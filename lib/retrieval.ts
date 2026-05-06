@@ -34,7 +34,8 @@ export async function retrieveCourseContext(
   scope: CourseRetrievalScope,
   query: string,
   limit = 5,
-  sourceHints: RetrievalSourceHint[] = []
+  sourceHints: RetrievalSourceHint[] = [],
+  options: { materialId?: string } = {}
 ): Promise<CourseRetrievalResult> {
   const { classId, professorId } = normalizeRetrievalScope(scope);
   const courseId = classId;
@@ -45,6 +46,7 @@ export async function retrieveCourseContext(
     ? await getVectorMaterialCandidates({
         classId,
         limit: Math.max(limit * 10, 50),
+        materialId: options.materialId,
         professorId,
         queryVector: queryEmbedding.values
       })
@@ -61,7 +63,7 @@ export async function retrieveCourseContext(
   let classDocuments: SourceDocument[] | null = null;
 
   if (!ranked || !ranked.hits.length) {
-    classDocuments = await getClassMaterialDocuments({ classId, professorId });
+    classDocuments = await getClassMaterialDocuments({ classId, materialId: options.materialId, professorId });
     ranked = rankMaterialChunks({
       candidates: [...staticCandidates, ...toCandidates(classDocuments)],
       limit,
@@ -102,11 +104,13 @@ async function createQueryEmbedding(query: string) {
 async function getVectorMaterialCandidates({
   classId,
   limit,
+  materialId,
   professorId,
   queryVector
 }: {
   classId: string;
   limit: number;
+  materialId?: string;
   professorId: string;
   queryVector: number[];
 }) {
@@ -176,6 +180,10 @@ async function getVectorMaterialCandidates({
         const materialRef = chunkDoc.ref.parent.parent;
 
         if (!materialRef) {
+          return null;
+        }
+
+        if (materialId && materialRef.id !== materialId) {
           return null;
         }
 
@@ -264,24 +272,30 @@ async function hasReadyClassMaterialChunks({ classId, professorId }: { classId: 
 
 async function getClassMaterialDocuments({
   classId,
+  materialId,
   professorId
 }: {
   classId: string;
+  materialId?: string;
   professorId: string;
 }): Promise<SourceDocument[]> {
   if (!adminDb) {
     return [];
   }
 
-  const materialsSnapshot = await adminDb
-    .collection("classes")
-    .doc(classId)
-    .collection("materials")
-    .where("status", "==", "ready")
-    .get();
+  const materialsCollection = adminDb.collection("classes").doc(classId).collection("materials");
+  const materialsSnapshot = materialId
+    ? {
+        docs: [await materialsCollection.doc(materialId).get()].filter((materialDoc) => materialDoc.exists)
+      }
+    : await materialsCollection.where("status", "==", "ready").get();
   const materialDocuments: Array<SourceDocument | null> = await Promise.all(
     materialsSnapshot.docs.map(async (materialDoc) => {
       const material = materialDoc.data();
+
+      if (!material) {
+        return null;
+      }
 
       if (!isStudentVisibleReadyMaterial(material) || readProfessorId(material) !== professorId) {
         return null;
@@ -338,7 +352,11 @@ function normalizeMaterialDocument({
     materialType,
     professorId: readProfessorId(material),
     professorName: readOptionalString(material.professorName ?? material.professor_name),
+    activeForStudents: readBooleanWithDefault(material.activeForStudents ?? material.studentVisible, true),
+    citationsRequired: readBooleanWithDefault(material.citationsRequired ?? material.requireCitations, true),
+    priority: normalizePriority(material.priority),
     status: material.status === "ready" ? "ready" : "processing",
+    teacherOnly: material.teacherOnly === true || material.visibility === "teacher-only",
     teacherId: readProfessorId(material),
     title,
     uploadedAt: createdAt
@@ -370,8 +388,10 @@ function normalizeChunk({
   return {
     id: chunkId,
     classId: String(chunkData.classId ?? classId),
+    chunkIndex: readOptionalNumberAllowZero(chunkData.chunkIndex),
     content,
     documentId: materialId,
+    excerpt: readOptionalString(chunkData.excerpt),
     label: String(chunkData.label ?? chunkData.sectionHeading ?? "Uploaded excerpt"),
     materialId: String(chunkData.materialId ?? materialId),
     materialType: String(chunkData.materialType ?? materialType),
@@ -433,9 +453,22 @@ function readOptionalNumber(value: unknown) {
   return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : undefined;
 }
 
+function readOptionalNumberAllowZero(value: unknown) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : undefined;
+}
+
 function readOptionalString(value: unknown) {
   const text = String(value ?? "").trim();
   return text || undefined;
+}
+
+function readBooleanWithDefault(value: unknown, defaultValue: boolean) {
+  return typeof value === "boolean" ? value : defaultValue;
+}
+
+function normalizePriority(value: unknown) {
+  return value === "primary" || value === "low" ? value : "normal";
 }
 
 function readEmbeddingVector(value: unknown) {
@@ -461,8 +494,11 @@ function formatFirestoreDate(value: unknown) {
 function isStudentVisibleReadyMaterial(material: Record<string, unknown>) {
   return (
     material.status === "ready" &&
+    material.activeForStudents !== false &&
     material.studentVisible !== false &&
+    material.teacherOnly !== true &&
     material.visibility !== "teacher-only" &&
+    material.visibility !== "hidden" &&
     material.private !== true
   );
 }

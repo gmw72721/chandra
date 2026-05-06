@@ -70,6 +70,32 @@ export function subscribeToClassStudentConversations(
   );
 }
 
+export function subscribeToClassConversations(
+  {
+    classId
+  }: {
+    classId: string;
+  },
+  callback: (conversations: StudentConversationSummary[]) => void,
+  onError?: (error: Error) => void
+) {
+  assertFirestoreReady();
+
+  return onSnapshot(
+    collection(db!, "classes", classId, "conversations"),
+    (snapshot) => {
+      const conversations = snapshot.docs
+        .map((conversationDoc) => ({ id: conversationDoc.id, ...conversationDoc.data() }) as StudentConversationSummary)
+        .sort((firstConversation, secondConversation) =>
+          timestampMillis(secondConversation.lastMessageAt) - timestampMillis(firstConversation.lastMessageAt)
+        );
+
+      callback(conversations);
+    },
+    (error) => onError?.(error)
+  );
+}
+
 export function subscribeToConversationMessages(
   {
     classId,

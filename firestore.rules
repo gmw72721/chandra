@@ -93,8 +93,12 @@ service cloud.firestore {
           "teacherName",
           "joinCode",
           "behaviorTitle",
+          "answerPolicy",
           "behaviorInstructions",
+          "defaultAssignmentContext",
+          "modelSettings",
           "refusalStyle",
+          "sourceUsage",
           "createdAt"
         ])
         && request.resource.data.name is string
@@ -105,9 +109,13 @@ service cloud.firestore {
         && request.resource.data.teacherName is string
         && request.resource.data.teacherName.size() > 0
         && validJoinCode(request.resource.data)
+        && validAnswerPolicy(request.resource.data.answerPolicy)
         && request.resource.data.behaviorTitle is string
         && request.resource.data.behaviorInstructions is string
+        && request.resource.data.defaultAssignmentContext is string
+        && validModelSettings(request.resource.data.modelSettings)
         && request.resource.data.refusalStyle is string
+        && validSourceUsage(request.resource.data.sourceUsage)
         && request.resource.data.createdAt == request.time;
     }
 
@@ -116,13 +124,17 @@ service cloud.firestore {
             "name",
             "section",
             "joinCode",
+            "answerPolicy",
             "behaviorTitle",
             "behaviorInstructions",
-            "refusalStyle"
+            "defaultAssignmentContext",
+            "modelSettings",
+            "refusalStyle",
+            "sourceUsage"
           ])
         && request.resource.data.teacherId == resource.data.teacherId
-        && request.resource.data.teacherName == resource.data.teacherName
-        && request.resource.data.createdAt == resource.data.createdAt
+        && stableClassTeacherName()
+        && stableClassCreatedAt()
         && validJoinCode(request.resource.data)
         && (
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(["joinCode"])
@@ -134,17 +146,75 @@ service cloud.firestore {
       return data.keys().hasAll([
           "name",
           "section",
+          "answerPolicy",
           "behaviorTitle",
           "behaviorInstructions",
-          "refusalStyle"
+          "defaultAssignmentContext",
+          "modelSettings",
+          "refusalStyle",
+          "sourceUsage"
         ])
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0
         && request.resource.data.section is string
         && request.resource.data.section.size() > 0
+        && validAnswerPolicy(request.resource.data.answerPolicy)
         && request.resource.data.behaviorTitle is string
+        && request.resource.data.defaultAssignmentContext is string
+        && validModelSettings(request.resource.data.modelSettings)
         && request.resource.data.behaviorInstructions is string
-        && request.resource.data.refusalStyle is string;
+        && request.resource.data.refusalStyle is string
+        && validSourceUsage(request.resource.data.sourceUsage);
+    }
+
+    function validAnswerPolicy(answerPolicy) {
+      return answerPolicy is map
+        && answerPolicy.keys().hasOnly([
+          "doNotGiveFinalAnswers",
+          "requireStudentAttemptFirst",
+          "askGuidingQuestionBeforeExplaining",
+          "allowWorkedExamples",
+          "refuseAnswerOnlyRequests"
+        ])
+        && answerPolicy.doNotGiveFinalAnswers is bool
+        && answerPolicy.requireStudentAttemptFirst is bool
+        && answerPolicy.askGuidingQuestionBeforeExplaining is bool
+        && answerPolicy.allowWorkedExamples is bool
+        && answerPolicy.refuseAnswerOnlyRequests is bool;
+    }
+
+    function validSourceUsage(sourceUsage) {
+      return sourceUsage is map
+        && sourceUsage.keys().hasOnly([
+          "useClassMaterialsFirst",
+          "citeSourcePages",
+          "askClarificationIfSourceUnclear",
+          "preferredSourceType"
+        ])
+        && sourceUsage.useClassMaterialsFirst is bool
+        && sourceUsage.citeSourcePages is bool
+        && sourceUsage.askClarificationIfSourceUnclear is bool
+        && sourceUsage.preferredSourceType is string
+        && sourceUsage.preferredSourceType.size() > 0;
+    }
+
+    function validModelSettings(modelSettings) {
+      return modelSettings is map
+        && modelSettings.keys().hasOnly([
+          "modelId",
+          "reasoningEffort",
+          "creativity",
+          "responseLength"
+        ])
+        && modelSettings.modelId is string
+        && modelSettings.modelId.size() > 0
+        && modelSettings.reasoningEffort is string
+        && modelSettings.reasoningEffort in ["low", "medium", "high"]
+        && modelSettings.creativity is number
+        && modelSettings.creativity >= 0
+        && modelSettings.creativity <= 100
+        && modelSettings.responseLength is string
+        && modelSettings.responseLength in ["short", "medium", "long"];
     }
 
     function validJoinCode(data) {
@@ -154,6 +224,22 @@ service cloud.firestore {
           && data.joinCode.size() == 6
           && data.joinCode.matches("^[A-Z]{6}$")
         );
+    }
+
+    function stableClassTeacherName() {
+      return (
+          !request.resource.data.keys().hasAny(["teacherName"])
+          && !resource.data.keys().hasAny(["teacherName"])
+        )
+        || request.resource.data.teacherName == resource.data.teacherName;
+    }
+
+    function stableClassCreatedAt() {
+      return (
+          !request.resource.data.keys().hasAny(["createdAt"])
+          && !resource.data.keys().hasAny(["createdAt"])
+        )
+        || request.resource.data.createdAt == resource.data.createdAt;
     }
 
     function validRosterStudent() {

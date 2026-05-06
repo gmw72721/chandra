@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ from retrieval.pdf_page_assets import (
     deduplicate_page_ranges,
     extract_printed_page_number_from_text,
     fetch_or_render_pdf_pages,
+    render_page_images,
 )
 from retrieval.pdf_retriever import build_query_features, hybrid_page_score
 
@@ -577,6 +580,33 @@ async def test_final_payload_contains_only_retrieved_page_assets(tmp_path: Path)
     assert "dW5yZWxhdGVk" not in image_urls[0]
 
 
+def test_page_rendering_skips_pdfium_page_load_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakePdfDocument:
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def __getitem__(self, _index: int) -> object:
+            raise RuntimeError("Failed to load page.")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setitem(sys.modules, "pypdfium2", types.SimpleNamespace(PdfDocument=FakePdfDocument))
+
+    images = render_page_images(
+        tmp_path / "source.pdf",
+        doc_id="doc_1",
+        page_start=1,
+        page_end=1,
+        output_dir=tmp_path,
+    )
+
+    assert images == []
+
+
 def test_page_cap_limits_total_pages() -> None:
     pages = [
         {
@@ -800,6 +830,41 @@ async def test_pdf_source_is_resolved_once_for_multiple_ranges_from_same_pdf(
     assert [(asset["page_start"], asset["page_end"]) for asset in assets] == [(1, 1), (4, 4)]
 
 
+@pytest.mark.asyncio
+async def test_invalid_pdf_source_falls_back_to_metadata_only_assets(tmp_path: Path) -> None:
+    source_pdf = tmp_path / "invalid.pdf"
+    source_pdf.write_bytes(b"not a real pdf")
+
+    assets = await fetch_or_render_pdf_pages(
+        [
+            {
+                "doc_id": "bad_pdf",
+                "title": "Uploaded Worksheet",
+                "page_start": 3,
+                "page_end": 3,
+                "score": 0.92,
+                "source_pdf_path": str(source_pdf),
+            }
+        ],
+        output_dir=tmp_path,
+    )
+
+    assert assets == [
+        {
+            "citation_label": "Uploaded Worksheet, page 3",
+            "doc_id": "bad_pdf",
+            "images": [],
+            "material_type": "",
+            "page_end": 3,
+            "page_start": 3,
+            "printed_page_end": None,
+            "printed_page_start": None,
+            "score": 0.92,
+            "title": "Uploaded Worksheet",
+        }
+    ]
+
+
 def test_final_answer_instruction_is_strict(tmp_path: Path) -> None:
     image = tmp_path / "page.png"
     image.write_bytes(b"page")
@@ -832,7 +897,9 @@ def test_final_answer_instruction_is_strict(tmp_path: Path) -> None:
     assert "If the student asks for the answer, final answer" in instruction
     assert "do not continue solving their exact problem" in instruction
     assert "a page that only locates the exercise or lists practice problems is not enough" in instruction
+    assert "For conceptual method questions" in instruction
     assert "Include one short quote of 20 words or fewer" in instruction
+    assert "solving help or method teaching" in instruction
     assert "do not state the next move outright" in instruction
     assert "`$integral$ is Problem N in Section X, on printed page P of Title.`" in instruction
 

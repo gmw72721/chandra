@@ -65,3 +65,16 @@ test("material upload progress is written to professor-scoped job documents", ()
   assert.match(rulesSource, /allow read: if isTargetClassTeacher\(classId\)/);
   assert.match(rulesSource, /allow write: if false/);
 });
+
+test("material settings PATCH preserves omitted visibility fields", () => {
+  const source = readFileSync(join(repoRoot, "lib/tutor-knowledge-server.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "app/api/materials/[materialId]/route.ts"), "utf8");
+
+  assert.match(source, /settings: Partial<TutorKnowledgeSourceSettings>/);
+  assert.match(source, /const currentSettings = sourceSettingsFromMaterial\(materialSnapshot\.data\(\) \?\? \{\}\)/);
+  assert.match(source, /\.\.\.currentSettings,\s*\.\.\.settings/s);
+  assert.match(source, /readBooleanWithDefault\(\s*material\.activeForStudents \?\? material\.studentVisible/s);
+  assert.match(routeSource, /activeForStudents: body\.activeForStudents/);
+  assert.match(routeSource, /requireCitations: body\.requireCitations/);
+  assert.doesNotMatch(routeSource, /Boolean\(body\.(?:activeForStudents|requireCitations|teacherOnly)\)/);
+});

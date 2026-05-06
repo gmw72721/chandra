@@ -18,8 +18,9 @@ SEARCH_PDF_PAGES_TOOL: dict[str, Any] = {
             "When it genuinely helps, call this tool 2 or 3 times in the same turn with distinct complementary queries: "
             "one for the exact problem/page/source, one for the relevant textbook method or formula, and one for a nearby textbook or worked example. "
             "Use only one call when one focused query is enough. "
-            "Use focused, iterative queries with the likely topic/method, exact worksheet titles, problem/page numbers, "
-            "figure/table labels, named equations, and the student's wording. If previous selected pages are insufficient "
+            "Use concise, focused queries with the likely topic/method, exact worksheet titles, problem/page numbers, "
+            "figure/table labels, named equations, and the student's wording. For exact problem/page searches, include "
+            "a locator verb such as find, where, locate, identify, or which. If previous selected pages are insufficient "
             "or mismatched, search again with a narrower or alternate query."
         ),
         "parameters": {
@@ -28,10 +29,11 @@ SEARCH_PDF_PAGES_TOOL: dict[str, Any] = {
                 "query": {
                     "type": "string",
                     "description": (
-                        "Focused semantic search query for the PDF corpus. For locating a problem, include problem PDF, homework, problem set, "
-                        "worksheet, assignment, or practice-problems terms before textbook terms. Include the likely topic or method, "
-                        "exact titles, page numbers, problem numbers, section names, figure/table labels, and the "
-                        "student's wording when available."
+                        "Focused semantic search query for the PDF corpus. For locating a problem, start with a locator verb "
+                        "such as find, where, locate, identify, or which, then include problem PDF, homework, problem set, "
+                        "worksheet, assignment, or practice-problems terms before textbook terms. Include the likely topic or "
+                        "method, exact titles, page numbers, problem numbers, section names, figure/table labels, and the "
+                        "student's wording when available. Keep filler source-type words out of textbook/method searches."
                     ),
                 },
                 "top_k": {

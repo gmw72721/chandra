@@ -18,10 +18,14 @@ type ScoredChunk = RankableChunk & {
 };
 
 type CandidateFeatures = RankableChunk & {
+  chunkTitle: string;
   contentText: string;
   documentTitle: string;
+  equationTokens: Set<string>;
   materialType: string;
+  normalizedContentText: string;
   problemNumbers: string[];
+  problemNumberSet: Set<string>;
   searchableTerms: string[];
   searchableText: string;
   termCounts: Map<string, number>;
@@ -209,10 +213,11 @@ export function createSourceMetadata(hits: RetrievalHit[]): TutorSource[] {
 
   for (const hit of hits) {
     const materialType = materialTypeForKind(hit.chunk.materialType ?? hit.document.materialType ?? hit.document.kind);
+    const pageNumber = hit.chunk.pageNumber ?? hit.chunk.pageStart;
     const problemNumber = hit.matchedProblemNumber ?? hit.chunk.problemNumbers?.[0];
     const key = [
       hit.document.id,
-      hit.chunk.pageNumber ?? "",
+      pageNumber ?? "",
       problemNumber ?? "",
       hit.chunk.sectionHeading ?? hit.chunk.label
     ].join(":");
@@ -225,7 +230,8 @@ export function createSourceMetadata(hits: RetrievalHit[]): TutorSource[] {
     sources.push({
       title: hit.chunk.title ?? hit.document.title,
       materialType,
-      ...(hit.chunk.pageNumber ? { pageNumber: hit.chunk.pageNumber } : {}),
+      ...(hit.document.citationsRequired ? { citationsRequired: true } : {}),
+      ...(pageNumber ? { pageNumber } : {}),
       ...(problemNumber ? { problemNumber } : {})
     });
   }
@@ -290,9 +296,9 @@ function scoreCandidate(
   const bm25Score = scoreBm25(candidate.searchableTerms, candidate.termCounts, queryFeatures.terms, corpusStats);
   const titleScore = scoreTerms(candidate.documentTitle, queryFeatures.terms);
   const chunkTextScore = scoreTerms(candidate.searchableText, queryFeatures.terms);
-  const exactPhraseScore = scoreExactPhrases(candidate.contentText, queryFeatures.exactPhrases);
-  const equationOverlapScore = scoreEquationOverlap(candidate.searchableText, queryFeatures.equationTokens);
-  const matchedProblemNumber = findMatchedProblemNumber(queryFeatures.problemNumbers, candidate.problemNumbers);
+  const exactPhraseScore = scoreExactPhrases(candidate.normalizedContentText, queryFeatures.exactPhrases);
+  const equationOverlapScore = scoreEquationOverlap(candidate.equationTokens, queryFeatures.equationTokens);
+  const matchedProblemNumber = findMatchedProblemNumber(queryFeatures.problemNumbers, candidate.problemNumberSet);
   const problemNumberScore = matchedProblemNumber ? 1 : 0;
   const pageNumberScore = scorePageNumbers(candidate.chunk, queryFeatures.pageNumbers);
   const sourceHintScore = scoreSourceHint(candidate, queryFeatures.sourceHints, candidate.documentTitle);
@@ -301,6 +307,7 @@ function scoreCandidate(
     (candidate.materialType === "assignment" || candidate.materialType === "practice-problems")
       ? 1.8
       : 0;
+  const priorityBoost = scoreSourcePriority(candidate.document.priority);
 
   return {
     chunk: candidate.chunk,
@@ -316,8 +323,21 @@ function scoreCandidate(
       problemNumberScore * 10 +
       pageNumberScore * 12 +
       sourceHintScore +
-      assignmentBoost
+      assignmentBoost +
+      priorityBoost
   };
+}
+
+function scoreSourcePriority(priority: unknown) {
+  if (priority === "primary") {
+    return 2;
+  }
+
+  if (priority === "low") {
+    return -1.5;
+  }
+
+  return 0;
 }
 
 function prepareCandidateFeatures(candidate: RankableChunk): CandidateFeatures {
@@ -325,16 +345,21 @@ function prepareCandidateFeatures(candidate: RankableChunk): CandidateFeatures {
   const contentText = candidate.chunk.content;
   const searchableText = normalizeText(`${documentText} ${contentText}`);
   const searchableTerms = tokenizeNormalized(searchableText);
+  const problemNumbers =
+    candidate.chunk.problemNumbers ?? problemNumbersFromText(`${candidate.chunk.label} ${candidate.chunk.content}`);
 
   return {
     ...candidate,
+    chunkTitle: normalizeText(candidate.chunk.title ?? ""),
     contentText,
     documentTitle: normalizeText(candidate.document.title),
+    equationTokens: new Set(extractEquationTokens(searchableText)),
     materialType: materialTypeForKind(
       candidate.chunk.materialType ?? candidate.document.materialType ?? candidate.document.kind
     ),
-    problemNumbers:
-      candidate.chunk.problemNumbers ?? problemNumbersFromText(`${candidate.chunk.label} ${candidate.chunk.content}`),
+    normalizedContentText: normalizeText(contentText),
+    problemNumbers,
+    problemNumberSet: new Set(problemNumbers.map((problemNumber) => problemNumber.toUpperCase())),
     searchableTerms,
     searchableText,
     termCounts: countTerms(searchableTerms)
@@ -380,7 +405,7 @@ function normalizeSourceHints(sourceHints: RetrievalSourceHint[]) {
 }
 
 function scoreSourceHint(
-  candidate: RankableChunk,
+  candidate: CandidateFeatures,
   sourceHints: ReturnType<typeof normalizeSourceHints>,
   documentTitle: string
 ) {
@@ -388,13 +413,10 @@ function scoreSourceHint(
     return 0;
   }
 
-  const chunkTitle = normalizeText(candidate.chunk.title ?? "");
-  let candidateProblems: Set<string> | null = null;
-
   return sourceHints.reduce((score, sourceHint) => {
     const titleMatches =
       documentTitle === sourceHint.title ||
-      chunkTitle === sourceHint.title ||
+      candidate.chunkTitle === sourceHint.title ||
       documentTitle.includes(sourceHint.title) ||
       sourceHint.title.includes(documentTitle);
 
@@ -404,10 +426,7 @@ function scoreSourceHint(
 
     const pageScore = sourceHint.pageNumber && chunkCoversPage(candidate.chunk, sourceHint.pageNumber) ? 2 : 0;
     const problemScore =
-      sourceHint.problemNumber &&
-      (candidateProblems ??= new Set(
-        (candidate.chunk.problemNumbers ?? []).map((problemNumber) => problemNumber.toUpperCase())
-      )).has(sourceHint.problemNumber)
+      sourceHint.problemNumber && candidate.problemNumberSet.has(sourceHint.problemNumber)
         ? 2
         : 0;
 
@@ -415,21 +434,18 @@ function scoreSourceHint(
   }, 0);
 }
 
-function findMatchedProblemNumber(queryProblemNumbers: string[], chunkProblemNumbers: string[]) {
-  if (!queryProblemNumbers.length || !chunkProblemNumbers.length) {
+function findMatchedProblemNumber(queryProblemNumbers: string[], chunkProblemNumbers: Set<string>) {
+  if (!queryProblemNumbers.length || !chunkProblemNumbers.size) {
     return undefined;
   }
 
-  const chunkNumbers = new Set(chunkProblemNumbers.map((number) => number.toUpperCase()));
-  return queryProblemNumbers.find((number) => chunkNumbers.has(number.toUpperCase()));
+  return queryProblemNumbers.find((number) => chunkProblemNumbers.has(number.toUpperCase()));
 }
 
-function scoreExactPhrases(content: string, exactPhrases: NormalizedExactPhrase[]) {
+function scoreExactPhrases(normalizedContent: string, exactPhrases: NormalizedExactPhrase[]) {
   if (!exactPhrases.length) {
     return 0;
   }
-
-  const normalizedContent = normalizeText(content);
 
   return exactPhrases.reduce(
     (score, phrase) => score + (phrase.originalLength >= 20 && normalizedContent.includes(phrase.normalized) ? 1 : 0),
@@ -548,12 +564,11 @@ function extractEquationTokens(input: string) {
   return [...new Set(tokens.map((token) => token.toLowerCase()))];
 }
 
-function scoreEquationOverlap(searchableText: string, equationTokens: string[]) {
+function scoreEquationOverlap(contentEquationTokens: Set<string>, equationTokens: string[]) {
   if (!equationTokens.length) {
     return 0;
   }
 
-  const contentEquationTokens = new Set(extractEquationTokens(searchableText));
   const matches = equationTokens.filter((token) => contentEquationTokens.has(token)).length;
 
   return matches / Math.max(equationTokens.length, 1);

@@ -228,7 +228,7 @@ export function AuthForm() {
   return (
     <section className="auth-card">
       <p className="eyebrow">Accounts</p>
-      <h1>{mode === "signup" ? "Create your Chandra account." : "Welcome back."}</h1>
+      <h1>{mode === "signup" ? "Create your Chandra account" : "Welcome back."}</h1>
 
       <div className="segmented-control" aria-label="Authentication mode">
         <button

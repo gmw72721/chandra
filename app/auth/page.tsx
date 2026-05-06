@@ -5,7 +5,7 @@ import { AuthForm } from "@/components/AuthForm";
 export default function AuthPage() {
   return (
     <main className="shell auth-shell">
-      <nav className="topbar">
+      <nav className="topbar auth-topbar">
         <Link className="brand" href="/">
           Chandra
         </Link>

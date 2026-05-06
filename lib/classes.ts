@@ -14,8 +14,20 @@ import {
   where
 } from "firebase/firestore";
 import { generateClassCode } from "./class-code";
+import {
+  defaultAnswerPolicySettings,
+  defaultAssignmentContext,
+  defaultClassModelSettings,
+  defaultRefusalStyle,
+  defaultSourceUsageSettings,
+  type AnswerPolicySettings,
+  type ClassModelSettings,
+  type SourceUsageSettings,
+  type TutorBehavior
+} from "./class-settings";
 import { db, isFirebaseConfigured } from "./firebase";
 import type { TutorKnowledgeKind, TutorKnowledgeSourceMode } from "./tutor-knowledge";
+import type { TutorKnowledgePriority } from "./types";
 
 const maxClassCodeAttempts = 10;
 
@@ -26,9 +38,13 @@ export type TeacherClass = {
   teacherId: string;
   teacherName: string;
   joinCode?: string;
-  behaviorTitle?: string;
+  answerPolicy?: AnswerPolicySettings;
+  behaviorTitle?: TutorBehavior;
   behaviorInstructions?: string;
+  defaultAssignmentContext?: string;
+  modelSettings?: ClassModelSettings;
   refusalStyle?: string;
+  sourceUsage?: SourceUsageSettings;
   createdAt?: unknown;
 };
 
@@ -43,6 +59,8 @@ export type ClassMaterial = {
   id: string;
   title: string;
   kind: TutorKnowledgeKind;
+  activeForStudents?: boolean;
+  citationsRequired?: boolean;
   fileName?: string;
   filePath?: string;
   fileUrl?: string;
@@ -50,8 +68,11 @@ export type ClassMaterial = {
   fileSize?: number;
   characterCount?: number;
   chunkCount?: number;
+  priority?: TutorKnowledgePriority;
+  requireCitations?: boolean;
   sourceMode?: TutorKnowledgeSourceMode;
   status: "uploaded" | "processing" | "ready";
+  teacherOnly?: boolean;
   addedAt?: unknown;
 };
 
@@ -196,13 +217,16 @@ export async function createTeacherClass({
     teacherName,
     joinCode: classCode,
     behaviorTitle: "Guided problem solving",
+    answerPolicy: defaultAnswerPolicySettings,
     behaviorInstructions: [
       "Ask students to explain their thinking before giving hints.",
       "Do not provide final answers unless the student has already shown the main reasoning.",
       "Use course materials before generic explanations when relevant."
     ].join("\n"),
-    refusalStyle:
-      "If a student asks for a direct answer, redirect them toward the next useful step and ask a checking question.",
+    defaultAssignmentContext,
+    modelSettings: defaultClassModelSettings,
+    refusalStyle: defaultRefusalStyle,
+    sourceUsage: defaultSourceUsageSettings,
     createdAt: serverTimestamp()
   });
 
@@ -232,28 +256,40 @@ export async function ensureClassJoinCode(classId: string) {
 }
 
 export async function updateTeacherClassSettings({
+  answerPolicy,
   behaviorInstructions,
   behaviorTitle,
   classId,
+  defaultAssignmentContext,
+  modelSettings,
   name,
   refusalStyle,
-  section
+  section,
+  sourceUsage
 }: {
+  answerPolicy: AnswerPolicySettings;
   behaviorInstructions: string;
-  behaviorTitle: string;
+  behaviorTitle: TutorBehavior;
   classId: string;
+  defaultAssignmentContext: string;
+  modelSettings: ClassModelSettings;
   name: string;
   refusalStyle: string;
   section: string;
+  sourceUsage: SourceUsageSettings;
 }) {
   assertFirestoreReady();
 
   await updateDoc(doc(db!, "classes", classId), {
+    answerPolicy,
     behaviorInstructions: behaviorInstructions.trim(),
     behaviorTitle: behaviorTitle.trim(),
+    defaultAssignmentContext: defaultAssignmentContext.trim(),
+    modelSettings,
     name: name.trim(),
     refusalStyle: refusalStyle.trim(),
-    section: section.trim()
+    section: section.trim(),
+    sourceUsage
   });
 }
 

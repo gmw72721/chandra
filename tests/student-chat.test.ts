@@ -45,10 +45,13 @@ test("model selector is hidden from student chat", () => {
 
 test("student chat posts the saved class and auth token to the tutor API", () => {
   const source = readFileSync(join(repoRoot, "app/student/page.tsx"), "utf8");
+  const apiClientSource = readFileSync(join(repoRoot, "lib/api-client.ts"), "utf8");
 
   assert.match(source, /const activeCourseId = isTeacherPreview \? queryClassId \?\? "" : profile\?\.classId \?\? ""/);
   assert.match(source, /Authorization: `Bearer \$\{token\}`/);
   assert.match(source, /courseId: activeCourseId/);
+  assert.match(apiClientSource, /return path\.startsWith\("\/"\) \? path : `\/\$\{path\}`/);
+  assert.doesNotMatch(apiClientSource, /NEXT_PUBLIC_API_BASE_URL/);
 });
 
 test("student chat persists and resumes class-scoped conversations", () => {
@@ -76,6 +79,26 @@ test("student chat persists and resumes class-scoped conversations", () => {
   assert.match(studentConversationRouteSource, /listStudentConversations/);
   assert.match(studentMessageRouteSource, /authorizeTutorChatRequest/);
   assert.match(studentMessageRouteSource, /listStudentConversationMessages/);
+});
+
+test("student view pins teacher assignment guidance above chat", () => {
+  const source = readFileSync(join(repoRoot, "app/student/page.tsx"), "utf8");
+  const styles = readFileSync(join(repoRoot, "app/styles.css"), "utf8");
+
+  assert.match(source, /className="student-teacher-instructions"/);
+  assert.match(source, /Teacher instructions/);
+  assert.match(source, /formatPinnedTeacherInstructions\(activeClass\.defaultAssignmentContext\)/);
+  assert.match(styles, /\.student-teacher-instructions/);
+});
+
+test("conversation titles use topic labels from the first prompt", () => {
+  const source = readFileSync(join(repoRoot, "lib/student-conversations-server.ts"), "utf8");
+
+  assert.match(source, /inferTopicConversationTitle\(normalized\)/);
+  assert.match(source, /Derivative chain rule/);
+  assert.match(source, /Limits with fractions/);
+  assert.match(source, /Optimization problem/);
+  assert.match(source, /return "Need help"/);
 });
 
 test("teacher roster can open a student's saved conversations", () => {
@@ -188,9 +211,27 @@ test("provider messages keep assistant source context for follow-ups", () => {
 test("student chat does not surface raw backend fetch failures", () => {
   const source = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
 
-  assert.match(source, /describeTutorServiceError\(caughtError\)/);
-  assert.match(source, /I could not reach Chandra's tutor backend/);
-  assert.match(source, /npm run dev:api/);
+  assert.match(source, /classifyUnexpectedChatError\(caughtError\)/);
+  assert.match(source, /TUTOR_BACKEND_UNREACHABLE/);
+  assert.match(source, /Chandra is having trouble connecting\. Try again in a moment\./);
+  assert.doesNotMatch(source, /I could not reach Chandra's tutor backend/);
+  assert.doesNotMatch(source, /npm run dev:api/);
+  assert.doesNotMatch(source, /check `BACKEND_API_BASE_URL`/);
+});
+
+test("student chat errors include stable codes and student-safe messages", () => {
+  const source = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
+
+  assert.match(source, /errorCode: chatError\.code/);
+  assert.match(source, /Code: \$\{error\.code\}/);
+  assert.match(source, /CHAT_SIGN_IN_REQUIRED/);
+  assert.match(source, /CHAT_CLASS_NOT_FOUND/);
+  assert.match(source, /CHAT_CONVERSATION_NOT_FOUND/);
+  assert.match(source, /TUTOR_BACKEND_AUTH_FAILED/);
+  assert.match(source, /TUTOR_BACKEND_SETUP_INCOMPLETE/);
+  assert.match(source, /TUTOR_BACKEND_TIMEOUT/);
+  assert.match(source, /TUTOR_BACKEND_RATE_LIMITED/);
+  assert.match(source, /TUTOR_BACKEND_STREAM_FAILED/);
 });
 
 test("pdf tool prompt uses textbook readings for solving help", () => {
@@ -207,11 +248,15 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(routeSource, /relationships, family conflict, emotional support, unrelated coding/);
   assert.match(routeSource, /Briefly redirect those to course material/);
   assert.match(routeSource, /include one short quote of 20 words or fewer/);
+  assert.match(routeSource, /For conceptual method questions such as when to use a technique/);
+  assert.match(routeSource, /For solving help and method teaching/);
   assert.match(promptSource, /Do not continue solving their exact problem/);
   assert.match(promptSource, /similar textbook\/readings\/example problem/);
   assert.match(promptSource, /Only help with this class/);
   assert.match(promptSource, /Do not write unrelated code/);
   assert.match(promptSource, /search the problem PDF first/);
   assert.match(promptSource, /Do not only point the student to pages/);
+  assert.match(promptSource, /method teaching/);
+  assert.match(promptSource, /search textbook\/readings\/examples so the explanation can use the class wording/);
   assert.match(promptSource, /previously cited source context/);
 });

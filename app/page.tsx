@@ -1,34 +1,25 @@
 import Link from "next/link";
 import { AuthNav } from "@/components/AuthNav";
+import { LandingActions } from "@/components/LandingActions";
 
 export default function HomePage() {
   return (
-    <main className="shell">
-      <nav className="topbar">
+    <main className="shell landing-shell">
+      <nav className="topbar landing-topbar">
         <Link className="brand" href="/">
           Chandra
         </Link>
-        <AuthNav />
+        <AuthNav showCreateAccount />
       </nav>
 
-      <section className="workspace two-column">
+      <section className="workspace two-column landing-hero">
         <div className="intro-panel">
           <h1>Teacher-guided AI tutoring that keeps students doing the thinking.</h1>
           <p>
-            Chandra lets teachers set the tutoring behavior, ground answers in course material,
-            and review where students are getting stuck.
+            Teachers set tutoring behavior, ground answers in your course material, and review
+            where students get stuck—so you can focus on teaching, not troubleshooting.
           </p>
-          <div className="button-row">
-            <Link className="primary-button" href="/student">
-              Open Student Chat
-            </Link>
-            <Link className="secondary-button" href="/teacher">
-              Open Teacher Dashboard
-            </Link>
-            <Link className="secondary-button" href="/auth">
-              Create Account
-            </Link>
-          </div>
+          <LandingActions />
         </div>
       </section>
     </main>

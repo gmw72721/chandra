@@ -36,6 +36,9 @@ def build_pdf_rag_graph(
             messages=state["messages"],
             tools=[SEARCH_PDF_PAGES_TOOL],
             tool_choice="auto",
+            temperature=state.get("temperature", 0.4),
+            max_tokens=state.get("max_tokens"),
+            reasoning_effort=state.get("reasoning_effort"),
         )
         tool_calls = new_search_tool_calls(
             state,
@@ -81,13 +84,15 @@ def build_pdf_rag_graph(
         }
 
     async def openrouter_answer_with_pages(state: PdfRagState) -> dict[str, Any]:
-        messages = build_multimodal_final_messages(state)
+        messages = await asyncio.to_thread(build_multimodal_final_messages, state)
         response = await client.chat(
             model=state.get("model") or DEFAULT_OPENROUTER_MODEL,
             messages=messages,
             tools=[SEARCH_PDF_PAGES_TOOL],
             tool_choice="auto",
-            temperature=0.2,
+            temperature=state.get("temperature", 0.4),
+            max_tokens=state.get("max_tokens"),
+            reasoning_effort=state.get("reasoning_effort"),
         )
         requested_tool_calls = [
             tool_call
@@ -296,6 +301,8 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
     """Build the multimodal answer/search-again call with only selected page assets."""
 
     base_messages = list(state["messages"])
+    answer_policy = normalize_answer_policy_state(state.get("answer_policy"))
+    source_usage = normalize_source_usage_state(state.get("source_usage"))
     selected_context = {
         "retrieved_pages": state.get("retrieved_pages", []),
         "page_assets": [
@@ -328,16 +335,15 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
                 "Never repeat a previous query or minor wording variant. "
                 "If the student only asks where a problem is, locate it only; do not ask a follow-up and do not also search for method pages. "
                 "If the student only asks to find, identify, or locate a problem, answer with the problem set/assignment location only. "
-                "If the student asks for the answer, final answer, or says to just give the answer, say you cannot give the final answer and do not continue solving their exact problem in that reply. "
-                "For direct-answer requests, offer to walk through a similar textbook/readings/example problem or check their attempted step instead. "
+                f"{final_direct_answer_instruction(answer_policy)} "
                 "For solving-help questions, a page that only locates the exercise or lists practice problems is not enough. "
                 "Before helping with the next move, make sure selected pages include textbook, reading, notes, or worked-example support for the method. "
                 "For solving-help questions only, if selected pages only identify the problem/location, search again for textbook/readings/examples using the method, section, equation pattern, and textbook/example terms. "
-                "When you give solving help, use the selected textbook/readings/examples pages directly. "
-                "Include one short quote of 20 words or fewer from the selected textbook example when it supports the hint, then paraphrase the idea. "
-                "Use textbook examples to teach a similar pattern; do not finish the student's exact problem after refusing a direct answer request. "
+                "For conceptual method questions, use selected textbook/readings/examples to teach the recognition pattern in the class wording. "
+                f"{final_citation_instruction(source_usage)} "
+                f"{final_example_boundary_instruction(answer_policy)} "
                 "Give scaffolded help, not a full solution: do not state the next move outright; ask a targeted question or give a small hint that helps the student find it. "
-                "If no sharper query is available, say the answer is not present and ask for the exact worksheet, page, problem, or pasted text. "
+                f"{final_unclear_source_instruction(source_usage)} "
                 "When printed_page_start is present, use it as the document page number because it was read from the selected PDF page. "
                 "page_start/page_end are only internal render indexes. "
                 "For problem-location answers, use this shape: `$integral$ is Problem N in Section X, on printed page P of Title.` "
@@ -376,6 +382,66 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
             "content": content,
         },
     ]
+
+
+def normalize_answer_policy_state(value: Any) -> dict[str, bool]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "refuseAnswerOnlyRequests": source.get("refuseAnswerOnlyRequests")
+        if isinstance(source.get("refuseAnswerOnlyRequests"), bool)
+        else True,
+    }
+
+
+def normalize_source_usage_state(value: Any) -> dict[str, bool]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "citeSourcePages": source.get("citeSourcePages") if isinstance(source.get("citeSourcePages"), bool) else True,
+        "askClarificationIfSourceUnclear": source.get("askClarificationIfSourceUnclear")
+        if isinstance(source.get("askClarificationIfSourceUnclear"), bool)
+        else True,
+    }
+
+
+def final_direct_answer_instruction(answer_policy: dict[str, bool]) -> str:
+    if answer_policy["refuseAnswerOnlyRequests"]:
+        return (
+            "If the student asks for the answer, final answer, or says to just give the answer, "
+            "say you cannot give the final answer and do not continue solving their exact problem in that reply. "
+            "For direct-answer requests, offer to walk through a similar textbook/readings/example problem or check their attempted step instead."
+        )
+
+    return (
+        "If the student asks for the answer, final answer, or says to just give the answer, "
+        "avoid answer-only output; explain the reasoning and check understanding instead."
+    )
+
+
+def final_citation_instruction(source_usage: dict[str, bool]) -> str:
+    if source_usage["citeSourcePages"]:
+        return (
+            "When you give solving help or method teaching, use the selected textbook/readings/examples pages directly. "
+            "Include one short quote of 20 words or fewer from the selected textbook example when a relevant quote is available, then paraphrase the idea."
+        )
+
+    return (
+        "When you give solving help, use the selected textbook/readings/examples pages directly. "
+        "Mention source titles when helpful, but page citations and quotes are optional."
+    )
+
+
+def final_example_boundary_instruction(answer_policy: dict[str, bool]) -> str:
+    if answer_policy["refuseAnswerOnlyRequests"]:
+        return "Use textbook examples to teach a similar pattern; do not finish the student's exact problem after refusing a direct answer request."
+
+    return "Use textbook examples to teach patterns, and avoid completing graded work wholesale."
+
+
+def final_unclear_source_instruction(source_usage: dict[str, bool]) -> str:
+    if source_usage["askClarificationIfSourceUnclear"]:
+        return "If no sharper query is available, say the answer is not present and ask for the exact worksheet, page, problem, or pasted text."
+
+    return "If no sharper query is available, say what is uncertain and give cautious general help without inventing source details."
 
 
 def sources_from_pages(pages: list[dict[str, Any]], *, limit: int = MAX_RETRIEVED_WINDOWS) -> list[dict[str, Any]]:
@@ -607,10 +673,25 @@ def append_stage(state: PdfRagState, stage: str) -> list[str]:
     return [*state.get("stage_history", []), stage]
 
 
+async def close_owned_openrouter_client(client: Any, owns_client: bool) -> None:
+    if not owns_client or not hasattr(client, "aclose"):
+        return
+
+    try:
+        await client.aclose()
+    except Exception:
+        return
+
+
 async def run_pdf_rag_agent(
     *,
     messages: list[dict[str, Any]],
     model: str,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+    answer_policy: dict[str, Any] | None = None,
+    source_usage: dict[str, Any] | None = None,
     class_id: str | None = None,
     professor_id: str | None = None,
     professor_name: str | None = None,
@@ -620,51 +701,67 @@ async def run_pdf_rag_agent(
 ) -> dict[str, Any]:
     """Run the student PDF RAG graph and return Chandra's API response shape."""
 
-    graph = build_pdf_rag_graph(
-        openrouter_client=openrouter_client,
-        retriever=retriever,
-        page_asset_builder=page_asset_builder,
-    )
-    final_state = await graph.ainvoke(
-        {
-            "messages": messages,
-            "tool_calls": [],
-            "retrieved_pages": [],
-            "page_assets": [],
-            "answer": "",
-            "tool_call_count": 0,
-            "stage_history": [],
-            "search_queries": [],
-            "model": model,
-            "class_id": class_id,
-            "professor_id": professor_id,
-            "professor_name": professor_name,
-            "sources": [],
-            "retrieval_confidence": "low",
-        },
-        {"recursion_limit": 40},
-    )
-    answer = answer_or_page_fallback(final_state)
-    sources = sources_for_answer(final_state, answer)
+    owns_client = openrouter_client is None
+    client = openrouter_client or OpenRouterClient()
 
-    return {
-        "content": answer,
-        "langGraphTrace": {
-            "searchQueries": final_state.get("search_queries") or [],
-            "selectedPages": selected_page_trace(final_state.get("page_assets", [])),
-            "stages": final_state.get("stage_history") or [],
-            "toolCallCount": final_state.get("tool_call_count") or 0,
-        },
-        "message": answer,
-        "sources": sources,
-        "retrievalConfidence": final_state.get("retrieval_confidence") or "low",
-    }
+    try:
+        graph = build_pdf_rag_graph(
+            openrouter_client=client,
+            retriever=retriever,
+            page_asset_builder=page_asset_builder,
+        )
+        final_state = await graph.ainvoke(
+            {
+                "messages": messages,
+                "tool_calls": [],
+                "retrieved_pages": [],
+                "page_assets": [],
+                "answer": "",
+                "tool_call_count": 0,
+                "stage_history": [],
+                "search_queries": [],
+                "model": model,
+                "temperature": temperature if temperature is not None else 0.4,
+                "max_tokens": max_tokens,
+                "reasoning_effort": reasoning_effort,
+                "answer_policy": answer_policy,
+                "source_usage": source_usage,
+                "class_id": class_id,
+                "professor_id": professor_id,
+                "professor_name": professor_name,
+                "sources": [],
+                "retrieval_confidence": "low",
+            },
+            {"recursion_limit": 40},
+        )
+        answer = answer_or_page_fallback(final_state)
+        sources = sources_for_answer(final_state, answer)
+
+        return {
+            "content": answer,
+            "langGraphTrace": {
+                "searchQueries": final_state.get("search_queries") or [],
+                "selectedPages": selected_page_trace(final_state.get("page_assets", [])),
+                "stages": final_state.get("stage_history") or [],
+                "toolCallCount": final_state.get("tool_call_count") or 0,
+            },
+            "message": answer,
+            "sources": sources,
+            "retrievalConfidence": final_state.get("retrieval_confidence") or "low",
+        }
+    finally:
+        await close_owned_openrouter_client(client, owns_client)
 
 
 async def run_pdf_rag_agent_stream(
     *,
     messages: list[dict[str, Any]],
     model: str,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+    answer_policy: dict[str, Any] | None = None,
+    source_usage: dict[str, Any] | None = None,
     class_id: str | None = None,
     professor_id: str | None = None,
     professor_name: str | None = None,
@@ -674,6 +771,7 @@ async def run_pdf_rag_agent_stream(
 ):
     """Run the PDF RAG flow while yielding student-facing progress events."""
 
+    owns_client = openrouter_client is None
     client = openrouter_client or OpenRouterClient()
     build_assets = page_asset_builder or fetch_or_render_pdf_pages
     state: PdfRagState = {
@@ -686,6 +784,11 @@ async def run_pdf_rag_agent_stream(
         "stage_history": [],
         "search_queries": [],
         "model": model,
+        "temperature": temperature if temperature is not None else 0.4,
+        "max_tokens": max_tokens,
+        "reasoning_effort": reasoning_effort,
+        "answer_policy": answer_policy,
+        "source_usage": source_usage,
         "class_id": class_id,
         "professor_id": professor_id,
         "professor_name": professor_name,
@@ -693,101 +796,25 @@ async def run_pdf_rag_agent_stream(
         "retrieval_confidence": "low",
     }
 
-    response = await client.chat(
-        model=model or DEFAULT_OPENROUTER_MODEL,
-        messages=messages,
-        tools=[SEARCH_PDF_PAGES_TOOL],
-        tool_choice="auto",
-    )
-    state["answer"] = response.get("content") or ""
-    state["stage_history"] = append_stage(state, "openrouter_agent")
-    state["tool_calls"] = new_search_tool_calls(
-        state,
-        [
-            tool_call
-            for tool_call in response.get("tool_calls", [])
-            if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-        ],
-        limit=remaining_search_call_count(state),
-    )
-
-    if not state["tool_calls"]:
-        yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
-        return
-
-    while state.get("tool_calls") and state.get("tool_call_count", 0) < MAX_TOOL_CALLS:
-        parsed_searches = parse_search_tool_call_batch(state, state.get("tool_calls", []))
-        new_search_queries = [query for query, _top_k in parsed_searches]
-        search_number_start = state.get("tool_call_count", 0) + 1
-        search_numbers = list(range(search_number_start, search_number_start + len(new_search_queries)))
-        search_entries = [
-            {
-                "description": search_reason_from_tool_call(tool_call),
-                "query": query,
-                "searchNumber": search_number,
-            }
-            for tool_call, query, search_number in zip(
-                state.get("tool_calls", []),
-                new_search_queries,
-                search_numbers,
-            )
-        ]
-
-        yield {
-            "message": (
-                search_entries[0]["description"] if len(search_entries) == 1 else search_batch_message(new_search_queries)
-            ),
-            "queries": new_search_queries,
-            "searches": search_entries,
-            "searchNumbers": search_numbers,
-            "stage": "searching_pages",
-            "type": "search_batch",
-        }
-        _queries, new_pages = await execute_parsed_searches(
-            parsed_searches,
-            retriever=retriever,
-            class_id=class_id,
-            professor_id=professor_id,
-        )
-
-        state["retrieved_pages"] = deduplicate_retrieved_windows([*state.get("retrieved_pages", []), *new_pages])
-        state["tool_call_count"] = state.get("tool_call_count", 0) + len(new_search_queries)
-        state["retrieval_confidence"] = "high" if state["retrieved_pages"] else "low"
-        state["sources"] = sources_from_pages(state["retrieved_pages"])
-        state["stage_history"] = append_stage(state, "search_pdf_pages")
-        state["search_queries"] = [*state.get("search_queries", []), *new_search_queries]
-        state["tool_calls"] = []
-
-        yield {
-            "message": "Opening the selected PDF pages.",
-            "stage": "opening_pages",
-            "type": "step",
-        }
-        state["page_assets"] = await build_assets(state.get("retrieved_pages", []), max_total_pages=MAX_TOTAL_PAGES)
-        state["stage_history"] = append_stage(state, "fetch_or_render_pdf_pages")
-        yield {
-            "message": "Reading the most relevant pages.",
-            "stage": "reading_pages",
-            "type": "step",
-        }
-
+    try:
         response = await client.chat(
             model=model or DEFAULT_OPENROUTER_MODEL,
-            messages=build_multimodal_final_messages(state),
+            messages=messages,
             tools=[SEARCH_PDF_PAGES_TOOL],
             tool_choice="auto",
-            temperature=0.2,
+            temperature=state.get("temperature", 0.4),
+            max_tokens=state.get("max_tokens"),
+            reasoning_effort=state.get("reasoning_effort"),
         )
         state["answer"] = response.get("content") or ""
-        state["stage_history"] = append_stage(state, "openrouter_answer_with_pages")
-        requested_tool_calls = [
-            tool_call
-            for tool_call in response.get("tool_calls", [])
-            if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-        ]
+        state["stage_history"] = append_stage(state, "openrouter_agent")
         state["tool_calls"] = new_search_tool_calls(
             state,
-            requested_tool_calls,
+            [
+                tool_call
+                for tool_call in response.get("tool_calls", [])
+                if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
+            ],
             limit=remaining_search_call_count(state),
         )
 
@@ -795,13 +822,97 @@ async def run_pdf_rag_agent_stream(
             yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
             return
 
-    if not state.get("answer"):
-        state["answer"] = (
-            "I could not find enough support in the selected PDF pages after the maximum number of searches. "
-            "Ask your teacher for the exact worksheet, page, or problem text, or paste the relevant part here."
-        )
+        while state.get("tool_calls") and state.get("tool_call_count", 0) < MAX_TOOL_CALLS:
+            parsed_searches = parse_search_tool_call_batch(state, state.get("tool_calls", []))
+            new_search_queries = [query for query, _top_k in parsed_searches]
+            search_number_start = state.get("tool_call_count", 0) + 1
+            search_numbers = list(range(search_number_start, search_number_start + len(new_search_queries)))
+            search_entries = [
+                {
+                    "description": search_reason_from_tool_call(tool_call),
+                    "query": query,
+                    "searchNumber": search_number,
+                }
+                for tool_call, query, search_number in zip(
+                    state.get("tool_calls", []),
+                    new_search_queries,
+                    search_numbers,
+                )
+            ]
 
-    yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
+            yield {
+                "message": (
+                    search_entries[0]["description"] if len(search_entries) == 1 else search_batch_message(new_search_queries)
+                ),
+                "queries": new_search_queries,
+                "searches": search_entries,
+                "searchNumbers": search_numbers,
+                "stage": "searching_pages",
+                "type": "search_batch",
+            }
+            _queries, new_pages = await execute_parsed_searches(
+                parsed_searches,
+                retriever=retriever,
+                class_id=class_id,
+                professor_id=professor_id,
+            )
+
+            state["retrieved_pages"] = deduplicate_retrieved_windows([*state.get("retrieved_pages", []), *new_pages])
+            state["tool_call_count"] = state.get("tool_call_count", 0) + len(new_search_queries)
+            state["retrieval_confidence"] = "high" if state["retrieved_pages"] else "low"
+            state["sources"] = sources_from_pages(state["retrieved_pages"])
+            state["stage_history"] = append_stage(state, "search_pdf_pages")
+            state["search_queries"] = [*state.get("search_queries", []), *new_search_queries]
+            state["tool_calls"] = []
+
+            yield {
+                "message": "Opening the selected PDF pages.",
+                "stage": "opening_pages",
+                "type": "step",
+            }
+            state["page_assets"] = await build_assets(state.get("retrieved_pages", []), max_total_pages=MAX_TOTAL_PAGES)
+            state["stage_history"] = append_stage(state, "fetch_or_render_pdf_pages")
+            yield {
+                "message": "Reading the most relevant pages.",
+                "stage": "reading_pages",
+                "type": "step",
+            }
+
+            response = await client.chat(
+                model=model or DEFAULT_OPENROUTER_MODEL,
+                messages=await asyncio.to_thread(build_multimodal_final_messages, state),
+                tools=[SEARCH_PDF_PAGES_TOOL],
+                tool_choice="auto",
+                temperature=state.get("temperature", 0.4),
+                max_tokens=state.get("max_tokens"),
+                reasoning_effort=state.get("reasoning_effort"),
+            )
+            state["answer"] = response.get("content") or ""
+            state["stage_history"] = append_stage(state, "openrouter_answer_with_pages")
+            requested_tool_calls = [
+                tool_call
+                for tool_call in response.get("tool_calls", [])
+                if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
+            ]
+            state["tool_calls"] = new_search_tool_calls(
+                state,
+                requested_tool_calls,
+                limit=remaining_search_call_count(state),
+            )
+
+            if not state["tool_calls"]:
+                yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
+                return
+
+        if not state.get("answer"):
+            state["answer"] = (
+                "I could not find enough support in the selected PDF pages after the maximum number of searches. "
+                "Ask your teacher for the exact worksheet, page, or problem text, or paste the relevant part here."
+            )
+
+        yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
+    finally:
+        await close_owned_openrouter_client(client, owns_client)
 
 
 def pdf_rag_response_from_state(state: PdfRagState) -> dict[str, Any]:

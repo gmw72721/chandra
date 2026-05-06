@@ -41,3 +41,13 @@ test("FastAPI stream errors include a diagnostic instead of a blank fallback", (
   assert.match(source, /describe_stream_error\(error\)/);
   assert.match(source, /error\.__class__\.__name__/);
 });
+
+test("Next chat route uses the private backend base URL for FastAPI", () => {
+  const source = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
+  const envExample = readFileSync(join(repoRoot, ".env.example"), "utf8");
+
+  assert.match(source, /process\.env\.BACKEND_API_BASE_URL/);
+  assert.doesNotMatch(source, /process\.env\.NEXT_PUBLIC_API_BASE_URL/);
+  assert.match(envExample, /BACKEND_API_BASE_URL=http:\/\/127\.0\.0\.1:8000/);
+  assert.doesNotMatch(envExample, /NEXT_PUBLIC_API_BASE_URL/);
+});

@@ -24,11 +24,15 @@ export type SourceDocument = {
   kind: "lecture-notes" | "textbook" | "worked-example" | "assignment";
   status: "ready" | "processing" | "needs-review";
   uploadedAt: string;
+  activeForStudents?: boolean;
   classId?: string;
+  citationsRequired?: boolean;
   materialType?: string;
+  priority?: TutorKnowledgePriority;
   professorId?: string;
   professorName?: string;
   teacherId?: string;
+  teacherOnly?: boolean;
   chunks: SourceChunk[];
 };
 
@@ -38,8 +42,10 @@ export type SourceChunk = {
   label: string;
   content: string;
   classId?: string;
+  chunkIndex?: number;
   chunkText?: string;
   docId?: string;
+  excerpt?: string;
   materialId?: string;
   materialType?: string;
   pageEnd?: number;
@@ -55,6 +61,8 @@ export type SourceChunk = {
   vector?: number[];
   vectorDistance?: number;
 };
+
+export type TutorKnowledgePriority = "primary" | "normal" | "low";
 
 export type Course = {
   id: string;
@@ -102,6 +110,26 @@ export type StudentConversationSummary = {
   tags?: string[];
 };
 
+export type StudentRosterActivitySummary = {
+  conversationCount: number;
+  displayName: string;
+  lastActiveAt: string;
+  lastChatTopic: string;
+  questionsPerDay: number;
+  questionsToday: number;
+  recentConversations: Array<{
+    id: string;
+    lastMessageAt: unknown;
+    messageCount: number;
+    title: string;
+  }>;
+  status: "active" | "inactive" | "no_activity";
+  studentId: string;
+  studentEmail: string;
+  teacherNotes: string;
+  totalQuestions: number;
+};
+
 export type RetrievalHit = {
   chunk: SourceChunk;
   document: SourceDocument;
@@ -114,6 +142,7 @@ export type RetrievalConfidence = "high" | "medium" | "low";
 export type TutorSource = {
   title: string;
   materialType: string;
+  citationsRequired?: boolean;
   pageNumber?: number;
   problemNumber?: string;
 };

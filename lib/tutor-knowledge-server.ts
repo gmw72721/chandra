@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, type DocumentReference } from "firebase-admin/firestore";
 import { PDFParse } from "pdf-parse";
 import { PDFDocument } from "pdf-lib";
 import { adminAuth, adminDb, adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
@@ -17,6 +17,7 @@ import {
 } from "./tutor-knowledge";
 import { TutorKnowledgeHttpError } from "./tutor-knowledge-errors";
 import { materialTypeForKind, problemNumbersFromText } from "./retrieval-ranking";
+import type { TutorKnowledgePriority } from "./types";
 import {
   VertexEmbeddingError,
   createVertexEmbedding,
@@ -67,6 +68,13 @@ type MaterialJobProgressUpdate = {
   percent: number;
   step: MaterialJobStep;
   totalChunks?: number;
+};
+
+export type TutorKnowledgeSourceSettings = {
+  activeForStudents: boolean;
+  priority: TutorKnowledgePriority;
+  requireCitations: boolean;
+  teacherOnly: boolean;
 };
 
 export async function authorizeClassTeacher(request: Request, classId: string) {
@@ -181,6 +189,7 @@ export async function saveTutorKnowledge({
   const chunks = ingestion.chunks;
   const fileMetadata = file ? await uploadTutorKnowledgeFile({ classId, file, materialId: materialRef.id }) : {};
   const materialType = materialTypeForKind(kind);
+  const sourceSettings = defaultSourceSettingsForKind(kind);
 
   await materialRef.set({
     classId,
@@ -194,7 +203,17 @@ export async function saveTutorKnowledge({
     professor_id: teacherId,
     professor_name: professorName ?? "",
     teacherId,
-    studentVisible: true,
+    activeForStudents: sourceSettings.activeForStudents,
+    citationsRequired: sourceSettings.requireCitations,
+    priority: sourceSettings.priority,
+    requireCitations: sourceSettings.requireCitations,
+    studentVisible: sourceSettings.activeForStudents,
+    teacherOnly: sourceSettings.teacherOnly,
+    visibility: sourceSettings.teacherOnly
+      ? "teacher-only"
+      : sourceSettings.activeForStudents
+        ? "student-visible"
+        : "hidden",
     ...fileMetadata,
     characterCount: searchableText.length,
     chunkCount: chunks.length,
@@ -208,6 +227,7 @@ export async function saveTutorKnowledge({
       hasFile: Boolean(file),
       hasPastedText: Boolean(pastedText)
     }),
+    ...(pastedText ? { textSource: pastedText } : {}),
     visualPageCount: ingestion.visualPageCount
   });
 
@@ -320,6 +340,145 @@ export async function deleteTutorKnowledge({
   await materialRef.delete();
 }
 
+export async function updateTutorKnowledgeSettings({
+  classId,
+  materialId,
+  settings
+}: {
+  classId: string;
+  materialId: string;
+  settings: Partial<TutorKnowledgeSourceSettings>;
+}) {
+  const materialRef = adminDb!.collection("classes").doc(classId).collection("materials").doc(materialId);
+  const materialSnapshot = await materialRef.get();
+
+  if (!materialSnapshot.exists) {
+    throw new TutorKnowledgeHttpError("Tutor knowledge not found.", 404);
+  }
+
+  const currentSettings = sourceSettingsFromMaterial(materialSnapshot.data() ?? {});
+  const normalizedSettings = normalizeTutorKnowledgeSourceSettings({
+    ...currentSettings,
+    ...settings
+  });
+
+  await materialRef.update({
+    activeForStudents: normalizedSettings.activeForStudents,
+    citationsRequired: normalizedSettings.requireCitations,
+    priority: normalizedSettings.priority,
+    requireCitations: normalizedSettings.requireCitations,
+    studentVisible: normalizedSettings.activeForStudents,
+    teacherOnly: normalizedSettings.teacherOnly,
+    updatedAt: FieldValue.serverTimestamp(),
+    visibility: normalizedSettings.teacherOnly
+      ? "teacher-only"
+      : normalizedSettings.activeForStudents
+        ? "student-visible"
+        : "hidden"
+  });
+
+  return {
+    id: materialId,
+    ...normalizedSettings
+  };
+}
+
+export async function reprocessTutorKnowledge({
+  classId,
+  materialId,
+  teacherId
+}: {
+  classId: string;
+  materialId: string;
+  teacherId: string;
+}) {
+  const materialRef = adminDb!.collection("classes").doc(classId).collection("materials").doc(materialId);
+  const materialSnapshot = await materialRef.get();
+
+  if (!materialSnapshot.exists) {
+    throw new TutorKnowledgeHttpError("Tutor knowledge not found.", 404);
+  }
+
+  const material = materialSnapshot.data() ?? {};
+  const title = String(material.title ?? "").trim() || "Tutor knowledge";
+  const kind = String(material.kind ?? "").trim();
+  const professorName = String(material.professorName ?? material.professor_name ?? "").trim();
+  const file = await readStoredMaterialFile(material);
+  const textSource = String(material.textSource ?? "").trim();
+  const fallbackText = file ? "" : await readExistingChunkText(materialRef);
+
+  if (!isTutorKnowledgeKind(kind)) {
+    throw new TutorKnowledgeHttpError("Tutor knowledge has an invalid source type.", 400);
+  }
+
+  if (!file && !textSource && !fallbackText) {
+    throw new TutorKnowledgeHttpError("No original source content is available to reprocess.", 400);
+  }
+
+  const ingestion = await buildTutorKnowledgeIngestion({
+    docId: materialId,
+    file,
+    pastedText: textSource || fallbackText,
+    title
+  });
+  const chunks = ingestion.chunks;
+  const materialType = materialTypeForKind(kind);
+
+  await materialRef.update({
+    characterCount: ingestion.searchableText.length,
+    chunkCount: chunks.length,
+    embeddingStatus: isVertexEmbeddingConfigured() ? "processing" : "not-configured",
+    pageCount: ingestion.pageCount,
+    reprocessedAt: FieldValue.serverTimestamp(),
+    status: "processing",
+    visualPageCount: ingestion.visualPageCount
+  });
+
+  const existingChunksSnapshot = await materialRef.collection("chunks").get();
+  await deleteDocumentsInBatches(existingChunksSnapshot.docs.map((chunkDoc) => chunkDoc.ref));
+
+  try {
+    await writeChunks({
+      classId,
+      chunks,
+      materialId,
+      materialType,
+      professorName,
+      teacherId,
+      title
+    });
+
+    await materialRef.update({
+      embeddingStatus: isVertexEmbeddingConfigured() ? "ready" : "not-configured",
+      indexedAt: FieldValue.serverTimestamp(),
+      status: "ready"
+    });
+  } catch (caughtError) {
+    if (caughtError instanceof VertexEmbeddingError) {
+      await writeChunks({
+        classId,
+        chunks,
+        materialId,
+        materialType,
+        professorName,
+        skipEmbeddings: true,
+        teacherId,
+        title
+      });
+      await materialRef.update(buildEmbeddingFailureMaterialMetadata(caughtError));
+      throw new TutorKnowledgeHttpError(`Gemini embeddings failed: ${caughtError.message}`, 502);
+    }
+
+    throw caughtError;
+  }
+
+  return {
+    id: materialId,
+    characterCount: ingestion.searchableText.length,
+    chunkCount: chunks.length
+  };
+}
+
 async function uploadTutorKnowledgeFile({
   classId,
   file,
@@ -370,6 +529,83 @@ async function uploadTutorKnowledgeFile({
     contentType: file.type || contentTypeFromFileName(file.name),
     fileSize: file.size
   };
+}
+
+function defaultSourceSettingsForKind(kind: string): TutorKnowledgeSourceSettings {
+  const materialType = materialTypeForKind(kind);
+  const teacherOnly = materialType === "practice-solutions";
+
+  return {
+    activeForStudents: !teacherOnly,
+    priority: materialType === "assignment" || materialType === "practice-problems" || materialType === "reading"
+      ? "primary"
+      : "normal",
+    requireCitations: true,
+    teacherOnly
+  };
+}
+
+function sourceSettingsFromMaterial(material: Record<string, unknown>): TutorKnowledgeSourceSettings {
+  const defaultSettings = defaultSourceSettingsForKind(String(material.kind ?? material.materialType ?? ""));
+
+  return {
+    activeForStudents: readBooleanWithDefault(
+      material.activeForStudents ?? material.studentVisible,
+      defaultSettings.activeForStudents
+    ),
+    priority: isTutorKnowledgePriority(material.priority) ? material.priority : defaultSettings.priority,
+    requireCitations: readBooleanWithDefault(
+      material.requireCitations ?? material.citationsRequired,
+      defaultSettings.requireCitations
+    ),
+    teacherOnly: readBooleanWithDefault(material.teacherOnly, defaultSettings.teacherOnly)
+  };
+}
+
+function normalizeTutorKnowledgeSourceSettings(settings: TutorKnowledgeSourceSettings): TutorKnowledgeSourceSettings {
+  return {
+    activeForStudents: Boolean(settings.activeForStudents) && !settings.teacherOnly,
+    priority: isTutorKnowledgePriority(settings.priority) ? settings.priority : "normal",
+    requireCitations: Boolean(settings.requireCitations),
+    teacherOnly: Boolean(settings.teacherOnly)
+  };
+}
+
+function isTutorKnowledgePriority(value: unknown): value is TutorKnowledgePriority {
+  return value === "primary" || value === "normal" || value === "low";
+}
+
+function readBooleanWithDefault(value: unknown, defaultValue: boolean) {
+  return typeof value === "boolean" ? value : defaultValue;
+}
+
+async function readStoredMaterialFile(material: Record<string, unknown>) {
+  const filePath = String(material.filePath ?? "").trim();
+  const fileName = String(material.fileName ?? "source").trim() || "source";
+
+  if (!filePath) {
+    return null;
+  }
+
+  const [buffer] = await adminStorage!.bucket().file(filePath).download();
+  const fileBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+
+  return new File([fileBytes], fileName, {
+    type: String(material.contentType ?? "") || contentTypeFromFileName(fileName)
+  });
+}
+
+async function readExistingChunkText(
+  materialRef: DocumentReference
+) {
+  const chunksSnapshot = await materialRef.collection("chunks").orderBy("chunkIndex").get().catch(() =>
+    materialRef.collection("chunks").orderBy("order").get()
+  );
+
+  return chunksSnapshot.docs
+    .map((chunkDoc) => String(chunkDoc.data().chunk_text ?? chunkDoc.data().content ?? "").trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 async function buildTutorKnowledgeIngestion({
@@ -663,9 +899,12 @@ async function writeChunks({
       );
 
   const chunkRefs = await mapWithConcurrency(chunks, embeddingConcurrencyLimit, async (chunk, index) => {
+    const chunkId = `chunk_${String(index + 1).padStart(4, "0")}`;
     const data = await prepareTutorKnowledgeChunkData({
       classId,
       chunk,
+      chunkId,
+      chunkIndex: index,
       embedding: embeddings[index],
       materialId,
       materialType,
@@ -691,7 +930,7 @@ async function writeChunks({
         .collection("materials")
         .doc(materialId)
         .collection("chunks")
-        .doc()
+        .doc(chunkId)
     };
   });
 
@@ -731,6 +970,8 @@ async function mapWithConcurrency<TItem, TResult>(
 export async function prepareTutorKnowledgeChunkData({
   classId,
   chunk,
+  chunkId,
+  chunkIndex = chunk.order,
   createEmbedding = createVertexEmbedding,
   embedding,
   materialId,
@@ -742,6 +983,8 @@ export async function prepareTutorKnowledgeChunkData({
 }: {
   classId: string;
   chunk: TutorKnowledgeChunk;
+  chunkId?: string;
+  chunkIndex?: number;
   createEmbedding?: typeof createVertexEmbedding;
   embedding?: VertexEmbeddingResult;
   materialId: string;
@@ -769,6 +1012,8 @@ export async function prepareTutorKnowledgeChunkData({
     ...storedChunk,
     classId,
     class_id: classId,
+    chunkId: chunkId ?? "",
+    chunkIndex,
     chunk_text: chunk.chunkText ?? chunk.content,
     course_id: classId,
     createdAt: FieldValue.serverTimestamp(),
@@ -778,6 +1023,7 @@ export async function prepareTutorKnowledgeChunkData({
     hasPdfPart: Boolean(chunk.pdfPart),
     materialId,
     materialType,
+    excerpt: buildChunkExcerpt(chunk.chunkText ?? chunk.content),
     page_end: chunk.pageEnd ?? pageNumber,
     page_start: chunk.pageStart ?? pageNumber,
     pageEnd: chunk.pageEnd ?? pageNumber,
@@ -863,6 +1109,12 @@ function buildChunkEmbeddingMetadata(embedding: VertexEmbeddingResult | undefine
     embeddingProvider: embedding.provider,
     embeddingTaskType: embedding.taskType
   };
+}
+
+function buildChunkExcerpt(content: string) {
+  const normalized = content.replace(/\s+/g, " ").trim();
+
+  return normalized.length > 260 ? `${normalized.slice(0, 257).trimEnd()}...` : normalized;
 }
 
 function requireProfessorId(professorId: string) {

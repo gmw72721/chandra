@@ -28,6 +28,7 @@ class OpenRouterClient:
         self.http_referer = http_referer or os.getenv("OPENROUTER_HTTP_REFERER") or "http://localhost:3000"
         self.max_retries = max(0, max_retries)
         self.timeout = timeout
+        self._client: httpx.AsyncClient | None = None
 
     async def chat(
         self,
@@ -38,6 +39,8 @@ class OpenRouterClient:
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool = True,
         temperature: float = 0.4,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY is required for LangGraph tutor chat.")
@@ -47,6 +50,12 @@ class OpenRouterClient:
             "messages": messages,
             "temperature": temperature,
         }
+
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+
+        if reasoning_effort and model_supports_reasoning_effort(model):
+            payload["reasoning"] = {"effort": reasoning_effort}
 
         if tools:
             payload["tools"] = tools
@@ -65,19 +74,20 @@ class OpenRouterClient:
         }
 
     async def _post_chat_completion(self, payload: dict[str, Any]) -> httpx.Response:
+        client = self._get_http_client()
+
         for attempt in range(self.max_retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    return await client.post(
-                        f"{self.base_url}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self.api_key}",
-                            "Content-Type": "application/json",
-                            "HTTP-Referer": self.http_referer,
-                            "X-Title": self.app_title,
-                        },
-                        json=payload,
-                    )
+                return await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": self.http_referer,
+                        "X-Title": self.app_title,
+                    },
+                    json=payload,
+                )
             except (httpx.TransportError, httpx.TimeoutException) as error:
                 if attempt >= self.max_retries:
                     raise RuntimeError(
@@ -88,6 +98,27 @@ class OpenRouterClient:
                 await asyncio.sleep(0.35 * (attempt + 1))
 
         raise RuntimeError("The model provider did not return a response.")
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        if self._client is None or getattr(self._client, "is_closed", False):
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+
+def model_supports_reasoning_effort(model: str) -> bool:
+    normalized_model = model.lower()
+
+    return (
+        normalized_model.startswith("openai/o")
+        or "openai/gpt-5" in normalized_model
+        or "reasoning" in normalized_model
+    )
 
 
 def encode_file_as_data_url(path: str | Path, fallback_mime_type: str = "application/octet-stream") -> str:

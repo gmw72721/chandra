@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
@@ -22,58 +23,69 @@ async def fetch_or_render_pdf_pages(
     """Fetch/render only selected PDF page ranges into multimodal assets."""
 
     selected_ranges = deduplicate_page_ranges(retrieved_pages, max_total_pages=max_total_pages)
-    assets: list[dict[str, Any]] = []
-    source_cache: dict[str, Path] = {}
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
+    source_cache = await resolve_pdf_sources(selected_ranges, output_dir=target_dir)
 
-    for item in selected_ranges:
-        source_key = str(item["source_pdf_path"])
-        source_pdf = source_cache.get(source_key)
+    return await asyncio.gather(
+        *(build_page_asset(item, source_cache[str(item["source_pdf_path"])], target_dir) for item in selected_ranges)
+    )
 
-        if source_pdf is None:
-            source_pdf = await resolve_pdf_path(source_key, output_dir=target_dir)
-            source_cache[source_key] = source_pdf
 
-        images = render_page_images(
+async def resolve_pdf_sources(selected_ranges: list[dict[str, Any]], *, output_dir: Path) -> dict[str, Path]:
+    source_keys = list(dict.fromkeys(str(item["source_pdf_path"]) for item in selected_ranges))
+    source_paths = await asyncio.gather(*(resolve_pdf_path(source_key, output_dir=output_dir) for source_key in source_keys))
+
+    return dict(zip(source_keys, source_paths))
+
+
+async def build_page_asset(item: dict[str, Any], source_pdf: Path, output_dir: Path) -> dict[str, Any]:
+    images, printed_page_range = await asyncio.gather(
+        asyncio.to_thread(
+            render_page_images,
             source_pdf,
             doc_id=item["doc_id"],
             page_start=item["page_start"],
             page_end=item["page_end"],
-            output_dir=target_dir,
-        )
-        printed_page_start, printed_page_end = extract_printed_page_range(
+            output_dir=output_dir,
+        ),
+        asyncio.to_thread(
+            extract_printed_page_range,
             source_pdf,
             page_start=item["page_start"],
             page_end=item["page_end"],
+        ),
+    )
+    printed_page_start, printed_page_end = printed_page_range
+    display_page_start = printed_page_start or item["page_start"]
+    display_page_end = printed_page_end or item["page_end"]
+    asset: dict[str, Any] = {
+        "doc_id": item["doc_id"],
+        "title": item["title"],
+        "page_start": item["page_start"],
+        "page_end": item["page_end"],
+        "printed_page_start": printed_page_start,
+        "printed_page_end": printed_page_end,
+        "score": float(item.get("score") or 0.0),
+        "material_type": str(item.get("material_type") or ""),
+        "images": images,
+        "citation_label": citation_label(item["title"], display_page_start, display_page_end),
+    }
+
+    if not images:
+        mini_pdf = await asyncio.to_thread(
+            safe_extract_mini_pdf,
+            source_pdf,
+            doc_id=item["doc_id"],
+            page_start=item["page_start"],
+            page_end=item["page_end"],
+            output_dir=output_dir,
         )
-        display_page_start = printed_page_start or item["page_start"]
-        display_page_end = printed_page_end or item["page_end"]
-        asset: dict[str, Any] = {
-            "doc_id": item["doc_id"],
-            "title": item["title"],
-            "page_start": item["page_start"],
-            "page_end": item["page_end"],
-            "printed_page_start": printed_page_start,
-            "printed_page_end": printed_page_end,
-            "score": float(item.get("score") or 0.0),
-            "material_type": str(item.get("material_type") or ""),
-            "images": images,
-            "citation_label": citation_label(item["title"], display_page_start, display_page_end),
-        }
 
-        if not images:
-            asset["file"] = extract_mini_pdf(
-                source_pdf,
-                doc_id=item["doc_id"],
-                page_start=item["page_start"],
-                page_end=item["page_end"],
-                output_dir=target_dir,
-            )
+        if mini_pdf:
+            asset["file"] = mini_pdf
 
-        assets.append(asset)
-
-    return assets
+    return asset
 
 
 def deduplicate_page_ranges(
@@ -155,7 +167,7 @@ async def resolve_pdf_path(source_pdf_path: str, *, output_dir: Path) -> Path:
         target = output_dir / f"source_{digest}.pdf"
 
         if not target.exists():
-            download_storage_object(bucket_name, object_path, target)
+            await asyncio.to_thread(download_storage_object, bucket_name, object_path, target)
 
         return target
 
@@ -183,7 +195,7 @@ async def resolve_pdf_path(source_pdf_path: str, *, output_dir: Path) -> Path:
             target = output_dir / f"source_{digest}.pdf"
 
             if not target.exists():
-                download_storage_object(bucket_name, source_pdf_path, target)
+                await asyncio.to_thread(download_storage_object, bucket_name, source_pdf_path, target)
 
             return target
 
@@ -238,22 +250,48 @@ def render_page_images(
 
     safe_doc_id = safe_name(doc_id)
     rendered: list[str] = []
-    pdf = pypdfium2.PdfDocument(str(source_pdf))
+    try:
+        pdf = pypdfium2.PdfDocument(str(source_pdf))
+    except Exception:
+        return []
 
     try:
         for page_number in range(page_start, page_end + 1):
             output_path = output_dir / f"{safe_doc_id}_p{page_number}.png"
 
             if not output_path.exists():
-                page = pdf[page_number - 1]
-                bitmap = page.render(scale=2).to_pil()
-                bitmap.save(output_path)
+                try:
+                    page = pdf[page_number - 1]
+                    bitmap = page.render(scale=2).to_pil()
+                    bitmap.save(output_path)
+                except Exception:
+                    continue
 
             rendered.append(str(output_path))
     finally:
         pdf.close()
 
     return rendered
+
+
+def safe_extract_mini_pdf(
+    source_pdf: Path,
+    *,
+    doc_id: str,
+    page_start: int,
+    page_end: int,
+    output_dir: Path,
+) -> str:
+    try:
+        return extract_mini_pdf(
+            source_pdf,
+            doc_id=doc_id,
+            page_start=page_start,
+            page_end=page_end,
+            output_dir=output_dir,
+        )
+    except Exception:
+        return ""
 
 
 def extract_printed_page_range(source_pdf: Path, *, page_start: int, page_end: int) -> tuple[int | None, int | None]:

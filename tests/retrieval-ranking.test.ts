@@ -125,6 +125,31 @@ test("explicit page requests outrank broad semantic similarity", () => {
   assert.equal(result.hits[0]?.chunk.id, "page-129");
 });
 
+test("page range chunks keep page citations in source metadata", () => {
+  const requestedRange = makeDocument({
+    id: "calc-reader",
+    kind: "textbook",
+    title: "Calculus Reader",
+    chunks: [
+      {
+        content: "Exercises 9 through 16 cover integration by parts.",
+        id: "pages-128-130",
+        pageEnd: 130,
+        pageStart: 128
+      }
+    ]
+  });
+
+  const result = rankMaterialChunks({
+    candidates: toCandidates([requestedRange]),
+    query: "Can you find page 129 in the calculus reader?"
+  });
+  const sources = createSourceMetadata(result.hits);
+
+  assert.equal(result.hits[0]?.chunk.id, "pages-128-130");
+  assert.equal(sources[0]?.pageNumber, 128);
+});
+
 test("exact problem signals beat a slightly better vector match", () => {
   const exactProblem = makeDocument({
     id: "practice",
@@ -166,6 +191,29 @@ test("practice problems and solutions have distinct material types", () => {
   assert.equal(materialTypeForKind("Practice Solutions"), "practice-solutions");
 });
 
+test("source priority breaks otherwise similar retrieval ties", () => {
+  const normalSource = makeDocument({
+    id: "normal-notes",
+    kind: "lecture-notes",
+    title: "Limits Notes",
+    chunks: [{ content: "A limit describes the value a function approaches.", id: "normal-limit" }]
+  });
+  const primarySource = makeDocument({
+    id: "primary-reader",
+    kind: "textbook",
+    priority: "primary",
+    title: "Limits Reader",
+    chunks: [{ content: "A limit describes the value a function approaches.", id: "primary-limit" }]
+  });
+
+  const result = rankMaterialChunks({
+    candidates: toCandidates([normalSource, primarySource]),
+    query: "limit value function approaches"
+  });
+
+  assert.equal(result.hits[0]?.document.id, "primary-reader");
+});
+
 test("source hints keep vague follow-ups on the previous material", () => {
   const previousMaterial = makeDocument({
     id: "practice-problems",
@@ -189,6 +237,41 @@ test("source hints keep vague follow-ups on the previous material", () => {
   });
 
   assert.equal(result.hits[0]?.document.id, "practice-problems");
+});
+
+test("page source hints keep vague follow-ups on the same page range", () => {
+  const previousReading = makeDocument({
+    id: "chapter-reader",
+    kind: "textbook",
+    title: "Chapter 4 Reader",
+    chunks: [
+      {
+        content: "The comparison test applies when each term is bounded by a convergent series.",
+        id: "reader-pages-41-42",
+        pageEnd: 42,
+        pageStart: 41
+      }
+    ]
+  });
+  const nearbyNotes = makeDocument({
+    id: "series-notes",
+    kind: "lecture-notes",
+    title: "Series Notes",
+    chunks: [
+      {
+        content: "The comparison test applies when each term is bounded by a convergent series.",
+        id: "series-comparison"
+      }
+    ]
+  });
+
+  const result = rankMaterialChunks({
+    candidates: toCandidates([nearbyNotes, previousReading]),
+    query: "can you explain that example again?",
+    sourceHints: [{ pageNumber: 42, title: "Chapter 4 Reader" }]
+  });
+
+  assert.equal(result.hits[0]?.chunk.id, "reader-pages-41-42");
 });
 
 test("problem number matching handles common student patterns", () => {
@@ -276,6 +359,7 @@ function makeDocument({
   id,
   kind,
   materialType,
+  priority,
   title
 }: {
   chunks: Array<{
@@ -290,6 +374,7 @@ function makeDocument({
   id: string;
   kind: SourceDocument["kind"];
   materialType?: string;
+  priority?: SourceDocument["priority"];
   title: string;
 }): SourceDocument {
   return {
@@ -310,6 +395,7 @@ function makeDocument({
     courseId: "class-a",
     id,
     kind,
+    priority,
     status: "ready",
     title,
     uploadedAt: new Date("2026-05-05T00:00:00.000Z").toISOString()

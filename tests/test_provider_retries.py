@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import types
 from typing import Any
 
 import httpx
@@ -95,3 +97,140 @@ def test_query_feature_builder_handles_non_string_query_objects() -> None:
     assert "trig" in features["terms"]
     assert "14" in features["problem_numbers"]
     assert 104 in features["page_numbers"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_retriever_excludes_teacher_only_and_hidden_materials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_firestore_modules(monkeypatch)
+    hidden_materials = [
+        {"status": "ready", "teacherOnly": True, "title": "Teacher Solutions"},
+        {"status": "ready", "visibility": "hidden", "title": "Hidden Notes"},
+        {"status": "ready", "activeForStudents": False, "title": "Inactive Reading"},
+        {"status": "ready", "private": True, "title": "Private Source"},
+    ]
+
+    for material in hidden_materials:
+        FakeFirestoreClient.next_chunks = [fake_chunk_doc(material=material)]
+        retriever = GeminiPdfRetriever(gemini_api_key="test-key")
+
+        results = await retriever._search_firestore(
+            class_id="class-1",
+            professor_id="teacher-1",
+            query="problem 7",
+            query_vector=[0.1, 0.2],
+            top_k=5,
+        )
+
+        assert results == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_retriever_keeps_student_visible_ready_material(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_firestore_modules(monkeypatch)
+    FakeFirestoreClient.next_chunks = [
+        fake_chunk_doc(
+            material={
+                "status": "ready",
+                "studentVisible": True,
+                "title": "Student Worksheet",
+            }
+        )
+    ]
+    retriever = GeminiPdfRetriever(gemini_api_key="test-key")
+
+    results = await retriever._search_firestore(
+        class_id="class-1",
+        professor_id="teacher-1",
+        query="problem 7",
+        query_vector=[0.1, 0.2],
+        top_k=5,
+    )
+
+    assert [result.title for result in results] == ["Student Worksheet"]
+
+
+def install_fake_firestore_modules(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_firestore_module = types.SimpleNamespace(client=lambda: FakeFirestoreClient())
+    fake_firebase_admin = types.SimpleNamespace(
+        _apps=["test-app"],
+        firestore=fake_firestore_module,
+        initialize_app=lambda: None,
+    )
+    fake_distance_module = types.SimpleNamespace(DistanceMeasure=types.SimpleNamespace(COSINE="COSINE"))
+
+    monkeypatch.setitem(sys.modules, "firebase_admin", fake_firebase_admin)
+    monkeypatch.setitem(sys.modules, "firebase_admin.firestore", fake_firestore_module)
+    monkeypatch.setitem(sys.modules, "google", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "google.cloud", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "google.cloud.firestore_v1", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "google.cloud.firestore_v1.base_vector_query", fake_distance_module)
+
+
+def fake_chunk_doc(*, material: dict[str, Any]) -> "FakeChunkDoc":
+    return FakeChunkDoc(
+        chunk={
+            "chunk_text": "Problem 7 asks students to solve a linear equation.",
+            "classId": "class-1",
+            "docId": "material-1",
+            "materialType": "assignment",
+            "page_start": 3,
+            "page_end": 3,
+            "professorId": "teacher-1",
+            "title": material.get("title", "Material"),
+            "vectorDistance": 0.1,
+        },
+        material=material,
+    )
+
+
+class FakeFirestoreClient:
+    next_chunks: list["FakeChunkDoc"] = []
+
+    def collection_group(self, _name: str) -> "FakeFirestoreClient":
+        return self
+
+    def where(self, *_args: object) -> "FakeFirestoreClient":
+        return self
+
+    def find_nearest(self, **_kwargs: object) -> "FakeFirestoreClient":
+        return self
+
+    def get(self) -> list["FakeChunkDoc"]:
+        return self.next_chunks
+
+
+class FakeChunkDoc:
+    def __init__(self, *, chunk: dict[str, Any], material: dict[str, Any]) -> None:
+        self._chunk = chunk
+        self.reference = FakeChunkReference(material)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self._chunk
+
+
+class FakeChunkReference:
+    def __init__(self, material: dict[str, Any]) -> None:
+        self.parent = types.SimpleNamespace(parent=FakeMaterialReference(material))
+
+
+class FakeMaterialReference:
+    id = "material-1"
+    path = "classes/class-1/materials/material-1"
+
+    def __init__(self, material: dict[str, Any]) -> None:
+        self._material = material
+
+    def get(self) -> "FakeMaterialSnapshot":
+        return FakeMaterialSnapshot(self._material)
+
+
+class FakeMaterialSnapshot:
+    def __init__(self, material: dict[str, Any]) -> None:
+        self._material = material
+
+    def to_dict(self) -> dict[str, Any]:
+        return self._material

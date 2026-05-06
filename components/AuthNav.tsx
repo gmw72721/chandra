@@ -5,7 +5,11 @@ import { useRouter } from "next/navigation";
 import { signOutCurrentUser } from "@/lib/auth";
 import { useAuth } from "./AuthProvider";
 
-export function AuthNav() {
+type AuthNavProps = {
+  showCreateAccount?: boolean;
+};
+
+export function AuthNav({ showCreateAccount = false }: AuthNavProps) {
   const router = useRouter();
   const { firebaseReady, isLoading, profile, user } = useAuth();
 
@@ -30,6 +34,7 @@ export function AuthNav() {
     return (
       <div className="nav-actions">
         <Link href="/auth">Sign in</Link>
+        {showCreateAccount ? <Link href="/auth">Create account</Link> : null}
       </div>
     );
   }
@@ -43,4 +48,3 @@ export function AuthNav() {
     </div>
   );
 }
-

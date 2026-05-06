@@ -89,9 +89,9 @@ class GeminiPdfRetriever:
             return []
 
         result: httpx.Response | None = None
-        for attempt in range(3):
-            try:
-                async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            for attempt in range(3):
+                try:
                     result = await client.post(
                         f"https://generativelanguage.googleapis.com/v1beta/models/{self.embedding_model}:embedContent",
                         headers={
@@ -104,12 +104,12 @@ class GeminiPdfRetriever:
                             "taskType": "RETRIEVAL_QUERY",
                         },
                     )
-                break
-            except (httpx.TransportError, httpx.TimeoutException):
-                if attempt == 2:
-                    return []
+                    break
+                except (httpx.TransportError, httpx.TimeoutException):
+                    if attempt == 2:
+                        return []
 
-                await asyncio.sleep(0.35 * (attempt + 1))
+                    await asyncio.sleep(0.35 * (attempt + 1))
 
         if result is None:
             return []
@@ -156,19 +156,21 @@ class GeminiPdfRetriever:
                     distance_result_field="vectorDistance",
                 )
             )
-            snapshot = firestore_query.get()
+            snapshot = await asyncio.to_thread(firestore_query.get)
         except Exception:
             return []
 
+        chunk_docs = list(snapshot)
         results: list[PdfPageResult] = []
+        material_cache = await self._load_material_cache(chunk_docs)
         query_features = build_query_features(query)
 
-        for chunk_doc in snapshot:
+        for chunk_doc in chunk_docs:
             chunk = chunk_doc.to_dict() or {}
             material_ref = chunk_doc.reference.parent.parent
-            material = (material_ref.get().to_dict() if material_ref else {}) or {}
+            material = self._get_cached_material(material_ref, material_cache)
 
-            if material.get("studentVisible") is False or material.get("status") != "ready":
+            if not is_student_visible_ready_material(material):
                 continue
 
             source_pdf_path = str(
@@ -214,6 +216,36 @@ class GeminiPdfRetriever:
             )
 
         return sorted(results, key=lambda result: result.score, reverse=True)[:top_k]
+
+    async def _load_material_cache(self, chunk_docs: list[Any]) -> dict[str, dict[str, Any]]:
+        material_refs: dict[str, Any] = {}
+
+        for chunk_doc in chunk_docs:
+            material_ref = chunk_doc.reference.parent.parent
+            cache_key = self._material_cache_key(material_ref)
+
+            if cache_key:
+                material_refs.setdefault(cache_key, material_ref)
+
+        snapshots = await asyncio.gather(
+            *(asyncio.to_thread(material_ref.get) for material_ref in material_refs.values())
+        )
+
+        return {
+            cache_key: (snapshot.to_dict() if snapshot else {}) or {}
+            for cache_key, snapshot in zip(material_refs.keys(), snapshots)
+        }
+
+    def _get_cached_material(
+        self,
+        material_ref: Any | None,
+        material_cache: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        cache_key = self._material_cache_key(material_ref)
+        return material_cache.get(cache_key, {}) if cache_key else {}
+
+    def _material_cache_key(self, material_ref: Any | None) -> str:
+        return str(getattr(material_ref, "path", material_ref)) if material_ref is not None else ""
 
 
 def build_query_features(query: Any) -> dict[str, Any]:
@@ -303,6 +335,17 @@ def material_preference_score(
         return -4.0
 
     return 0.0
+
+
+def is_student_visible_ready_material(material: dict[str, Any]) -> bool:
+    return (
+        material.get("status") == "ready"
+        and material.get("activeForStudents") is not False
+        and material.get("studentVisible") is not False
+        and material.get("teacherOnly") is not True
+        and material.get("visibility") not in {"teacher-only", "hidden"}
+        and material.get("private") is not True
+    )
 
 
 def ensure_text(value: Any) -> str:

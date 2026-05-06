@@ -1,17 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, Suspense, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useAuth } from "@/components/AuthProvider";
-import { AuthNav } from "@/components/AuthNav";
 import { RequireAuth } from "@/components/RequireAuth";
 import { apiUrl } from "@/lib/api-client";
-import { updateStudentClass } from "@/lib/auth";
-import { CLASS_CODE_LENGTH, formatClassCodeInput } from "@/lib/class-code";
+import { signOutCurrentUser } from "@/lib/auth";
 import { subscribeToClass, type TeacherClass } from "@/lib/classes";
 import type { ChatMessage, StudentConversationSummary, TutorApiResponse } from "@/lib/types";
 
@@ -37,7 +35,7 @@ type ChatStreamEvent =
       stage: string;
       type: "search_batch";
     }
-  | { message: string; stage: string; type: "error" }
+  | { errorCode?: string; errorId?: string; message: string; stage: string; type: "error" }
   | { payload: TutorApiResponse; type: "final" };
 
 const initialMessages: ChatMessage[] = [
@@ -52,14 +50,7 @@ const initialMessages: ChatMessage[] = [
 
 export default function StudentPage() {
   return (
-    <main className="shell chat-shell">
-      <nav className="topbar">
-        <Link className="brand" href="/">
-          Chandra
-        </Link>
-        <AuthNav />
-      </nav>
-
+    <main className="student-workspace-page">
       <Suspense
         fallback={
           <section className="auth-state-panel">
@@ -75,15 +66,13 @@ export default function StudentPage() {
 }
 
 function StudentWorkspace() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const { firebaseReady, profile, user } = useAuth();
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [chatProgress, setChatProgress] = useState<ChatProgress | null>(null);
-  const [isSavingClassCode, setIsSavingClassCode] = useState(false);
-  const [classCodeError, setClassCodeError] = useState("");
-  const [classCodeMessage, setClassCodeMessage] = useState("");
   const [classLoadError, setClassLoadError] = useState<{ classId: string; message: string } | null>(null);
   const [loadedClassId, setLoadedClassId] = useState("");
   const [savedClass, setSavedClass] = useState<TeacherClass | null>(null);
@@ -159,10 +148,19 @@ function StudentWorkspace() {
   const activeClass = savedClass?.id === activeCourseId ? savedClass : null;
   const className = activeClass?.name ?? (activeCourseId ? "Saved class" : "Class needed");
   const classSection = activeClass?.section ?? (activeCourseId ? "Student chat" : "Enter your class code");
+  const classSectionLabel = formatClassSectionLabel(classSection, Boolean(activeCourseId));
+  const visibleClassCode = activeClass?.joinCode || activeClass?.id || activeCourseId;
+  const pinnedTeacherInstructions = activeClass ? formatPinnedTeacherInstructions(activeClass.defaultAssignmentContext) : "";
   const visibleConversationSummaries = conversationSummaries.filter(
     (conversation) => conversation.classId === activeCourseId && conversation.studentId === user?.uid
   );
   const activeSelectedConversationId = selectedConversationClassId === activeCourseId ? selectedConversationId : "";
+  const selectedConversation =
+    visibleConversationSummaries.find((conversation) => conversation.id === activeSelectedConversationId) ?? null;
+  const conversationTitle = selectedConversation?.title ?? "";
+  const conversationMessageCount = selectedConversation?.messageCount ?? 0;
+  const accountName = profile?.displayName ?? user?.displayName ?? "Student";
+  const accountEmail = profile?.email ?? user?.email ?? "";
 
   useEffect(() => {
     if (!firebaseReady || !activeCourseId || !activeSelectedConversationId || !user) {
@@ -322,36 +320,6 @@ function StudentWorkspace() {
     }
   }
 
-  async function submitClassCode(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!user) {
-      return;
-    }
-
-    const formData = new FormData(event.currentTarget);
-    setClassCodeError("");
-    setClassCodeMessage("");
-    setIsSavingClassCode(true);
-
-    try {
-      await updateStudentClass({
-        classId: String(formData.get("classCode") ?? ""),
-        uid: user.uid
-      });
-      setClassCodeMessage("Class saved.");
-    } catch (caughtError) {
-      const message = caughtError instanceof Error ? caughtError.message : "Class save failed.";
-      setClassCodeError(
-        message.toLowerCase().includes("permission")
-          ? "Class code was not found, or you do not have permission to join it."
-          : message
-      );
-    } finally {
-      setIsSavingClassCode(false);
-    }
-  }
-
   function startNewConversation() {
     setSelectedConversationId("");
     setSelectedConversationClassId(activeCourseId);
@@ -359,110 +327,185 @@ function StudentWorkspace() {
     setConversationMessagesError("");
   }
 
+  async function handleSignOut() {
+    await signOutCurrentUser();
+    router.push("/auth");
+  }
+
   return (
     <RequireAuth role={isTeacherPreview ? ["student", "teacher"] : "student"}>
-      <section className="chat-layout">
-        <aside className="student-sidebar">
-          <p className="eyebrow">{isTeacherPreview ? "Student view" : className}</p>
-          <h1>{classSection}</h1>
-          {isLoadingClass ? <p className="sidebar-note">Loading class.</p> : null}
-          {classLoadMessage ? <p className="form-error">{classLoadMessage}</p> : null}
-          {isTeacherPreview ? (
-            <Link className="secondary-button preview-exit" href="/teacher">
-              Back to dashboard
+      <section className="student-workspace-shell">
+        <aside className="student-workspace-sidebar" aria-label="Student workspace navigation">
+          <div className="student-sidebar-scroll">
+            <Link className="student-brand" href="/">
+              <span className="student-wordmark">Chandra</span>
             </Link>
-          ) : null}
 
-          {profile?.role === "student" && !isTeacherPreview ? (
-            <form className="student-class-form" key={profile.classId ?? "no-class"} onSubmit={submitClassCode}>
-              <label className="field-label" htmlFor="student-class-code">
-                Class code
-              </label>
-              <div>
-                <input
-                  id="student-class-code"
-                  name="classCode"
-                  defaultValue=""
-                  maxLength={CLASS_CODE_LENGTH}
-                  onChange={(event) => {
-                    event.currentTarget.value = formatClassCodeInput(event.currentTarget.value);
-                  }}
-                  placeholder="ABCDEF"
-                />
-                <button className="secondary-button compact" disabled={isSavingClassCode} type="submit">
-                  {isSavingClassCode ? "Saving" : "Save"}
-                </button>
-              </div>
-              {classCodeError ? <p className="form-error">{classCodeError}</p> : null}
-              {classCodeMessage ? <p className="form-success">{classCodeMessage}</p> : null}
-            </form>
-          ) : null}
+            <section className="student-sidebar-card student-current-class-card" aria-label="Current class">
+              <p className="eyebrow">Current class</p>
+              <h2>
+                <span>{className}</span>
+                {classSectionLabel ? <span>{classSectionLabel}</span> : null}
+              </h2>
+              {isLoadingClass ? <p className="sidebar-note">Loading class.</p> : null}
+              {classLoadMessage ? <p className="form-error">{classLoadMessage}</p> : null}
+              {isTeacherPreview ? (
+                <Link className="student-sidebar-action" href="/teacher">
+                  Back to dashboard
+                </Link>
+              ) : null}
 
-          {profile?.role === "student" && !isTeacherPreview && activeCourseId ? (
-            <section className="student-conversation-history" aria-label="Saved conversations">
-              <div className="sidebar-section-heading">
-                <strong>Conversations</strong>
-                <button className="secondary-button compact" type="button" onClick={startNewConversation}>
-                  New
-                </button>
-              </div>
-              {conversationLoadError ? <p className="form-error">{conversationLoadError}</p> : null}
-              <div className="student-conversation-list">
-                {visibleConversationSummaries.map((conversation) => (
-                  <button
-                    aria-pressed={conversation.id === activeSelectedConversationId}
-                    className="student-conversation-row"
-                    key={conversation.id}
-                    type="button"
-                    onClick={() => {
-                      setSelectedConversationId(conversation.id);
-                      setSelectedConversationClassId(activeCourseId);
-                    }}
-                  >
-                    <strong>{conversation.title}</strong>
-                    <span>{formatConversationMeta(conversation)}</span>
+              {profile?.role === "student" && !isTeacherPreview ? (
+                <div className="student-class-code-display" aria-label="Class code">
+                  <span>Class code</span>
+                  <strong>{visibleClassCode || "No class joined"}</strong>
+                </div>
+              ) : null}
+            </section>
+
+            {profile?.role === "student" && !isTeacherPreview ? (
+              <section className="student-sidebar-card student-conversation-history" aria-label="Saved conversations">
+                <div className="sidebar-section-heading">
+                  <p className="eyebrow">Conversations</p>
+                  <button className="student-new-mini-button" type="button" onClick={startNewConversation}>
+                    New
                   </button>
-                ))}
-                {!visibleConversationSummaries.length && !conversationLoadError ? (
-                  <p className="sidebar-note">No saved conversations.</p>
-                ) : null}
+                </div>
+                {conversationLoadError ? <p className="form-error">{conversationLoadError}</p> : null}
+                <div className="student-conversation-list">
+                  {visibleConversationSummaries.map((conversation) => (
+                    <button
+                      aria-pressed={conversation.id === activeSelectedConversationId}
+                      className="student-conversation-row"
+                      key={conversation.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedConversationId(conversation.id);
+                        setSelectedConversationClassId(activeCourseId);
+                      }}
+                    >
+                      <span className="student-conversation-icon" aria-hidden="true" />
+                      <span className="student-conversation-copy">
+                        <strong>{conversation.title}</strong>
+                        <span>{formatConversationMeta(conversation)}</span>
+                      </span>
+                      <span className="student-row-chevron" aria-hidden="true">
+                        ›
+                      </span>
+                    </button>
+                  ))}
+                  {!visibleConversationSummaries.length && !conversationLoadError ? (
+                    <p className="sidebar-note">No saved conversations.</p>
+                  ) : null}
+                </div>
+              </section>
+            ) : null}
+          </div>
+
+          <section className="student-account-card" aria-label="Signed in account">
+            <span className="student-avatar" aria-hidden="true">
+              {getInitials(accountName, accountEmail)}
+            </span>
+            <span className="student-account-copy">
+              <strong>{accountName}</strong>
+              <span>{accountEmail}</span>
+            </span>
+            <button className="student-signout-button" type="button" onClick={handleSignOut}>
+              Sign out
+            </button>
+          </section>
+        </aside>
+
+        <section className="student-workspace-main" aria-label="Student tutor chat">
+          <header className="student-main-header">
+            <div>
+              <h1>
+                <span>{className}</span>
+                {classSectionLabel ? <span>{classSectionLabel}</span> : null}
+              </h1>
+            </div>
+            <div className="student-status-actions" aria-label="Workspace status">
+              <span className="student-status-pill">
+                <span className="student-user-icon" aria-hidden="true" />
+                Student
+              </span>
+              <span className="student-status-pill">
+                <span className="student-connected-dot" aria-hidden="true" />
+                Connected
+              </span>
+            </div>
+          </header>
+
+          {pinnedTeacherInstructions ? (
+            <section className="student-teacher-instructions" aria-label="Teacher instructions">
+              <div>
+                <p className="eyebrow">Teacher instructions</p>
+                <p>{pinnedTeacherInstructions}</p>
               </div>
             </section>
           ) : null}
-        </aside>
 
-        <section className="chat-panel" aria-label="Student tutor chat">
+          {selectedConversation ? (
+            <section className="student-conversation-header" aria-label="Current conversation">
+              <div>
+                <h2>{conversationTitle}</h2>
+                <p>{formatMessageCount(conversationMessageCount)}</p>
+              </div>
+            </section>
+          ) : null}
+
           {conversationMessagesError ? <p className="form-error chat-error">{conversationMessagesError}</p> : null}
-          <div className="message-list">
+          <div className="message-list student-message-list">
             {messages.map((message) => (
-              <article className={`message ${message.role}`} key={message.id}>
-                <div className="message-meta">{message.role === "student" ? "You" : "Chandra"}</div>
-                <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                  {normalizeMarkdownMath(message.content)}
-                </ReactMarkdown>
-                {message.role === "assistant" && message.sources?.length ? (
-                  <div className="message-sources" aria-label="Sources used">
-                    {message.sources.map((source, index) => (
-                      <span key={`${source.title}-${source.pageNumber ?? ""}-${source.problemNumber ?? ""}-${index}`}>
-                        {formatSourceLabel(source)}
-                      </span>
-                    ))}
+              <article className={`student-workspace-message ${message.role === "student" ? "student" : "assistant"}`} key={message.id}>
+                {message.role === "student" ? (
+                  <div className="student-message-stack">
+                    <div className="message-meta">You</div>
+                    <div className="student-message-bubble">
+                      <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                        {normalizeMarkdownMath(message.content)}
+                      </ReactMarkdown>
+                    </div>
                   </div>
-                ) : null}
+                ) : (
+                  <>
+                    <span className="chandra-message-avatar" aria-hidden="true">
+                      C
+                    </span>
+                    <div className="assistant-message-stack">
+                      <div className="message-meta">Chandra</div>
+                      <div className="assistant-message-bubble">
+                        <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                          {normalizeMarkdownMath(message.content)}
+                        </ReactMarkdown>
+                      </div>
+                      {message.sources?.length ? (
+                        <div className="message-sources" aria-label="Sources used">
+                          <strong>Sources:</strong>
+                          {message.sources.map((source, index) => (
+                            <span key={`${source.title}-${source.pageNumber ?? ""}-${source.problemNumber ?? ""}-${index}`}>
+                              {formatSourceLabel(source)}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  </>
+                )}
               </article>
             ))}
             {isSending && chatProgress ? <ChatProgressMessage progress={chatProgress} /> : null}
           </div>
 
-          <form className="composer" onSubmit={sendMessage}>
+          <form className="composer student-composer" onSubmit={sendMessage}>
             <textarea
               aria-label="Message Chandra"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
-              placeholder={activeCourseId ? "Ask about a problem, step, or equation..." : "Save your class code to start chatting."}
-              rows={3}
+              placeholder={activeCourseId ? "Ask about a problem, step, or equation..." : "Join a class to start chatting."}
+              rows={1}
             />
-            <button type="submit" disabled={isSending || !draft.trim() || !activeCourseId}>
+            <button className="student-send-button" type="submit" disabled={isSending || !draft.trim() || !activeCourseId}>
               {isSending ? "Sending" : "Send"}
             </button>
           </form>
@@ -474,22 +517,29 @@ function StudentWorkspace() {
 
 function ChatProgressMessage({ progress }: { progress: ChatProgress }) {
   return (
-    <article className="message assistant progress-message" aria-live="polite">
-      <div className="message-meta">Chandra</div>
-      <div className="progress-row">
-        <span className="thinking-dot" aria-hidden="true" />
-        <p>{progress.message}</p>
+    <article className="student-workspace-message assistant progress-message" aria-live="polite">
+      <span className="chandra-message-avatar" aria-hidden="true">
+        C
+      </span>
+      <div className="assistant-message-stack">
+        <div className="message-meta">Chandra</div>
+        <div className="assistant-message-bubble">
+          <div className="progress-row">
+            <span className="thinking-dot" aria-hidden="true" />
+            <p>{progress.message}</p>
+          </div>
+          {progress.searches.length ? (
+            <ol className="progress-searches" aria-label="Searches Chandra has tried">
+              {progress.searches.map((search, index) => (
+                <li key={`${search.query}-${index}`}>
+                  <strong>{search.description}</strong>
+                  <span>{search.query}</span>
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </div>
       </div>
-      {progress.searches.length ? (
-        <ol className="progress-searches" aria-label="Searches Chandra has tried">
-          {progress.searches.map((search, index) => (
-            <li key={`${search.query}-${index}`}>
-              <strong>{search.description}</strong>
-              <span>{search.query}</span>
-            </li>
-          ))}
-        </ol>
-      ) : null}
     </article>
   );
 }
@@ -668,6 +718,34 @@ function formatConversationMeta(conversation: StudentConversationSummary) {
     `${conversation.messageCount} messages`,
     formatConversationDate(conversation.lastMessageAt)
   ].filter(Boolean).join(" / ");
+}
+
+function formatMessageCount(count: number) {
+  return `${count} ${count === 1 ? "message" : "messages"}`;
+}
+
+function formatClassSectionLabel(classSection: string, hasClass: boolean) {
+  if (!hasClass || !classSection || classSection === "Enter your class code" || classSection === "Student chat") {
+    return "";
+  }
+
+  return `Section ${classSection}`;
+}
+
+function formatPinnedTeacherInstructions(defaultAssignmentContext?: string) {
+  const customInstructions = defaultAssignmentContext?.replace(/\s+/g, " ").trim();
+
+  return customInstructions || "Show your work. Do not use decimals unless asked.";
+}
+
+function getInitials(name: string, email: string) {
+  const source = name.trim() || email.trim();
+  const parts = source
+    .replace(/@.*/, "")
+    .split(/\s+|[._-]+/)
+    .filter(Boolean);
+
+  return (parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : source.slice(0, 2)).toUpperCase();
 }
 
 function formatConversationDate(value: unknown) {
