@@ -65,10 +65,12 @@ class OpenRouterClient:
         response = await self._post_chat_completion(payload)
         response.raise_for_status()
         completion = response.json()
-        message = completion.get("choices", [{}])[0].get("message") or {}
+        choice = completion.get("choices", [{}])[0]
+        message = choice.get("message") or {}
 
         return {
             "content": message.get("content") or "",
+            "finish_reason": choice.get("finish_reason"),
             "tool_calls": message.get("tool_calls") or [],
             "raw": completion,
         }

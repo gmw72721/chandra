@@ -144,6 +144,15 @@ test("source labels render under tutor messages", () => {
   assert.match(styles, /\.message-sources/);
 });
 
+test("student chat math can overflow horizontally without hiding the rest of the answer", () => {
+  const styles = readFileSync(join(repoRoot, "app/styles.css"), "utf8");
+
+  assert.match(styles, /\.assistant-message-bubble \{/);
+  assert.match(styles, /overflow-x: auto/);
+  assert.match(styles, /\.assistant-message-bubble \.katex/);
+  assert.match(styles, /\.assistant-message-bubble \.katex-display/);
+});
+
 test("chat retrieval query carries recent conversation context into follow-ups", () => {
   const messages = [
     { role: "system" as const, content: "hidden setup" },
@@ -234,12 +243,33 @@ test("student chat errors include stable codes and student-safe messages", () =>
   assert.match(source, /TUTOR_BACKEND_STREAM_FAILED/);
 });
 
+test("student chat response length settings leave room for math-heavy examples", () => {
+  const source = readFileSync(join(repoRoot, "lib/class-settings.ts"), "utf8");
+
+  assert.match(source, /return 700/);
+  assert.match(source, /return 1600/);
+  assert.match(source, /return 2600/);
+});
+
+test("student chat does not drop generated answers when assistant persistence fails", () => {
+  const source = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
+
+  assert.match(source, /saveAssistantMessageWithoutBlockingTutorResponse/);
+  assert.match(source, /await saveAssistantMessage\(/);
+  assert.match(source, /catch \(caughtError\)/);
+  assert.match(source, /CHAT_CONVERSATION_ID_INVALID/);
+  assert.match(source, /withConversationMetadata\(tutorResponse, preparedRequest\.persistence\)/);
+});
+
 test("pdf tool prompt uses textbook readings for solving help", () => {
   const routeSource = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
   const promptSource = readFileSync(join(repoRoot, "lib/prompts.ts"), "utf8");
 
   assert.match(routeSource, /search the problem PDF first/);
   assert.match(routeSource, /Do not search textbook\/readings unless no problem-set match is found/);
+  assert.match(routeSource, /concrete math problem, including a fully pasted problem/);
+  assert.match(routeSource, /Check problem PDFs, worksheets, assignments, practice problems, and textbook sections before helping/);
+  assert.match(routeSource, /use the tool first to check whether the exact problem appears in class materials/);
   assert.match(routeSource, /prefer queries that target the reading or method/);
   assert.match(routeSource, /Do not repeat the exact problem\/source search/);
   assert.match(routeSource, /use those pages and do not search again/);
@@ -255,6 +285,8 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(promptSource, /Only help with this class/);
   assert.match(promptSource, /Do not write unrelated code/);
   assert.match(promptSource, /search the problem PDF first/);
+  assert.match(promptSource, /concrete math problem the student asks about, including fully pasted problems/);
+  assert.match(promptSource, /Check whether it appears in uploaded problem PDFs/);
   assert.match(promptSource, /Do not only point the student to pages/);
   assert.match(promptSource, /method teaching/);
   assert.match(promptSource, /search textbook\/readings\/examples so the explanation can use the class wording/);

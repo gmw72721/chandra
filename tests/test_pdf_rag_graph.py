@@ -44,13 +44,13 @@ class FakeRetriever:
 
 
 @pytest.mark.asyncio
-async def test_direct_answer_path_does_not_call_retrieval() -> None:
+async def test_direct_answer_path_does_not_call_retrieval_for_conceptual_question() -> None:
     client = FakeOpenRouterClient([{"content": "Try isolating x first.", "tool_calls": []}])
     retriever = FakeRetriever([])
 
     response = await run_pdf_rag_agent(
         class_id="class-algebra",
-        messages=[{"role": "user", "content": "How do I solve x + 2 = 5?"}],
+        messages=[{"role": "user", "content": "How do I know when to isolate the variable?"}],
         model="openai/gpt-4.1-mini",
         openrouter_client=client,
         professor_id="teacher-1",
@@ -60,6 +60,145 @@ async def test_direct_answer_path_does_not_call_retrieval() -> None:
     assert response["content"] == "Try isolating x first."
     assert len(client.calls) == 1
     assert retriever.calls == []
+
+
+@pytest.mark.asyncio
+async def test_pasted_concrete_math_problem_forces_exact_problem_search(tmp_path: Path) -> None:
+    image = tmp_path / "limits_p25.png"
+    image.write_bytes(b"selected-page")
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": "Use the limit laws to split it up first.",
+                "tool_calls": [],
+            },
+            {"content": "This is listed in the selected practice-problems page. Which limit law applies first?", "tool_calls": []},
+        ]
+    )
+    retriever = FakeRetriever(
+        [
+            {
+                "doc_id": "limits_practice",
+                "title": "Calculus Practice Problems",
+                "page_start": 25,
+                "page_end": 25,
+                "section": "Limit Properties",
+                "score": 0.95,
+                "chunk_text": "Given lim x to 8 f(x) = -9 and lim x to 8 h(x) = 4, compute lim x to 8 [2f(x)-12h(x)].",
+                "source_pdf_path": "data/pdfs/limits_practice.pdf",
+            }
+        ]
+    )
+
+    async def page_asset_builder(pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "doc_id": page["doc_id"],
+                "title": page["title"],
+                "page_start": page["page_start"],
+                "page_end": page["page_end"],
+                "images": [str(image)],
+                "citation_label": f"{page['title']}, page {page['page_start']}",
+            }
+            for page in pages
+        ]
+
+    response = await run_pdf_rag_agent(
+        class_id="class-calculus",
+        messages=[
+            {
+                "role": "user",
+                "content": "lim(x -> 8) [2f(x) - 12h(x)], given lim f(x) = -9 and lim h(x) = 4. I need help",
+            }
+        ],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        page_asset_builder=page_asset_builder,
+        professor_id="teacher-1",
+        retriever=retriever,
+    )
+
+    assert response["content"].startswith("This is listed")
+    assert len(client.calls) == 2
+    assert retriever.calls == [
+        {
+            "query": (
+                "find exact problem in problem PDF worksheet assignment practice problems textbook section "
+                "lim(x -> 8) [2f(x) - 12h(x)], given lim f(x) = -9 and lim h(x) = 4. I need help"
+            ),
+            "top_k": 5,
+            "class_id": "class-calculus",
+            "professor_id": "teacher-1",
+        }
+    ]
+    assert response["langGraphTrace"]["searchQueries"] == [retriever.calls[0]["query"]]
+
+
+@pytest.mark.asyncio
+async def test_streaming_pasted_concrete_math_problem_forces_exact_problem_search(tmp_path: Path) -> None:
+    image = tmp_path / "limits_p25.png"
+    image.write_bytes(b"selected-page")
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": "Use the limit laws to split it up first.",
+                "tool_calls": [],
+            },
+            {"content": "This is listed in the selected practice-problems page. Which limit law applies first?", "tool_calls": []},
+        ]
+    )
+    retriever = FakeRetriever(
+        [
+            {
+                "doc_id": "limits_practice",
+                "title": "Calculus Practice Problems",
+                "page_start": 25,
+                "page_end": 25,
+                "section": "Limit Properties",
+                "score": 0.95,
+                "chunk_text": "Given lim x to 8 f(x) = -9 and lim x to 8 h(x) = 4, compute lim x to 8 [2f(x)-12h(x)].",
+                "source_pdf_path": "data/pdfs/limits_practice.pdf",
+            }
+        ]
+    )
+
+    async def page_asset_builder(pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "doc_id": page["doc_id"],
+                "title": page["title"],
+                "page_start": page["page_start"],
+                "page_end": page["page_end"],
+                "images": [str(image)],
+                "citation_label": f"{page['title']}, page {page['page_start']}",
+            }
+            for page in pages
+        ]
+
+    events = [
+        event
+        async for event in run_pdf_rag_agent_stream(
+            class_id="class-calculus",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "lim(x -> 8) [2f(x) - 12h(x)], given lim f(x) = -9 and lim h(x) = 4. I need help",
+                }
+            ],
+            model="openai/gpt-4.1-mini",
+            openrouter_client=client,
+            page_asset_builder=page_asset_builder,
+            professor_id="teacher-1",
+            retriever=retriever,
+        )
+    ]
+
+    assert [event["type"] for event in events] == ["search_batch", "step", "step", "final"]
+    assert events[0]["searches"][0]["description"] == "Checking exact problem and page"
+    assert events[-1]["payload"]["content"].startswith("This is listed")
+    assert len(client.calls) == 2
+    assert len(retriever.calls) == 1
+    assert retriever.calls[0]["query"].startswith("find exact problem in problem PDF")
 
 
 @pytest.mark.asyncio

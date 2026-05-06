@@ -13,6 +13,7 @@ class PdfRagState(TypedDict):
     retrieved_pages: list[dict[str, Any]]
     page_assets: list[dict[str, Any]]
     answer: str
+    finish_reason: NotRequired[str]
     tool_call_count: int
     stage_history: NotRequired[list[str]]
     search_queries: NotRequired[list[str]]

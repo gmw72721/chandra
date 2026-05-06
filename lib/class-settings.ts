@@ -132,14 +132,14 @@ export function creativityToTemperature(creativity: number) {
 
 export function responseLengthToMaxTokens(responseLength: ResponseLength) {
   if (responseLength === "short") {
-    return 450;
+    return 700;
   }
 
   if (responseLength === "long") {
-    return 1400;
+    return 2600;
   }
 
-  return 850;
+  return 1600;
 }
 
 function clampCreativity(value: unknown) {

@@ -45,6 +45,7 @@ const chatRequestSchema = z.object({
       createdAt: z.string(),
       langGraphTrace: z
         .object({
+          finishReason: z.string().optional(),
           searchQueries: z.array(z.string()),
           selectedPages: z.array(
             z.object({
@@ -114,7 +115,7 @@ export async function POST(request: Request) {
     const tutorResponse = normalizeTutorResponse(await response.json());
 
     if (preparedRequest.persistence) {
-      await saveAssistantMessage({
+      await saveAssistantMessageWithoutBlockingTutorResponse({
         assistantMessageId: preparedRequest.persistence.assistantMessageId,
         conversationId: preparedRequest.persistence.conversationId,
         modelId: preparedRequest.persistence.modelId,
@@ -294,7 +295,7 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest) {
               const tutorResponse = normalizeTutorResponse(event.payload as Partial<TutorApiResponse>);
 
               if (preparedRequest.persistence) {
-                await saveAssistantMessage({
+                await saveAssistantMessageWithoutBlockingTutorResponse({
                   assistantMessageId: preparedRequest.persistence.assistantMessageId,
                   conversationId: preparedRequest.persistence.conversationId,
                   modelId: preparedRequest.persistence.modelId,
@@ -677,6 +678,38 @@ function withConversationMetadata(
   };
 }
 
+async function saveAssistantMessageWithoutBlockingTutorResponse({
+  assistantMessageId,
+  conversationId,
+  modelId,
+  response,
+  scope
+}: {
+  assistantMessageId: string;
+  conversationId: string;
+  modelId: string;
+  response: TutorApiResponse;
+  scope: PreparedBackendChatRequest["scope"];
+}) {
+  try {
+    await saveAssistantMessage({
+      assistantMessageId,
+      conversationId,
+      modelId,
+      response,
+      scope
+    });
+  } catch (caughtError) {
+    reportStudentChatError({
+      caughtError,
+      code:
+        caughtError instanceof ConversationPersistenceError
+          ? classifyConversationPersistenceError(caughtError)
+          : "CHAT_CONVERSATION_ID_INVALID"
+    });
+  }
+}
+
 function buildPdfToolChoosingTutorSystemPrompt(
   sourceUsageValue?: SourceUsageSettings,
   answerPolicyValue?: AnswerPolicySettings
@@ -686,7 +719,8 @@ function buildPdfToolChoosingTutorSystemPrompt(
   const sourcePriorityRules = sourceUsage.useClassMaterialsFirst
     ? [
         "- If the student asks to find, identify, or locate a specific problem, search the problem PDF first: homework/problem sets, worksheets, assignments, or practice-problem PDFs. Do not search textbook/readings unless no problem-set match is found.",
-        "- If the student asks how to solve a math problem, search the exact problem/source first when identifiable, then textbook/readings only if method support would help.",
+        "- If the student asks about a concrete math problem, including a fully pasted problem, search for the exact problem/source first when class materials are available. Check problem PDFs, worksheets, assignments, practice problems, and textbook sections before helping.",
+        "- After checking the exact problem/source, search textbook/readings only if method support would help.",
         "- For conceptual method questions such as when to use a technique, how to recognize a pattern, why a rule works, or requests for examples, search textbook/readings/examples so the explanation can use the class wording."
       ]
     : [
@@ -742,14 +776,14 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- An uploaded or class-specific worksheet, assignment, PDF, notes, lecture, textbook, rubric, example, diagram, table, or equation.",
     "- A page, section, problem number, title, source-backed answer, or follow-up such as 'part b', 'that example', or 'the next one'.",
     "",
-    "Do not use the tool for greetings, study planning, off-topic support, unrelated coding, or trivial self-contained questions. For method-teaching questions or a fully pasted problem, use the tool when textbook/readings/examples would materially improve the explanation, quote, example, or hint.",
+    "Do not use the tool for greetings, study planning, off-topic support, unrelated coding, or trivial self-contained questions. For concrete math problems, including fully pasted problems, use the tool first to check whether the exact problem appears in class materials. For method-teaching questions, use the tool when textbook/readings/examples would materially improve the explanation, quote, example, or hint.",
     "",
     "Query rules:",
     "- Usually make one concise focused query from the student's exact wording plus the likely source type, any known title, page, section, problem number, topic/method, and recent source context.",
     "- For find/identify/locate requests, start the query with a locator verb such as find, where, locate, identify, or which, then include source-type terms like problem PDF, homework, problem set, worksheet, assignment, or practice problems. Do not include textbook unless the student asked for the textbook or no problem-set search has matched.",
     "- When the student gives both a specific problem/source and needs conceptual solving help, you may call search_pdf_pages 2 or 3 times in the same turn with distinct complementary queries.",
     "- If the student only asks where a problem is, find the problem/source page in a problem set/assignment and stop. Do not search for textbook or method pages.",
-    "- For a problem-solving request tied to a specific exercise, do not stop at finding the exercise page. Search for both the exact problem/source and textbook/reading/example support for the method before answering.",
+    "- For a problem-solving request tied to a specific class source, do not stop at finding the exercise page. Search for both the exact problem/source and textbook/reading/example support for the method before answering.",
     "- For follow-up questions, use previously cited source context in the transcript. Do not repeat the exact problem/source search when a prior assistant message already cited the matching problem/page.",
     "- If prior selected pages already include relevant textbook/reading/notes/worked-example support, use those pages and do not search again.",
     "- If a follow-up needs more class material after the problem page is already known, search only for the missing method/textbook/example support.",

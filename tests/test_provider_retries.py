@@ -19,6 +19,7 @@ class FakeOpenRouterResponse:
         return {
             "choices": [
                 {
+                    "finish_reason": "stop",
                     "message": {
                         "content": "Recovered after retry.",
                         "tool_calls": [],
@@ -55,6 +56,7 @@ async def test_openrouter_client_retries_read_errors(monkeypatch: pytest.MonkeyP
     response = await client.chat(model="test-model", messages=[{"role": "user", "content": "hi"}])
 
     assert response["content"] == "Recovered after retry."
+    assert response["finish_reason"] == "stop"
     assert len(attempts) == 2
 
 

@@ -148,6 +148,7 @@ export type TutorSource = {
 };
 
 export type TutorTrace = {
+  finishReason?: string;
   searchQueries: string[];
   selectedPages: Array<{
     citationLabel?: string;

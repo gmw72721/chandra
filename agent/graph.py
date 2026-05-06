@@ -49,9 +49,17 @@ def build_pdf_rag_graph(
             ],
             limit=remaining_search_call_count(state),
         )
+        if (
+            not tool_calls
+            and not state.get("retrieved_pages")
+            and state.get("tool_call_count", 0) == 0
+            and should_force_exact_problem_search(state)
+        ):
+            tool_calls = [forced_exact_problem_search_tool_call(state)]
 
         return {
             "answer": response.get("content") or "",
+            "finish_reason": response.get("finish_reason") or "",
             "stage_history": append_stage(state, "openrouter_agent"),
             "tool_calls": tool_calls,
         }
@@ -114,6 +122,7 @@ def build_pdf_rag_graph(
 
         return {
             "answer": answer,
+            "finish_reason": response.get("finish_reason") or "",
             "stage_history": append_stage(state, "openrouter_answer_with_pages"),
             "tool_calls": tool_calls,
         }
@@ -295,6 +304,88 @@ def route_after_openrouter_agent(state: PdfRagState) -> str:
         return "search_pdf_pages"
 
     return END
+
+
+def should_force_exact_problem_search(state: PdfRagState) -> bool:
+    source_usage = state.get("source_usage")
+
+    if isinstance(source_usage, dict) and source_usage.get("useClassMaterialsFirst") is False:
+        return False
+
+    latest_message = latest_student_message_content(state.get("messages", []))
+    if not latest_message:
+        return False
+
+    return looks_like_concrete_math_problem(latest_message)
+
+
+def latest_student_message_content(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") not in {"user", "student"}:
+            continue
+
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+
+        if isinstance(content, list):
+            text_parts = [
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            ]
+            return " ".join(text_parts).strip()
+
+    return ""
+
+
+def looks_like_concrete_math_problem(message: str) -> bool:
+    normalized = message.lower()
+    math_markers = [
+        r"\blim\s*\(",
+        r"\blim\s*[a-z]\s*(?:->|→|\\to)",
+        r"\bint\s*\(",
+        r"∫",
+        r"\bderivative\b",
+        r"\bdifferentiate\b",
+        r"\bintegral\b",
+        r"\bsolve\b",
+        r"\bf\([a-z0-9_+\-\s]+\)",
+        r"\b[a-z]\s*=\s*[-+*/^(). 0-9a-z]+",
+    ]
+    has_math_marker = any(re.search(pattern, normalized) for pattern in math_markers)
+    has_operator = bool(re.search(r"(?:->|→|=|\+|-|\*|/|\^|√|\\frac|\\sqrt)", message))
+    has_number = bool(re.search(r"\d", message))
+
+    return has_number and (has_math_marker or has_operator)
+
+
+def forced_exact_problem_search_tool_call(state: PdfRagState) -> dict[str, Any]:
+    query = forced_exact_problem_search_query(latest_student_message_content(state.get("messages", [])))
+    return {
+        "id": "forced_exact_problem_search",
+        "type": "function",
+        "function": {
+            "name": "search_pdf_pages",
+            "arguments": json.dumps(
+                {
+                    "query": query,
+                    "student_reason": "Checking exact problem and page",
+                }
+            ),
+        },
+    }
+
+
+def forced_exact_problem_search_query(message: str) -> str:
+    compact_message = re.sub(r"\s+", " ", message).strip()
+    if len(compact_message) > 260:
+        compact_message = compact_message[:260].rsplit(" ", 1)[0].strip()
+
+    return (
+        "find exact problem in problem PDF worksheet assignment practice problems textbook section "
+        f"{compact_message}"
+    ).strip()
 
 
 def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
@@ -723,6 +814,7 @@ async def run_pdf_rag_agent(
                 "model": model,
                 "temperature": temperature if temperature is not None else 0.4,
                 "max_tokens": max_tokens,
+                "finish_reason": "",
                 "reasoning_effort": reasoning_effort,
                 "answer_policy": answer_policy,
                 "source_usage": source_usage,
@@ -743,6 +835,7 @@ async def run_pdf_rag_agent(
                 "searchQueries": final_state.get("search_queries") or [],
                 "selectedPages": selected_page_trace(final_state.get("page_assets", [])),
                 "stages": final_state.get("stage_history") or [],
+                "finishReason": final_state.get("finish_reason") or "",
                 "toolCallCount": final_state.get("tool_call_count") or 0,
             },
             "message": answer,
@@ -786,6 +879,7 @@ async def run_pdf_rag_agent_stream(
         "model": model,
         "temperature": temperature if temperature is not None else 0.4,
         "max_tokens": max_tokens,
+        "finish_reason": "",
         "reasoning_effort": reasoning_effort,
         "answer_policy": answer_policy,
         "source_usage": source_usage,
@@ -807,6 +901,7 @@ async def run_pdf_rag_agent_stream(
             reasoning_effort=state.get("reasoning_effort"),
         )
         state["answer"] = response.get("content") or ""
+        state["finish_reason"] = response.get("finish_reason") or ""
         state["stage_history"] = append_stage(state, "openrouter_agent")
         state["tool_calls"] = new_search_tool_calls(
             state,
@@ -817,6 +912,13 @@ async def run_pdf_rag_agent_stream(
             ],
             limit=remaining_search_call_count(state),
         )
+        if (
+            not state["tool_calls"]
+            and not state.get("retrieved_pages")
+            and state.get("tool_call_count", 0) == 0
+            and should_force_exact_problem_search(state)
+        ):
+            state["tool_calls"] = [forced_exact_problem_search_tool_call(state)]
 
         if not state["tool_calls"]:
             yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
@@ -888,6 +990,7 @@ async def run_pdf_rag_agent_stream(
                 reasoning_effort=state.get("reasoning_effort"),
             )
             state["answer"] = response.get("content") or ""
+            state["finish_reason"] = response.get("finish_reason") or ""
             state["stage_history"] = append_stage(state, "openrouter_answer_with_pages")
             requested_tool_calls = [
                 tool_call
@@ -925,6 +1028,7 @@ def pdf_rag_response_from_state(state: PdfRagState) -> dict[str, Any]:
             "searchQueries": state.get("search_queries") or [],
             "selectedPages": selected_page_trace(state.get("page_assets", [])),
             "stages": state.get("stage_history") or [],
+            "finishReason": state.get("finish_reason") or "",
             "toolCallCount": state.get("tool_call_count") or 0,
         },
         "message": answer,

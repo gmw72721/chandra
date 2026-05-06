@@ -692,10 +692,10 @@ def creativity_to_temperature(creativity: int) -> float:
 
 def response_length_to_max_tokens(response_length: str) -> int:
     if response_length == "short":
-        return 450
+        return 700
     if response_length == "long":
-        return 1400
-    return 850
+        return 2600
+    return 1600
 
 
 def tutor_behavior_lines(policy_title: str) -> list[str]:

@@ -292,7 +292,8 @@ function buildSourceUsageInstructions(sourceUsage: SourceUsageSettings, answerPo
       ? [
           "- Use retrieval before answering when class PDFs could help solve, explain, or locate the student's question: uploaded PDFs, worksheet or assignment titles, page/section/problem numbers, notes, lectures, textbook examples, rubrics, diagrams, tables, equations, or previous source-backed answers.",
           "- If the student asks to find, identify, or locate a specific problem, search the problem PDF first: homework/problem sets, worksheets, assignments, or practice-problem PDFs. Use textbook/readings only if no problem-set match is found.",
-          "- For solving-help questions, search the exact problem/source first when identifiable, then prefer relevant textbook/readings that explain the method, definition, formula, theorem, or example before relying only on general knowledge.",
+          "- For any concrete math problem the student asks about, including fully pasted problems, search for the exact problem/source first when class materials are available. Check whether it appears in uploaded problem PDFs, worksheets, assignments, practice problems, or textbook sections before helping.",
+          "- After checking the exact problem/source, prefer relevant textbook/readings that explain the method, definition, formula, theorem, or example before relying only on general knowledge.",
           "- For conceptual method questions such as when to use a technique, how to recognize a pattern, why a rule works, or requests for examples, search textbook/readings/examples so the explanation can use the class wording."
         ]
       : [

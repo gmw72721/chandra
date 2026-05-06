@@ -4359,13 +4359,32 @@ button.student-row[aria-pressed="true"] {
 .assistant-message-bubble {
   width: fit-content;
   max-width: 620px;
+  overflow-x: auto;
   background: rgba(255, 254, 251, 0.96);
 }
 
 .student-message-bubble {
   max-width: 100%;
+  overflow-x: auto;
   border-color: #c9e1dc;
   background: #dfeeea;
+}
+
+.assistant-message-bubble .katex,
+.student-message-bubble .katex {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+  vertical-align: middle;
+}
+
+.assistant-message-bubble .katex-display,
+.student-message-bubble .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
 }
 
 .assistant-message-bubble p,
