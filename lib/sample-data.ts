@@ -11,7 +11,7 @@ export const courses: Course[] = [
     activePolicyId: "policy-socratic",
     allowedModelIds: [
       "demo-guided",
-      "openai/gpt-4.1-mini",
+      "openai/gpt-5.4-mini",
       "anthropic/claude-3.5-sonnet",
       "google/gemini-2.0-flash-001"
     ]
@@ -85,7 +85,7 @@ export const conversations: Conversation[] = [
     courseId: "algebra-201",
     studentName: "Maya R.",
     assignment: "Quadratics Practice Set",
-    modelId: "openai/gpt-4.1-mini",
+    modelId: "openai/gpt-5.4-mini",
     tags: ["factoring", "needs-confidence"],
     lastActiveAt: "2026-05-04T21:20:00.000Z",
     messages: [

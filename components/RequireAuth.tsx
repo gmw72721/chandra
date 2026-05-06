@@ -11,7 +11,7 @@ export function RequireAuth({
   children: React.ReactNode;
   role?: AccountRole | AccountRole[];
 }) {
-  const { firebaseReady, isLoading, profile, user } = useAuth();
+  const { firebaseReady, isLoading, profile, profileError, user } = useAuth();
   const allowedRoles = Array.isArray(role) ? role : role ? [role] : [];
 
   if (!firebaseReady) {
@@ -52,6 +52,7 @@ export function RequireAuth({
           <p className="eyebrow">Profile missing</p>
           <h1>This account needs a role profile.</h1>
           <p>Sign out and create a student or teacher account to continue.</p>
+          {profileError ? <p className="form-error">{profileError}</p> : null}
         </section>
       );
     }

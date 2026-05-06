@@ -1,0 +1,948 @@
+import { randomUUID } from "crypto";
+import { FieldValue } from "firebase-admin/firestore";
+import { PDFParse } from "pdf-parse";
+import { PDFDocument } from "pdf-lib";
+import { adminAuth, adminDb, adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
+import { attachPdfSlicesToChunks } from "./pdf-embedding-chunks";
+import {
+  classifyTutorKnowledgePage,
+  chunkTutorKnowledgePages,
+  chunkTutorKnowledgeText,
+  getTutorKnowledgeSourceMode,
+  isTutorKnowledgeKind,
+  maxTutorKnowledgeUploadBytes,
+  supportedTutorKnowledgeExtensions,
+  type TutorKnowledgeChunk,
+  type TutorKnowledgePage
+} from "./tutor-knowledge";
+import { TutorKnowledgeHttpError } from "./tutor-knowledge-errors";
+import { materialTypeForKind, problemNumbersFromText } from "./retrieval-ranking";
+import {
+  VertexEmbeddingError,
+  createVertexEmbedding,
+  createVertexEmbeddings,
+  isVertexEmbeddingConfigured,
+  type VertexEmbeddingResult
+} from "./vertex-embeddings";
+
+export type TutorKnowledgePreview = {
+  extractedCharacterCount: number;
+  pastedCharacterCount: number;
+  totalCharacterCount: number;
+  chunkCount: number;
+  previewText: string;
+  sourceMode: "file" | "pasted" | "file-and-pasted";
+  fileName: string;
+  contentType: string;
+  fileSize: number;
+  pageCount: number;
+  visualPageCount: number;
+};
+
+const supportedContentTypes = new Set([
+  "application/pdf",
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "application/csv",
+  "text/x-markdown"
+]);
+const embeddingConcurrencyLimit = 4;
+
+export { TutorKnowledgeHttpError } from "./tutor-knowledge-errors";
+
+type MaterialJobStep =
+  | "upload_received"
+  | "reading_file"
+  | "chunking_material"
+  | "embedding_chunks"
+  | "saving_to_class"
+  | "ready"
+  | "failed";
+
+type MaterialJobProgressUpdate = {
+  completedChunks?: number;
+  detail: string;
+  error?: string;
+  percent: number;
+  step: MaterialJobStep;
+  totalChunks?: number;
+};
+
+export async function authorizeClassTeacher(request: Request, classId: string) {
+  const token = getBearerToken(request);
+
+  if (!token) {
+    throw new TutorKnowledgeHttpError("Sign in as the class teacher to manage tutor knowledge.", 401);
+  }
+
+  assertFirebaseAdminReady();
+
+  const decodedToken = await adminAuth!.verifyIdToken(token);
+  const classSnapshot = await adminDb!.collection("classes").doc(classId).get();
+
+  if (!classSnapshot.exists) {
+    throw new TutorKnowledgeHttpError("Class not found.", 404);
+  }
+
+  if (classSnapshot.data()?.teacherId !== decodedToken.uid) {
+    throw new TutorKnowledgeHttpError("Only the class teacher can manage tutor knowledge.", 403);
+  }
+
+  return { classSnapshot, uid: decodedToken.uid };
+}
+
+export async function buildTutorKnowledgePreview(formData: FormData): Promise<TutorKnowledgePreview> {
+  const file = readOptionalFile(formData);
+  const pastedText = String(formData.get("text") ?? "").trim();
+
+  if (!file && !pastedText) {
+    throw new TutorKnowledgeHttpError("Add a supported file or paste tutor knowledge text before previewing.", 400);
+  }
+
+  const ingestion = await buildTutorKnowledgeIngestion({
+    docId: "preview",
+    file,
+    pastedText,
+    title: file?.name ?? "Pasted tutor knowledge"
+  });
+  const searchableText = ingestion.searchableText;
+
+  if (!searchableText && !ingestion.chunks.length) {
+    throw new TutorKnowledgeHttpError("No tutor knowledge text was found. This file may be scanned or image-only.", 400);
+  }
+
+  return {
+    extractedCharacterCount: ingestion.extractedText.trim().length,
+    pastedCharacterCount: pastedText.length,
+    totalCharacterCount: searchableText.length,
+    chunkCount: ingestion.chunks.length,
+    previewText: searchableText.slice(0, 1800),
+    sourceMode: getTutorKnowledgeSourceMode({
+      hasFile: Boolean(file),
+      hasPastedText: Boolean(pastedText)
+    }),
+    fileName: file?.name ?? "",
+    contentType: file?.type ?? "",
+    fileSize: file?.size ?? 0,
+    pageCount: ingestion.pageCount,
+    visualPageCount: ingestion.visualPageCount
+  };
+}
+
+export async function saveTutorKnowledge({
+  classId,
+  formData,
+  jobId,
+  professorName,
+  teacherId
+}: {
+  classId: string;
+  formData: FormData;
+  jobId?: string;
+  professorName?: string;
+  teacherId: string;
+}) {
+  const title = String(formData.get("title") ?? "").trim();
+  const kind = String(formData.get("kind") ?? "").trim();
+  const file = readOptionalFile(formData);
+  const pastedText = String(formData.get("text") ?? "").trim();
+
+  if (!title) {
+    throw new TutorKnowledgeHttpError("Add a title before saving tutor knowledge.", 400);
+  }
+
+  if (!isTutorKnowledgeKind(kind)) {
+    throw new TutorKnowledgeHttpError("Choose a valid tutor knowledge type.", 400);
+  }
+
+  const materialRef = adminDb!.collection("classes").doc(classId).collection("materials").doc();
+  const updateProgress = createMaterialJobProgressWriter({
+    classId,
+    jobId,
+    materialId: materialRef.id,
+    teacherId,
+    title
+  });
+
+  await updateProgress({
+    detail: "Upload received. Starting server-side processing.",
+    percent: 15,
+    step: "upload_received"
+  });
+  const ingestion = await buildTutorKnowledgeIngestion({
+    docId: materialRef.id,
+    file,
+    pastedText,
+    title,
+    updateProgress
+  });
+  const searchableText = ingestion.searchableText;
+  const chunks = ingestion.chunks;
+  const fileMetadata = file ? await uploadTutorKnowledgeFile({ classId, file, materialId: materialRef.id }) : {};
+  const materialType = materialTypeForKind(kind);
+
+  await materialRef.set({
+    classId,
+    class_id: classId,
+    course_id: classId,
+    title,
+    kind,
+    materialType,
+    professorId: teacherId,
+    professorName: professorName ?? "",
+    professor_id: teacherId,
+    professor_name: professorName ?? "",
+    teacherId,
+    studentVisible: true,
+    ...fileMetadata,
+    characterCount: searchableText.length,
+    chunkCount: chunks.length,
+    embeddingProvider: "vertex-ai",
+    embeddingStatus: isVertexEmbeddingConfigured() ? "processing" : "not-configured",
+    status: "processing",
+    addedAt: FieldValue.serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    pageCount: ingestion.pageCount,
+    sourceMode: getTutorKnowledgeSourceMode({
+      hasFile: Boolean(file),
+      hasPastedText: Boolean(pastedText)
+    }),
+    visualPageCount: ingestion.visualPageCount
+  });
+
+  try {
+    await writeChunks({
+      classId,
+      chunks,
+      materialId: materialRef.id,
+      materialType,
+      onEmbeddingProgress: async ({ completed, total }) => {
+        await updateProgress({
+          completedChunks: completed,
+          detail: `Calling Gemini embeddings for chunk ${completed} of ${total}.`,
+          percent: Math.min(90, 50 + Math.round((completed / Math.max(total, 1)) * 40)),
+          step: "embedding_chunks",
+          totalChunks: total
+        });
+      },
+      professorName,
+      teacherId,
+      title
+    });
+
+    await updateProgress({
+      completedChunks: chunks.length,
+      detail: "Saving vectors, source metadata, and class visibility.",
+      percent: 95,
+      step: "saving_to_class",
+      totalChunks: chunks.length
+    });
+    await materialRef.update({
+      embeddingStatus: isVertexEmbeddingConfigured() ? "ready" : "not-configured",
+      indexedAt: FieldValue.serverTimestamp(),
+      status: "ready"
+    });
+    await updateProgress({
+      completedChunks: chunks.length,
+      detail: "Tutor knowledge is ready for students in this class.",
+      percent: 100,
+      step: "ready",
+      totalChunks: chunks.length
+    });
+  } catch (caughtError) {
+    if (caughtError instanceof VertexEmbeddingError) {
+      await writeChunks({
+        classId,
+        chunks,
+        materialId: materialRef.id,
+        materialType,
+        professorName,
+        skipEmbeddings: true,
+        teacherId,
+        title
+      });
+      await materialRef.update(buildEmbeddingFailureMaterialMetadata(caughtError));
+      await updateProgress({
+        completedChunks: 0,
+        detail: "Gemini embeddings failed. The source was not saved for student use.",
+        error: caughtError.cause instanceof Error ? caughtError.cause.message : caughtError.message,
+        percent: 100,
+        step: "failed",
+        totalChunks: chunks.length
+      });
+      const embeddingFailureDetail =
+        caughtError.cause instanceof Error ? caughtError.cause.message : caughtError.message;
+      throw new TutorKnowledgeHttpError(
+        `Gemini embeddings failed: ${embeddingFailureDetail}`,
+        502
+      );
+    }
+
+    await updateProgress({
+      detail: "Tutor knowledge processing failed before it was ready.",
+      error: caughtError instanceof Error ? caughtError.message : String(caughtError),
+      percent: 100,
+      step: "failed"
+    });
+    throw caughtError;
+  }
+
+  return {
+    id: materialRef.id,
+    characterCount: searchableText.length,
+    chunkCount: chunks.length
+  };
+}
+
+export async function deleteTutorKnowledge({
+  classId,
+  materialId
+}: {
+  classId: string;
+  materialId: string;
+}) {
+  const materialRef = adminDb!.collection("classes").doc(classId).collection("materials").doc(materialId);
+  const materialSnapshot = await materialRef.get();
+
+  if (!materialSnapshot.exists) {
+    throw new TutorKnowledgeHttpError("Tutor knowledge not found.", 404);
+  }
+
+  const filePath = String(materialSnapshot.data()?.filePath ?? "");
+
+  if (filePath) {
+    await adminStorage!.bucket().file(filePath).delete({ ignoreNotFound: true });
+  }
+
+  const chunksSnapshot = await materialRef.collection("chunks").get();
+  await deleteDocumentsInBatches(chunksSnapshot.docs.map((chunkDoc) => chunkDoc.ref));
+  await materialRef.delete();
+}
+
+async function uploadTutorKnowledgeFile({
+  classId,
+  file,
+  materialId
+}: {
+  classId: string;
+  file: File;
+  materialId: string;
+}) {
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const safeFileName = sanitizeFileName(file.name);
+  const filePath = `classes/${classId}/materials/${materialId}/original/${safeFileName}`;
+  const downloadToken = randomUUID();
+  const storageFile = adminStorage!.bucket().file(filePath);
+
+  try {
+    await storageFile.save(buffer, {
+      contentType: file.type || contentTypeFromFileName(file.name),
+      metadata: {
+        metadata: {
+          firebaseStorageDownloadTokens: downloadToken
+        }
+      },
+      resumable: false
+    });
+  } catch (caughtError) {
+    console.error("Tutor knowledge original file upload failed.", caughtError);
+
+    return {
+      contentType: file.type || contentTypeFromFileName(file.name),
+      fileName: file.name,
+      fileSize: file.size,
+      originalFileStorageError: caughtError instanceof Error ? caughtError.message : "Original file could not be saved.",
+      originalFileStorageStatus: "not-saved"
+    };
+  }
+
+  const bucketName = adminStorage!.bucket().name;
+  const encodedPath = filePath
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+
+  return {
+    fileName: file.name,
+    filePath,
+    fileUrl: `https://storage.googleapis.com/${bucketName}/${encodedPath}`,
+    contentType: file.type || contentTypeFromFileName(file.name),
+    fileSize: file.size
+  };
+}
+
+async function buildTutorKnowledgeIngestion({
+  docId,
+  file,
+  pastedText,
+  title,
+  updateProgress
+}: {
+  docId: string;
+  file: File | null;
+  pastedText: string;
+  title: string;
+  updateProgress?: (progress: MaterialJobProgressUpdate) => Promise<void>;
+}) {
+  await updateProgress?.({
+    detail: file
+      ? "Reading the uploaded file and extracting usable text."
+      : "Reading pasted tutor knowledge text.",
+    percent: 25,
+    step: "reading_file"
+  });
+  const fileIngestion = file
+    ? await extractChunksFromFile({
+        docId,
+        file,
+        title
+      })
+    : {
+        chunks: [] as TutorKnowledgeChunk[],
+        extractedText: "",
+        pageCount: 0,
+        visualPageCount: 0
+      };
+  const pastedChunks = pastedText
+    ? chunkTutorKnowledgeText(pastedText, {
+        docId,
+        labelPrefix: "Pasted tutor knowledge chunk",
+        sourceType: "pasted",
+        title
+      })
+    : [];
+  const chunks = [...fileIngestion.chunks, ...pastedChunks].map((chunk, order) => ({
+    ...chunk,
+    order
+  }));
+  const searchableText = [fileIngestion.extractedText, pastedText].filter((text) => text.trim()).join("\n\n").trim();
+
+  await updateProgress?.({
+    detail: `Built ${chunks.length} tutor knowledge chunk${chunks.length === 1 ? "" : "s"} for this class.`,
+    percent: 50,
+    step: "chunking_material",
+    totalChunks: chunks.length
+  });
+
+  return {
+    chunks,
+    extractedText: fileIngestion.extractedText,
+    pageCount: fileIngestion.pageCount,
+    searchableText,
+    visualPageCount: fileIngestion.visualPageCount
+  };
+}
+
+async function extractChunksFromFile({
+  docId,
+  file,
+  title
+}: {
+  docId: string;
+  file: File;
+  title: string;
+}) {
+  validateFile(file);
+  const buffer = Buffer.from(await file.arrayBuffer());
+
+  if (!isPdfFile(file)) {
+    const extractedText = buffer.toString("utf8").trim();
+    return {
+      chunks: chunkTutorKnowledgeText(extractedText, {
+        docId,
+        sourceType: "text",
+        title
+      }),
+      extractedText,
+      pageCount: 0,
+      visualPageCount: 0
+    };
+  }
+
+  const pages = await extractPdfPages(buffer);
+  const chunks = chunkTutorKnowledgePages({
+    docId,
+    pages,
+    title
+  });
+
+  return {
+    chunks: await attachPdfSlicesToChunks({
+      chunks,
+      pdfBytes: buffer
+    }),
+    extractedText: pages.map((page) => page.text.trim()).filter(Boolean).join("\n\n"),
+    pageCount: pages.length,
+    visualPageCount: pages.filter((page) => classifyTutorKnowledgePage(page) !== "text-heavy").length
+  };
+}
+
+async function extractPdfPages(buffer: Buffer): Promise<TutorKnowledgePage[]> {
+  const pageInfoByNumberPromise = extractPdfPageInfo(buffer);
+  let pages = await extractPdfTextPages(buffer, { lineEnforce: true }).catch(() =>
+    extractPdfTextPages(buffer, { lineEnforce: false }).catch(async () =>
+      visualPdfPagesFromPageInfo(await pageInfoByNumberPromise)
+    )
+  );
+  const pageInfoByNumber = await pageInfoByNumberPromise;
+
+  if (!pages.length) {
+    pages = visualPdfPagesFromPageInfo(pageInfoByNumber);
+  }
+
+  if (!pages.length) {
+    throw new TutorKnowledgeHttpError(
+      "We could not inspect this PDF. Try a non-password-protected PDF or paste the content manually.",
+      400
+    );
+  }
+
+  return pages.map((page) => {
+    const text = page.text.trim();
+    const pageInfo = pageInfoByNumber.get(page.num);
+    const pageArea = pageInfo?.area ?? 0;
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
+    const lineCount = text.split(/\r?\n/).filter((line) => line.trim().length >= 3).length;
+
+    return {
+      metrics: {
+        embeddedImageCount: 0,
+        imageCoverageRatio: text ? 0 : 1,
+        lineCount,
+        pageArea,
+        textDensity: pageArea ? wordCount / pageArea : 0
+      },
+      isVisual: !text,
+      pageNumber: page.num,
+      text
+    };
+  });
+}
+
+async function extractPdfTextPages(buffer: Buffer, options: { lineEnforce: boolean }) {
+  const parser = new PDFParse({ data: buffer });
+
+  try {
+    const result = await parser.getText({
+      lineEnforce: options.lineEnforce,
+      pageJoiner: ""
+    });
+
+    return result.pages.map((page) => ({
+      num: page.num,
+      text: page.text
+    }));
+  } catch {
+    throw new TutorKnowledgeHttpError(
+      "We could not read this PDF. Try a non-password-protected PDF or paste the content manually.",
+      400
+    );
+  } finally {
+    await parser.destroy();
+  }
+}
+
+async function extractPdfPageInfo(buffer: Buffer) {
+  const parser = new PDFParse({ data: buffer });
+
+  try {
+    const info = await parser.getInfo({ parsePageInfo: true });
+
+    return new Map(
+      (info.pages ?? []).map((page) => [
+        page.pageNumber,
+        {
+          area: page.width * page.height,
+          height: page.height,
+          width: page.width
+        }
+      ])
+    );
+  } catch {
+    return extractPdfPageInfoWithPdfLib(buffer);
+  } finally {
+    await parser.destroy();
+  }
+}
+
+async function extractPdfPageInfoWithPdfLib(buffer: Buffer) {
+  try {
+    const pdf = await PDFDocument.load(buffer, { ignoreEncryption: true });
+
+    return new Map(
+      pdf.getPages().map((page, index) => {
+        const { height, width } = page.getSize();
+
+        return [
+          index + 1,
+          {
+            area: width * height,
+            height,
+            width
+          }
+        ];
+      })
+    );
+  } catch {
+    return new Map<number, { area: number; height: number; width: number }>();
+  }
+}
+
+function visualPdfPagesFromPageInfo(pageInfoByNumber: Map<number, { area: number; height: number; width: number }>) {
+  return Array.from(pageInfoByNumber.keys())
+    .sort((first, second) => first - second)
+    .map((num) => ({
+      num,
+      text: ""
+    }));
+}
+
+function readOptionalFile(formData: FormData) {
+  const file = formData.get("file");
+
+  if (!file || !(file instanceof File) || !file.name) {
+    return null;
+  }
+
+  validateFile(file);
+  return file;
+}
+
+function validateFile(file: File) {
+  if (file.size > maxTutorKnowledgeUploadBytes) {
+    throw new TutorKnowledgeHttpError("Files must be 12 MB or smaller.", 400);
+  }
+
+  const extension = getFileExtension(file.name);
+  const supportedExtension = supportedTutorKnowledgeExtensions.some((item) => item === extension);
+  const supportedContentType = !file.type || supportedContentTypes.has(file.type);
+
+  if (!supportedExtension || !supportedContentType) {
+    throw new TutorKnowledgeHttpError("Only PDF, TXT, MD, and CSV files are supported.", 400);
+  }
+}
+
+async function writeChunks({
+  classId,
+  chunks,
+  materialId,
+  materialType,
+  onEmbeddingProgress,
+  professorName,
+  skipEmbeddings = false,
+  teacherId,
+  title
+}: {
+  classId: string;
+  chunks: TutorKnowledgeChunk[];
+  materialId: string;
+  materialType: string;
+  onEmbeddingProgress?: (progress: { completed: number; total: number }) => Promise<void>;
+  professorName?: string;
+  skipEmbeddings?: boolean;
+  teacherId: string;
+  title: string;
+}) {
+  let completedEmbeddings = 0;
+  const embeddings = skipEmbeddings
+    ? []
+    : await createVertexEmbeddings(
+        chunks.map((chunk) => ({
+          file: chunk.pdfPart ?? chunk.pageImage,
+          taskType: "RETRIEVAL_DOCUMENT",
+          text: chunk.content,
+          title
+        })),
+        {
+          onProgress: async ({ completed, total }) => {
+            completedEmbeddings = completed;
+            await onEmbeddingProgress?.({ completed, total });
+          }
+        }
+      );
+
+  const chunkRefs = await mapWithConcurrency(chunks, embeddingConcurrencyLimit, async (chunk, index) => {
+    const data = await prepareTutorKnowledgeChunkData({
+      classId,
+      chunk,
+      embedding: embeddings[index],
+      materialId,
+      materialType,
+      professorName,
+      skipEmbedding: skipEmbeddings,
+      teacherId,
+      title
+    });
+
+    if (skipEmbeddings) {
+      completedEmbeddings += 1;
+      await onEmbeddingProgress?.({
+        completed: completedEmbeddings,
+        total: chunks.length
+      });
+    }
+
+    return {
+      data,
+      ref: adminDb!
+        .collection("classes")
+        .doc(classId)
+        .collection("materials")
+        .doc(materialId)
+        .collection("chunks")
+        .doc()
+    };
+  });
+
+  for (let index = 0; index < chunkRefs.length; index += 450) {
+    const batch = adminDb!.batch();
+
+    chunkRefs.slice(index, index + 450).forEach((chunkRef) => {
+      batch.set(chunkRef.ref, chunkRef.data);
+    });
+
+    await batch.commit();
+  }
+}
+
+async function mapWithConcurrency<TItem, TResult>(
+  items: TItem[],
+  concurrencyLimit: number,
+  mapItem: (item: TItem, index: number) => Promise<TResult>
+) {
+  const results = new Array<TResult>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrencyLimit), items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        results[currentIndex] = await mapItem(items[currentIndex], currentIndex);
+      }
+    })
+  );
+
+  return results;
+}
+
+export async function prepareTutorKnowledgeChunkData({
+  classId,
+  chunk,
+  createEmbedding = createVertexEmbedding,
+  embedding,
+  materialId,
+  materialType,
+  professorName,
+  skipEmbedding = false,
+  teacherId,
+  title
+}: {
+  classId: string;
+  chunk: TutorKnowledgeChunk;
+  createEmbedding?: typeof createVertexEmbedding;
+  embedding?: VertexEmbeddingResult;
+  materialId: string;
+  materialType: string;
+  professorName?: string;
+  skipEmbedding?: boolean;
+  teacherId: string;
+  title: string;
+}) {
+  const professorId = requireProfessorId(teacherId);
+  const normalizedProfessorName = professorName?.trim() ?? "";
+  const chunkEmbedding = embedding ?? (skipEmbedding
+    ? undefined
+    : await createEmbedding({
+        file: chunk.pdfPart ?? chunk.pageImage,
+        taskType: "RETRIEVAL_DOCUMENT",
+        text: chunk.content,
+        title
+      }));
+  const { pageImage: _pageImage, pdfPart: _pdfPart, ...storedChunk } = chunk;
+  const pageNumber = chunk.pageStart ?? extractPageNumber(chunk.label);
+  const sectionHeading = chunk.section ?? extractSectionHeading(chunk.content);
+
+  return {
+    ...storedChunk,
+    classId,
+    class_id: classId,
+    chunk_text: chunk.chunkText ?? chunk.content,
+    course_id: classId,
+    createdAt: FieldValue.serverTimestamp(),
+    doc_id: chunk.docId ?? materialId,
+    docId: chunk.docId ?? materialId,
+    hasPageImage: Boolean(chunk.pageImage),
+    hasPdfPart: Boolean(chunk.pdfPart),
+    materialId,
+    materialType,
+    page_end: chunk.pageEnd ?? pageNumber,
+    page_start: chunk.pageStart ?? pageNumber,
+    pageEnd: chunk.pageEnd ?? pageNumber,
+    pageNumber,
+    pageStart: chunk.pageStart ?? pageNumber,
+    problemNumbers: problemNumbersFromText(`${chunk.label}\n${chunk.content}`),
+    professorId,
+    professorName: normalizedProfessorName,
+    professor_id: professorId,
+    professor_name: normalizedProfessorName,
+    section: sectionHeading,
+    sectionHeading,
+    teacherId: professorId,
+    title,
+    ...buildChunkEmbeddingMetadata(chunkEmbedding)
+  };
+}
+
+export function buildEmbeddingFailureMaterialMetadata(error: VertexEmbeddingError) {
+  return {
+    embeddingError: error.cause instanceof Error ? error.cause.message : error.message,
+    embeddingFailedAt: FieldValue.serverTimestamp(),
+    embeddingStatus: "failed",
+    status: "needs-review"
+  };
+}
+
+function createMaterialJobProgressWriter({
+  classId,
+  jobId,
+  materialId,
+  teacherId,
+  title
+}: {
+  classId: string;
+  jobId?: string;
+  materialId: string;
+  teacherId: string;
+  title: string;
+}): (progress: MaterialJobProgressUpdate) => Promise<void> {
+  const normalizedJobId = jobId?.trim() ?? "";
+
+  if (!normalizedJobId) {
+    return async () => {};
+  }
+
+  if (!/^[a-zA-Z0-9_-]{8,80}$/.test(normalizedJobId)) {
+    throw new TutorKnowledgeHttpError("Invalid tutor knowledge progress job id.", 400);
+  }
+
+  const jobRef = adminDb!.collection("classes").doc(classId).collection("materialJobs").doc(normalizedJobId);
+
+  return async (progress: MaterialJobProgressUpdate) => {
+    await jobRef.set(
+      {
+        classId,
+        completedChunks: progress.completedChunks ?? null,
+        detail: progress.detail,
+        error: progress.error ?? null,
+        materialId,
+        percent: Math.max(0, Math.min(100, progress.percent)),
+        professorId: teacherId,
+        step: progress.step,
+        title,
+        totalChunks: progress.totalChunks ?? null,
+        updatedAt: FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+  };
+}
+
+function buildChunkEmbeddingMetadata(embedding: VertexEmbeddingResult | undefined) {
+  if (!embedding?.values.length) {
+    return {};
+  }
+
+  return {
+    embedding: FieldValue.vector(embedding.values),
+    embeddingCreatedAt: FieldValue.serverTimestamp(),
+    embeddingDimensions: embedding.dimensions,
+    embeddingModel: embedding.model,
+    embeddingProvider: embedding.provider,
+    embeddingTaskType: embedding.taskType
+  };
+}
+
+function requireProfessorId(professorId: string) {
+  const normalizedProfessorId = professorId.trim();
+
+  if (!normalizedProfessorId) {
+    throw new TutorKnowledgeHttpError("Embedded tutor knowledge requires professor_id metadata.", 400);
+  }
+
+  return normalizedProfessorId;
+}
+
+function extractPageNumber(label: string) {
+  const match = label.match(/\bpage\s+(\d{1,4})\b/i);
+  return match?.[1] ? Number(match[1]) : null;
+}
+
+function extractSectionHeading(content: string) {
+  const [firstSentence] = content.split(/(?<=[.!?])\s+/);
+  const heading = firstSentence?.trim() ?? "";
+
+  if (!heading || heading.length > 90) {
+    return "";
+  }
+
+  return heading;
+}
+
+async function deleteDocumentsInBatches(
+  refs: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>[]
+) {
+  for (let index = 0; index < refs.length; index += 450) {
+    const batch = adminDb!.batch();
+
+    refs.slice(index, index + 450).forEach((ref) => {
+      batch.delete(ref);
+    });
+
+    await batch.commit();
+  }
+}
+
+function getBearerToken(request: Request) {
+  const authorization = request.headers.get("authorization") ?? "";
+
+  if (!authorization.startsWith("Bearer ")) {
+    return "";
+  }
+
+  return authorization.slice("Bearer ".length).trim();
+}
+
+function getFileExtension(fileName: string) {
+  const match = fileName.toLowerCase().match(/\.[^.]+$/);
+  return match?.[0] ?? "";
+}
+
+function isPdfFile(file: File) {
+  return file.type === "application/pdf" || getFileExtension(file.name) === ".pdf";
+}
+
+function contentTypeFromFileName(fileName: string) {
+  const extension = getFileExtension(fileName);
+
+  if (extension === ".pdf") {
+    return "application/pdf";
+  }
+
+  if (extension === ".md") {
+    return "text/markdown";
+  }
+
+  if (extension === ".csv") {
+    return "text/csv";
+  }
+
+  return "text/plain";
+}
+
+function sanitizeFileName(fileName: string) {
+  const cleaned = fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return cleaned || "tutor-knowledge-file";
+}

@@ -8,7 +8,14 @@ import {
   signOut,
   updateProfile
 } from "firebase/auth";
-import { doc, getDoc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
+import {
+  doc,
+  getDoc,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+} from "firebase/firestore";
+import { normalizeClassCode } from "./class-code";
 import { auth, db, isFirebaseConfigured } from "./firebase";
 
 export type AccountRole = "student" | "teacher";
@@ -18,6 +25,7 @@ export type UserProfile = {
   email: string;
   displayName: string;
   role: AccountRole;
+  classId?: string;
   createdAt?: unknown;
 };
 
@@ -55,12 +63,14 @@ export async function signUpWithRole({
   displayName,
   email,
   password,
-  role
+  role,
+  classId
 }: {
   displayName: string;
   email: string;
   password: string;
   role: AccountRole;
+  classId?: string;
 }) {
   assertFirebaseReady();
 
@@ -75,6 +85,21 @@ export async function signUpWithRole({
     createdAt: serverTimestamp()
   };
 
+  const cleanClassId =
+    role === "student"
+      ? await joinStudentClass({
+          classCode: classId ?? "",
+          displayName,
+          email,
+          syncProfile: false,
+          user: credential.user
+        })
+      : "";
+
+  if (role === "student" && cleanClassId) {
+    profile.classId = cleanClassId;
+  }
+
   await setDoc(doc(db!, "users", credential.user.uid), profile);
   return profile;
 }
@@ -82,11 +107,13 @@ export async function signUpWithRole({
 export async function createRoleProfile({
   displayName,
   role,
-  user
+  user,
+  classId
 }: {
   displayName: string;
   role: AccountRole;
   user: User;
+  classId?: string;
 }) {
   assertFirebaseReady();
 
@@ -100,6 +127,21 @@ export async function createRoleProfile({
     role,
     createdAt: serverTimestamp()
   };
+
+  const cleanClassId =
+    role === "student"
+      ? await joinStudentClass({
+          classCode: classId ?? "",
+          displayName: cleanDisplayName,
+          email: user.email ?? "",
+          syncProfile: false,
+          user
+        })
+      : "";
+
+  if (role === "student" && cleanClassId) {
+    profile.classId = cleanClassId;
+  }
 
   await setDoc(doc(db!, "users", user.uid), profile);
   return profile;
@@ -124,8 +166,86 @@ export async function getUserProfile(uid: string) {
   return snapshot.exists() ? (snapshot.data() as UserProfile) : null;
 }
 
+export async function updateStudentClass({
+  classId,
+  uid
+}: {
+  classId: string;
+  uid: string;
+}) {
+  assertFirebaseReady();
+
+  if (auth!.currentUser?.uid !== uid) {
+    throw new Error("Sign in before joining a class.");
+  }
+
+  await joinStudentClass({
+    classCode: classId,
+    displayName: auth!.currentUser.displayName ?? "",
+    email: auth!.currentUser.email ?? "",
+    syncProfile: true,
+    user: auth!.currentUser
+  });
+}
+
 function assertFirebaseReady() {
   if (!isFirebaseConfigured || !auth || !db) {
     throw new Error("Firebase is not configured. Add NEXT_PUBLIC_FIREBASE_* values to .env.local.");
   }
+}
+
+async function joinStudentClass({
+  classCode,
+  displayName,
+  email,
+  syncProfile,
+  user
+}: {
+  classCode: string;
+  displayName: string;
+  email: string;
+  syncProfile: boolean;
+  user?: User | null;
+}) {
+  const cleanClassCode = normalizeClassCode(classCode);
+
+  if (!cleanClassCode) {
+    if (!syncProfile) {
+      return "";
+    }
+
+    if (!user) {
+      throw new Error("Sign in before joining a class.");
+    }
+  }
+
+  if (!user) {
+    throw new Error("Sign in before joining a class.");
+  }
+
+  if (!cleanClassCode && !syncProfile) {
+    return "";
+  }
+
+  const token = await user.getIdToken();
+  const response = await fetch("/api/classes/join", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      classCode: cleanClassCode,
+      displayName,
+      email,
+      syncProfile
+    })
+  });
+  const data = (await response.json()) as { classId?: string; error?: string };
+
+  if (!response.ok) {
+    throw new Error(data.error ?? "Class join failed.");
+  }
+
+  return data.classId ?? "";
 }

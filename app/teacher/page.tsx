@@ -20,7 +20,6 @@ export default function TeacherPage() {
           <div>
             <p className="eyebrow">Teacher dashboard</p>
             <h1>Classes</h1>
-            <p>Create classes, manage rosters, tune tutor behavior, and add course materials.</p>
           </div>
         </section>
 

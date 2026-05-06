@@ -10,6 +10,7 @@ import {
   signUpWithRole,
   type AccountRole
 } from "@/lib/auth";
+import { CLASS_CODE_LENGTH, formatClassCodeInput } from "@/lib/class-code";
 import { useAuth } from "./AuthProvider";
 
 type AuthMode = "signin" | "signup";
@@ -17,6 +18,7 @@ type AuthMode = "signin" | "signup";
 const pendingProfileStorageKey = "chandra.pendingProfile";
 
 type PendingProfile = {
+  classId?: string;
   displayName: string;
   email: string;
   role: AccountRole;
@@ -26,8 +28,10 @@ export function AuthForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const requestedRole = searchParams.get("role") === "teacher" ? "teacher" : "student";
+  const requestedClassId = formatClassCodeInput(searchParams.get("classId") ?? "");
   const [mode, setMode] = useState<AuthMode>("signup");
   const [role, setRole] = useState<AccountRole>(requestedRole);
+  const [classId, setClassId] = useState(requestedClassId);
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -54,6 +58,7 @@ export function AuthForm() {
 
     isRepairingProfileRef.current = true;
     createRoleProfile({
+      classId: pendingProfile.classId,
       displayName: pendingProfile.displayName,
       role: pendingProfile.role,
       user
@@ -78,6 +83,7 @@ export function AuthForm() {
     try {
       if (mode === "signup") {
         savePendingProfile({
+          classId: role === "student" ? classId.trim() : "",
           displayName: displayName.trim(),
           email: email.trim().toLowerCase(),
           role
@@ -86,7 +92,8 @@ export function AuthForm() {
           displayName: displayName.trim(),
           email: email.trim(),
           password,
-          role
+          role,
+          classId: role === "student" ? classId.trim() : ""
         });
         window.localStorage.removeItem(pendingProfileStorageKey);
         router.push(role === "teacher" ? "/teacher" : "/student");
@@ -144,6 +151,7 @@ export function AuthForm() {
 
               try {
                 const nextProfile = await createRoleProfile({
+                  classId: role === "student" ? classId.trim() : "",
                   displayName: displayName.trim() || user.displayName || user.email || "",
                   role,
                   user
@@ -168,6 +176,21 @@ export function AuthForm() {
               <option value="student">Student</option>
               <option value="teacher">Teacher</option>
             </select>
+
+            {role === "student" ? (
+              <>
+                <label className="field-label" htmlFor="repair-class-id">
+                  Class code
+                </label>
+                <input
+                  id="repair-class-id"
+                  value={classId}
+                  maxLength={CLASS_CODE_LENGTH}
+                  onChange={(event) => setClassId(formatClassCodeInput(event.target.value))}
+                  placeholder="ABCDEF"
+                />
+              </>
+            ) : null}
 
             <label className="field-label" htmlFor="repair-name">
               Name
@@ -238,6 +261,21 @@ export function AuthForm() {
               <option value="student">Student</option>
               <option value="teacher">Teacher</option>
             </select>
+
+            {role === "student" ? (
+              <>
+                <label className="field-label" htmlFor="class-id">
+                  Class code
+                </label>
+                <input
+                  id="class-id"
+                  value={classId}
+                  maxLength={CLASS_CODE_LENGTH}
+                  onChange={(event) => setClassId(formatClassCodeInput(event.target.value))}
+                  placeholder="ABCDEF"
+                />
+              </>
+            ) : null}
 
             <label className="field-label" htmlFor="name">
               Name

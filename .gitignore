@@ -1,7 +1,14 @@
 node_modules
+.venv
+.venv*
 .next
 out
 dist
+.langgraph_api
+.playwright-mcp
+__pycache__
+*.py[cod]
+*.swp
 .env
 .env.local
 .env*.local
@@ -9,5 +16,5 @@ coverage
 *.log
 .DS_Store
 uploads
+data/rendered
 tsconfig.tsbuildinfo
-

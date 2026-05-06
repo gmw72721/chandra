@@ -1,0 +1,8 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "env": ".env.local",
+  "graphs": {
+    "pdf_rag": "agent.langgraph_app:graph"
+  }
+}

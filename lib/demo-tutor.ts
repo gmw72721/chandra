@@ -1,4 +1,5 @@
 import type { RetrievalHit } from "./types";
+import { summarizeLikelySource } from "./retrieval-ranking";
 
 export function createDemoTutorResponse(question: string, hits: RetrievalHit[]) {
   const source = hits[0];
@@ -11,12 +12,29 @@ export function createDemoTutorResponse(question: string, hits: RetrievalHit[]) 
     ].join("\n");
   }
 
+  const likelySourceLead = summarizeLikelySource(hits);
+
   return [
-    `A helpful place to look is ${source.document.title}, especially the part on ${source.chunk.label}.`,
+    likelySourceLead || `A helpful place to look is ${source.document.title}, especially ${source.chunk.label}.`,
     "",
-    `For your problem, try applying this idea: ${source.chunk.content}`,
+    "Let's use that source as a guide without jumping straight to the final answer.",
     "",
-    "Before we go further, what step would you try next? Write just that step, and I will check it."
+    "What is the first operation or rule you think applies here? Write that one step, and I will check it."
   ].join("\n");
 }
 
+export function createDirectTutorResponse(question: string) {
+  if (/\b(?:do\s*not|don['’]?t)\s+have\s+(?:a|an)?\s*(?:problem|question|assignment)\s+yet\b/i.test(question)) {
+    return [
+      "That is okay. We do not need a specific problem yet.",
+      "",
+      "Tell me the topic you are working on, or paste a problem when you get one, and I will help you choose a good first step."
+    ].join("\n");
+  }
+
+  return [
+    "I can help with that without looking up class materials first.",
+    "",
+    "Tell me the topic or goal, and I will guide you through the next useful step."
+  ].join("\n");
+}

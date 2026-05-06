@@ -1,18 +1,23 @@
 "use client";
 
 import {
-  addDoc,
   collection,
   doc,
+  getDoc,
+  getDocs,
+  limit,
   onSnapshot,
   query,
   serverTimestamp,
   setDoc,
   updateDoc,
-  writeBatch,
   where
 } from "firebase/firestore";
+import { generateClassCode } from "./class-code";
 import { db, isFirebaseConfigured } from "./firebase";
+import type { TutorKnowledgeKind, TutorKnowledgeSourceMode } from "./tutor-knowledge";
+
+const maxClassCodeAttempts = 10;
 
 export type TeacherClass = {
   id: string;
@@ -20,6 +25,7 @@ export type TeacherClass = {
   section: string;
   teacherId: string;
   teacherName: string;
+  joinCode?: string;
   behaviorTitle?: string;
   behaviorInstructions?: string;
   refusalStyle?: string;
@@ -36,58 +42,135 @@ export type ClassStudent = {
 export type ClassMaterial = {
   id: string;
   title: string;
-  kind: string;
+  kind: TutorKnowledgeKind;
   fileName?: string;
+  filePath?: string;
+  fileUrl?: string;
+  contentType?: string;
+  fileSize?: number;
+  characterCount?: number;
   chunkCount?: number;
+  sourceMode?: TutorKnowledgeSourceMode;
   status: "uploaded" | "processing" | "ready";
   addedAt?: unknown;
 };
 
+export type MaterialJobStep =
+  | "upload_received"
+  | "reading_file"
+  | "chunking_material"
+  | "embedding_chunks"
+  | "saving_to_class"
+  | "ready"
+  | "failed";
+
+export type MaterialJobProgress = {
+  id: string;
+  classId: string;
+  completedChunks?: number;
+  detail: string;
+  error?: string;
+  materialId?: string;
+  percent: number;
+  step: MaterialJobStep;
+  title?: string;
+  totalChunks?: number;
+  updatedAt?: unknown;
+};
+
 export function subscribeToTeacherClasses(
   teacherId: string,
-  callback: (classes: TeacherClass[]) => void
+  callback: (classes: TeacherClass[]) => void,
+  onError?: (error: Error) => void
 ) {
   assertFirestoreReady();
 
   const classesQuery = query(collection(db!, "classes"), where("teacherId", "==", teacherId));
 
-  return onSnapshot(classesQuery, (snapshot) => {
-    const classes = snapshot.docs
-      .map((classDoc) => ({ id: classDoc.id, ...classDoc.data() }) as TeacherClass)
-      .sort((firstClass, secondClass) => firstClass.name.localeCompare(secondClass.name));
+  return onSnapshot(
+    classesQuery,
+    (snapshot) => {
+      const classes = snapshot.docs
+        .map((classDoc) => ({ id: classDoc.id, ...classDoc.data() }) as TeacherClass)
+        .sort((firstClass, secondClass) => firstClass.name.localeCompare(secondClass.name));
 
-    callback(classes);
-  });
+      callback(classes);
+    },
+    (error) => onError?.(error)
+  );
+}
+
+export function subscribeToMaterialJob(
+  classId: string,
+  jobId: string,
+  callback: (progress: MaterialJobProgress | null) => void,
+  onError?: (error: Error) => void
+) {
+  assertFirestoreReady();
+
+  return onSnapshot(
+    doc(db!, "classes", classId, "materialJobs", jobId),
+    (snapshot) => {
+      callback(snapshot.exists() ? ({ id: snapshot.id, ...snapshot.data() } as MaterialJobProgress) : null);
+    },
+    (error) => onError?.(error)
+  );
+}
+
+export function subscribeToClass(
+  classId: string,
+  callback: (teacherClass: TeacherClass | null) => void,
+  onError?: (error: Error) => void
+) {
+  assertFirestoreReady();
+
+  return onSnapshot(
+    doc(db!, "classes", classId),
+    (snapshot) => {
+      callback(snapshot.exists() ? ({ id: snapshot.id, ...snapshot.data() } as TeacherClass) : null);
+    },
+    (error) => onError?.(error)
+  );
 }
 
 export function subscribeToClassStudents(
   classId: string,
-  callback: (students: ClassStudent[]) => void
+  callback: (students: ClassStudent[]) => void,
+  onError?: (error: Error) => void
 ) {
   assertFirestoreReady();
 
-  return onSnapshot(collection(db!, "classes", classId, "students"), (snapshot) => {
-    const students = snapshot.docs
-      .map((studentDoc) => ({ id: studentDoc.id, ...studentDoc.data() }) as ClassStudent)
-      .sort((firstStudent, secondStudent) => firstStudent.email.localeCompare(secondStudent.email));
+  return onSnapshot(
+    collection(db!, "classes", classId, "students"),
+    (snapshot) => {
+      const students = snapshot.docs
+        .map((studentDoc) => ({ id: studentDoc.id, ...studentDoc.data() }) as ClassStudent)
+        .sort((firstStudent, secondStudent) => firstStudent.email.localeCompare(secondStudent.email));
 
-    callback(students);
-  });
+      callback(students);
+    },
+    (error) => onError?.(error)
+  );
 }
 
 export function subscribeToClassMaterials(
   classId: string,
-  callback: (materials: ClassMaterial[]) => void
+  callback: (materials: ClassMaterial[]) => void,
+  onError?: (error: Error) => void
 ) {
   assertFirestoreReady();
 
-  return onSnapshot(collection(db!, "classes", classId, "materials"), (snapshot) => {
-    const materials = snapshot.docs
-      .map((materialDoc) => ({ id: materialDoc.id, ...materialDoc.data() }) as ClassMaterial)
-      .sort((firstMaterial, secondMaterial) => firstMaterial.title.localeCompare(secondMaterial.title));
+  return onSnapshot(
+    collection(db!, "classes", classId, "materials"),
+    (snapshot) => {
+      const materials = snapshot.docs
+        .map((materialDoc) => ({ id: materialDoc.id, ...materialDoc.data() }) as ClassMaterial)
+        .sort((firstMaterial, secondMaterial) => firstMaterial.title.localeCompare(secondMaterial.title));
 
-    callback(materials);
-  });
+      callback(materials);
+    },
+    (error) => onError?.(error)
+  );
 }
 
 export async function createTeacherClass({
@@ -103,11 +186,15 @@ export async function createTeacherClass({
 }) {
   assertFirestoreReady();
 
-  return addDoc(collection(db!, "classes"), {
+  const classCode = await createUniqueClassCode();
+  const classReference = doc(db!, "classes", classCode);
+
+  await setDoc(classReference, {
     name: name.trim(),
     section: section.trim(),
     teacherId,
     teacherName,
+    joinCode: classCode,
     behaviorTitle: "Guided problem solving",
     behaviorInstructions: [
       "Ask students to explain their thinking before giving hints.",
@@ -118,6 +205,30 @@ export async function createTeacherClass({
       "If a student asks for a direct answer, redirect them toward the next useful step and ask a checking question.",
     createdAt: serverTimestamp()
   });
+
+  return classReference;
+}
+
+export async function ensureClassJoinCode(classId: string) {
+  assertFirestoreReady();
+
+  const classReference = doc(db!, "classes", classId);
+  const classSnapshot = await getDoc(classReference);
+
+  if (!classSnapshot.exists()) {
+    throw new Error("Class not found.");
+  }
+
+  const existingJoinCode = classSnapshot.data().joinCode;
+
+  if (typeof existingJoinCode === "string" && existingJoinCode.trim()) {
+    return existingJoinCode;
+  }
+
+  const joinCode = await createUniqueClassCode();
+  await updateDoc(classReference, { joinCode });
+
+  return joinCode;
 }
 
 export async function updateTeacherClassSettings({
@@ -167,65 +278,34 @@ export async function addStudentToClass({
   });
 }
 
-export async function addClassMaterial({
-  classId,
-  fileName,
-  kind,
-  text,
-  title
-}: {
-  classId: string;
-  fileName?: string;
-  kind: string;
-  text: string;
-  title: string;
-}) {
-  assertFirestoreReady();
-
-  const chunks = chunkText(text);
-  const materialRef = await addDoc(collection(db!, "classes", classId, "materials"), {
-    title: title.trim(),
-    kind,
-    fileName: fileName?.trim() || "",
-    chunkCount: chunks.length,
-    status: chunks.length ? "ready" : "uploaded",
-    addedAt: serverTimestamp()
-  });
-
-  const batch = writeBatch(db!);
-
-  chunks.forEach((chunk, index) => {
-    const chunkRef = doc(collection(db!, "classes", classId, "materials", materialRef.id, "chunks"));
-    batch.set(chunkRef, {
-      content: chunk,
-      label: `Chunk ${index + 1}`,
-      order: index
-    });
-  });
-
-  await batch.commit();
-}
-
-function chunkText(text: string) {
-  const normalizedText = text.replace(/\s+/g, " ").trim();
-
-  if (!normalizedText) {
-    return [];
-  }
-
-  const chunks: string[] = [];
-  const chunkSize = 1200;
-  const overlap = 160;
-
-  for (let start = 0; start < normalizedText.length; start += chunkSize - overlap) {
-    chunks.push(normalizedText.slice(start, start + chunkSize));
-  }
-
-  return chunks;
-}
-
 function assertFirestoreReady() {
   if (!isFirebaseConfigured || !db) {
     throw new Error("Firebase is not configured. Add NEXT_PUBLIC_FIREBASE_* values to .env.local.");
   }
+}
+
+async function createUniqueClassCode() {
+  for (let attempt = 0; attempt < maxClassCodeAttempts; attempt += 1) {
+    const classCode = generateClassCode();
+
+    if (await isClassCodeAvailable(classCode)) {
+      return classCode;
+    }
+  }
+
+  throw new Error("Could not create a unique class code. Please try again.");
+}
+
+async function isClassCodeAvailable(classCode: string) {
+  const classSnapshot = await getDoc(doc(db!, "classes", classCode));
+
+  if (classSnapshot.exists()) {
+    return false;
+  }
+
+  const joinCodeSnapshot = await getDocs(
+    query(collection(db!, "classes"), where("joinCode", "==", classCode), limit(1))
+  );
+
+  return joinCodeSnapshot.empty;
 }

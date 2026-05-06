@@ -1,0 +1,226 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userProfile(uid) {
+      return get(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function userProfileExists(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function isTeacher() {
+      return isSignedIn()
+        && userProfileExists(request.auth.uid)
+        && userProfile(request.auth.uid).data.role == "teacher";
+    }
+
+    function isStudentInClass(classId) {
+      return isSignedIn()
+        && userProfileExists(request.auth.uid)
+        && userProfile(request.auth.uid).data.role == "student"
+        && userProfile(request.auth.uid).data.classId == classId;
+    }
+
+    function isClassTeacher() {
+      return isSignedIn()
+        && resource.data.teacherId == request.auth.uid;
+    }
+
+    function isTargetClassTeacher(classId) {
+      return isSignedIn()
+        && get(/databases/$(database)/documents/classes/$(classId)).data.teacherId == request.auth.uid;
+    }
+
+    function hasClassId(data) {
+      return data.keys().hasAny(["classId"]);
+    }
+
+    function validRole(role) {
+      return role == "student" || role == "teacher";
+    }
+
+    function validProfileClass(data) {
+      return !hasClassId(data)
+        || (
+          data.role == "student"
+          && data.classId is string
+          && data.classId.size() > 0
+          && exists(/databases/$(database)/documents/classes/$(data.classId))
+        );
+    }
+
+    function validProfileBase(userId, data) {
+      return data.keys().hasOnly(["uid", "email", "displayName", "role", "classId", "createdAt"])
+        && data.uid == userId
+        && data.email is string
+        && data.displayName is string
+        && data.displayName.size() > 0
+        && validRole(data.role)
+        && validProfileClass(data);
+    }
+
+    function validProfileCreate(userId) {
+      return validProfileBase(userId, request.resource.data)
+        && request.resource.data.createdAt == request.time;
+    }
+
+    function validProfileUpdate(userId) {
+      return validProfileBase(userId, request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["displayName", "classId"])
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.role == resource.data.role
+        && (
+          (
+            !request.resource.data.keys().hasAny(["createdAt"])
+            && !resource.data.keys().hasAny(["createdAt"])
+          )
+          || request.resource.data.createdAt == resource.data.createdAt
+        );
+    }
+
+    function validClassCreate() {
+      return request.resource.data.keys().hasOnly([
+          "name",
+          "section",
+          "teacherId",
+          "teacherName",
+          "joinCode",
+          "behaviorTitle",
+          "behaviorInstructions",
+          "refusalStyle",
+          "createdAt"
+        ])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.section is string
+        && request.resource.data.section.size() > 0
+        && request.resource.data.teacherId == request.auth.uid
+        && request.resource.data.teacherName is string
+        && request.resource.data.teacherName.size() > 0
+        && validJoinCode(request.resource.data)
+        && request.resource.data.behaviorTitle is string
+        && request.resource.data.behaviorInstructions is string
+        && request.resource.data.refusalStyle is string
+        && request.resource.data.createdAt == request.time;
+    }
+
+    function validClassUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            "name",
+            "section",
+            "joinCode",
+            "behaviorTitle",
+            "behaviorInstructions",
+            "refusalStyle"
+          ])
+        && request.resource.data.teacherId == resource.data.teacherId
+        && request.resource.data.teacherName == resource.data.teacherName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && validJoinCode(request.resource.data)
+        && (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(["joinCode"])
+          || validClassSettings(request.resource.data)
+        );
+    }
+
+    function validClassSettings(data) {
+      return data.keys().hasAll([
+          "name",
+          "section",
+          "behaviorTitle",
+          "behaviorInstructions",
+          "refusalStyle"
+        ])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.section is string
+        && request.resource.data.section.size() > 0
+        && request.resource.data.behaviorTitle is string
+        && request.resource.data.behaviorInstructions is string
+        && request.resource.data.refusalStyle is string;
+    }
+
+    function validJoinCode(data) {
+      return !data.keys().hasAny(["joinCode"])
+        || (
+          data.joinCode is string
+          && data.joinCode.size() == 6
+          && data.joinCode.matches("^[A-Z]{6}$")
+        );
+    }
+
+    function validRosterStudent() {
+      return request.resource.data.keys().hasOnly(["email", "displayName", "addedAt"])
+        && request.resource.data.email is string
+        && request.resource.data.email.size() > 0
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() > 0
+        && request.resource.data.addedAt == request.time;
+    }
+
+    match /users/{userId} {
+      allow create: if isSignedIn()
+        && request.auth.uid == userId
+        && validProfileCreate(userId);
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isSignedIn()
+        && request.auth.uid == userId
+        && validProfileUpdate(userId);
+    }
+
+    match /classes/{classId} {
+      allow create: if isTeacher()
+        && validClassCreate();
+      allow get: if isSignedIn();
+      allow list: if isTeacher();
+      allow update: if isClassTeacher() && validClassUpdate();
+      allow delete: if isClassTeacher();
+
+      match /students/{studentId} {
+        allow read: if isTargetClassTeacher(classId);
+        allow create, update: if isTargetClassTeacher(classId) && validRosterStudent();
+        allow delete: if isTargetClassTeacher(classId);
+      }
+
+      match /materials/{materialId} {
+        allow read: if isTargetClassTeacher(classId) || isStudentInClass(classId);
+        allow write: if isTargetClassTeacher(classId);
+
+        match /chunks/{chunkId} {
+          allow read: if isTargetClassTeacher(classId) || isStudentInClass(classId);
+          allow write: if isTargetClassTeacher(classId);
+        }
+      }
+
+      match /materialJobs/{jobId} {
+        allow read: if isTargetClassTeacher(classId);
+        allow write: if false;
+      }
+
+      match /conversations/{conversationId} {
+        allow get, list: if isTargetClassTeacher(classId)
+          || (
+            isStudentInClass(classId)
+            && resource.data.studentId == request.auth.uid
+          );
+        allow write: if false;
+
+        match /messages/{messageId} {
+          allow get, list: if isTargetClassTeacher(classId)
+            || (
+              isStudentInClass(classId)
+              && get(/databases/$(database)/documents/classes/$(classId)/conversations/$(conversationId)).data.studentId == request.auth.uid
+            );
+          allow write: if false;
+        }
+      }
+    }
+  }
+}

@@ -157,8 +157,8 @@ button:disabled {
 }
 
 .intro-panel h1 {
-  max-width: 820px;
-  font-size: clamp(2.8rem, 7vw, 5.8rem);
+  max-width: 720px;
+  font-size: clamp(2.45rem, 4.8vw, 4.1rem);
 }
 
 .intro-panel p {
@@ -184,13 +184,6 @@ button:disabled {
   margin-top: 28px;
 }
 
-.snapshot-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.metric-card,
 .panel,
 .student-sidebar,
 .chat-panel {
@@ -200,24 +193,11 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
-.metric-card {
-  min-height: 150px;
-  padding: 18px;
-}
-
-.metric-card span,
 .assignment-box span,
 .document-row span,
 .conversation-row span,
 .model-row small {
   color: var(--muted);
-}
-
-.metric-card strong {
-  display: block;
-  margin-top: 12px;
-  font-size: 1.6rem;
-  line-height: 1.15;
 }
 
 .chat-shell {
@@ -241,12 +221,72 @@ button:disabled {
   font-size: 2rem;
 }
 
+.sidebar-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.sidebar-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.student-conversation-history {
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+}
+
+.student-conversation-list,
+.teacher-conversation-list {
+  display: grid;
+  gap: 8px;
+}
+
+.student-conversation-row,
+.teacher-conversation-row {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  padding: 10px;
+  color: var(--ink);
+  text-align: left;
+}
+
+.student-conversation-row[aria-pressed="true"],
+.teacher-conversation-row[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.student-conversation-row span,
+.teacher-conversation-row span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .field-label {
   display: block;
   margin: 18px 0 8px;
   color: var(--muted);
   font-size: 0.85rem;
   font-weight: 800;
+}
+
+.field-hint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 select,
@@ -256,6 +296,7 @@ textarea,
 .class-form input,
 .material-add-form input,
 .student-add-form input,
+.student-class-form input,
 .auth-form input {
   width: 100%;
   border: 1px solid var(--line);
@@ -274,6 +315,7 @@ select {
 .class-form input,
 .material-add-form input,
 .student-add-form input,
+.student-class-form input,
 .auth-form input {
   min-height: 42px;
   padding: 0 12px;
@@ -301,6 +343,10 @@ textarea {
   grid-template-rows: 1fr auto;
   min-height: 680px;
   overflow: hidden;
+}
+
+.chat-error {
+  margin: 14px 14px 0;
 }
 
 .message-list {
@@ -341,6 +387,98 @@ textarea {
   text-transform: uppercase;
 }
 
+.message-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.message-sources span {
+  border: 1px solid rgba(18, 108, 106, 0.2);
+  border-radius: 999px;
+  background: rgba(18, 108, 106, 0.08);
+  color: #496664;
+  padding: 5px 10px;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.progress-message {
+  background: #fffaf0;
+}
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.progress-row p {
+  margin: 0;
+}
+
+.thinking-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(18, 108, 106, 0.3);
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+  flex: 0 0 auto;
+}
+
+.progress-searches {
+  margin: 12px 0 0;
+  padding-left: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+  list-style: none;
+}
+
+.progress-searches li + li {
+  margin-top: 8px;
+}
+
+.progress-searches li {
+  border-left: 3px solid rgba(18, 108, 106, 0.22);
+  padding-left: 10px;
+}
+
+.progress-searches strong,
+.progress-searches span {
+  display: block;
+}
+
+.progress-searches strong {
+  color: #314744;
+  font-size: 0.82rem;
+}
+
+.progress-searches span {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+@keyframes thinking-pulse {
+  0% {
+    opacity: 0.45;
+    transform: scale(0.9);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+
+  100% {
+    opacity: 0.45;
+    transform: scale(0.9);
+  }
+}
+
 .composer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 96px;
@@ -373,7 +511,7 @@ textarea {
 }
 
 .dashboard-header h1 {
-  font-size: clamp(2.3rem, 6vw, 4.6rem);
+  font-size: clamp(2rem, 3.8vw, 3.2rem);
 }
 
 .dashboard-header p:last-child {
@@ -415,6 +553,26 @@ textarea {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 18px;
+}
+
+.class-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.class-code {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
 }
 
 .panel h2 {
@@ -541,7 +699,8 @@ textarea {
 .class-form,
 .class-settings-form,
 .material-add-form,
-.student-add-form {
+.student-add-form,
+.student-class-form {
   display: grid;
   margin-bottom: 14px;
 }
@@ -551,12 +710,13 @@ textarea {
   margin-top: 16px;
 }
 
-.material-add-form .secondary-button {
+.material-add-form > .secondary-button {
   width: fit-content;
   margin-top: 16px;
 }
 
 .student-add-form div,
+.student-class-form div,
 .material-add-form div,
 .model-add-form div {
   display: grid;
@@ -579,6 +739,249 @@ textarea {
 .material-row {
   align-items: center;
   justify-content: space-between;
+}
+
+button.student-row {
+  width: 100%;
+  color: var(--ink);
+  text-align: left;
+}
+
+button.student-row[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.professor-chat-review {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 14px;
+  min-height: 640px;
+}
+
+.professor-chat-sidebar,
+.professor-chat-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+}
+
+.professor-chat-sidebar {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 14px;
+}
+
+.professor-student-summary {
+  display: grid;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 14px;
+}
+
+.professor-student-summary h3 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.professor-student-summary span {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.professor-chat-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.professor-chat-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 16px 18px;
+}
+
+.professor-chat-heading h3 {
+  margin: 0;
+  font-size: 1.18rem;
+}
+
+.professor-message-list {
+  max-height: 590px;
+  min-height: 0;
+}
+
+.professor-message-list .message p {
+  white-space: pre-wrap;
+}
+
+.professor-chat-empty {
+  align-self: start;
+}
+
+.teacher-conversation-list {
+  display: grid;
+  gap: 10px;
+}
+
+.material-actions,
+.material-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.material-actions {
+  margin-top: 16px;
+}
+
+.material-add-form .material-actions {
+  grid-template-columns: none;
+}
+
+.material-add-form .upload-progress {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  padding: 14px;
+}
+
+.material-add-form .upload-progress > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+  background: rgba(25, 31, 29, 0.34);
+  padding: 24px;
+}
+
+.modal-dialog {
+  width: min(520px, 100%);
+  max-height: min(820px, calc(100vh - 48px));
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 24px 70px rgba(31, 36, 33, 0.22);
+  padding: 18px;
+}
+
+.knowledge-modal-dialog {
+  width: min(760px, 100%);
+}
+
+.modal-heading,
+.dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.modal-heading {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 14px;
+}
+
+.modal-heading h3 {
+  margin: 0;
+  font-size: 1.24rem;
+}
+
+.modal-form {
+  margin-bottom: 0;
+}
+
+.modal-form .dialog-actions {
+  display: flex;
+  grid-template-columns: none;
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.upload-progress strong,
+.upload-progress span {
+  font-weight: 800;
+}
+
+.upload-progress p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.upload-progress-track {
+  display: block;
+  overflow: hidden;
+  height: 10px;
+  border-radius: 999px;
+  background: #eee7da;
+}
+
+.upload-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.upload-progress-steps {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.upload-progress-steps li {
+  display: grid;
+  min-height: 54px;
+  align-content: space-between;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8f5ed;
+  padding: 8px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.upload-progress-steps li.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.upload-progress-steps li.done {
+  border-color: rgba(68, 132, 96, 0.32);
+  background: rgba(68, 132, 96, 0.1);
+  color: #2e6749;
+}
+
+.upload-progress-steps small {
+  color: inherit;
+  font-size: 0.72rem;
 }
 
 .class-detail-grid {
@@ -716,6 +1119,14 @@ textarea {
   font-weight: 700;
 }
 
+.form-success {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: 10px 12px;
+  color: var(--accent-strong) !important;
+  font-weight: 700;
+}
+
 @media (max-width: 820px) {
   .shell,
   .chat-shell {
@@ -727,6 +1138,7 @@ textarea {
   .chat-layout,
   .class-workflow,
   .class-detail-grid,
+  .professor-chat-review,
   .dashboard-grid {
     grid-template-columns: 1fr;
   }
@@ -736,11 +1148,7 @@ textarea {
   }
 
   .intro-panel h1 {
-    font-size: 2.65rem;
-  }
-
-  .snapshot-grid {
-    grid-template-columns: 1fr;
+    font-size: 2.35rem;
   }
 
   .chat-panel {
@@ -758,9 +1166,34 @@ textarea {
   }
 
   .student-add-form div,
+  .student-class-form div,
   .material-add-form div,
   .model-add-form div {
     grid-template-columns: 1fr;
+  }
+
+  .upload-progress-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .material-add-form .material-actions,
+  .material-row-actions {
+    display: flex;
+  }
+
+  .modal-backdrop {
+    align-items: start;
+    padding: 12px;
+  }
+
+  .modal-dialog {
+    max-height: calc(100vh - 24px);
+  }
+
+  .modal-heading,
+  .dialog-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .tag-row {

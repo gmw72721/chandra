@@ -2,6 +2,8 @@ import type { ModelOption } from "./types";
 
 export const customModelStorageKey = "chandra.customOpenRouterModels";
 
+export const defaultOpenRouterModelId = "openai/gpt-5.4-mini";
+
 export const defaultModelOptions: ModelOption[] = [
   {
     id: "demo-guided",
@@ -10,10 +12,10 @@ export const defaultModelOptions: ModelOption[] = [
     description: "Local guided response for development and classroom previews."
   },
   {
-    id: "openai/gpt-4.1-mini",
-    label: "OpenAI GPT-4.1 Mini",
+    id: defaultOpenRouterModelId,
+    label: "OpenAI GPT-5.4 Mini",
     provider: "openrouter",
-    description: "Fast general-purpose tutor model routed through OpenRouter."
+    description: "Strong, efficient tutor model routed through OpenRouter."
   },
   {
     id: "anthropic/claude-3.5-sonnet",

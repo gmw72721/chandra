@@ -9,14 +9,20 @@
     "dev:api": "uvicorn backend.main:app --reload --port 8000",
     "build": "next build",
     "start": "next start",
+    "eval:retrieval:live": "node --env-file=.env.local --experimental-strip-types scripts/live-retrieval-eval.mjs",
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "test:retrieval": "node --test --experimental-strip-types tests/retrieval-ranking.test.ts tests/retrieval-eval.test.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "clsx": "^2.1.1",
     "firebase": "^12.12.1",
+    "firebase-admin": "^13.8.0",
+    "google-auth-library": "^10.6.2",
     "next": "^16.2.4",
     "openai": "^4.56.0",
+    "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
@@ -31,6 +37,7 @@
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.2.4",
+    "firebase-tools": "^15.16.0",
     "typescript": "^5.5.3"
   }
 }

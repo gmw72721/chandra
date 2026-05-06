@@ -24,6 +24,11 @@ export type SourceDocument = {
   kind: "lecture-notes" | "textbook" | "worked-example" | "assignment";
   status: "ready" | "processing" | "needs-review";
   uploadedAt: string;
+  classId?: string;
+  materialType?: string;
+  professorId?: string;
+  professorName?: string;
+  teacherId?: string;
   chunks: SourceChunk[];
 };
 
@@ -32,6 +37,23 @@ export type SourceChunk = {
   documentId: string;
   label: string;
   content: string;
+  classId?: string;
+  chunkText?: string;
+  docId?: string;
+  materialId?: string;
+  materialType?: string;
+  pageEnd?: number;
+  pageNumber?: number;
+  pageStart?: number;
+  problemNumbers?: string[];
+  professorId?: string;
+  professorName?: string;
+  section?: string;
+  sectionHeading?: string;
+  teacherId?: string;
+  title?: string;
+  vector?: number[];
+  vectorDistance?: number;
 };
 
 export type Course = {
@@ -47,6 +69,8 @@ export type ChatMessage = {
   role: Role;
   content: string;
   createdAt: string;
+  langGraphTrace?: TutorTrace;
+  sources?: TutorSource[];
 };
 
 export type Conversation = {
@@ -60,8 +84,62 @@ export type Conversation = {
   lastActiveAt: string;
 };
 
+export type StudentConversationSummary = {
+  id: string;
+  classId: string;
+  studentId: string;
+  studentName: string;
+  studentEmail: string;
+  teacherId: string;
+  teacherName?: string;
+  title: string;
+  modelId: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+  lastMessageAt: unknown;
+  messageCount: number;
+  assignment?: string;
+  tags?: string[];
+};
+
 export type RetrievalHit = {
   chunk: SourceChunk;
   document: SourceDocument;
   score: number;
+  matchedProblemNumber?: string;
+};
+
+export type RetrievalConfidence = "high" | "medium" | "low";
+
+export type TutorSource = {
+  title: string;
+  materialType: string;
+  pageNumber?: number;
+  problemNumber?: string;
+};
+
+export type TutorTrace = {
+  searchQueries: string[];
+  selectedPages: Array<{
+    citationLabel?: string;
+    docId?: string;
+    materialType?: string;
+    pageEnd?: number;
+    pageStart?: number;
+    printedPageEnd?: number;
+    printedPageStart?: number;
+    title?: string;
+  }>;
+  stages: string[];
+  toolCallCount: number;
+};
+
+export type TutorApiResponse = {
+  assistantMessageId?: string;
+  conversationId?: string;
+  message: string;
+  content: string;
+  langGraphTrace?: TutorTrace;
+  sources: TutorSource[];
+  retrievalConfidence: RetrievalConfidence;
 };
