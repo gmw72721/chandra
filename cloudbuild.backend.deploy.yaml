@@ -1,0 +1,61 @@
+substitutions:
+  _REGION: us-central1
+  _SERVICE: chandra-backend
+  _REPOSITORY: chandra
+  _SERVICE_ACCOUNT: chandra-backend@chandra-f6e13.iam.gserviceaccount.com
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - backend/Dockerfile
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${SHORT_SHA}
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${SHORT_SHA}
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --project
+      - ${PROJECT_ID}
+      - --region
+      - ${_REGION}
+      - --platform
+      - managed
+      - --image
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${SHORT_SHA}
+      - --service-account
+      - ${_SERVICE_ACCOUNT}
+      - --port
+      - "8000"
+      - --no-allow-unauthenticated
+      - --ingress
+      - all
+      - --timeout
+      - 900s
+      - --concurrency
+      - "10"
+      - --cpu
+      - "1"
+      - --memory
+      - 2Gi
+      - --min-instances
+      - "0"
+      - --max-instances
+      - "5"
+      - --update-env-vars
+      - CHANDRA_ENV=production,OPENROUTER_BASE_URL=https://openrouter.ai/api/v1,OPENROUTER_HTTP_REFERER=http://localhost:3000,OPENROUTER_APP_TITLE=Rhetor,DEFAULT_MODEL=openai/gpt-5.4-mini,FIREBASE_PROJECT_ID=chandra-f6e13,FIREBASE_STORAGE_BUCKET=chandra-f6e13-tutor-knowledge,NEXT_PUBLIC_FIREBASE_PROJECT_ID=chandra-f6e13,NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=chandra-f6e13.firebasestorage.app,GOOGLE_CLOUD_PROJECT=chandra-f6e13,GOOGLE_CLOUD_LOCATION=us,VERTEX_EMBEDDING_MODEL=gemini-embedding-2,VERTEX_EMBEDDING_DIMENSIONS=768
+      - --update-secrets
+      - OPENROUTER_API_KEY=chandra-backend-openrouter-api-key:latest,BACKEND_SHARED_SECRET=chandra-backend-backend-shared-secret:latest,NEXT_PUBLIC_FIREBASE_API_KEY=chandra-backend-next-public-firebase-api-key:latest,GEMINI_API_KEY=chandra-backend-gemini-api-key:latest
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${SHORT_SHA}

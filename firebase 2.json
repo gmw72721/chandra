@@ -1,0 +1,25 @@
+{
+  "apphosting": [
+    {
+      "backendId": "chandra-frontend",
+      "rootDir": ".",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        ".env",
+        ".env.*",
+        "backend/.venv",
+        "uploads",
+        "data/rendered"
+      ]
+    }
+  ],
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  }
+}
