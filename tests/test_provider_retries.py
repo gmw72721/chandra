@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from backend.agent.openrouter_client import OpenRouterClient
+from backend.agent.tools import search_pdf_pages
 from backend.retrieval.pdf_retriever import GeminiPdfRetriever, build_query_features, exact_results_from_pdf_text
 
 
@@ -299,6 +300,85 @@ async def test_gemini_retriever_excludes_file_pdf_without_openable_source(
     assert results == []
 
 
+@pytest.mark.asyncio
+async def test_search_pdf_pages_defaults_to_next_internal_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[dict[str, Any]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "pages": [
+                    {
+                        "chunk_text": "Problem 7 asks students to solve a linear equation.",
+                        "doc_id": "material-1",
+                        "material_type": "assignment",
+                        "page_end": 3,
+                        "page_start": 3,
+                        "score": 0.91,
+                        "section": "Practice",
+                        "source_pdf_path": "gs://bucket/material.pdf",
+                        "title": "Practice Problems",
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            requests.append({"url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setenv("BACKEND_SHARED_SECRET", "test-secret")
+    monkeypatch.setenv("NEXT_INTERNAL_BASE_URL", "http://next.local")
+    monkeypatch.setattr("backend.agent.tools.httpx.AsyncClient", FakeAsyncClient)
+
+    pages = await search_pdf_pages(
+        "find problem 7",
+        class_id="class-1",
+        professor_id="teacher-1",
+    )
+
+    assert pages == [
+        {
+            "chunk_text": "Problem 7 asks students to solve a linear equation.",
+            "doc_id": "material-1",
+            "material_type": "assignment",
+            "page_end": 3,
+            "page_start": 3,
+            "score": 0.91,
+            "section": "Practice",
+            "source_pdf_path": "gs://bucket/material.pdf",
+            "title": "Practice Problems",
+        }
+    ]
+    assert requests == [
+        {
+            "headers": {
+                "Content-Type": "application/json",
+                "X-Chandra-Internal-Secret": "test-secret",
+            },
+            "json": {
+                "classId": "class-1",
+                "professorId": "teacher-1",
+                "query": "find problem 7",
+                "topK": 5,
+            },
+            "url": "http://next.local/api/internal/pdf-page-search",
+        }
+    ]
+
+
 def install_fake_firestore_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_firestore_module = types.SimpleNamespace(client=lambda: FakeFirestoreClient())
     fake_firebase_admin = types.SimpleNamespace(
@@ -317,36 +397,64 @@ def install_fake_firestore_modules(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def fake_chunk_doc(*, material: dict[str, Any]) -> "FakeChunkDoc":
+    normalized_material = {
+        "teacherId": "teacher-1",
+        **material,
+    }
+
     return FakeChunkDoc(
         chunk={
             "chunk_text": "Problem 7 asks students to solve a linear equation.",
             "classId": "class-1",
             "docId": "material-1",
+            "embedding": [0.1, 0.2],
             "materialType": "assignment",
             "page_start": 3,
             "page_end": 3,
             "professorId": "teacher-1",
-            "title": material.get("title", "Material"),
+            "title": normalized_material.get("title", "Material"),
             "vectorDistance": 0.1,
         },
-        material=material,
+        material=normalized_material,
     )
 
 
 class FakeFirestoreClient:
     next_chunks: list["FakeChunkDoc"] = []
 
-    def collection_group(self, _name: str) -> "FakeFirestoreClient":
-        return self
+    def collection(self, _name: str) -> "FakeCollectionReference":
+        return FakeCollectionReference(self.next_chunks)
 
-    def where(self, *_args: object) -> "FakeFirestoreClient":
-        return self
 
-    def find_nearest(self, **_kwargs: object) -> "FakeFirestoreClient":
-        return self
+class FakeCollectionReference:
+    def __init__(self, chunks: list["FakeChunkDoc"]) -> None:
+        self._chunks = chunks
 
-    def get(self) -> list["FakeChunkDoc"]:
-        return self.next_chunks
+    def document(self, _document_id: str) -> "FakeDocumentReference":
+        return FakeDocumentReference(self._chunks)
+
+
+class FakeDocumentReference:
+    def __init__(self, chunks: list["FakeChunkDoc"]) -> None:
+        self._chunks = chunks
+
+    def collection(self, _name: str) -> "FakeMaterialsCollectionReference":
+        return FakeMaterialsCollectionReference(self._chunks)
+
+
+class FakeMaterialsCollectionReference:
+    def __init__(self, chunks: list["FakeChunkDoc"]) -> None:
+        self._chunks = chunks
+
+    def get(self) -> list["FakeMaterialDoc"]:
+        materials: dict[str, tuple[dict[str, Any], list[FakeChunkDoc]]] = {}
+
+        for chunk in self._chunks:
+            material = chunk.reference.parent.parent._material
+            title = str(material.get("title") or "Material")
+            materials.setdefault(title, (material, []))[1].append(chunk)
+
+        return [FakeMaterialDoc(material=material, chunks=chunks) for material, chunks in materials.values()]
 
 
 class FakeChunkDoc:
@@ -372,6 +480,38 @@ class FakeMaterialReference:
 
     def get(self) -> "FakeMaterialSnapshot":
         return FakeMaterialSnapshot(self._material)
+
+    def collection(self, _name: str) -> "FakeChunkCollectionReference":
+        return FakeChunkCollectionReference([])
+
+
+class FakeMaterialDoc:
+    def __init__(self, *, material: dict[str, Any], chunks: list[FakeChunkDoc]) -> None:
+        self._material = material
+        self.reference = FakeMaterialDocReference(material=material, chunks=chunks)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self._material
+
+
+class FakeMaterialDocReference:
+    id = "material-1"
+    path = "classes/class-1/materials/material-1"
+
+    def __init__(self, *, material: dict[str, Any], chunks: list[FakeChunkDoc]) -> None:
+        self._material = material
+        self._chunks = chunks
+
+    def collection(self, _name: str) -> "FakeChunkCollectionReference":
+        return FakeChunkCollectionReference(self._chunks)
+
+
+class FakeChunkCollectionReference:
+    def __init__(self, chunks: list[FakeChunkDoc]) -> None:
+        self._chunks = chunks
+
+    def get(self) -> list[FakeChunkDoc]:
+        return self._chunks
 
 
 class FakeMaterialSnapshot:

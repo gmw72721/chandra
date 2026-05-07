@@ -11,9 +11,8 @@ from langgraph.graph import END, START, StateGraph
 from backend.agent.openrouter_client import OpenRouterClient, encode_file_as_data_url
 from backend.agent.state import PdfRagState
 from backend.agent.tools import SEARCH_PDF_PAGES_TOOL, parse_search_pdf_pages_arguments, search_pdf_pages
-from backend.retrieval.pdf_page_assets import MAX_TOTAL_PAGES, fetch_or_render_pdf_pages
+from backend.retrieval.pdf_page_assets import MAX_TOTAL_PAGES, fetch_pdf_page_assets_via_next
 from backend.retrieval.pdf_retriever import (
-    GeminiPdfRetriever,
     PdfRetriever,
     content_has_requested_problem_number,
     page_numbers_from_text,
@@ -36,8 +35,8 @@ def build_pdf_rag_graph(
     """Build the controlled LangGraph runtime for student PDF RAG chat."""
 
     client = openrouter_client or OpenRouterClient()
-    build_assets = page_asset_builder or fetch_or_render_pdf_pages
-    search_retriever = retriever or GeminiPdfRetriever()
+    build_assets = page_asset_builder or fetch_pdf_page_assets_via_next
+    search_retriever = retriever
     fast_initial_search = should_enable_fast_initial_search(client)
 
     async def openrouter_agent(state: PdfRagState) -> dict[str, Any]:
@@ -908,6 +907,17 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
                 }
             )
 
+        if asset.get("file_data_url"):
+            content.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": f"{asset.get('doc_id') or 'selected-pages'}.pdf",
+                        "file_data": asset["file_data_url"],
+                    },
+                }
+            )
+
     return [
         *base_messages,
         {
@@ -1314,8 +1324,8 @@ async def run_pdf_rag_agent_stream(
 
     owns_client = openrouter_client is None
     client = openrouter_client or OpenRouterClient()
-    build_assets = page_asset_builder or fetch_or_render_pdf_pages
-    search_retriever = retriever or GeminiPdfRetriever()
+    build_assets = page_asset_builder or fetch_pdf_page_assets_via_next
+    search_retriever = retriever
     fast_initial_search = should_enable_fast_initial_search(client)
     state: PdfRagState = {
         "messages": messages,

@@ -93,8 +93,19 @@ test("chat routes enforce bounded request sizes before backend work", () => {
   assert.match(fastApiSource, /MAX_CHAT_MESSAGES_PER_REQUEST = 40/);
   assert.match(fastApiSource, /MAX_TOTAL_MESSAGE_CHARS = 100000/);
   assert.match(fastApiSource, /MAX_MODEL_RESPONSE_TOKENS = 8000/);
+  assert.match(fastApiSource, /MAX_PROVIDER_MESSAGE_CONTENT_CHARS = 60000/);
+  assert.match(fastApiSource, /max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS/);
   assert.match(fastApiSource, /maxTokens: Optional\[int\] = Field\(default=None, ge=1, le=MAX_MODEL_RESPONSE_TOKENS\)/);
   assert.match(fastApiSource, /validate_message_payload_size\(request\.messages\)/);
+});
+
+test("student chat classifies oversized backend requests explicitly", () => {
+  const nextSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+
+  assert.match(nextSource, /TUTOR_BACKEND_REQUEST_TOO_LARGE/);
+  assert.match(nextSource, /This chat is too large to send/);
+  assert.match(nextSource, /status === 413/);
+  assert.match(nextSource, /normalizedDetail\.includes\("too large"\)/);
 });
 
 test("material extraction and ingestion reject oversized uploads and text", () => {

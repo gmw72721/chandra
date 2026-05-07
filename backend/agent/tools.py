@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import os
+from typing import Any, Protocol
 
-from backend.retrieval.pdf_retriever import GeminiPdfRetriever, PdfPageResult, PdfRetriever
+import httpx
+
+
+class PdfRetriever(Protocol):
+    async def search(
+        self,
+        *,
+        query: str,
+        top_k: int = 5,
+        class_id: str | None = None,
+        professor_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        ...
 
 
 SEARCH_PDF_PAGES_TOOL: dict[str, Any] = {
@@ -89,12 +102,56 @@ async def search_pdf_pages(
 ) -> list[dict[str, Any]]:
     """Search indexed PDF page windows and return page metadata, not whole PDFs."""
 
-    backend = retriever or GeminiPdfRetriever()
-    pages = await backend.search(query=query, top_k=top_k, class_id=class_id, professor_id=professor_id)
+    if retriever:
+        pages = await retriever.search(query=query, top_k=top_k, class_id=class_id, professor_id=professor_id)
+    else:
+        pages = await search_pdf_pages_via_next(query=query, top_k=top_k, class_id=class_id, professor_id=professor_id)
+
     return [normalize_pdf_page_result(page) for page in pages]
 
 
-def normalize_pdf_page_result(page: PdfPageResult | dict[str, Any]) -> dict[str, Any]:
+async def search_pdf_pages_via_next(
+    *,
+    query: str,
+    top_k: int,
+    class_id: str | None,
+    professor_id: str | None,
+) -> list[dict[str, Any]]:
+    if not class_id or not professor_id:
+        return []
+
+    shared_secret = os.getenv("BACKEND_SHARED_SECRET", "").strip()
+
+    if not shared_secret:
+        return []
+
+    next_base_url = (os.getenv("NEXT_INTERNAL_BASE_URL") or os.getenv("FRONTEND_ORIGIN") or "http://127.0.0.1:3000").rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            response = await client.post(
+                f"{next_base_url}/api/internal/pdf-page-search",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Chandra-Internal-Secret": shared_secret,
+                },
+                json={
+                    "classId": class_id,
+                    "professorId": professor_id,
+                    "query": query,
+                    "topK": top_k,
+                },
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return []
+
+    pages = payload.get("pages") if isinstance(payload, dict) else []
+    return pages if isinstance(pages, list) else []
+
+
+def normalize_pdf_page_result(page: dict[str, Any] | Any) -> dict[str, Any]:
     """Normalize retriever output into the required tool result shape."""
 
     source = page if isinstance(page, dict) else page.to_dict()

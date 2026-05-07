@@ -28,6 +28,8 @@ export type SourceDocument = {
   classId?: string;
   citationsRequired?: boolean;
   materialType?: string;
+  filePath?: string;
+  fileUrl?: string;
   priority?: TutorKnowledgePriority;
   professorId?: string;
   professorName?: string;

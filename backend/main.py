@@ -57,6 +57,8 @@ TOKENIZE_RE = re.compile(r"[^a-z0-9\s-]")
 MAX_CHAT_MESSAGES_PER_REQUEST = 40
 MAX_MESSAGE_CONTENT_CHARS = 20000
 MAX_TOTAL_MESSAGE_CHARS = 100000
+MAX_PROVIDER_MESSAGE_CONTENT_CHARS = 60000
+MAX_PROVIDER_TOTAL_MESSAGE_CHARS = 140000
 MAX_MODEL_RESPONSE_TOKENS = 8000
 MAX_MATERIAL_UPLOAD_BYTES = 500 * 1024 * 1024
 MAX_EXTRACTED_TEXT_CHARS = 250000
@@ -149,7 +151,11 @@ async def langgraph_chat(
     x_chandra_internal_secret: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     authorize_internal_backend_request(x_chandra_internal_secret)
-    validate_message_payload_size(request.messages)
+    validate_message_payload_size(
+        request.messages,
+        max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
+        max_total_message_chars=MAX_PROVIDER_TOTAL_MESSAGE_CHARS,
+    )
 
     try:
         from backend.agent.graph import run_pdf_rag_agent
@@ -181,7 +187,11 @@ async def langgraph_chat_stream(
     x_chandra_internal_secret: Optional[str] = Header(default=None),
 ) -> StreamingResponse:
     authorize_internal_backend_request(x_chandra_internal_secret)
-    validate_message_payload_size(request.messages)
+    validate_message_payload_size(
+        request.messages,
+        max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
+        max_total_message_chars=MAX_PROVIDER_TOTAL_MESSAGE_CHARS,
+    )
 
     try:
         from backend.agent.graph import run_pdf_rag_agent_stream
@@ -436,7 +446,12 @@ def bearer_token(authorization: Optional[str]) -> str:
     return authorization.removeprefix("Bearer ").strip()
 
 
-def validate_message_payload_size(messages: list[Any]) -> None:
+def validate_message_payload_size(
+    messages: list[Any],
+    *,
+    max_message_content_chars: int = MAX_MESSAGE_CONTENT_CHARS,
+    max_total_message_chars: int = MAX_TOTAL_MESSAGE_CHARS,
+) -> None:
     total_characters = 0
 
     for message in messages:
@@ -447,12 +462,12 @@ def validate_message_payload_size(messages: list[Any]) -> None:
         elif isinstance(message, dict):
             content = str(message.get("content") or "")
 
-        if len(content) > MAX_MESSAGE_CONTENT_CHARS:
+        if len(content) > max_message_content_chars:
             raise HTTPException(status_code=413, detail="A chat message is too large.")
 
         total_characters += len(content)
 
-    if total_characters > MAX_TOTAL_MESSAGE_CHARS:
+    if total_characters > max_total_message_chars:
         raise HTTPException(status_code=413, detail="The chat request is too large.")
 
 

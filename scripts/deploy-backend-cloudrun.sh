@@ -10,6 +10,10 @@ SERVICE_ACCOUNT_NAME="${SERVICE_ACCOUNT_NAME:-chandra-backend}"
 SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 IMAGE_TAG="${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE}:${IMAGE_TAG}"
+CACHE_IMAGE="${CACHE_IMAGE:-${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE}:latest}"
+BUILD_IGNORE_FILE="${BUILD_IGNORE_FILE:-.gcloudignore.backend}"
+PROVISION_INFRA="${PROVISION_INFRA:-0}"
+SYNC_SECRETS="${SYNC_SECRETS:-0}"
 
 secret_env_names=(
   OPENROUTER_API_KEY
@@ -96,45 +100,54 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-gcloud config set project "$PROJECT_ID" >/dev/null
-gcloud services enable \
-  artifactregistry.googleapis.com \
-  cloudbuild.googleapis.com \
-  iam.googleapis.com \
-  run.googleapis.com \
-  secretmanager.googleapis.com \
-  --project "$PROJECT_ID" >/dev/null
-
-if ! gcloud iam service-accounts describe "$SERVICE_ACCOUNT_EMAIL" --project "$PROJECT_ID" >/dev/null 2>&1; then
-  gcloud iam service-accounts create "$SERVICE_ACCOUNT_NAME" \
-    --project "$PROJECT_ID" \
-    --display-name "Chandra backend Cloud Run" >/dev/null
+if [[ -n "$BUILD_IGNORE_FILE" && ! -f "$BUILD_IGNORE_FILE" ]]; then
+  printf 'Missing build ignore file: %s\n' "$BUILD_IGNORE_FILE" >&2
+  exit 1
 fi
 
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-  --role roles/datastore.user \
-  --quiet >/dev/null
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-  --role roles/storage.objectViewer \
-  --quiet >/dev/null
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-  --role roles/aiplatform.user \
-  --quiet >/dev/null
+if [[ "$PROVISION_INFRA" == "1" ]]; then
+  gcloud config set project "$PROJECT_ID" >/dev/null
+  gcloud services enable \
+    artifactregistry.googleapis.com \
+    cloudbuild.googleapis.com \
+    iam.googleapis.com \
+    run.googleapis.com \
+    secretmanager.googleapis.com \
+    --project "$PROJECT_ID" >/dev/null
 
-if ! gcloud artifacts repositories describe "$REPOSITORY" --location "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then
-  gcloud artifacts repositories create "$REPOSITORY" \
-    --repository-format docker \
-    --location "$REGION" \
-    --project "$PROJECT_ID" \
-    --description "Chandra containers" >/dev/null
+  if ! gcloud iam service-accounts describe "$SERVICE_ACCOUNT_EMAIL" --project "$PROJECT_ID" >/dev/null 2>&1; then
+    gcloud iam service-accounts create "$SERVICE_ACCOUNT_NAME" \
+      --project "$PROJECT_ID" \
+      --display-name "Chandra backend Cloud Run" >/dev/null
+  fi
+
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+    --role roles/datastore.user \
+    --quiet >/dev/null
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+    --role roles/storage.objectViewer \
+    --quiet >/dev/null
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+    --role roles/aiplatform.user \
+    --quiet >/dev/null
+
+  if ! gcloud artifacts repositories describe "$REPOSITORY" --location "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then
+    gcloud artifacts repositories create "$REPOSITORY" \
+      --repository-format docker \
+      --location "$REGION" \
+      --project "$PROJECT_ID" \
+      --description "Chandra containers" >/dev/null
+  fi
 fi
 
-for env_name in "${secret_env_names[@]}"; do
-  ensure_secret "$env_name"
-done
+if [[ "$SYNC_SECRETS" == "1" ]]; then
+  for env_name in "${secret_env_names[@]}"; do
+    ensure_secret "$env_name"
+  done
+fi
 
 plain_env_pairs=("CHANDRA_ENV=production")
 for env_name in "${plain_env_names[@]}"; do
@@ -149,11 +162,17 @@ for env_name in "${secret_env_names[@]}"; do
   secret_env_pairs+=("${env_name}=$(secret_id_for_env_name "$env_name"):latest")
 done
 
+build_ignore_args=()
+if [[ -n "$BUILD_IGNORE_FILE" ]]; then
+  build_ignore_args=(--ignore-file "$BUILD_IGNORE_FILE")
+fi
+
 gcloud builds submit \
+  "${build_ignore_args[@]}" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
   --config deployment/cloudbuild.backend.yaml \
-  --substitutions "_IMAGE=${IMAGE}" \
+  --substitutions "_IMAGE=${IMAGE},_CACHE_IMAGE=${CACHE_IMAGE}" \
   .
 
 gcloud run deploy "$SERVICE" \

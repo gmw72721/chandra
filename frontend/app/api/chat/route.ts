@@ -527,6 +527,7 @@ type StudentChatErrorCode =
   | "TUTOR_BACKEND_AUTH_FAILED"
   | "TUTOR_BACKEND_ERROR"
   | "TUTOR_BACKEND_RATE_LIMITED"
+  | "TUTOR_BACKEND_REQUEST_TOO_LARGE"
   | "TUTOR_BACKEND_REQUEST_FAILED"
   | "TUTOR_BACKEND_SETUP_INCOMPLETE"
   | "TUTOR_BACKEND_STREAM_FAILED"
@@ -639,6 +640,8 @@ function studentMessageForChatError(code: StudentChatErrorCode) {
       return "I could not save this message. Start a new chat and try again.";
     case "CHAT_REQUEST_INVALID":
       return "I could not send that message. Refresh the page and try again.";
+    case "TUTOR_BACKEND_REQUEST_TOO_LARGE":
+      return "This chat is too large to send. Start a new chat and try again.";
     case "TUTOR_BACKEND_UNREACHABLE":
       return STUDENT_TUTOR_BACKEND_UNAVAILABLE_MESSAGE;
     case "TUTOR_BACKEND_TIMEOUT":
@@ -747,6 +750,10 @@ function classifyBackendResponseError(status: number, detail: string): StudentCh
 
   if (status === 429 || normalizedDetail.includes("rate limit")) {
     return "TUTOR_BACKEND_RATE_LIMITED";
+  }
+
+  if (status === 413 || normalizedDetail.includes("too large")) {
+    return "TUTOR_BACKEND_REQUEST_TOO_LARGE";
   }
 
   if (status >= 500) {

@@ -1,4 +1,4 @@
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, type DocumentData, type DocumentReference } from "firebase-admin/firestore";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
 import {
   inferLearningStrategyObservedOutcome,
@@ -273,9 +273,11 @@ export async function listTeacherClassConversations({
   const rows = await Promise.all(
     conversationsSnapshot.docs.map(async (conversationDoc) => {
       const conversation = conversationDoc.data();
-      const sourceAudit = await getConversationSourceAudit({
+      const sourceAudit = await getConversationSourceAuditForConversation({
         classId,
-        conversationId: conversationDoc.id
+        conversation,
+        conversationId: conversationDoc.id,
+        conversationReference: conversationDoc.ref
       });
       const review = reviewsByConversationId.get(conversationDoc.id) ?? defaultTeacherConversationReview({
         classId,
@@ -338,6 +340,25 @@ export async function getConversationSourceAudit({
 
   const conversation = conversationSnapshot.data() ?? {};
 
+  return getConversationSourceAuditForConversation({
+    classId,
+    conversation,
+    conversationId,
+    conversationReference
+  });
+}
+
+async function getConversationSourceAuditForConversation({
+  classId,
+  conversation,
+  conversationId,
+  conversationReference
+}: {
+  classId: string;
+  conversation: DocumentData;
+  conversationId: string;
+  conversationReference: DocumentReference<DocumentData>;
+}): Promise<TeacherConversationSourceAuditSummary> {
   if (conversation.classId !== classId) {
     throw new ConversationPersistenceError("Conversation does not belong to this class.", 403);
   }
@@ -537,7 +558,7 @@ export async function listTeacherRosterActivity({
   });
 
   const messageSnapshots = await Promise.all(
-    conversationDocs.map((conversationDoc) => conversationDoc.ref.collection("messages").orderBy("createdAt", "asc").get())
+    conversationDocs.map((conversationDoc) => conversationDoc.ref.collection("messages").where("role", "==", "student").get())
   );
 
   messageSnapshots.forEach((messageSnapshot, conversationIndex) => {
@@ -551,28 +572,25 @@ export async function listTeacherRosterActivity({
 
     messageSnapshot.docs.forEach((messageDoc) => {
       const message = messageDoc.data();
-      const role = String(message.role ?? "");
       const createdAt = serializeFirestoreValue(message.createdAt);
 
-      if (role === "student") {
-        activity.totalQuestions += 1;
+      activity.totalQuestions += 1;
 
-        const activeDay = dateKey(createdAt, timezone);
+      const activeDay = dateKey(createdAt, timezone);
 
-        if (activeDay) {
-          activeDaysByEmail.get(studentEmail)?.add(activeDay);
-        }
+      if (activeDay) {
+        activeDaysByEmail.get(studentEmail)?.add(activeDay);
+      }
 
-        if (activeDay === todayKey) {
-          activity.questionsToday += 1;
-        }
+      if (activeDay === todayKey) {
+        activity.questionsToday += 1;
+      }
 
-        const activeAt = timestampMillis(createdAt);
+      const activeAt = timestampMillis(createdAt);
 
-        if (activeAt >= (lastStudentMessageAtByEmail.get(studentEmail) ?? 0)) {
-          activity.lastActiveAt = String(createdAt ?? "");
-          lastStudentMessageAtByEmail.set(studentEmail, activeAt);
-        }
+      if (activeAt >= (lastStudentMessageAtByEmail.get(studentEmail) ?? 0)) {
+        activity.lastActiveAt = String(createdAt ?? "");
+        lastStudentMessageAtByEmail.set(studentEmail, activeAt);
       }
     });
 
@@ -606,16 +624,22 @@ export async function listTeacherRosterActivity({
 async function getStudentPresenceByEmail(classId: string, studentEmails: string[]) {
   const uniqueEmails = Array.from(new Set(studentEmails.map((email) => email.trim().toLowerCase()).filter(Boolean)));
   const presenceByEmail = new Map<string, { isOnline: boolean; lastSeenAt: string }>();
+  const emailBatches: string[][] = [];
 
   for (let index = 0; index < uniqueEmails.length; index += 30) {
     const emailBatch = uniqueEmails.slice(index, index + 30);
 
-    if (!emailBatch.length) {
-      continue;
+    if (emailBatch.length) {
+      emailBatches.push(emailBatch);
     }
+  }
 
-    const snapshot = await adminDb!.collection("userPresence").where("email", "in", emailBatch).get();
+  const snapshots = await Promise.all(
+    emailBatches.map((emailBatch) => adminDb!.collection("userPresence").where("email", "in", emailBatch).get())
+  );
+  const now = Date.now();
 
+  snapshots.forEach((snapshot) => {
     snapshot.docs.forEach((presenceDoc) => {
       const presence = presenceDoc.data() ?? {};
       const email = String(presence.email ?? "").trim().toLowerCase();
@@ -632,11 +656,11 @@ async function getStudentPresenceByEmail(classId: string, studentEmails: string[
       }
 
       presenceByEmail.set(email, {
-        isOnline: Boolean(presence.online) && Date.now() - timestampMillis(lastSeenAt) <= presenceActiveWindowMs,
+        isOnline: Boolean(presence.online) && now - timestampMillis(lastSeenAt) <= presenceActiveWindowMs,
         lastSeenAt
       });
     });
-  }
+  });
 
   return presenceByEmail;
 }

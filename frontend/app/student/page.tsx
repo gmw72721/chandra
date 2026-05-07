@@ -47,6 +47,8 @@ type ChatStreamEvent =
 
 const studentComposerTextareaMaxHeight = 156;
 const studentAppearanceOptions = ["light", "dark"] as const;
+const markdownRemarkPlugins = [remarkMath];
+const markdownRehypePlugins = [rehypeKatex];
 
 const initialMessages: ChatMessage[] = [
   {
@@ -556,7 +558,7 @@ function StudentWorkspace() {
                   <div className="student-message-stack">
                     <div className="message-meta">You</div>
                     <div className="student-message-bubble">
-                      <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                      <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
                         {normalizeMarkdownMath(message.content)}
                       </ReactMarkdown>
                     </div>
@@ -570,7 +572,7 @@ function StudentWorkspace() {
                       <div className="message-meta">Chandra</div>
                       {assistantMessageAnswerContent(message) ? (
                         <div className="assistant-message-bubble">
-                          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                          <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
                             {normalizeMarkdownMath(assistantMessageAnswerContent(message))}
                           </ReactMarkdown>
                         </div>
@@ -578,7 +580,7 @@ function StudentWorkspace() {
                       {assistantStructuredSections(message).map((section) => (
                         <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
                           <strong>{section.label}</strong>
-                          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                          <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
                             {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(section.content, section.kind))}
                           </ReactMarkdown>
                         </div>

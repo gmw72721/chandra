@@ -207,7 +207,6 @@ class GeminiPdfRetriever:
         try:
             import firebase_admin
             from firebase_admin import firestore
-            from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
         except ImportError:
             return []
 
@@ -216,44 +215,42 @@ class GeminiPdfRetriever:
                 firebase_admin.initialize_app()
 
             db = firestore.client()
-            firestore_query = (
-                db.collection_group("chunks")
-                .where("professorId", "==", professor_id)
-                .where("classId", "==", class_id)
-                .find_nearest(
-                    vector_field="embedding",
-                    query_vector=query_vector,
-                    distance_measure=DistanceMeasure.COSINE,
-                    limit=min(max(top_k * 10, 50), 100),
-                    distance_result_field="vectorDistance",
-                )
+            material_docs = await self._load_visible_class_material_docs(
+                db,
+                class_id=class_id,
+                professor_id=professor_id,
             )
-            snapshot = await asyncio.to_thread(firestore_query.get)
+            material_chunk_pairs = await asyncio.gather(
+                *[
+                    asyncio.to_thread(material_doc.reference.collection("chunks").get)
+                    for material_doc in material_docs
+                ]
+            )
         except Exception:
             return []
 
-        chunk_docs = list(snapshot)
         results: list[PdfPageResult] = []
-        material_cache = await self._load_material_cache(chunk_docs)
 
-        for chunk_doc in chunk_docs:
-            chunk = chunk_doc.to_dict() or {}
-            material_ref = chunk_doc.reference.parent.parent
-            material = self._get_cached_material(material_ref, material_cache)
+        for material_doc, chunks_snapshot in zip(material_docs, material_chunk_pairs):
+            material = material_doc.to_dict() or {}
 
-            if not is_student_visible_ready_material(material):
-                continue
+            for chunk_doc in chunks_snapshot:
+                chunk = chunk_doc.to_dict() or {}
+                embedding_values = embedding_values_from_chunk(chunk)
 
-            result = self._result_from_chunk(
-                chunk,
-                material=material,
-                material_ref=material_ref,
-                query_features=query_features,
-                vector_score=1.0 - float(chunk.get("vectorDistance") or 0.0),
-            )
+                if not embedding_values:
+                    continue
 
-            if result:
-                results.append(result)
+                result = self._result_from_chunk(
+                    chunk,
+                    material=material,
+                    material_ref=material_doc.reference,
+                    query_features=query_features,
+                    vector_score=cosine_similarity(query_vector, embedding_values),
+                )
+
+                if result:
+                    results.append(result)
 
         return sorted(results, key=lambda result: result.score, reverse=True)[:top_k]
 
@@ -652,6 +649,58 @@ def hybrid_page_score(
         + problem_miss_penalty
         + material_preference_score(query_features, searchable_text=searchable_text, material_type=material_type)
     )
+
+
+def embedding_values_from_chunk(chunk: dict[str, Any]) -> list[float]:
+    embedding = chunk.get("embedding")
+
+    if embedding is None:
+        return []
+
+    if hasattr(embedding, "to_list"):
+        embedding = embedding.to_list()
+    elif hasattr(embedding, "toArray"):
+        embedding = embedding.toArray()
+    elif hasattr(embedding, "_values"):
+        embedding = getattr(embedding, "_values")
+
+    if isinstance(embedding, dict):
+        embedding = embedding.get("values") or embedding.get("value")
+
+    if not isinstance(embedding, (list, tuple)):
+        return []
+
+    values: list[float] = []
+
+    for value in embedding:
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            return []
+
+    return values
+
+
+def cosine_similarity(first: list[float], second: list[float]) -> float:
+    if not first or not second:
+        return 0.0
+
+    length = min(len(first), len(second))
+    dot_product = 0.0
+    first_norm = 0.0
+    second_norm = 0.0
+
+    for index in range(length):
+        first_value = first[index]
+        second_value = second[index]
+        dot_product += first_value * second_value
+        first_norm += first_value * first_value
+        second_norm += second_value * second_value
+
+    if first_norm <= 0 or second_norm <= 0:
+        return 0.0
+
+    return dot_product / ((first_norm ** 0.5) * (second_norm ** 0.5))
 
 
 def has_numbered_item_context(normalized_text: str, material_type: str) -> bool:

@@ -40,6 +40,65 @@ async def fetch_or_render_pdf_pages(
     )
 
 
+async def fetch_pdf_page_assets_via_next(
+    retrieved_pages: list[dict[str, Any]],
+    *,
+    max_total_pages: int = MAX_TOTAL_PAGES,
+) -> list[dict[str, Any]]:
+    """Ask the Next.js server to build selected PDF assets using Node/Firebase."""
+
+    selected_ranges = deduplicate_page_ranges(retrieved_pages, max_total_pages=max_total_pages)
+
+    if not selected_ranges:
+        return []
+
+    shared_secret = os.getenv("BACKEND_SHARED_SECRET", "").strip()
+
+    if not shared_secret:
+        return [metadata_only_page_asset(page) for page in selected_ranges]
+
+    next_base_url = (os.getenv("NEXT_INTERNAL_BASE_URL") or os.getenv("FRONTEND_ORIGIN") or "http://127.0.0.1:3000").rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{next_base_url}/api/internal/pdf-page-assets",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Chandra-Internal-Secret": shared_secret,
+                },
+                json={
+                    "maxTotalPages": max_total_pages,
+                    "pages": selected_ranges,
+                },
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return [metadata_only_page_asset(page) for page in selected_ranges]
+
+    assets = payload.get("assets") if isinstance(payload, dict) else []
+    return assets if isinstance(assets, list) else [metadata_only_page_asset(page) for page in selected_ranges]
+
+
+def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
+    page_start = int(page.get("page_start") or 1)
+    page_end = int(page.get("page_end") or page_start)
+
+    return {
+        "citation_label": citation_label(str(page.get("title") or "Untitled PDF"), page_start, page_end),
+        "doc_id": str(page.get("doc_id") or ""),
+        "images": [],
+        "material_type": str(page.get("material_type") or ""),
+        "page_end": page_end,
+        "page_start": page_start,
+        "printed_page_end": None,
+        "printed_page_start": None,
+        "score": float(page.get("score") or 0.0),
+        "title": str(page.get("title") or "Untitled PDF"),
+    }
+
+
 async def resolve_pdf_sources(selected_ranges: list[dict[str, Any]], *, output_dir: Path) -> dict[str, Path]:
     source_keys = list(dict.fromkeys(str(item["source_pdf_path"]) for item in selected_ranges))
     source_paths = await asyncio.gather(*(resolve_pdf_path(source_key, output_dir=output_dir) for source_key in source_keys))

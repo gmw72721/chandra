@@ -441,15 +441,26 @@ export function TeacherClassManager() {
     () => filterRosterRows(rosterRows, rosterSearchQuery, rosterFilter),
     [rosterFilter, rosterRows, rosterSearchQuery]
   );
-  const selectedRosterRow = isRosterDetailOpen
-    ? rosterRows.find((row) => row.student.id === displaySelectedStudentId) ?? rosterRows[0] ?? null
-    : null;
+  const selectedRosterRow = useMemo(
+    () =>
+      isRosterDetailOpen
+        ? rosterRows.find((row) => row.student.id === displaySelectedStudentId) ?? rosterRows[0] ?? null
+        : null,
+    [displaySelectedStudentId, isRosterDetailOpen, rosterRows]
+  );
   const currentRosterStudentIds = useMemo(() => new Set(rosterStudents.map((student) => student.id)), [rosterStudents]);
-  const availableCheckedStudentIds = checkedStudentIds.filter((studentId) => currentRosterStudentIds.has(studentId));
+  const availableCheckedStudentIds = useMemo(
+    () => checkedStudentIds.filter((studentId) => currentRosterStudentIds.has(studentId)),
+    [checkedStudentIds, currentRosterStudentIds]
+  );
   const checkedStudentIdSet = useMemo(() => new Set(availableCheckedStudentIds), [availableCheckedStudentIds]);
-  const checkedVisibleStudentIds = filteredRosterRows
-    .map((row) => row.student.id)
-    .filter((studentId) => checkedStudentIdSet.has(studentId));
+  const checkedVisibleStudentIds = useMemo(
+    () =>
+      filteredRosterRows
+        .map((row) => row.student.id)
+        .filter((studentId) => checkedStudentIdSet.has(studentId)),
+    [checkedStudentIdSet, filteredRosterRows]
+  );
   const allVisibleStudentsChecked =
     filteredRosterRows.length > 0 && checkedVisibleStudentIds.length === filteredRosterRows.length;
   const someVisibleStudentsChecked = checkedVisibleStudentIds.length > 0;
@@ -458,21 +469,36 @@ export function TeacherClassManager() {
     () => buildConversationReviewRows(classConversations, activeClassId),
     [activeClassId, classConversations]
   );
-  const visibleStudentConversations = studentConversations.filter(
-    (conversation) =>
-      conversation.classId === activeClassId &&
-      conversation.studentEmail === selectedStudent?.email.trim().toLowerCase()
+  const visibleStudentConversations = useMemo(
+    () =>
+      studentConversations.filter(
+        (conversation) =>
+          conversation.classId === activeClassId &&
+          conversation.studentEmail === selectedStudent?.email.trim().toLowerCase()
+      ),
+    [activeClassId, selectedStudent?.email, studentConversations]
   );
-  const activeSelectedConversationId =
-    selectedConversationClassId === activeClassId &&
-    (conversationReviewRows.some((conversation) => conversation.id === selectedConversationId) ||
-      visibleStudentConversations.some((conversation) => conversation.id === selectedConversationId))
-      ? selectedConversationId
-      : activeTab === "conversations"
-        ? conversationReviewRows[0]?.id ?? visibleStudentConversations[0]?.id ?? ""
-        : visibleStudentConversations[0]?.id ?? "";
-  const selectedConversation = visibleStudentConversations.find(
-    (conversation) => conversation.id === activeSelectedConversationId
+  const activeSelectedConversationId = useMemo(
+    () =>
+      selectedConversationClassId === activeClassId &&
+      (conversationReviewRows.some((conversation) => conversation.id === selectedConversationId) ||
+        visibleStudentConversations.some((conversation) => conversation.id === selectedConversationId))
+        ? selectedConversationId
+        : activeTab === "conversations"
+          ? conversationReviewRows[0]?.id ?? visibleStudentConversations[0]?.id ?? ""
+          : visibleStudentConversations[0]?.id ?? "",
+    [
+      activeClassId,
+      activeTab,
+      conversationReviewRows,
+      selectedConversationClassId,
+      selectedConversationId,
+      visibleStudentConversations
+    ]
+  );
+  const selectedConversation = useMemo(
+    () => visibleStudentConversations.find((conversation) => conversation.id === activeSelectedConversationId) ?? null,
+    [activeSelectedConversationId, visibleStudentConversations]
   );
   const conversationStudentOptions = useMemo(
     () =>
@@ -509,39 +535,59 @@ export function TeacherClassManager() {
       conversationTopicFilter
     ]
   );
-  const selectedConversationReviewRow =
-    filteredConversationReviewRows.find((conversation) => conversation.id === activeSelectedConversationId) ??
-    conversationReviewRows.find((conversation) => conversation.id === activeSelectedConversationId) ??
-    filteredConversationReviewRows[0] ??
-    conversationReviewRows[0] ??
-    null;
-  const selectedConversationRosterRow =
-    rosterRows.find((row) => row.student.id === selectedConversationReviewRow?.studentId) ??
-    rosterRows.find((row) => row.student.email.trim().toLowerCase() === selectedConversationReviewRow?.studentEmail) ??
-    null;
-  const transcriptMessages =
-    selectedConversationReviewRow?.id === activeSelectedConversationId
-      ? conversationMessages.filter((message) => message.role === "student" || message.role === "assistant")
-      : [];
-  const conversationMetrics = classConversationMetrics ?? buildConversationMetrics(conversationReviewRows, rosterRows);
-  const conversationSourceRows = buildConversationSourceRows(
-    selectedConversationReviewRow?.sourceAudit,
-    transcriptMessages,
-    materials
+  const selectedConversationReviewRow = useMemo(
+    () =>
+      filteredConversationReviewRows.find((conversation) => conversation.id === activeSelectedConversationId) ??
+      conversationReviewRows.find((conversation) => conversation.id === activeSelectedConversationId) ??
+      filteredConversationReviewRows[0] ??
+      conversationReviewRows[0] ??
+      null,
+    [activeSelectedConversationId, conversationReviewRows, filteredConversationReviewRows]
+  );
+  const selectedConversationRosterRow = useMemo(
+    () =>
+      rosterRows.find((row) => row.student.id === selectedConversationReviewRow?.studentId) ??
+      rosterRows.find((row) => row.student.email.trim().toLowerCase() === selectedConversationReviewRow?.studentEmail) ??
+      null,
+    [rosterRows, selectedConversationReviewRow?.studentEmail, selectedConversationReviewRow?.studentId]
+  );
+  const transcriptMessages = useMemo(
+    () =>
+      selectedConversationReviewRow?.id === activeSelectedConversationId
+        ? conversationMessages.filter((message) => message.role === "student" || message.role === "assistant")
+        : [],
+    [activeSelectedConversationId, conversationMessages, selectedConversationReviewRow?.id]
+  );
+  const conversationMetrics = useMemo(
+    () => classConversationMetrics ?? buildConversationMetrics(conversationReviewRows, rosterRows),
+    [classConversationMetrics, conversationReviewRows, rosterRows]
+  );
+  const conversationSourceRows = useMemo(
+    () => buildConversationSourceRows(selectedConversationReviewRow?.sourceAudit, transcriptMessages, materials),
+    [materials, selectedConversationReviewRow?.sourceAudit, transcriptMessages]
   );
   const hasSourceWarning = Boolean(selectedConversationReviewRow?.sourceAudit.noSourceUsedWarning);
   const isSourceAuditExpanded = Boolean(
     selectedConversationReviewRow && expandedSourceConversationId === selectedConversationReviewRow.id
   );
-  const visibleConversationSourceRows = isSourceAuditExpanded ? conversationSourceRows : conversationSourceRows.slice(0, 3);
-  const conversationCitationCount = conversationSourceRows.reduce((sum, source) => sum + source.citationCount, 0);
+  const visibleConversationSourceRows = useMemo(
+    () => (isSourceAuditExpanded ? conversationSourceRows : conversationSourceRows.slice(0, 3)),
+    [conversationSourceRows, isSourceAuditExpanded]
+  );
+  const conversationCitationCount = useMemo(
+    () => conversationSourceRows.reduce((sum, source) => sum + source.citationCount, 0),
+    [conversationSourceRows]
+  );
   const selectedConversationPrivateNote = selectedConversationReviewRow
     ? conversationNotesById[selectedConversationReviewRow.id] ?? selectedConversationReviewRow.review.privateNote
     : "";
   const isConversationNoteHighlighted = Boolean(
     selectedConversationReviewRow && highlightedNoteConversationId === selectedConversationReviewRow.id
   );
-  const studentTimelineBars = buildStudentTimelineBars(selectedConversationRosterRow, conversationReviewRows);
+  const studentTimelineBars = useMemo(
+    () => buildStudentTimelineBars(selectedConversationRosterRow, conversationReviewRows),
+    [conversationReviewRows, selectedConversationRosterRow]
+  );
   const displayedStudentLearningProfile =
     selectedStudentLearningProfile?.studentEmail === selectedStudent?.email.trim().toLowerCase()
       ? selectedStudentLearningProfile
@@ -550,20 +596,22 @@ export function TeacherClassManager() {
     () => materials.filter((material) => knowledgeFilterMatchesMaterial(knowledgeFilter, material)),
     [knowledgeFilter, materials]
   );
-  const selectedMaterial = useMemo(() => {
-    if (filteredMaterials.some((material) => material.id === selectedMaterialId)) {
-      return filteredMaterials.find((material) => material.id === selectedMaterialId) ?? null;
-    }
-
-    if (materials.some((material) => material.id === selectedMaterialId)) {
-      return materials.find((material) => material.id === selectedMaterialId) ?? null;
-    }
-
-    return filteredMaterials[0] ?? materials[0] ?? null;
-  }, [filteredMaterials, materials, selectedMaterialId]);
-  const selectedMaterialSettings = selectedMaterial
-    ? sourceSettingsByMaterialId[selectedMaterial.id] ?? defaultKnowledgeSourceSettings(selectedMaterial)
-    : null;
+  const selectedMaterial = useMemo(
+    () =>
+      filteredMaterials.find((material) => material.id === selectedMaterialId) ??
+      materials.find((material) => material.id === selectedMaterialId) ??
+      filteredMaterials[0] ??
+      materials[0] ??
+      null,
+    [filteredMaterials, materials, selectedMaterialId]
+  );
+  const selectedMaterialSettings = useMemo(
+    () =>
+      selectedMaterial
+        ? sourceSettingsByMaterialId[selectedMaterial.id] ?? defaultKnowledgeSourceSettings(selectedMaterial)
+        : null,
+    [selectedMaterial, sourceSettingsByMaterialId]
+  );
   const selectedMaterialDetail = selectedMaterial ? materialDetailsById[selectedMaterial.id] ?? null : null;
   const selectedClassCode = selectedClass?.joinCode ?? "";
   const selectedAnswerPolicy = normalizeAnswerPolicySettings(selectedClass?.answerPolicy);
