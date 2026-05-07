@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import re
 import json
@@ -12,7 +13,7 @@ import httpx
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from .material_visibility import is_student_visible_ready_material
@@ -53,6 +54,13 @@ if should_load_dotenv_local():
 
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini"
 TOKENIZE_RE = re.compile(r"[^a-z0-9\s-]")
+MAX_CHAT_MESSAGES_PER_REQUEST = 40
+MAX_MESSAGE_CONTENT_CHARS = 20000
+MAX_TOTAL_MESSAGE_CHARS = 100000
+MAX_MODEL_RESPONSE_TOKENS = 8000
+MAX_MATERIAL_UPLOAD_BYTES = 500 * 1024 * 1024
+MAX_EXTRACTED_TEXT_CHARS = 250000
+UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 
 app = FastAPI(title="Chandra API")
 _LANGGRAPH_OPENROUTER_CLIENT: Any | None = None
@@ -88,33 +96,33 @@ async def close_shared_http_clients() -> None:
 
 
 class ChatMessage(BaseModel):
-    id: str
-    role: str
-    content: str
-    createdAt: str
+    id: str = Field(min_length=1, max_length=200)
+    role: str = Field(max_length=32)
+    content: str = Field(max_length=MAX_MESSAGE_CONTENT_CHARS)
+    createdAt: str = Field(max_length=80)
 
 
 class ChatRequest(BaseModel):
-    courseId: Optional[str] = None
+    courseId: Optional[str] = Field(default=None, max_length=200)
     modelId: Optional[str] = None
-    temperature: Optional[float] = None
-    maxTokens: Optional[int] = None
-    reasoningEffort: Optional[str] = None
-    messages: list[ChatMessage]
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    maxTokens: Optional[int] = Field(default=None, ge=1, le=MAX_MODEL_RESPONSE_TOKENS)
+    reasoningEffort: Optional[str] = Field(default=None, max_length=20)
+    messages: list[ChatMessage] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES_PER_REQUEST)
 
 
 class LangGraphChatRequest(BaseModel):
-    classId: str
-    professorId: str
-    professorName: Optional[str] = None
-    modelId: str
-    temperature: Optional[float] = None
-    maxTokens: Optional[int] = None
-    reasoningEffort: Optional[str] = None
+    classId: str = Field(min_length=1, max_length=200)
+    professorId: str = Field(min_length=1, max_length=200)
+    professorName: Optional[str] = Field(default=None, max_length=200)
+    modelId: str = Field(min_length=1, max_length=200)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    maxTokens: Optional[int] = Field(default=None, ge=1, le=MAX_MODEL_RESPONSE_TOKENS)
+    reasoningEffort: Optional[str] = Field(default=None, max_length=20)
     answerPolicy: Optional[dict[str, Any]] = None
     sourceUsage: Optional[dict[str, Any]] = None
     studentLearningProfileContext: Optional[dict[str, Any]] = None
-    messages: list[dict[str, Any]]
+    messages: list[dict[str, Any]] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES_PER_REQUEST)
 
 
 @app.get("/health")
@@ -131,7 +139,7 @@ def authorize_internal_backend_request(x_chandra_internal_secret: Optional[str])
             detail="BACKEND_SHARED_SECRET is required before the tutor backend can accept internal requests.",
         )
 
-    if x_chandra_internal_secret != expected_secret:
+    if not hmac.compare_digest(x_chandra_internal_secret or "", expected_secret):
         raise HTTPException(status_code=403, detail="Invalid backend shared secret.")
 
 
@@ -141,6 +149,7 @@ async def langgraph_chat(
     x_chandra_internal_secret: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     authorize_internal_backend_request(x_chandra_internal_secret)
+    validate_message_payload_size(request.messages)
 
     try:
         from backend.agent.graph import run_pdf_rag_agent
@@ -172,6 +181,7 @@ async def langgraph_chat_stream(
     x_chandra_internal_secret: Optional[str] = Header(default=None),
 ) -> StreamingResponse:
     authorize_internal_backend_request(x_chandra_internal_secret)
+    validate_message_payload_size(request.messages)
 
     try:
         from backend.agent.graph import run_pdf_rag_agent_stream
@@ -238,9 +248,11 @@ async def extract_material(
     classId: str = Form(...),
     file: UploadFile = File(...),
     authorization: Optional[str] = Header(default=None),
+    content_length: Optional[int] = Header(default=None),
 ) -> dict[str, str]:
     authorize_class_teacher(classId, authorization)
-    contents = await file.read()
+    enforce_upload_content_length(content_length)
+    contents = await read_upload_file_with_limit(file)
 
     file_name = file.filename or "material"
     is_pdf = file.content_type == "application/pdf" or file_name.lower().endswith(".pdf")
@@ -251,6 +263,7 @@ async def extract_material(
         text = contents.decode("utf-8", errors="ignore")
 
     text = text.strip()
+    enforce_extracted_text_size(text)
 
     if not text:
         raise HTTPException(status_code=400, detail="No searchable text was found in that file.")
@@ -260,6 +273,7 @@ async def extract_material(
 
 @app.post("/api/chat")
 async def chat(request: ChatRequest, authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
+    validate_message_payload_size(request.messages)
     scope = authorize_tutor_chat_request(request, authorization)
     course_id = scope["classId"]
     latest_student_message = next(
@@ -420,6 +434,53 @@ def bearer_token(authorization: Optional[str]) -> str:
         return ""
 
     return authorization.removeprefix("Bearer ").strip()
+
+
+def validate_message_payload_size(messages: list[Any]) -> None:
+    total_characters = 0
+
+    for message in messages:
+        content = ""
+
+        if isinstance(message, ChatMessage):
+            content = message.content
+        elif isinstance(message, dict):
+            content = str(message.get("content") or "")
+
+        if len(content) > MAX_MESSAGE_CONTENT_CHARS:
+            raise HTTPException(status_code=413, detail="A chat message is too large.")
+
+        total_characters += len(content)
+
+    if total_characters > MAX_TOTAL_MESSAGE_CHARS:
+        raise HTTPException(status_code=413, detail="The chat request is too large.")
+
+
+def enforce_upload_content_length(content_length: Optional[int]) -> None:
+    if content_length is not None and content_length > MAX_MATERIAL_UPLOAD_BYTES + UPLOAD_READ_CHUNK_BYTES:
+        raise HTTPException(status_code=413, detail="Material uploads must be 500 MB or smaller.")
+
+
+async def read_upload_file_with_limit(file: UploadFile) -> bytes:
+    contents = bytearray()
+
+    while True:
+        chunk = await file.read(UPLOAD_READ_CHUNK_BYTES)
+
+        if not chunk:
+            break
+
+        contents.extend(chunk)
+
+        if len(contents) > MAX_MATERIAL_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Material uploads must be 500 MB or smaller.")
+
+    return bytes(contents)
+
+
+def enforce_extracted_text_size(text: str) -> None:
+    if len(text) > MAX_EXTRACTED_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail="Extracted material text is too large.")
 
 
 def extract_pdf_text(contents: bytes) -> str:

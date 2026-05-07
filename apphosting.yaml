@@ -109,6 +109,10 @@ env:
     secret: LEARNING_PROFILE_UPDATE_SECRET
     availability:
       - RUNTIME
+  - variable: TEACHER_SIGNUP_TOKEN
+    secret: TEACHER_SIGNUP_TOKEN
+    availability:
+      - RUNTIME
 
   - variable: GEMINI_API_KEY
     secret: GEMINI_API_KEY

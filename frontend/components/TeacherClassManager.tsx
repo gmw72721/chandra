@@ -367,6 +367,9 @@ export function TeacherClassManager() {
     classCode: string;
     status: "copied" | "failed";
   } | null>(null);
+  const [teacherInviteUrl, setTeacherInviteUrl] = useState("");
+  const [teacherInviteExpiresAt, setTeacherInviteExpiresAt] = useState("");
+  const [teacherInviteCopyStatus, setTeacherInviteCopyStatus] = useState<"" | "copied" | "failed">("");
   const [loadedTeacherId, setLoadedTeacherId] = useState("");
   const [loadedDetailsClassId, setLoadedDetailsClassId] = useState("");
   const [isSavingClass, setIsSavingClass] = useState(false);
@@ -374,6 +377,7 @@ export function TeacherClassManager() {
   const [isSavingStudent, setIsSavingStudent] = useState(false);
   const [isSavingMaterial, setIsSavingMaterial] = useState(false);
   const [isSavingThemePreference, setIsSavingThemePreference] = useState(false);
+  const [isCreatingTeacherInvite, setIsCreatingTeacherInvite] = useState(false);
   const [isClassDialogOpen, setIsClassDialogOpen] = useState(false);
   const [isStudentDialogOpen, setIsStudentDialogOpen] = useState(false);
   const [isKnowledgeDialogOpen, setIsKnowledgeDialogOpen] = useState(false);
@@ -1247,6 +1251,62 @@ export function TeacherClassManager() {
       setInviteLinkCopyResult({ classCode: selectedClassCode, status: "copied" });
     } catch {
       setInviteLinkCopyResult({ classCode: selectedClassCode, status: "failed" });
+    }
+  }
+
+  async function createTeacherInviteLink() {
+    if (!user) {
+      return;
+    }
+
+    setError("");
+    setTeacherInviteCopyStatus("");
+    setIsCreatingTeacherInvite(true);
+
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch(apiUrl("/api/teacher-invites"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      const data = (await response.json()) as {
+        error?: string;
+        expiresAt?: string;
+        inviteUrl?: string;
+      };
+
+      if (!response.ok || !data.inviteUrl) {
+        throw new Error(data.error ?? "Teacher invite creation failed.");
+      }
+
+      setTeacherInviteUrl(data.inviteUrl);
+      setTeacherInviteExpiresAt(data.expiresAt ?? "");
+
+      try {
+        await copyTextToClipboard(data.inviteUrl);
+        setTeacherInviteCopyStatus("copied");
+      } catch {
+        setTeacherInviteCopyStatus("failed");
+      }
+    } catch (caughtError) {
+      setError(formatClassError(caughtError, "Teacher invite creation failed."));
+    } finally {
+      setIsCreatingTeacherInvite(false);
+    }
+  }
+
+  async function copyTeacherInviteLink() {
+    if (!teacherInviteUrl) {
+      return;
+    }
+
+    try {
+      await copyTextToClipboard(teacherInviteUrl);
+      setTeacherInviteCopyStatus("copied");
+    } catch {
+      setTeacherInviteCopyStatus("failed");
     }
   }
 
@@ -2907,6 +2967,50 @@ export function TeacherClassManager() {
                               ))}
                             </div>
                           </div>
+                        </section>
+
+                        <section className="settings-card" aria-labelledby="settings-teacher-invites">
+                          <h3 id="settings-teacher-invites">Teacher Invites</h3>
+                          <p>Create a one-use link for another teacher to join Chandra.</p>
+                          <div className="teacher-invite-actions">
+                            <button
+                              className="teacher-action-button"
+                              disabled={isCreatingTeacherInvite}
+                              type="button"
+                              onClick={createTeacherInviteLink}
+                            >
+                              <LinkIcon />
+                              {isCreatingTeacherInvite ? "Creating" : "Create teacher invite"}
+                            </button>
+                            <button
+                              className="teacher-action-button"
+                              disabled={!teacherInviteUrl}
+                              type="button"
+                              onClick={copyTeacherInviteLink}
+                            >
+                              <LinkIcon />
+                              {teacherInviteCopyStatus === "copied"
+                                ? "Copied"
+                                : teacherInviteCopyStatus === "failed"
+                                  ? "Copy failed"
+                                  : "Copy link"}
+                            </button>
+                          </div>
+                          {teacherInviteUrl ? (
+                            <div className="teacher-invite-url-box">
+                              <input aria-label="Teacher invite URL" readOnly value={teacherInviteUrl} />
+                              <span>
+                                Expires{" "}
+                                {teacherInviteExpiresAt
+                                  ? new Date(teacherInviteExpiresAt).toLocaleDateString("en-US", {
+                                      month: "short",
+                                      day: "numeric",
+                                      year: "numeric"
+                                    })
+                                  : "in 30 days"}
+                              </span>
+                            </div>
+                          ) : null}
                         </section>
 
                         <section className="settings-card compact-settings-card" aria-labelledby="settings-tutor-behavior">

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import {
   TutorKnowledgeHttpError,
-  authorizeClassTeacher
+  assertTutorKnowledgeTextWithinLimit,
+  authorizeClassTeacher,
+  validateTutorKnowledgeFile
 } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
@@ -22,6 +24,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Upload a material file." }, { status: 400 });
     }
 
+    validateTutorKnowledgeFile(file);
     const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
     const buffer = Buffer.from(await file.arrayBuffer());
 
@@ -31,18 +34,22 @@ export async function POST(request: Request) {
 
       try {
         const result = await parser.getText();
+        const text = result.text.trim();
+        assertTutorKnowledgeTextWithinLimit(text, "Extracted material text");
         return NextResponse.json({
           fileName: file.name,
-          text: result.text.trim()
+          text
         });
       } finally {
         await parser.destroy();
       }
     }
 
+    const text = buffer.toString("utf8").trim();
+    assertTutorKnowledgeTextWithinLimit(text, "Extracted material text");
     return NextResponse.json({
       fileName: file.name,
-      text: buffer.toString("utf8").trim()
+      text
     });
   } catch (caughtError) {
     if (caughtError instanceof TutorKnowledgeHttpError) {

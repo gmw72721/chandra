@@ -207,7 +207,7 @@ test("teacher roster active status uses Firebase presence and combines activity 
 });
 
 test("conversation Firestore rules are class-scoped and server-write-only", () => {
-  const rules = readFileSync(join(repoRoot, "firebase/firestore.rules"), "utf8");
+  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
 
   assert.match(rules, /match \/conversations\/\{conversationId\}/);
   assert.match(rules, /match \/conversationReviews\/\{conversationId\}/);

@@ -63,7 +63,7 @@ test("student classId scopes vector retrieval", () => {
 test("material upload progress is written to professor-scoped job documents", () => {
   const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/materials/route.ts"), "utf8");
-  const rulesSource = readFileSync(join(repoRoot, "firebase/firestore.rules"), "utf8");
+  const rulesSource = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
 
   assert.match(routeSource, /formData\.get\("jobId"\)/);
   assert.match(source, /createMaterialJobProgressWriter/);

@@ -5143,6 +5143,30 @@ button.student-row[aria-pressed="true"] {
   gap: 10px;
 }
 
+.teacher-invite-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.teacher-invite-url-box {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.teacher-invite-url-box input {
+  width: 100%;
+  min-width: 0;
+  font-size: 0.78rem;
+}
+
+.teacher-invite-url-box span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 .settings-card h3 {
   margin: 0;
   color: var(--ink);

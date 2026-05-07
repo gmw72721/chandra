@@ -47,8 +47,23 @@ const supportedContentTypes = new Set([
   "text/x-markdown"
 ]);
 const embeddingConcurrencyLimit = 4;
+const maxTutorKnowledgeFileBytes = 500 * 1024 * 1024;
+const maxTutorKnowledgePastedTextCharacters = 250000;
 
 export { TutorKnowledgeHttpError } from "./tutor-knowledge-errors";
+
+export function validateTutorKnowledgeFile(file: File) {
+  validateFile(file);
+}
+
+export function assertTutorKnowledgeTextWithinLimit(text: string, label = "Tutor knowledge text") {
+  if (text.length > maxTutorKnowledgePastedTextCharacters) {
+    throw new TutorKnowledgeHttpError(
+      `${label} is too large. Keep pasted text under ${maxTutorKnowledgePastedTextCharacters.toLocaleString()} characters.`,
+      413
+    );
+  }
+}
 
 type MaterialJobStep =
   | "upload_received"
@@ -762,6 +777,7 @@ async function buildTutorKnowledgeIngestion({
   title: string;
   updateProgress?: (progress: MaterialJobProgressUpdate) => Promise<void>;
 }) {
+  assertTutorKnowledgeTextWithinLimit(pastedText);
   await updateProgress?.({
     detail: file
       ? "Reading the uploaded file and extracting usable text."
@@ -995,6 +1011,13 @@ function validateFile(file: File) {
 
   if (!supportedExtension || !supportedContentType) {
     throw new TutorKnowledgeHttpError("Only PDF, TXT, MD, and CSV files are supported.", 400);
+  }
+
+  if (file.size > maxTutorKnowledgeFileBytes) {
+    throw new TutorKnowledgeHttpError(
+      `Material files must be ${Math.floor(maxTutorKnowledgeFileBytes / 1024 / 1024)} MB or smaller.`,
+      413
+    );
   }
 }
 

@@ -112,7 +112,7 @@ test("teacher-only insight routes and Firestore rules are server owned", () => {
     join(repoRoot, "frontend/app/api/classes/[classId]/insights/feedback/route.ts"),
     "utf8"
   );
-  const rules = readFileSync(join(repoRoot, "firebase/firestore.rules"), "utf8");
+  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
 
   assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
   assert.match(routeSource, /updateClassTeacherInsights/);

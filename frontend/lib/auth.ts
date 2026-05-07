@@ -75,18 +75,28 @@ export async function signUpWithRole({
   email,
   password,
   role,
-  classId
+  classId,
+  teacherInviteToken
 }: {
   displayName: string;
   email: string;
   password: string;
   role: AccountRole;
   classId?: string;
+  teacherInviteToken?: string;
 }) {
   assertFirebaseReady();
 
   const credential = await createUserWithEmailAndPassword(auth!, email, password);
   await updateProfile(credential.user, { displayName });
+
+  if (role === "teacher") {
+    return createTeacherProfile({
+      displayName,
+      teacherInviteToken,
+      user: credential.user
+    });
+  }
 
   const profile: UserProfile = {
     uid: credential.user.uid,
@@ -119,17 +129,27 @@ export async function createRoleProfile({
   displayName,
   role,
   user,
-  classId
+  classId,
+  teacherInviteToken
 }: {
   displayName: string;
   role: AccountRole;
   user: User;
   classId?: string;
+  teacherInviteToken?: string;
 }) {
   assertFirebaseReady();
 
   const cleanDisplayName = displayName.trim() || user.displayName || user.email || "Chandra user";
   await updateProfile(user, { displayName: cleanDisplayName });
+
+  if (role === "teacher") {
+    return createTeacherProfile({
+      displayName: cleanDisplayName,
+      teacherInviteToken,
+      user
+    });
+  }
 
   const profile: UserProfile = {
     uid: user.uid,
@@ -335,4 +355,34 @@ async function joinStudentClass({
   }
 
   return data.classId ?? "";
+}
+
+async function createTeacherProfile({
+  displayName,
+  teacherInviteToken,
+  user
+}: {
+  displayName: string;
+  teacherInviteToken?: string;
+  user: User;
+}) {
+  const token = await user.getIdToken();
+  const response = await fetch("/api/teacher-signup", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      displayName,
+      inviteToken: teacherInviteToken ?? ""
+    })
+  });
+  const data = (await response.json()) as { profile?: UserProfile; error?: string };
+
+  if (!response.ok || !data.profile) {
+    throw new Error(data.error ?? "Teacher signup failed.");
+  }
+
+  return data.profile;
 }

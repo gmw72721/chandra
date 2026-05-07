@@ -112,7 +112,7 @@ test("teacher-only learning profile routes enforce authorization", () => {
     join(repoRoot, "frontend/app/api/classes/[classId]/students/[studentId]/learning-profile/route.ts"),
     "utf8"
   );
-  const rules = readFileSync(join(repoRoot, "firebase/firestore.rules"), "utf8");
+  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
 
   assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
   assert.match(routeSource, /updateOneStudentLearningProfile/);

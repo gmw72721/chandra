@@ -37,6 +37,9 @@ const STUDENT_TUTOR_BACKEND_UNAVAILABLE_MESSAGE =
   "Chandra is having trouble connecting. Try again in a moment.";
 const STUDENT_TUTOR_RESPONSE_FAILED_MESSAGE =
   "Chandra is having trouble responding right now. Try again in a moment.";
+const maxChatMessagesPerRequest = 40;
+const maxChatMessageCharacters = 12000;
+const maxChatRequestCharacters = 60000;
 
 const safeDocumentIdSchema = z
   .string()
@@ -53,7 +56,7 @@ const chatRequestSchema = z.object({
     z.object({
       id: safeDocumentIdSchema,
       role: z.enum(["student", "teacher", "assistant", "system"]),
-      content: z.string(),
+      content: z.string().max(maxChatMessageCharacters),
       createdAt: z.string(),
       langGraphTrace: z
         .object({
@@ -117,7 +120,17 @@ const chatRequestSchema = z.object({
         ])
         .optional()
     })
-  )
+  ).min(1).max(maxChatMessagesPerRequest)
+}).superRefine((value, context) => {
+  const totalCharacters = value.messages.reduce((total, message) => total + message.content.length, 0);
+
+  if (totalCharacters > maxChatRequestCharacters) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Chat request is too large.",
+      path: ["messages"]
+    });
+  }
 });
 
 export async function POST(request: Request) {

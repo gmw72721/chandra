@@ -78,6 +78,7 @@ service cloud.firestore {
 
     function validProfileCreate(userId) {
       return validProfileBase(userId, request.resource.data)
+        && request.resource.data.role == "student"
         && request.resource.data.createdAt == request.time;
     }
 
@@ -369,6 +370,10 @@ service cloud.firestore {
         && request.auth.uid == userId
         && validPresence(userId);
       allow delete: if false;
+    }
+
+    match /teacherInvites/{inviteId} {
+      allow read, write: if false;
     }
 
     match /classes/{classId} {
