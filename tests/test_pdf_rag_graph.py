@@ -9,24 +9,26 @@ from typing import Any
 
 import pytest
 
-from agent.graph import (
+from backend.agent.graph import (
     build_multimodal_final_messages,
     diagnose_search_result,
+    forced_initial_search_tool_call,
     run_pdf_rag_agent,
     run_pdf_rag_agent_stream,
     structured_tutor_output_from_answer,
 )
-from agent.tools import normalize_pdf_page_result
-from retrieval.pdf_page_assets import (
+from backend.agent.tools import normalize_pdf_page_result
+from backend.retrieval.pdf_page_assets import (
     deduplicate_page_ranges,
     extract_printed_page_number_from_text,
     fetch_or_render_pdf_pages,
     render_page_images,
 )
-from retrieval.pdf_retriever import (
+from backend.retrieval.pdf_retriever import (
     build_query_features,
     equation_overlap_score,
     equation_tokens_from_text,
+    exact_search_problem_numbers,
     hybrid_page_score,
     problem_numbers_from_text,
     section_related_top_k,
@@ -1433,6 +1435,68 @@ def test_textbook_section_query_prefers_reading_pages_generically() -> None:
     assert textbook_score > worksheet_score
 
 
+def test_section_problem_locator_prefers_composite_exercise_item() -> None:
+    query_features = build_query_features("problem 3 in section 5 so section 5.3")
+    wrong_section_score = hybrid_page_score(
+        query_features,
+        material_type="reading",
+        page_start=199,
+        page_end=199,
+        searchable_text=(
+            "5.1. Metric Spaces and Continuous Functions. "
+            "The discrete metric is d(x,y)=1 if x!=y. (5.3) Thus no two distinct points are close."
+        ),
+        vector_score=0.99,
+    )
+    exact_exercise_score = hybrid_page_score(
+        query_features,
+        material_type="reading",
+        page_start=252,
+        page_end=252,
+        searchable_text=(
+            "Exercises. 5.3. Give an example of a set X and a function d : X x X -> R "
+            "that is symmetric and satisfies the triangle inequality."
+        ),
+        vector_score=0.65,
+    )
+
+    assert exact_search_problem_numbers(query_features) == {"5.3"}
+    assert exact_exercise_score > wrong_section_score
+
+
+def test_section_problem_diagnostic_accepts_composite_exercise_match() -> None:
+    diagnostic = diagnose_search_result(
+        "problem 3 in section 5 so section 5.3",
+        [
+            {
+                "chunk_text": (
+                    "Exercises. 5.3. Give an example of a set X and a function d : X x X -> R "
+                    "that is symmetric and satisfies the triangle inequality."
+                ),
+                "doc_id": "acme",
+                "material_type": "reading",
+                "page_end": 252,
+                "page_start": 252,
+                "section": "",
+                "source_pdf_path": "data/rendered/source_53d1cee85592d906.pdf",
+                "title": "ACME Textbook",
+            }
+        ],
+        "problem 3 in section 5 so section 5.3",
+    )
+
+    assert diagnostic is None
+
+
+def test_numbered_section_problem_forces_exact_search_not_section_reading() -> None:
+    tool_call = forced_initial_search_tool_call(
+        {"messages": [{"role": "user", "content": "problem 3 in section 5 so section 5.3"}]}
+    )
+
+    assert tool_call is not None
+    assert tool_call["id"] == "forced_exact_problem_search"
+
+
 def test_equation_tokens_expand_math_notation_equivalents() -> None:
     query_tokens = equation_tokens_from_text(r"\lim \sqrt{x} + \int derivative")
     ocr_tokens = equation_tokens_from_text("limit square root of x plus integral differentiate")
@@ -1577,8 +1641,8 @@ async def test_pdf_source_is_resolved_once_for_multiple_ranges_from_same_pdf(
         image.write_bytes(b"image")
         return [str(image)]
 
-    monkeypatch.setattr("retrieval.pdf_page_assets.resolve_pdf_path", fake_resolve_pdf_path)
-    monkeypatch.setattr("retrieval.pdf_page_assets.render_page_images", fake_render_page_images)
+    monkeypatch.setattr("backend.retrieval.pdf_page_assets.resolve_pdf_path", fake_resolve_pdf_path)
+    monkeypatch.setattr("backend.retrieval.pdf_page_assets.render_page_images", fake_render_page_images)
 
     assets = await fetch_or_render_pdf_pages(
         [
@@ -1679,10 +1743,12 @@ def test_final_answer_instruction_is_strict(tmp_path: Path) -> None:
     assert "Use retrieval_diagnostics to repair weak searches" in instruction
     assert "found problem page only, missing method" in instruction
     assert "sqrt/square root" in instruction
-    assert "If the student only asks where a task, question, exercise, or problem is" in instruction
+    assert "If the student explicitly asks where, which page, find, identify, or locate a task, question, exercise, or problem" in instruction
     assert "locate it only; do not ask a follow-up" in instruction
     assert "If the student asks for the answer, final answer" in instruction
     assert "do not continue completing their exact task" in instruction
+    assert "treat that as source lookup, not solving help" in instruction
+    assert "only supplies a specific problem/exercise/page/title reference without asking for solving help" in instruction
     assert "Source-backed help does not override the attempt-first rule" in instruction
     assert "first ask what they have tried or where they are stuck" in instruction
     assert "do not provide task-specific starting points" in instruction
@@ -1691,6 +1757,8 @@ def test_final_answer_instruction_is_strict(tmp_path: Path) -> None:
     assert "a page that only locates the task or lists practice items is not enough" in instruction
     assert "For conceptual method questions" in instruction
     assert "quote the relevant passage exactly" in instruction
+    assert "quote the full visible problem statement exactly" in instruction
+    assert "bare references like `problem 3.4`" in instruction
     assert "generic copyright grounds" in instruction
     assert "solving help or method teaching" in instruction
     assert "verify it before affirming it" in instruction
@@ -2139,3 +2207,308 @@ async def test_trig_solving_help_gathers_problem_and_textbook_support(tmp_path: 
         "pageNumber": 615,
         "title": "Calculus Textbook",
     }
+
+
+@pytest.mark.asyncio
+async def test_exact_exercise_solving_help_searches_problem_then_context(tmp_path: Path) -> None:
+    exercise_image = tmp_path / "acme_p98.png"
+    context_image = tmp_path / "acme_p97.png"
+    exercise_image.write_bytes(b"exercise page")
+    context_image.write_bytes(b"context page")
+    question = "Help me prove Exercise 2.14: Given the setup of Exercise 2.13, prove the rank inequalities."
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_exact_exercise",
+                        "type": "function",
+                        "function": {
+                            "name": "search_pdf_pages",
+                            "arguments": json.dumps(
+                                {
+                                    "query": "find Exercise 2.14 Given setup Exercise 2.13 rank inequalities",
+                                    "student_reason": "Checking exact exercise page",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_context",
+                        "type": "function",
+                        "function": {
+                            "name": "search_pdf_pages",
+                            "arguments": json.dumps(
+                                {
+                                    "query": "rank nullity theorem composition linear maps proof context",
+                                    "student_reason": "Finding relevant proof context pages",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "content": (
+                    "Use Exercise 2.14 on page 98 together with the rank-nullity context on page 97. "
+                    "Hint: compare the range of KL with the ranges of K and L first."
+                ),
+                "tool_calls": [],
+            },
+        ]
+    )
+    retriever = FakeRetriever(
+        [
+            [
+                {
+                    "doc_id": "acme",
+                    "title": "ACME Textbook",
+                    "page_start": 98,
+                    "page_end": 98,
+                    "section": "Exercises",
+                    "score": 0.99,
+                    "chunk_text": (
+                        "2.14. Given the setup of Exercise 2.13, prove the following inequalities: "
+                        "rank(KL) <= min(rank(L), rank(K))."
+                    ),
+                    "source_pdf_path": "data/rendered/source_53d1cee85592d906.pdf",
+                    "material_type": "reading",
+                }
+            ],
+            [
+                {
+                    "doc_id": "acme",
+                    "title": "ACME Textbook",
+                    "page_start": 97,
+                    "page_end": 97,
+                    "section": "Linear Transformations and Matrices",
+                    "score": 0.94,
+                    "chunk_text": "Rank-nullity theorem and setup for Exercise 2.13.",
+                    "source_pdf_path": "data/rendered/source_53d1cee85592d906.pdf",
+                    "material_type": "reading",
+                }
+            ],
+        ]
+    )
+
+    async def page_asset_builder(pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "doc_id": page["doc_id"],
+                "title": page["title"],
+                "page_start": page["page_start"],
+                "page_end": page["page_end"],
+                "printed_page_start": page["page_start"],
+                "printed_page_end": page["page_end"],
+                "score": page["score"],
+                "material_type": page["material_type"],
+                "images": [str(exercise_image if page["page_start"] == 98 else context_image)],
+                "citation_label": f"{page['title']}, page {page['page_start']}",
+            }
+            for page in pages
+        ]
+
+    response = await run_pdf_rag_agent(
+        class_id="class-acme",
+        messages=[{"role": "user", "content": question}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        page_asset_builder=page_asset_builder,
+        professor_id="teacher-1",
+        retriever=retriever,
+    )
+
+    assert [call["query"] for call in retriever.calls] == [
+        "find Exercise 2.14 Given setup Exercise 2.13 rank inequalities",
+        "rank nullity theorem composition linear maps proof context",
+    ]
+    assert response["langGraphTrace"]["stages"] == [
+        "openrouter_agent",
+        "search_pdf_pages",
+        "fetch_or_render_pdf_pages",
+        "openrouter_answer_with_pages",
+        "search_pdf_pages",
+        "fetch_or_render_pdf_pages",
+        "openrouter_answer_with_pages",
+    ]
+    assert [page["pageStart"] for page in response["langGraphTrace"]["selectedPages"]] == [98, 97]
+    assert "rank-nullity context" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_passage_lookup_verifies_exact_exercise_page_before_quote(tmp_path: Path) -> None:
+    image = tmp_path / "acme_p98.png"
+    image.write_bytes(b"exercise page")
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_quote",
+                        "type": "function",
+                        "function": {
+                            "name": "search_pdf_pages",
+                            "arguments": json.dumps(
+                                {
+                                    "query": "read quote Exercise 2.14 Given setup Exercise 2.13",
+                                    "student_reason": "Checking exact exercise page",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "content": (
+                    "Exercise 2.14 says to prove two rank inequalities from the setup of Exercise 2.13 "
+                    "on page 98 of ACME Textbook."
+                ),
+                "tool_calls": [],
+            },
+        ]
+    )
+    retriever = FakeRetriever(
+        [
+            {
+                "doc_id": "acme",
+                "title": "ACME Textbook",
+                "page_start": 98,
+                "page_end": 98,
+                "section": "Exercises",
+                "score": 0.99,
+                "chunk_text": (
+                    "2.14. Given the setup of Exercise 2.13, prove the following inequalities: "
+                    "(i) rank(KL) <= min(rank(L), rank(K))."
+                ),
+                "source_pdf_path": "data/rendered/source_53d1cee85592d906.pdf",
+                "material_type": "reading",
+            }
+        ]
+    )
+
+    async def page_asset_builder(pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "doc_id": page["doc_id"],
+                "title": page["title"],
+                "page_start": page["page_start"],
+                "page_end": page["page_end"],
+                "printed_page_start": page["page_start"],
+                "printed_page_end": page["page_end"],
+                "score": page["score"],
+                "material_type": page["material_type"],
+                "images": [str(image)],
+                "citation_label": f"{page['title']}, page {page['page_start']}",
+            }
+            for page in pages
+        ]
+
+    response = await run_pdf_rag_agent(
+        class_id="class-acme",
+        messages=[{"role": "user", "content": "Read Exercise 2.14 from the PDF."}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        page_asset_builder=page_asset_builder,
+        professor_id="teacher-1",
+        retriever=retriever,
+    )
+
+    assert [call["query"] for call in retriever.calls] == ["read quote Exercise 2.14 Given setup Exercise 2.13"]
+    assert response["langGraphTrace"]["selectedPages"][0]["pageStart"] == 98
+    assert "page 98" in response["message"]
+    assert response["structuredOutput"]["metadata"]["mode"] in {"source_lookup", "explain"}
+
+
+@pytest.mark.asyncio
+async def test_concept_method_query_can_use_semantic_context_without_exact_exercise(tmp_path: Path) -> None:
+    image = tmp_path / "rank_nullity.png"
+    image.write_bytes(b"context")
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_concept",
+                        "type": "function",
+                        "function": {
+                            "name": "search_pdf_pages",
+                            "arguments": json.dumps(
+                                {
+                                    "query": "rank nullity theorem rank composition linear maps inequalities",
+                                    "student_reason": "Finding method and context pages",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "content": (
+                    "Use rank-nullity and range containment. Hint: compare range(KL) with range(K), "
+                    "then compare null spaces for the lower bound."
+                ),
+                "tool_calls": [],
+            },
+        ]
+    )
+    retriever = FakeRetriever(
+        [
+            {
+                "doc_id": "acme",
+                "title": "ACME Textbook",
+                "page_start": 91,
+                "page_end": 92,
+                "section": "Rank-Nullity",
+                "score": 0.96,
+                "chunk_text": "Rank-nullity theorem and range/null-space arguments for linear maps.",
+                "source_pdf_path": "data/rendered/source_53d1cee85592d906.pdf",
+                "material_type": "reading",
+            }
+        ]
+    )
+
+    async def page_asset_builder(pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "doc_id": page["doc_id"],
+                "title": page["title"],
+                "page_start": page["page_start"],
+                "page_end": page["page_end"],
+                "printed_page_start": page["page_start"],
+                "printed_page_end": page["page_end"],
+                "score": page["score"],
+                "material_type": page["material_type"],
+                "images": [str(image)],
+                "citation_label": f"{page['title']}, pages {page['page_start']}-{page['page_end']}",
+            }
+            for page in pages
+        ]
+
+    response = await run_pdf_rag_agent(
+        class_id="class-acme",
+        messages=[
+            {
+                "role": "user",
+                "content": "How do I prove inequalities like rank(KL) <= rank(L) using rank-nullity?",
+            }
+        ],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        page_asset_builder=page_asset_builder,
+        professor_id="teacher-1",
+        retriever=retriever,
+    )
+
+    assert [call["query"] for call in retriever.calls] == [
+        "rank nullity theorem rank composition linear maps inequalities"
+    ]
+    assert response["langGraphTrace"]["selectedPages"][0]["pageStart"] == 91
+    assert "rank-nullity" in response["message"]

@@ -1,7 +1,7 @@
 import { applicationDefault, cert, initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
-import { createSourceMetadata, rankMaterialChunks } from "../lib/retrieval-ranking.ts";
-import { createVertexEmbedding } from "../lib/vertex-embeddings.ts";
+import { createSourceMetadata, rankMaterialChunks } from "../frontend/lib/retrieval-ranking.ts";
+import { createVertexEmbedding } from "../frontend/lib/vertex-embeddings.ts";
 
 const classId = process.env.LIVE_RETRIEVAL_CLASS_ID;
 const professorId = process.env.LIVE_RETRIEVAL_PROFESSOR_ID;

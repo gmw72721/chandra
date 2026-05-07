@@ -6,8 +6,8 @@ import test from "node:test";
 const repoRoot = process.cwd();
 
 test("chunks are prepared with embedding metadata", () => {
-  const source = readFileSync(join(repoRoot, "lib/tutor-knowledge-server.ts"), "utf8");
-  const vertexSource = readFileSync(join(repoRoot, "lib/vertex-embeddings.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
+  const vertexSource = readFileSync(join(repoRoot, "frontend/lib/vertex-embeddings.ts"), "utf8");
 
   assert.match(source, /prepareTutorKnowledgeChunkData/);
   assert.match(source, /taskType: "RETRIEVAL_DOCUMENT"/);
@@ -31,7 +31,7 @@ test("chunks are prepared with embedding metadata", () => {
 });
 
 test("missing professor metadata is rejected before embedding", () => {
-  const source = readFileSync(join(repoRoot, "lib/tutor-knowledge-server.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
 
   assert.match(source, /const professorId = requireProfessorId\(teacherId\)/);
   assert.match(source, /Embedded tutor knowledge requires professor_id metadata/);
@@ -39,7 +39,7 @@ test("missing professor metadata is rejected before embedding", () => {
 });
 
 test("Vertex embedding failures are handled with material error metadata", () => {
-  const source = readFileSync(join(repoRoot, "lib/tutor-knowledge-server.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
 
   assert.match(source, /caughtError instanceof VertexEmbeddingError/);
   assert.match(source, /skipEmbeddings: true/);
@@ -50,7 +50,7 @@ test("Vertex embedding failures are handled with material error metadata", () =>
 });
 
 test("student classId scopes vector retrieval", () => {
-  const source = readFileSync(join(repoRoot, "lib/retrieval.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/lib/retrieval.ts"), "utf8");
 
   assert.match(source, /collectionGroup\("chunks"\)/);
   assert.match(source, /\.where\("professorId", "==", professorId\)/);
@@ -61,9 +61,9 @@ test("student classId scopes vector retrieval", () => {
 });
 
 test("material upload progress is written to professor-scoped job documents", () => {
-  const source = readFileSync(join(repoRoot, "lib/tutor-knowledge-server.ts"), "utf8");
-  const routeSource = readFileSync(join(repoRoot, "app/api/materials/route.ts"), "utf8");
-  const rulesSource = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/materials/route.ts"), "utf8");
+  const rulesSource = readFileSync(join(repoRoot, "firebase/firestore.rules"), "utf8");
 
   assert.match(routeSource, /formData\.get\("jobId"\)/);
   assert.match(source, /createMaterialJobProgressWriter/);
@@ -76,8 +76,8 @@ test("material upload progress is written to professor-scoped job documents", ()
 });
 
 test("material settings PATCH preserves omitted visibility fields", () => {
-  const source = readFileSync(join(repoRoot, "lib/tutor-knowledge-server.ts"), "utf8");
-  const routeSource = readFileSync(join(repoRoot, "app/api/materials/[materialId]/route.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/materials/[materialId]/route.ts"), "utf8");
 
   assert.match(source, /settings: Partial<TutorKnowledgeSourceSettings>/);
   assert.match(source, /const currentSettings = sourceSettingsFromMaterial\(materialSnapshot\.data\(\) \?\? \{\}\)/);

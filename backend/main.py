@@ -5,6 +5,7 @@ import os
 import re
 import json
 import traceback
+from functools import lru_cache
 from typing import Any, Optional
 
 import httpx
@@ -17,25 +18,73 @@ from dotenv import load_dotenv
 from .material_visibility import is_student_visible_ready_material
 from .sample_data import COURSES, DOCUMENTS, TUTOR_POLICIES
 
-if os.getenv("CHANDRA_ENV_LOADED") != "1":
+LOCAL_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+]
+
+
+def is_production_environment() -> bool:
+    environment = (
+        os.getenv("CHANDRA_ENV")
+        or os.getenv("FASTAPI_ENV")
+        or os.getenv("ENVIRONMENT")
+        or os.getenv("NODE_ENV")
+        or ""
+    ).strip().lower()
+    return environment in {"prod", "production"}
+
+
+def should_load_dotenv_local() -> bool:
+    if os.getenv("CHANDRA_ENV_LOADED") == "1":
+        return False
+
+    explicit = os.getenv("CHANDRA_LOAD_DOTENV_LOCAL")
+    if explicit is not None:
+        return explicit.strip().lower() in {"1", "true", "yes"}
+
+    return not is_production_environment()
+
+
+if should_load_dotenv_local():
     load_dotenv(".env.local")
 
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini"
+TOKENIZE_RE = re.compile(r"[^a-z0-9\s-]")
 
 app = FastAPI(title="Chandra API")
+_LANGGRAPH_OPENROUTER_CLIENT: Any | None = None
+_LEGACY_OPENROUTER_HTTP_CLIENT: httpx.AsyncClient | None = None
+
+
+def configured_cors_origins() -> list[str]:
+    origins = os.getenv("BACKEND_CORS_ORIGINS") or os.getenv("FRONTEND_ORIGIN") or ""
+    configured = [origin.strip().rstrip("/") for origin in origins.split(",") if origin.strip()]
+    return configured or LOCAL_CORS_ORIGINS
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=configured_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("shutdown")
+async def close_shared_http_clients() -> None:
+    global _LANGGRAPH_OPENROUTER_CLIENT, _LEGACY_OPENROUTER_HTTP_CLIENT
+
+    if _LANGGRAPH_OPENROUTER_CLIENT is not None and hasattr(_LANGGRAPH_OPENROUTER_CLIENT, "aclose"):
+        await _LANGGRAPH_OPENROUTER_CLIENT.aclose()
+        _LANGGRAPH_OPENROUTER_CLIENT = None
+
+    if _LEGACY_OPENROUTER_HTTP_CLIENT is not None:
+        await _LEGACY_OPENROUTER_HTTP_CLIENT.aclose()
+        _LEGACY_OPENROUTER_HTTP_CLIENT = None
 
 
 class ChatMessage(BaseModel):
@@ -73,18 +122,28 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def authorize_internal_backend_request(x_chandra_internal_secret: Optional[str]) -> None:
+    expected_secret = os.getenv("BACKEND_SHARED_SECRET", "").strip()
+
+    if not expected_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="BACKEND_SHARED_SECRET is required before the tutor backend can accept internal requests.",
+        )
+
+    if x_chandra_internal_secret != expected_secret:
+        raise HTTPException(status_code=403, detail="Invalid backend shared secret.")
+
+
 @app.post("/api/langgraph/chat")
 async def langgraph_chat(
     request: LangGraphChatRequest,
     x_chandra_internal_secret: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
-    expected_secret = os.getenv("BACKEND_SHARED_SECRET")
-
-    if expected_secret and x_chandra_internal_secret != expected_secret:
-        raise HTTPException(status_code=403, detail="Invalid backend shared secret.")
+    authorize_internal_backend_request(x_chandra_internal_secret)
 
     try:
-        from agent.graph import run_pdf_rag_agent
+        from backend.agent.graph import run_pdf_rag_agent
     except ImportError as error:
         raise HTTPException(
             status_code=500,
@@ -103,6 +162,7 @@ async def langgraph_chat(
         student_profile_context=request.studentLearningProfileContext,
         professor_id=request.professorId,
         professor_name=request.professorName,
+        openrouter_client=shared_langgraph_openrouter_client(),
     )
 
 
@@ -111,13 +171,10 @@ async def langgraph_chat_stream(
     request: LangGraphChatRequest,
     x_chandra_internal_secret: Optional[str] = Header(default=None),
 ) -> StreamingResponse:
-    expected_secret = os.getenv("BACKEND_SHARED_SECRET")
-
-    if expected_secret and x_chandra_internal_secret != expected_secret:
-        raise HTTPException(status_code=403, detail="Invalid backend shared secret.")
+    authorize_internal_backend_request(x_chandra_internal_secret)
 
     try:
-        from agent.graph import run_pdf_rag_agent_stream
+        from backend.agent.graph import run_pdf_rag_agent_stream
     except ImportError as error:
         raise HTTPException(
             status_code=500,
@@ -138,6 +195,7 @@ async def langgraph_chat_stream(
                 student_profile_context=request.studentLearningProfileContext,
                 professor_id=request.professorId,
                 professor_name=request.professorName,
+                openrouter_client=shared_langgraph_openrouter_client(),
             ):
                 yield json.dumps(event) + "\n"
         except Exception as error:
@@ -162,6 +220,17 @@ def describe_stream_error(error: Exception) -> str:
         return message
 
     return f"{error.__class__.__name__}: the tutor service crashed while processing this request. Check the FastAPI terminal for the traceback."
+
+
+def shared_langgraph_openrouter_client() -> Any:
+    global _LANGGRAPH_OPENROUTER_CLIENT
+
+    if _LANGGRAPH_OPENROUTER_CLIENT is None:
+        from backend.agent.openrouter_client import OpenRouterClient
+
+        _LANGGRAPH_OPENROUTER_CLIENT = OpenRouterClient()
+
+    return _LANGGRAPH_OPENROUTER_CLIENT
 
 
 @app.post("/api/materials/extract")
@@ -767,6 +836,7 @@ def answer_policy_lines(answer_policy: dict[str, bool]) -> list[str]:
         *(
             [
                 "- Require a student attempt before substantial help on graded-looking work.",
+                "- If the student asks to see, read, pull up, copy, quote, recite, identify, or locate the wording of a specific problem, exercise, question, passage, or page, or only supplies a specific problem/exercise/page/title reference without asking for solving help, treat that as source lookup, not solving help: retrieve the exact source and provide the visible task text when quotation is allowed, without solving it or asking for an attempt first.",
                 "- If a student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, first ask what they have tried or where they are stuck.",
                 "- In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example.",
                 "- A follow-up like 'I still need help', 'yes', 'tell me more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution.",
@@ -818,7 +888,7 @@ def source_usage_lines(source_usage: dict[str, Any]) -> list[str]:
         ),
         *(
             [
-                "- When a student asks to pull up, read, or quote a specific passage from selected uploaded class material, quote the relevant passage exactly with source/page context, then explain or paraphrase it. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words."
+                "- When a student asks to see, pull up, read, copy, quote, recite, identify, locate, or restate a specific problem, exercise, question, passage, or page from selected uploaded class material, or only supplies a specific problem/exercise/page/title reference without asking for solving help, quote the relevant passage exactly from the visible text with source/page context, then explain or paraphrase only if helpful. For problem-statement lookup, give the problem text but do not solve it or ask for an attempt first. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words."
             ]
             if source_usage["quoteSourcePassages"]
             else ["- Include at most one short quote of 20 words or fewer from source material when useful, then paraphrase the idea."]
@@ -910,13 +980,12 @@ async def call_openrouter(model_id: Optional[str], system_prompt: str, messages:
         "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Chandra"),
     }
 
-    async with httpx.AsyncClient(timeout=45) as client:
-        response = await client.post(
-            os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
-            + "/chat/completions",
-            json=payload,
-            headers=headers,
-        )
+    response = await legacy_openrouter_http_client().post(
+        os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+        + "/chat/completions",
+        json=payload,
+        headers=headers,
+    )
 
     response.raise_for_status()
     data = response.json()
@@ -935,6 +1004,18 @@ def create_demo_tutor_response(question: str, retrieval_hits: list[dict[str, Any
         "If you paste the exact task, I will help you choose the next step without jumping straight to the answer."
         f"{source_line}"
     )
+
+
+def legacy_openrouter_http_client() -> httpx.AsyncClient:
+    global _LEGACY_OPENROUTER_HTTP_CLIENT
+
+    if _LEGACY_OPENROUTER_HTTP_CLIENT is None or getattr(_LEGACY_OPENROUTER_HTTP_CLIENT, "is_closed", False):
+        _LEGACY_OPENROUTER_HTTP_CLIENT = httpx.AsyncClient(
+            timeout=45,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
+
+    return _LEGACY_OPENROUTER_HTTP_CLIENT
 
 
 def source_metadata(retrieval_hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -966,7 +1047,7 @@ def source_metadata(retrieval_hits: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def tokenize(value: Any) -> list[str]:
     value = "" if value is None else str(value)
-    return [term for term in re.sub(r"[^a-z0-9\s-]", " ", value.lower()).split() if len(term) > 2]
+    return [term for term in TOKENIZE_RE.sub(" ", value.lower()).split() if len(term) > 2]
 
 
 def score_chunk(content: Any, terms: list[str]) -> int:
@@ -1006,6 +1087,7 @@ def firestore_value(field: dict[str, Any]) -> Any:
     return None
 
 
+@lru_cache(maxsize=128)
 def model_supports_reasoning_effort(model: str) -> bool:
     normalized_model = model.lower()
 

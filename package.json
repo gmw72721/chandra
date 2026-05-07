@@ -4,18 +4,18 @@
   "private": true,
   "description": "Teacher-guided AI learning platform for classrooms.",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev frontend",
     "dev:all": "node scripts/start-dev.mjs",
-    "dev:web": "next dev",
+    "dev:web": "next dev frontend",
     "dev:api": "python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 8000",
     "setup:run": "node scripts/setup-and-run.mjs",
-    "build": "next build",
-    "start": "next start",
+    "build": "next build frontend && node scripts/prepare-apphosting-next-output.mjs",
+    "start": "next start frontend",
     "eval:retrieval:live": "node --env-file=.env.local --experimental-strip-types scripts/live-retrieval-eval.mjs",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "test:retrieval": "node --test --experimental-strip-types tests/retrieval-ranking.test.ts tests/retrieval-eval.test.ts",
-    "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "lint": "eslint --config frontend/eslint.config.mjs frontend/app frontend/components frontend/lib tests",
+    "typecheck": "tsc --project frontend/tsconfig.json --noEmit"
   },
   "dependencies": {
     "clsx": "^2.1.1",

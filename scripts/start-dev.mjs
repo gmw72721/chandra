@@ -12,7 +12,7 @@ process.env.CHANDRA_ENV_LOADED = "1";
 stopPreviousStack();
 writePidFile();
 
-start("frontend", "node_modules/.bin/next", ["dev", "--hostname", "127.0.0.1", "--port", "3000"]);
+start("frontend", "node_modules/.bin/next", ["dev", "frontend", "--hostname", "127.0.0.1", "--port", "3000"]);
 start("backend", "python3", ["-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"]);
 
 process.on("SIGINT", shutdown);

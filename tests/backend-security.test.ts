@@ -24,7 +24,7 @@ test("FastAPI chat accepts omitted modelId from the current student UI", () => {
 });
 
 test("material extraction routes require teacher authorization", () => {
-  const nextSource = readFileSync(join(repoRoot, "app/api/materials/extract/route.ts"), "utf8");
+  const nextSource = readFileSync(join(repoRoot, "frontend/app/api/materials/extract/route.ts"), "utf8");
   const fastApiSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
 
   assert.match(nextSource, /await authorizeClassTeacher\(request, classId\)/);
@@ -43,17 +43,39 @@ test("FastAPI stream errors include a diagnostic instead of a blank fallback", (
 });
 
 test("Next chat route uses the private backend base URL for FastAPI", () => {
-  const source = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
-  const envExample = readFileSync(join(repoRoot, ".env.example"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const envExample = readFileSync(join(repoRoot, "config/env.example"), "utf8");
 
   assert.match(source, /process\.env\.BACKEND_API_BASE_URL/);
+  assert.match(source, /BACKEND_API_BASE_URL is required in production/);
   assert.doesNotMatch(source, /process\.env\.NEXT_PUBLIC_API_BASE_URL/);
   assert.match(envExample, /BACKEND_API_BASE_URL=http:\/\/127\.0\.0\.1:8000/);
   assert.doesNotMatch(envExample, /NEXT_PUBLIC_API_BASE_URL/);
 });
 
+test("LangGraph backend requires shared-secret protection", () => {
+  const source = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const envExample = readFileSync(join(repoRoot, "config/env.example"), "utf8");
+
+  assert.match(source, /def authorize_internal_backend_request/);
+  assert.match(source, /BACKEND_SHARED_SECRET is required/);
+  assert.match(source, /Invalid backend shared secret/);
+  assert.match(routeSource, /BACKEND_SHARED_SECRET is required for tutor backend requests/);
+  assert.match(envExample, /BACKEND_SHARED_SECRET=/);
+});
+
+test("FastAPI CORS origins are environment-configurable for production", () => {
+  const source = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
+  const envExample = readFileSync(join(repoRoot, "config/env.example"), "utf8");
+
+  assert.match(source, /BACKEND_CORS_ORIGINS/);
+  assert.match(source, /FRONTEND_ORIGIN/);
+  assert.match(envExample, /BACKEND_CORS_ORIGINS=/);
+});
+
 test("Firestore class settings rules accept the current teacher settings schema", () => {
-  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+  const rules = readFileSync(join(repoRoot, "firebase/firestore.rules"), "utf8");
 
   assert.match(rules, /"quoteSourcePassages"/);
   assert.match(rules, /sourceUsage\.quoteSourcePassages is bool/);
@@ -61,7 +83,7 @@ test("Firestore class settings rules accept the current teacher settings schema"
 });
 
 test("Firestore user theme preference updates only validate theme fields", () => {
-  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+  const rules = readFileSync(join(repoRoot, "firebase/firestore.rules"), "utf8");
 
   assert.match(rules, /function validProfileThemePreferenceUpdate\(\)/);
   assert.match(rules, /affectedKeys\(\)\.hasOnly\(\[\s*"appearance",\s*"themeColor"\s*\]\)/);

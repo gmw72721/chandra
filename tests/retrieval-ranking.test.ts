@@ -3,11 +3,12 @@ import test from "node:test";
 import {
   buildLowConfidenceTutorMessage,
   createSourceMetadata,
+  hasExactLookupSignal,
   materialTypeForKind,
   problemNumbersFromText,
   rankMaterialChunks
-} from "../lib/retrieval-ranking.ts";
-import type { SourceDocument } from "../lib/types.ts";
+} from "../frontend/lib/retrieval-ranking.ts";
+import type { SourceDocument } from "../frontend/lib/types.ts";
 
 test("title matching improves retrieval ranking", () => {
   const homework = makeDocument({
@@ -316,6 +317,21 @@ test("problem number matching handles common student patterns", () => {
     "7",
     "2"
   ]);
+});
+
+test("problem number matching handles OCR-spaced dotted exercise numbers", () => {
+  assert.ok(
+    problemNumbersFromText("no 2 14 Given the setup of Exercise 2.13").includes("2.14")
+  );
+  assert.ok(problemNumbersFromText("2 .14. Given the setup").includes("2.14"));
+});
+
+test("concept method queries with equations do not force exact lookup", () => {
+  assert.equal(
+    hasExactLookupSignal("Explain rank-nullity / how do I prove inequalities like rank(KL) <= rank(L)?"),
+    false
+  );
+  assert.equal(hasExactLookupSignal("where is rank(KL) <= rank(L) in the PDF?"), true);
 });
 
 test("problem number match is returned in source metadata", () => {

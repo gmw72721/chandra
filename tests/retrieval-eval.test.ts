@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSourceMetadata, rankMaterialChunks } from "../lib/retrieval-ranking.ts";
-import type { RetrievalSourceHint } from "../lib/retrieval-ranking.ts";
-import type { SourceDocument } from "../lib/types.ts";
+import { createSourceMetadata, rankMaterialChunks } from "../frontend/lib/retrieval-ranking.ts";
+import type { RetrievalSourceHint } from "../frontend/lib/retrieval-ranking.ts";
+import type { SourceDocument } from "../frontend/lib/types.ts";
 
 type EvalCase = {
   expectedChunkId: string;

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 const repoRoot = process.cwd();
-const source = () => readFileSync(join(repoRoot, "lib/teacher-insights-server.ts"), "utf8");
+const source = () => readFileSync(join(repoRoot, "frontend/lib/teacher-insights-server.ts"), "utf8");
 
 test("teacher insight ranges normalize and filter timestamps", () => {
   const serverSource = source();
@@ -107,12 +107,12 @@ test("generated insight sections are grounded against actual conversations", () 
 });
 
 test("teacher-only insight routes and Firestore rules are server owned", () => {
-  const routeSource = readFileSync(join(repoRoot, "app/api/classes/[classId]/insights/route.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/insights/route.ts"), "utf8");
   const feedbackRouteSource = readFileSync(
-    join(repoRoot, "app/api/classes/[classId]/insights/feedback/route.ts"),
+    join(repoRoot, "frontend/app/api/classes/[classId]/insights/feedback/route.ts"),
     "utf8"
   );
-  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+  const rules = readFileSync(join(repoRoot, "firebase/firestore.rules"), "utf8");
 
   assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
   assert.match(routeSource, /updateClassTeacherInsights/);

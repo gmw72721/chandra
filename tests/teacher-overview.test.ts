@@ -4,10 +4,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 const repoRoot = process.cwd();
-const source = () => readFileSync(join(repoRoot, "lib/teacher-overview-server.ts"), "utf8");
+const source = () => readFileSync(join(repoRoot, "frontend/lib/teacher-overview-server.ts"), "utf8");
 
 test("teacher overview has a teacher-only route backed by the server aggregator", () => {
-  const routeSource = readFileSync(join(repoRoot, "app/api/classes/[classId]/overview/route.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/overview/route.ts"), "utf8");
 
   assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
   assert.match(routeSource, /getTeacherClassOverview/);
@@ -36,7 +36,7 @@ test("teacher overview aggregates existing roster, conversations, knowledge, and
 
 test("teacher overview uses timezone-aware day keys", () => {
   const serverSource = source();
-  const conversationSource = readFileSync(join(repoRoot, "lib/student-conversations-server.ts"), "utf8");
+  const conversationSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
 
   assert.match(serverSource, /normalizeOverviewTimezone/);
   assert.match(serverSource, /dateKeyInTimezone/);
@@ -46,7 +46,7 @@ test("teacher overview uses timezone-aware day keys", () => {
 });
 
 test("overview UI consumes API rows instead of screenshot literals", () => {
-  const componentSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(componentSource, /TeacherClassOverview/);
   assert.match(componentSource, /\/api\/classes\/\$\{encodeURIComponent\(activeClassId\)\}\/overview/);

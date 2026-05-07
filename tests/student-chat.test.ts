@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { buildChatRetrievalQuery, getLatestStudentQuestion, getRecentSourceHints } from "../lib/chat-retrieval-query.ts";
+import { buildChatRetrievalQuery, getLatestStudentQuestion, getRecentSourceHints } from "../frontend/lib/chat-retrieval-query.ts";
 import {
   buildLearningStrategyTelemetry,
   inferLearningStrategyObservedOutcome,
   stripTeacherOnlyTutorResponseFields
-} from "../lib/learning-strategy-telemetry.ts";
-import { assistantContentWithSources } from "../lib/provider-source-context.ts";
-import { resolveStudentChatClassId, StudentChatScopeError } from "../lib/student-chat-scope.ts";
-import { normalizeTutorResponse } from "../lib/tutor-response.ts";
+} from "../frontend/lib/learning-strategy-telemetry.ts";
+import { assistantContentWithSources } from "../frontend/lib/provider-source-context.ts";
+import { resolveStudentChatClassId, StudentChatScopeError } from "../frontend/lib/student-chat-scope.ts";
+import { normalizeTutorResponse } from "../frontend/lib/tutor-response.ts";
 
 const repoRoot = process.cwd();
 
@@ -42,7 +42,7 @@ test("student without a saved class gets an authorization error", () => {
 });
 
 test("model selector is hidden from student chat", () => {
-  const source = readFileSync(join(repoRoot, "app/student/page.tsx"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
 
   assert.doesNotMatch(source, /htmlFor="model"/);
   assert.doesNotMatch(source, /modelOptions/);
@@ -50,8 +50,8 @@ test("model selector is hidden from student chat", () => {
 });
 
 test("student chat posts the saved class and auth token to the tutor API", () => {
-  const source = readFileSync(join(repoRoot, "app/student/page.tsx"), "utf8");
-  const apiClientSource = readFileSync(join(repoRoot, "lib/api-client.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const apiClientSource = readFileSync(join(repoRoot, "frontend/lib/api-client.ts"), "utf8");
 
   assert.match(source, /const activeCourseId = isTeacherPreview \? queryClassId \?\? "" : profile\?\.classId \?\? ""/);
   assert.match(source, /Authorization: `Bearer \$\{token\}`/);
@@ -61,12 +61,12 @@ test("student chat posts the saved class and auth token to the tutor API", () =>
 });
 
 test("student chat persists and resumes class-scoped conversations", () => {
-  const routeSource = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
-  const studentSource = readFileSync(join(repoRoot, "app/student/page.tsx"), "utf8");
-  const persistenceSource = readFileSync(join(repoRoot, "lib/student-conversations-server.ts"), "utf8");
-  const studentConversationRouteSource = readFileSync(join(repoRoot, "app/api/student/conversations/route.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
+  const studentConversationRouteSource = readFileSync(join(repoRoot, "frontend/app/api/student/conversations/route.ts"), "utf8");
   const studentMessageRouteSource = readFileSync(
-    join(repoRoot, "app/api/student/conversations/[conversationId]/messages/route.ts"),
+    join(repoRoot, "frontend/app/api/student/conversations/[conversationId]/messages/route.ts"),
     "utf8"
   );
 
@@ -88,8 +88,8 @@ test("student chat persists and resumes class-scoped conversations", () => {
 });
 
 test("student view pins teacher assignment guidance above chat", () => {
-  const source = readFileSync(join(repoRoot, "app/student/page.tsx"), "utf8");
-  const styles = readFileSync(join(repoRoot, "app/styles.css"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
   assert.match(source, /className="student-teacher-instructions"/);
   assert.match(source, /Teacher instructions/);
@@ -98,7 +98,7 @@ test("student view pins teacher assignment guidance above chat", () => {
 });
 
 test("conversation titles use topic labels from the first prompt", () => {
-  const source = readFileSync(join(repoRoot, "lib/student-conversations-server.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
 
   assert.match(source, /inferTopicConversationTitle\(normalized\)/);
   assert.match(source, /Derivative chain rule/);
@@ -108,13 +108,13 @@ test("conversation titles use topic labels from the first prompt", () => {
 });
 
 test("teacher roster can open a student's saved conversations", () => {
-  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
   const conversationRouteSource = readFileSync(
-    join(repoRoot, "app/api/classes/[classId]/students/[studentId]/conversations/route.ts"),
+    join(repoRoot, "frontend/app/api/classes/[classId]/students/[studentId]/conversations/route.ts"),
     "utf8"
   );
   const messageRouteSource = readFileSync(
-    join(repoRoot, "app/api/classes/[classId]/conversations/[conversationId]/messages/route.ts"),
+    join(repoRoot, "frontend/app/api/classes/[classId]/conversations/[conversationId]/messages/route.ts"),
     "utf8"
   );
 
@@ -131,9 +131,9 @@ test("teacher roster can open a student's saved conversations", () => {
 });
 
 test("teacher class conversations endpoint loads the review inbox", () => {
-  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
-  const routeSource = readFileSync(join(repoRoot, "app/api/classes/[classId]/conversations/route.ts"), "utf8");
-  const persistenceSource = readFileSync(join(repoRoot, "lib/student-conversations-server.ts"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/conversations/route.ts"), "utf8");
+  const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
 
   assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
   assert.match(routeSource, /listTeacherClassConversations\(\{ classId \}\)/);
@@ -147,11 +147,11 @@ test("teacher class conversations endpoint loads the review inbox", () => {
 
 test("teacher conversation review PATCH stores teacher-only metadata", () => {
   const routeSource = readFileSync(
-    join(repoRoot, "app/api/classes/[classId]/conversations/[conversationId]/review/route.ts"),
+    join(repoRoot, "frontend/app/api/classes/[classId]/conversations/[conversationId]/review/route.ts"),
     "utf8"
   );
-  const persistenceSource = readFileSync(join(repoRoot, "lib/student-conversations-server.ts"), "utf8");
-  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
   assert.match(routeSource, /privateNote: String\(data\.privateNote \?\? ""\)\.slice\(0, 1000\)/);
@@ -164,7 +164,7 @@ test("teacher conversation review PATCH stores teacher-only metadata", () => {
 });
 
 test("private conversation review data is not written to student-readable conversation docs", () => {
-  const persistenceSource = readFileSync(join(repoRoot, "lib/student-conversations-server.ts"), "utf8");
+  const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
   const createConversationStart = persistenceSource.indexOf("async function createOrVerifyStudentConversation");
   const createConversationEnd = persistenceSource.indexOf("async function verifyStudentConversation");
   const createConversationSource = persistenceSource.slice(createConversationStart, createConversationEnd);
@@ -174,12 +174,12 @@ test("private conversation review data is not written to student-readable conver
 });
 
 test("teacher transcript messages include retrieval confidence", () => {
-  const persistenceSource = readFileSync(join(repoRoot, "lib/student-conversations-server.ts"), "utf8");
+  const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
   const messageRouteSource = readFileSync(
-    join(repoRoot, "app/api/classes/[classId]/conversations/[conversationId]/messages/route.ts"),
+    join(repoRoot, "frontend/app/api/classes/[classId]/conversations/[conversationId]/messages/route.ts"),
     "utf8"
   );
-  const typesSource = readFileSync(join(repoRoot, "lib/types.ts"), "utf8");
+  const typesSource = readFileSync(join(repoRoot, "frontend/lib/types.ts"), "utf8");
 
   assert.match(typesSource, /retrievalConfidence\?: RetrievalConfidence/);
   assert.match(persistenceSource, /retrievalConfidence: normalizeRetrievalConfidence\(data\.retrievalConfidence\)/);
@@ -187,10 +187,10 @@ test("teacher transcript messages include retrieval confidence", () => {
 });
 
 test("teacher roster active status uses Firebase presence and combines activity columns", () => {
-  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
-  const authSource = readFileSync(join(repoRoot, "lib/auth.ts"), "utf8");
-  const serverSource = readFileSync(join(repoRoot, "lib/student-conversations-server.ts"), "utf8");
-  const styles = readFileSync(join(repoRoot, "app/styles.css"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
+  const serverSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
+  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
   assert.match(authSource, /startUserPresenceHeartbeat/);
   assert.match(authSource, /doc\(db, "userPresence", user\.uid\)/);
@@ -207,7 +207,7 @@ test("teacher roster active status uses Firebase presence and combines activity 
 });
 
 test("conversation Firestore rules are class-scoped and server-write-only", () => {
-  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+  const rules = readFileSync(join(repoRoot, "firebase/firestore.rules"), "utf8");
 
   assert.match(rules, /match \/conversations\/\{conversationId\}/);
   assert.match(rules, /match \/conversationReviews\/\{conversationId\}/);
@@ -219,8 +219,8 @@ test("conversation Firestore rules are class-scoped and server-write-only", () =
 });
 
 test("source labels render under tutor messages", () => {
-  const source = readFileSync(join(repoRoot, "app/student/page.tsx"), "utf8");
-  const styles = readFileSync(join(repoRoot, "app/styles.css"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
   assert.match(source, /className="message-sources"/);
   assert.match(source, /formatSourceLabel/);
@@ -344,7 +344,7 @@ test("student chat response normalization repairs split decimal example next ste
 });
 
 test("student assistant renderer falls back for old messages without structured output", () => {
-  const source = readFileSync(join(repoRoot, "app/student/page.tsx"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
 
   assert.match(source, /assistantMessageAnswerContent\(message\)/);
   assert.match(source, /return message\.structuredOutput \? message\.structuredOutput\.sections\.answer : message\.content/);
@@ -355,9 +355,9 @@ test("student assistant renderer falls back for old messages without structured 
 });
 
 test("tutor prompt keeps simple greetings as natural chat replies", () => {
-  const promptSource = readFileSync(join(repoRoot, "lib/prompts.ts"), "utf8");
+  const promptSource = readFileSync(join(repoRoot, "frontend/lib/prompts.ts"), "utf8");
   const backendSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
-  const graphSource = readFileSync(join(repoRoot, "agent/graph.py"), "utf8");
+  const graphSource = readFileSync(join(repoRoot, "backend/agent/graph.py"), "utf8");
 
   assert.match(promptSource, /For simple greetings or check-ins/);
   assert.match(backendSource, /For simple greetings or check-ins/);
@@ -439,8 +439,8 @@ test("learning strategy telemetry is stripped from student-facing tutor response
       response
     })
   };
-  const studentSource = readFileSync(join(repoRoot, "app/student/page.tsx"), "utf8");
-  const persistenceSource = readFileSync(join(repoRoot, "lib/student-conversations-server.ts"), "utf8");
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
 
   assert.equal(stripTeacherOnlyTutorResponseFields(teacherTelemetryResponse).learningStrategyTelemetry, undefined);
   assert.match(persistenceSource, /learningStrategyTelemetry: response\.learningStrategyTelemetry/);
@@ -460,7 +460,7 @@ test("repeated answer-only follow-up classifies prior learning strategy outcome 
 });
 
 test("student chat math can overflow horizontally without hiding the rest of the answer", () => {
-  const styles = readFileSync(join(repoRoot, "app/styles.css"), "utf8");
+  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
   assert.match(styles, /\.assistant-message-bubble \{/);
   assert.match(styles, /overflow-x: auto/);
@@ -469,8 +469,8 @@ test("student chat math can overflow horizontally without hiding the rest of the
 });
 
 test("student composer textarea grows with typed lines up to a capped height", () => {
-  const studentSource = readFileSync(join(repoRoot, "app/student/page.tsx"), "utf8");
-  const styles = readFileSync(join(repoRoot, "app/styles.css"), "utf8");
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
   assert.match(studentSource, /draftTextareaRef/);
   assert.match(studentSource, /scrollHeight/);
@@ -545,7 +545,7 @@ test("provider messages keep assistant source context for follow-ups", () => {
 });
 
 test("student chat does not surface raw backend fetch failures", () => {
-  const source = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
 
   assert.match(source, /classifyUnexpectedChatError\(caughtError\)/);
   assert.match(source, /TUTOR_BACKEND_UNREACHABLE/);
@@ -556,7 +556,7 @@ test("student chat does not surface raw backend fetch failures", () => {
 });
 
 test("student chat errors include stable codes and student-safe messages", () => {
-  const source = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
 
   assert.match(source, /errorCode: chatError\.code/);
   assert.match(source, /Code: \$\{error\.code\}/);
@@ -571,7 +571,7 @@ test("student chat errors include stable codes and student-safe messages", () =>
 });
 
 test("student chat response length settings leave room for math-heavy examples", () => {
-  const source = readFileSync(join(repoRoot, "lib/class-settings.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/lib/class-settings.ts"), "utf8");
 
   assert.match(source, /return 900/);
   assert.match(source, /return 2200/);
@@ -581,7 +581,7 @@ test("student chat response length settings leave room for math-heavy examples",
 });
 
 test("student chat does not drop generated answers when assistant persistence fails", () => {
-  const source = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
 
   assert.match(source, /saveAssistantMessageWithoutBlockingTutorResponse/);
   assert.match(source, /await saveAssistantMessage\(/);
@@ -591,7 +591,7 @@ test("student chat does not drop generated answers when assistant persistence fa
 });
 
 test("student chat does not fail when optional prep data is unavailable", () => {
-  const source = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
 
   assert.match(source, /getStudentLearningProfileContextForTutor/);
   assert.match(source, /Student learning profile skipped for tutor chat/);
@@ -602,7 +602,7 @@ test("student chat does not fail when optional prep data is unavailable", () => 
 });
 
 test("student learning profile context is sent privately to backend", () => {
-  const routeSource = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
   const backendSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
 
   assert.match(routeSource, /studentLearningProfileContext: privateBackendLearningProfileContext\(studentLearningProfileContext\)/);
@@ -613,8 +613,8 @@ test("student learning profile context is sent privately to backend", () => {
 });
 
 test("pdf tool prompt uses textbook readings for solving help", () => {
-  const routeSource = readFileSync(join(repoRoot, "app/api/chat/route.ts"), "utf8");
-  const promptSource = readFileSync(join(repoRoot, "lib/prompts.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const promptSource = readFileSync(join(repoRoot, "frontend/lib/prompts.ts"), "utf8");
 
   assert.match(routeSource, /search the assignment\/problem PDF first/);
   assert.match(routeSource, /Do not search textbook\/readings unless no task-source match is found/);
@@ -632,11 +632,18 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(routeSource, /verify it before affirming it/);
   assert.match(promptSource, /verify it before affirming it/);
   assert.match(routeSource, /Source-backed help does not override the attempt-first rule/);
+  assert.match(routeSource, /treat that as source lookup, not solving help/);
+  assert.match(routeSource, /only supplies a specific problem\/exercise\/page\/title reference without asking for solving help/);
+  assert.match(routeSource, /quote the full visible problem statement exactly/);
+  assert.match(routeSource, /bare references like `problem 3\.4`/);
   assert.match(routeSource, /first ask what they have tried or where they are stuck/);
   assert.match(routeSource, /do not provide task-specific starting points/);
   assert.match(routeSource, /explain like I am 5' is not a student attempt/);
   assert.match(routeSource, /do not reveal a full solution, final answer, final artifact/);
   assert.match(promptSource, /first ask what they have tried or where they are stuck/);
+  assert.match(promptSource, /treat that as source lookup, not solving help/);
+  assert.match(promptSource, /only supplies a specific problem\/exercise\/page\/title reference without asking for solving help/);
+  assert.match(promptSource, /For problem-statement lookup, give the problem text but do not solve it or ask for an attempt first/);
   assert.match(promptSource, /do not provide task-specific starting points/);
   assert.match(promptSource, /explain like I am 5' is not a student attempt/);
   assert.match(promptSource, /do not reveal a full solution, final answer, final artifact/);

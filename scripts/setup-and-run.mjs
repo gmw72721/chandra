@@ -16,7 +16,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 process.chdir(root);
 
 const envPath = join(root, ".env.local");
-const envExamplePath = join(root, ".env.example");
+const envExamplePath = join(root, "config/env.example");
 const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 const autoYes = process.argv.includes("--yes") || process.env.CHANDRA_SETUP_YES === "1";
 const checkOnly = process.argv.includes("--check-only") || process.argv.includes("--no-start");
@@ -173,12 +173,12 @@ function pythonVersionOk(command) {
 function ensureEnvFile() {
   if (!existsSync(envPath)) {
     if (!existsSync(envExamplePath)) {
-      throw new Error(".env.example is missing; cannot create .env.local.");
+      throw new Error("config/env.example is missing; cannot create .env.local.");
     }
 
     copyFileSync(envExamplePath, envPath);
     chmodSync(envPath, 0o600);
-    console.log("[setup] Created .env.local from .env.example.");
+    console.log("[setup] Created .env.local from config/env.example.");
   }
 
   let envText = readFileSync(envPath, "utf8");
@@ -190,6 +190,8 @@ function ensureEnvFile() {
     OPENROUTER_HTTP_REFERER: "http://localhost:3000",
     OPENROUTER_APP_TITLE: "Chandra",
     BACKEND_API_BASE_URL: "http://127.0.0.1:8000",
+    BACKEND_CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000",
+    CHANDRA_ENV: "development",
     GOOGLE_CLOUD_LOCATION: "us",
     VERTEX_EMBEDDING_MODEL: "gemini-embedding-2",
     VERTEX_EMBEDDING_DIMENSIONS: "768"

@@ -7,7 +7,7 @@ import {
   formatClassCodeInput,
   generateClassCode,
   normalizeClassCode
-} from "../lib/class-code.ts";
+} from "../frontend/lib/class-code.ts";
 
 const repoRoot = process.cwd();
 
@@ -24,7 +24,7 @@ test("student-entered six-letter class codes normalize to uppercase", () => {
 });
 
 test("teacher workspace displays the short join code instead of the internal id", () => {
-  const source = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(source, /selectedClass\?\.joinCode/);
   assert.match(source, /Class code: \{selectedClassCode \|\| "Creating code\.\.\."\}/);
@@ -32,7 +32,7 @@ test("teacher workspace displays the short join code instead of the internal id"
 });
 
 test("teacher workspace copies a student auth invite link with the short class code", () => {
-  const source = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(source, /new URL\("\/auth", window\.location\.origin\)/);
   assert.match(source, /inviteUrl\.searchParams\.set\("role", "student"\)/);
@@ -41,8 +41,8 @@ test("teacher workspace copies a student auth invite link with the short class c
 });
 
 test("student-entered join codes enroll the student before saving profile classId", () => {
-  const authSource = readFileSync(join(repoRoot, "lib/auth.ts"), "utf8");
-  const joinSource = readFileSync(join(repoRoot, "app/api/classes/join/route.ts"), "utf8");
+  const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
+  const joinSource = readFileSync(join(repoRoot, "frontend/app/api/classes/join/route.ts"), "utf8");
 
   assert.match(authSource, /fetch\("\/api\/classes\/join"/);
   assert.match(authSource, /Authorization: `Bearer \$\{token\}`/);
@@ -52,8 +52,8 @@ test("student-entered join codes enroll the student before saving profile classI
 });
 
 test("teacher roster sync backfills students who already saved the classId", () => {
-  const managerSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
-  const syncSource = readFileSync(join(repoRoot, "app/api/classes/[classId]/roster/sync/route.ts"), "utf8");
+  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const syncSource = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/roster/sync/route.ts"), "utf8");
 
   assert.match(managerSource, /\/api\/classes\/\$\{encodeURIComponent\(activeClassId\)\}\/roster\/sync/);
   assert.match(syncSource, /collection\("users"\)\.where\("classId", "==", classId\)/);
@@ -62,8 +62,8 @@ test("teacher roster sync backfills students who already saved the classId", () 
 });
 
 test("teacher class creation uses an authenticated server route", () => {
-  const clientSource = readFileSync(join(repoRoot, "lib/classes.ts"), "utf8");
-  const routeSource = readFileSync(join(repoRoot, "app/api/classes/route.ts"), "utf8");
+  const clientSource = readFileSync(join(repoRoot, "frontend/lib/classes.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/classes/route.ts"), "utf8");
 
   assert.match(clientSource, /fetch\(apiUrl\("\/api\/classes"\)/);
   assert.match(clientSource, /Authorization: `Bearer \$\{token\}`/);

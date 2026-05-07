@@ -8,8 +8,8 @@ from typing import Any
 import httpx
 import pytest
 
-from agent.openrouter_client import OpenRouterClient
-from retrieval.pdf_retriever import GeminiPdfRetriever, build_query_features
+from backend.agent.openrouter_client import OpenRouterClient
+from backend.retrieval.pdf_retriever import GeminiPdfRetriever, build_query_features, exact_results_from_pdf_text
 
 
 class FakeOpenRouterResponse:
@@ -51,7 +51,7 @@ async def test_openrouter_client_retries_read_errors(monkeypatch: pytest.MonkeyP
 
             return FakeOpenRouterResponse()
 
-    monkeypatch.setattr("agent.openrouter_client.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr("backend.agent.openrouter_client.httpx.AsyncClient", FakeAsyncClient)
     client = OpenRouterClient(api_key="test-key", max_retries=2)
 
     response = await client.chat(model="test-model", messages=[{"role": "user", "content": "hi"}])
@@ -81,7 +81,7 @@ async def test_openrouter_client_retries_ssl_errors_with_fresh_clients(monkeypat
             nonlocal closed_clients
             closed_clients += 1
 
-    monkeypatch.setattr("agent.openrouter_client.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr("backend.agent.openrouter_client.httpx.AsyncClient", FakeAsyncClient)
     client = OpenRouterClient(api_key="test-key", max_retries=2)
 
     response = await client.chat(model="test-model", messages=[{"role": "user", "content": "hi"}])
@@ -111,7 +111,7 @@ async def test_gemini_retriever_returns_no_hits_after_embedding_read_errors(
             attempts.append(1)
             raise httpx.ReadError("embedding provider closed connection")
 
-    monkeypatch.setattr("retrieval.pdf_retriever.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr("backend.retrieval.pdf_retriever.httpx.AsyncClient", FakeAsyncClient)
     retriever = GeminiPdfRetriever(gemini_api_key="test-key")
 
     result = await retriever.search(query="trig substitution", class_id="class-1", professor_id="teacher-1")
@@ -151,7 +151,7 @@ async def test_gemini_retriever_excludes_teacher_only_and_hidden_materials(
         results = await retriever._search_firestore(
             class_id="class-1",
             professor_id="teacher-1",
-            query="problem 7",
+            query_features=build_query_features("problem 7"),
             query_vector=[0.1, 0.2],
             top_k=5,
         )
@@ -178,12 +178,125 @@ async def test_gemini_retriever_keeps_student_visible_ready_material(
     results = await retriever._search_firestore(
         class_id="class-1",
         professor_id="teacher-1",
-        query="problem 7",
+        query_features=build_query_features("problem 7"),
         query_vector=[0.1, 0.2],
         top_k=5,
     )
 
     assert [result.title for result in results] == ["Student Worksheet"]
+
+
+def test_problem_numbers_parse_ocr_spaced_dotted_items() -> None:
+    features = build_query_features(
+        "no 2 14 Given the setup of Exercise 2.13, prove the following inequalities:"
+    )
+
+    assert "2.14" in features["problem_numbers"]
+    assert "2.13" in features["problem_numbers"]
+
+
+def test_exact_pdf_verifier_reads_page_text_for_numbered_exercise(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    class FakePage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class FakePdfReader:
+        def __init__(self, _path: str) -> None:
+            self.pages = [
+                FakePage("Rank-nullity theorem context without the requested exercise."),
+                FakePage(
+                    "80 Chapter 2. Linear Transformations and Matrices. "
+                    "2 .14 . Given the setup of Exercise 2.13, prove the following inequalities: "
+                    "(i) rank(KL) <= min(rank(L), rank(K))."
+                ),
+            ]
+
+    monkeypatch.setitem(sys.modules, "pypdf", types.SimpleNamespace(PdfReader=FakePdfReader))
+
+    results = exact_results_from_pdf_text(
+        tmp_path / "reader.pdf",
+        material={"materialType": "reading", "title": "ACME Textbook"},
+        material_ref=types.SimpleNamespace(id="reader-1"),
+        query_features=build_query_features("read Exercise 2 14 Given setup of Exercise 2.13"),
+        source_pdf_path="reader.pdf",
+    )
+
+    assert results
+    assert results[0].page_start == 2
+    assert "2 .14" in results[0].chunk_text
+
+
+def test_concept_method_query_without_exact_identifier_does_not_force_pdf_text_match(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    class FakePage:
+        def extract_text(self) -> str:
+            return "2 .14 . Given the setup of Exercise 2.13, prove a rank inequality."
+
+    class FakePdfReader:
+        def __init__(self, _path: str) -> None:
+            self.pages = [FakePage()]
+
+    monkeypatch.setitem(sys.modules, "pypdf", types.SimpleNamespace(PdfReader=FakePdfReader))
+
+    query_features = build_query_features("explain rank-nullity and rank product inequalities")
+    assert query_features["exact_lookup_intent"] is False
+
+    results = exact_results_from_pdf_text(
+        tmp_path / "reader.pdf",
+        material={"materialType": "reading", "title": "ACME Textbook"},
+        material_ref=types.SimpleNamespace(id="reader-1"),
+        query_features=query_features,
+        source_pdf_path="reader.pdf",
+    )
+
+    assert results == []
+
+
+def test_concept_method_query_with_equation_but_no_locator_stays_semantic_led() -> None:
+    features = build_query_features(
+        "Explain rank-nullity / how do I prove inequalities like rank(KL) <= rank(L)?"
+    )
+
+    assert features["exact_lookup_intent"] is False
+    assert features["problem_numbers"] == set()
+
+
+@pytest.mark.asyncio
+async def test_gemini_retriever_excludes_file_pdf_without_openable_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_firestore_modules(monkeypatch)
+    FakeFirestoreClient.next_chunks = [
+        fake_chunk_doc(
+            material={
+                "contentType": "application/pdf",
+                "pageCount": 34,
+                "sourceMode": "file",
+                "status": "ready",
+                "studentVisible": True,
+                "title": "Broken PDF",
+            }
+        )
+    ]
+    retriever = GeminiPdfRetriever(gemini_api_key="test-key")
+
+    results = await retriever._search_firestore(
+        class_id="class-1",
+        professor_id="teacher-1",
+        query_features=build_query_features("exercise 2.14"),
+        query_vector=[0.1, 0.2],
+        top_k=5,
+    )
+
+    assert results == []
 
 
 def install_fake_firestore_modules(monkeypatch: pytest.MonkeyPatch) -> None:

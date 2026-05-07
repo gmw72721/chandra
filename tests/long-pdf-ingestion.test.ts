@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PDFDocument } from "pdf-lib";
-import { attachPdfSlicesToChunks } from "../lib/pdf-embedding-chunks.ts";
-import { rankMaterialChunks } from "../lib/retrieval-ranking.ts";
+import { attachPdfSlicesToChunks } from "../frontend/lib/pdf-embedding-chunks.ts";
+import { rankMaterialChunks } from "../frontend/lib/retrieval-ranking.ts";
 import {
   classifyTutorKnowledgePage,
   chunkTutorKnowledgePages,
   geminiEmbedding2PdfPageLimit
-} from "../lib/tutor-knowledge.ts";
-import type { SourceDocument } from "../lib/types.ts";
+} from "../frontend/lib/tutor-knowledge.ts";
+import type { SourceDocument } from "../frontend/lib/types.ts";
 
 test("220-page PDF mock is chunked into page-aware embedding slices", async () => {
   const docId = "long-pdf-material";
