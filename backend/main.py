@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 from .material_visibility import is_student_visible_ready_material
 from .sample_data import COURSES, DOCUMENTS, TUTOR_POLICIES
+from .voice_tutor.schemas import VoiceTutorBackendRequest
 
 LOCAL_CORS_ORIGINS = [
     "http://localhost:3000",
@@ -229,6 +230,25 @@ async def langgraph_chat_stream(
             ) + "\n"
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
+
+
+@app.post("/api/voice-tutor/tool")
+async def voice_tutor_tool(
+    request: VoiceTutorBackendRequest,
+    x_chandra_internal_secret: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    authorize_internal_backend_request(x_chandra_internal_secret)
+
+    try:
+        from backend.voice_tutor.graph import run_voice_tutor_graph
+    except ImportError as error:
+        raise HTTPException(
+            status_code=500,
+            detail="Voice tutor support is not installed. Run `pip install -r backend/requirements.txt`.",
+        ) from error
+
+    result = await run_voice_tutor_graph(request)
+    return result.model_dump(exclude_none=True)
 
 
 def describe_stream_error(error: Exception) -> str:
