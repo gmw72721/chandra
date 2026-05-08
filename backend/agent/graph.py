@@ -24,6 +24,34 @@ MAX_TOOL_CALLS = 8
 MAX_PARALLEL_SEARCHES = 3
 MAX_RETRIEVED_WINDOWS = 5
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini"
+VOICE_INTENTS = {
+    "hint",
+    "show_formula",
+    "find_source",
+    "explain_step",
+    "walkthrough",
+    "check_work",
+    "clarify",
+    "repeat",
+    "other",
+}
+VOICE_RETRIEVAL_MODES = {
+    "auto",
+    "none",
+    "reuse_sources",
+    "search_if_uncertain",
+    "force_search",
+}
+VOICE_SECTION_ORDER = [
+    "answer",
+    "hint",
+    "explanation",
+    "formula",
+    "example",
+    "checkWork",
+    "sources",
+    "nextStep",
+]
 
 
 def build_pdf_rag_graph(
@@ -40,7 +68,7 @@ def build_pdf_rag_graph(
     fast_initial_search = should_enable_fast_initial_search(client)
 
     async def openrouter_agent(state: PdfRagState) -> dict[str, Any]:
-        if fast_initial_search:
+        if fast_initial_search and voice_search_allowed(state):
             forced_tool_call = fast_forced_initial_search_tool_call(state)
             if forced_tool_call:
                 return {
@@ -52,24 +80,27 @@ def build_pdf_rag_graph(
 
         response = await client.chat(
             model=state.get("model") or DEFAULT_OPENROUTER_MODEL,
-            messages=state["messages"],
+            messages=messages_for_openrouter_agent(state),
             tools=[SEARCH_PDF_PAGES_TOOL],
             tool_choice="auto",
             temperature=state.get("temperature", 0.4),
             max_tokens=state.get("max_tokens"),
             reasoning_effort=state.get("reasoning_effort"),
         )
-        tool_calls = new_search_tool_calls(
-            state,
-            [
-                tool_call
-                for tool_call in response.get("tool_calls", [])
-                if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-            ],
-            limit=remaining_search_call_count(state),
-        )
+        tool_calls = []
+        if voice_search_allowed(state):
+            tool_calls = new_search_tool_calls(
+                state,
+                [
+                    tool_call
+                    for tool_call in response.get("tool_calls", [])
+                    if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
+                ],
+                limit=remaining_search_call_count(state),
+            )
         if (
-            not tool_calls
+            voice_search_allowed(state)
+            and not tool_calls
             and not state.get("retrieved_pages")
             and state.get("tool_call_count", 0) == 0
         ):
@@ -128,10 +159,14 @@ def build_pdf_rag_graph(
             for tool_call in response.get("tool_calls", [])
             if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
         ]
-        tool_calls = new_search_tool_calls(
-            state,
-            requested_tool_calls,
-            limit=remaining_search_call_count(state),
+        tool_calls = (
+            new_search_tool_calls(
+                state,
+                requested_tool_calls,
+                limit=remaining_search_call_count(state),
+            )
+            if voice_search_allowed(state)
+            else []
         )
         answer = response.get("content") or ""
 
@@ -604,6 +639,183 @@ def normalize_search_query(query: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", query.lower()).split())
 
 
+def messages_for_openrouter_agent(state: PdfRagState) -> list[dict[str, Any]]:
+    if not is_voice_mode_state(state):
+        return state["messages"]
+
+    return [
+        *state["messages"],
+        {
+            "role": "system",
+            "content": build_voice_runtime_instructions(state),
+        },
+    ]
+
+
+def is_voice_mode_state(state: PdfRagState) -> bool:
+    return bool(state.get("voice_mode"))
+
+
+def build_voice_runtime_instructions(state: PdfRagState) -> str:
+    known_context = compact_known_context_for_prompt(state.get("known_context") or {})
+    preferred_sections = normalize_preferred_sections(state.get("preferred_sections"))
+
+    return "\n".join(
+        [
+            "Voice tutor mode:",
+            "- This turn came from Realtime voice. Keep the tutoring result compact and structured for UI support.",
+            "- Realtime handles speech. LangGraph remains responsible for policy, retrieval, source grounding, and section choice.",
+            f"- Voice intent: {normalize_voice_intent(state.get('voice_intent'))}.",
+            f"- Preferred UI sections, not hard requirements: {', '.join(preferred_sections) or 'none'}.",
+            f"- Retrieval mode: {normalize_voice_retrieval_mode(state.get('retrieval_mode'))}.",
+            f"- Response budget: {normalize_voice_response_budget(state.get('response_budget'))}.",
+            "- Do not include full walkthroughs unless the student asked for a walkthrough.",
+            "- Make examples opt-in or only when they clearly help without completing the student's exact task.",
+            "- Usually include a useful next step unless this is only a source lookup.",
+            "- If Voice intent is find_source, or if the student asks to find, read, show, quote, restate, or pull up a specific problem, exercise, page, passage, or bare reference, treat it as problem-statement/source lookup.",
+            "- For problem-statement/source lookup, search class material, put the full visible problem or passage text in the Answer section with source/page context, do not solve it, and do not replace it with a hint or next step.",
+            "- For problem-statement/source lookup, the Answer section must start with `Problem text:` followed by the exact visible wording from the selected source. Do not summarize it as `asks you to...`.",
+            "- If the visible problem depends on a setup or referenced exercise that is also visible in retrieved context, include that exact wording under `Referenced setup:`. If the full wording is not visible, state only what is visible and what reference is missing; do not invent.",
+            "- For problem-statement/source lookup, omit Hint and nextStep unless the student also explicitly asks for help starting after the problem text is shown.",
+            f"- Compact known context: {json.dumps(known_context, ensure_ascii=True)}",
+        ]
+    )
+
+
+def compact_known_context_for_prompt(context: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        return {}
+
+    return {
+        key: value
+        for key, value in {
+            "problemSummary": short_context_string(context.get("problemSummary"), 240),
+            "currentStep": short_context_string(context.get("currentStep"), 160),
+            "knownFormula": short_context_string(context.get("knownFormula"), 180),
+            "knownSourceLabels": short_context_string_list(context.get("knownSourceLabels"), 4, 120),
+            "lastSectionsShown": [
+                section for section in short_context_string_list(context.get("lastSectionsShown"), 8, 40)
+                if section in VOICE_SECTION_ORDER
+            ],
+            "lastAssistantNextStep": short_context_string(context.get("lastAssistantNextStep"), 180),
+            "hasReliableSourceContext": bool(context.get("hasReliableSourceContext")),
+            "lastLangGraphMessageId": short_context_string(context.get("lastLangGraphMessageId"), 120),
+        }.items()
+        if value not in ("", [], None)
+    }
+
+
+def short_context_string(value: Any, max_length: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_length:
+        return text
+    return text[:max_length].rsplit(" ", 1)[0].strip()
+
+
+def short_context_string_list(value: Any, max_count: int, max_length: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    return [
+        short_context_string(item, max_length)
+        for item in value[:max_count]
+        if short_context_string(item, max_length)
+    ]
+
+
+def normalize_voice_intent(value: Any) -> str:
+    intent = str(value or "other").strip()
+    return intent if intent in VOICE_INTENTS else "other"
+
+
+def normalize_voice_retrieval_mode(value: Any) -> str:
+    mode = str(value or "auto").strip()
+    return mode if mode in VOICE_RETRIEVAL_MODES else "auto"
+
+
+def normalize_voice_response_budget(value: Any) -> str:
+    budget = str(value or "ui_compact").strip()
+    return budget if budget in {"voice_short", "ui_compact", "ui_full"} else "ui_compact"
+
+
+def voice_mode_requested(
+    *,
+    voice_intent: str | None,
+    preferred_sections: list[str] | None,
+    retrieval_mode: str | None,
+    response_budget: str | None,
+    known_context: dict[str, Any] | None,
+) -> bool:
+    return bool(
+        voice_intent
+        or preferred_sections
+        or retrieval_mode
+        or response_budget
+        or known_context
+    )
+
+
+def normalize_preferred_sections(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    sections: list[str] = []
+    for section in value:
+        normalized = normalize_section_name(section)
+        if normalized and normalized not in sections:
+            sections.append(normalized)
+
+    return sections[:8]
+
+
+def normalize_section_name(value: Any) -> str:
+    section = str(value or "").strip()
+    if section == "check_work":
+        return "checkWork"
+    if section == "source":
+        return "sources"
+    return section if section in VOICE_SECTION_ORDER else ""
+
+
+def voice_search_allowed(state: PdfRagState) -> bool:
+    if not is_voice_mode_state(state):
+        return True
+
+    mode = normalize_voice_retrieval_mode(state.get("retrieval_mode"))
+    intent = normalize_voice_intent(state.get("voice_intent"))
+    known_context = state.get("known_context") or {}
+    has_reliable_source_context = bool(
+        isinstance(known_context, dict)
+        and known_context.get("hasReliableSourceContext")
+    )
+
+    if mode == "none":
+        return False
+
+    if mode == "reuse_sources" and has_reliable_source_context:
+        return False
+
+    if mode == "search_if_uncertain" and has_reliable_source_context:
+        return False
+
+    if mode == "force_search" and intent == "find_source":
+        return True
+
+    if mode == "force_search":
+        return not has_reliable_source_context
+
+    if intent in {"clarify", "repeat"}:
+        return False
+
+    if intent == "find_source":
+        return True
+
+    if intent in {"hint", "explain_step", "check_work"} and has_reliable_source_context:
+        return False
+
+    return True
+
+
 def route_after_openrouter_agent(state: PdfRagState) -> str:
     if state.get("tool_calls") and state.get("tool_call_count", 0) < MAX_TOOL_CALLS:
         return "search_pdf_pages"
@@ -793,6 +1005,8 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
     """Build the multimodal answer/search-again call with only selected page assets."""
 
     base_messages = list(state["messages"])
+    if is_voice_mode_state(state):
+        base_messages.append({"role": "system", "content": build_voice_runtime_instructions(state)})
     answer_policy = normalize_answer_policy_state(state.get("answer_policy"))
     source_usage = normalize_source_usage_state(state.get("source_usage"))
     selected_context = {
@@ -1100,6 +1314,10 @@ def answer_references_asset(answer: str, asset: dict[str, Any]) -> bool:
 
 
 def answer_or_page_fallback(state: PdfRagState) -> str:
+    source_lookup_answer = source_lookup_problem_text_answer(state, (state.get("answer") or "").strip())
+    if source_lookup_answer:
+        return source_lookup_answer
+
     answer = normalize_answer_against_selected_pages(state, (state.get("answer") or "").strip())
     if answer:
         return answer
@@ -1124,6 +1342,105 @@ def answer_or_page_fallback(state: PdfRagState) -> str:
         "I found the strongest matching PDF page for this question: "
         f"{'; '.join(source_labels)}. Start there; it was the top-ranked match."
     )
+
+
+def source_lookup_problem_text_answer(state: PdfRagState, answer: str) -> str:
+    if not is_voice_mode_state(state) or normalize_voice_intent(state.get("voice_intent")) != "find_source":
+        return ""
+
+    if re.search(r"\bProblem text\s*:", answer, flags=re.IGNORECASE):
+        return normalize_answer_against_selected_pages(state, answer)
+
+    extracted = extract_requested_problem_text_from_pages(state)
+    if not extracted:
+        return ""
+
+    problem_text, page = extracted
+    source_label = source_context_label_from_page(page)
+    source_context = f"\n\nSource context: {source_label}." if source_label else ""
+    return f"Problem text: {problem_text}{source_context}".strip()
+
+
+def extract_requested_problem_text_from_pages(state: PdfRagState) -> tuple[str, dict[str, Any]] | None:
+    latest_message = latest_student_message_content(state.get("messages", []))
+    requested_problem_numbers = problem_numbers_from_text(latest_message).union(alternate_numbered_problem_numbers(latest_message))
+
+    if not requested_problem_numbers:
+        return None
+
+    pages = sorted(state.get("retrieved_pages", []), key=lambda page: float(page.get("score") or 0.0), reverse=True)
+    sorted_problem_numbers = sorted(requested_problem_numbers, key=len, reverse=True)
+
+    for page in pages:
+        searchable_text = page_raw_diagnostic_text(page)
+
+        for problem_number in sorted_problem_numbers:
+            if not content_has_requested_problem_number(searchable_text, {problem_number}):
+                continue
+
+            problem_text = extract_problem_text_for_number(searchable_text, problem_number)
+            if problem_text:
+                return problem_text, page
+
+    return None
+
+
+def extract_problem_text_for_number(text: str, problem_number: str) -> str:
+    normalized_text = re.sub(r"\s+", " ", str(text or "")).strip()
+
+    if not normalized_text:
+        return ""
+
+    start_match = re.search(problem_statement_start_pattern(problem_number), normalized_text, flags=re.IGNORECASE)
+
+    if not start_match:
+        return ""
+
+    remaining = normalized_text[start_match.start():]
+    next_match = re.search(next_problem_statement_pattern(problem_number), remaining[start_match.end() - start_match.start():], flags=re.IGNORECASE)
+    end_index = start_match.end() - start_match.start() + next_match.start() if next_match else min(len(remaining), 1400)
+    problem_text = remaining[:end_index].strip()
+    problem_text = re.sub(r"\b(?:solution|answer)\s*:\s*.*$", "", problem_text, flags=re.IGNORECASE).strip()
+
+    if len(problem_text) > 1200:
+        problem_text = problem_text[:1200].rsplit(" ", 1)[0].strip()
+
+    return problem_text
+
+
+def problem_statement_start_pattern(problem_number: str) -> str:
+    parts = [re.escape(part) for part in str(problem_number).lower().split(".") if part]
+    flexible_number = r"\s*\.\s*".join(parts)
+
+    if "." in str(problem_number):
+        return rf"(?<![\d.]){flexible_number}\s*[\).:]"
+
+    return (
+        rf"\b(?:problem|problems|exercise|exercises|ex\.?|question|questions|number|no\.?)?"
+        rf"\s*#?\s*{flexible_number}\s*[\).:]"
+    )
+
+
+def next_problem_statement_pattern(problem_number: str) -> str:
+    item_start = (
+        r"give|prove|show|let|find|determine|compute|suppose|consider|verify|"
+        r"establish|use|assume|recall|for|if|what|which|why|does"
+    )
+
+    if "." in str(problem_number):
+        return rf"(?<![\d.])\d{{1,3}}\s*\.\s*\d{{1,3}}[a-z]?\s*[\).:]\s*(?=(?:{item_start})\b)"
+
+    return rf"(?<![\d.])\d{{1,3}}[a-z]?\s*[\).:]\s*(?=(?:{item_start})\b)"
+
+
+def source_context_label_from_page(page: dict[str, Any]) -> str:
+    title = str(page.get("title") or "Untitled PDF").strip()
+    page_number = page.get("printed_page_start") or page.get("page_start")
+
+    if page_number:
+        return f"{title}, page {page_number}"
+
+    return title
 
 
 def normalize_answer_against_selected_pages(state: PdfRagState, answer: str) -> str:
@@ -1252,6 +1569,11 @@ async def run_pdf_rag_agent(
     answer_policy: dict[str, Any] | None = None,
     source_usage: dict[str, Any] | None = None,
     student_profile_context: dict[str, Any] | None = None,
+    voice_intent: str | None = None,
+    preferred_sections: list[str] | None = None,
+    retrieval_mode: str | None = None,
+    response_budget: str | None = None,
+    known_context: dict[str, Any] | None = None,
     class_id: str | None = None,
     professor_id: str | None = None,
     professor_name: str | None = None,
@@ -1263,6 +1585,13 @@ async def run_pdf_rag_agent(
 
     owns_client = openrouter_client is None
     client = openrouter_client or OpenRouterClient()
+    voice_mode = voice_mode_requested(
+        voice_intent=voice_intent,
+        preferred_sections=preferred_sections,
+        retrieval_mode=retrieval_mode,
+        response_budget=response_budget,
+        known_context=known_context,
+    )
 
     try:
         graph = build_pdf_rag_graph(
@@ -1288,9 +1617,15 @@ async def run_pdf_rag_agent(
                 "answer_policy": answer_policy,
                 "source_usage": source_usage,
                 "student_profile_context": student_profile_context or {},
+                "voice_intent": voice_intent,
+                "preferred_sections": preferred_sections or [],
+                "retrieval_mode": retrieval_mode,
+                "response_budget": response_budget,
+                "known_context": compact_known_context_for_prompt(known_context or {}),
                 "class_id": class_id,
                 "professor_id": professor_id,
                 "professor_name": professor_name,
+                "voice_mode": voice_mode,
                 "sources": [],
                 "retrieval_confidence": "low",
                 "retrieval_diagnostics": [],
@@ -1313,6 +1648,11 @@ async def run_pdf_rag_agent_stream(
     answer_policy: dict[str, Any] | None = None,
     source_usage: dict[str, Any] | None = None,
     student_profile_context: dict[str, Any] | None = None,
+    voice_intent: str | None = None,
+    preferred_sections: list[str] | None = None,
+    retrieval_mode: str | None = None,
+    response_budget: str | None = None,
+    known_context: dict[str, Any] | None = None,
     class_id: str | None = None,
     professor_id: str | None = None,
     professor_name: str | None = None,
@@ -1327,6 +1667,13 @@ async def run_pdf_rag_agent_stream(
     build_assets = page_asset_builder or fetch_pdf_page_assets_via_next
     search_retriever = retriever
     fast_initial_search = should_enable_fast_initial_search(client)
+    voice_mode = voice_mode_requested(
+        voice_intent=voice_intent,
+        preferred_sections=preferred_sections,
+        retrieval_mode=retrieval_mode,
+        response_budget=response_budget,
+        known_context=known_context,
+    )
     state: PdfRagState = {
         "messages": messages,
         "tool_calls": [],
@@ -1344,16 +1691,26 @@ async def run_pdf_rag_agent_stream(
         "answer_policy": answer_policy,
         "source_usage": source_usage,
         "student_profile_context": student_profile_context or {},
+        "voice_intent": voice_intent,
+        "preferred_sections": preferred_sections or [],
+        "retrieval_mode": retrieval_mode,
+        "response_budget": response_budget,
+        "known_context": compact_known_context_for_prompt(known_context or {}),
         "class_id": class_id,
         "professor_id": professor_id,
         "professor_name": professor_name,
+        "voice_mode": voice_mode,
         "sources": [],
         "retrieval_confidence": "low",
         "retrieval_diagnostics": [],
     }
 
     try:
-        forced_fast_tool_call = fast_forced_initial_search_tool_call(state) if fast_initial_search else None
+        forced_fast_tool_call = (
+            fast_forced_initial_search_tool_call(state)
+            if fast_initial_search and voice_search_allowed(state)
+            else None
+        )
         if forced_fast_tool_call:
             state["answer"] = ""
             state["finish_reason"] = "forced_tool_call"
@@ -1362,7 +1719,7 @@ async def run_pdf_rag_agent_stream(
         else:
             response = await client.chat(
                 model=model or DEFAULT_OPENROUTER_MODEL,
-                messages=messages,
+                messages=messages_for_openrouter_agent(state),
                 tools=[SEARCH_PDF_PAGES_TOOL],
                 tool_choice="auto",
                 temperature=state.get("temperature", 0.4),
@@ -1372,17 +1729,22 @@ async def run_pdf_rag_agent_stream(
             state["answer"] = response.get("content") or ""
             state["finish_reason"] = response.get("finish_reason") or ""
             state["stage_history"] = append_stage(state, "openrouter_agent")
-            state["tool_calls"] = new_search_tool_calls(
-                state,
-                [
-                    tool_call
-                    for tool_call in response.get("tool_calls", [])
-                    if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-                ],
-                limit=remaining_search_call_count(state),
+            state["tool_calls"] = (
+                new_search_tool_calls(
+                    state,
+                    [
+                        tool_call
+                        for tool_call in response.get("tool_calls", [])
+                        if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
+                    ],
+                    limit=remaining_search_call_count(state),
+                )
+                if voice_search_allowed(state)
+                else []
             )
         if (
-            not state["tool_calls"]
+            voice_search_allowed(state)
+            and not state["tool_calls"]
             and not state.get("retrieved_pages")
             and state.get("tool_call_count", 0) == 0
         ):
@@ -1475,7 +1837,7 @@ async def run_pdf_rag_agent_stream(
                 state,
                 requested_tool_calls,
                 limit=remaining_search_call_count(state),
-            )
+            ) if voice_search_allowed(state) else []
 
             if not state["tool_calls"]:
                 yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
@@ -1497,7 +1859,7 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
     sources = sources_for_answer(state, answer)
     retrieval_confidence = normalize_retrieval_confidence(state.get("retrieval_confidence"))
 
-    return {
+    response = {
         "content": answer,
         "langGraphTrace": {
             "searchQueries": state.get("search_queries") or [],
@@ -1512,6 +1874,147 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
         "structuredOutput": structured_tutor_output_from_answer(answer, state, sources),
         "retrievalConfidence": retrieval_confidence,
     }
+
+    if is_voice_mode_state(state):
+        return apply_voice_response_policy(response, state)
+
+    return response
+
+
+def apply_voice_response_policy(response: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
+    structured_output = response.get("structuredOutput")
+    if not isinstance(structured_output, dict):
+        return response
+
+    sections = structured_output.get("sections")
+    if not isinstance(sections, dict):
+        return response
+
+    kept_sections, skipped_sections = filter_voice_structured_sections(
+        sections,
+        state=state,
+        has_sources=bool(response.get("sources")),
+    )
+    response["structuredOutput"] = {
+        **structured_output,
+        "sections": kept_sections,
+    }
+    response["sectionsShown"] = sections_shown_for_voice_response(kept_sections, bool(response.get("sources")))
+    response["skippedSections"] = skipped_sections
+    return response
+
+
+def filter_voice_structured_sections(
+    sections: dict[str, Any],
+    *,
+    state: PdfRagState,
+    has_sources: bool,
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    intent = normalize_voice_intent(state.get("voice_intent"))
+    preferred_sections = normalize_preferred_sections(state.get("preferred_sections"))
+    allowed_sections = voice_allowed_sections(intent, preferred_sections, has_sources)
+    kept: dict[str, str] = {}
+    skipped: list[dict[str, str]] = []
+
+    for section in VOICE_SECTION_ORDER:
+        if section == "sources":
+            continue
+
+        value = str(sections.get(section) or "").strip()
+        if not value:
+            continue
+
+        if section in allowed_sections or section == "answer":
+            kept[section] = value
+            continue
+
+        skipped.append(
+            {
+                "section": section,
+                "reason": voice_skip_reason(section, intent),
+            }
+        )
+
+    if not kept.get("answer"):
+        kept["answer"] = str(sections.get("answer") or "").strip()
+
+    for preferred in preferred_sections:
+        if preferred == "sources":
+            if not has_sources:
+                skipped.append(
+                    {
+                        "section": "sources",
+                        "reason": "No reliable source was needed or found for this voice turn.",
+                    }
+                )
+            continue
+
+        if preferred not in kept and not any(item["section"] == preferred for item in skipped):
+            skipped.append(
+                {
+                    "section": preferred,
+                    "reason": voice_skip_reason(preferred, intent),
+                }
+            )
+
+    return kept, skipped
+
+
+def voice_allowed_sections(intent: str, preferred_sections: list[str], has_sources: bool) -> set[str]:
+    if intent == "hint":
+        return {"answer", "hint", "nextStep"}
+
+    if intent == "show_formula":
+        allowed = {"answer", "formula", "explanation", "nextStep"}
+        if "example" in preferred_sections:
+            allowed.add("example")
+        return allowed
+
+    if intent == "find_source":
+        return {"answer", "sourceNote"}
+
+    if intent == "explain_step":
+        return {"answer", "explanation", "nextStep"}
+
+    if intent == "walkthrough":
+        allowed = {"answer", "hint", "explanation", "formula", "nextStep"}
+        if "example" in preferred_sections:
+            allowed.add("example")
+        return allowed
+
+    if intent == "check_work":
+        return {"answer", "checkWork", "nextStep"}
+
+    if intent in {"clarify", "repeat"}:
+        return {"answer"}
+
+    return {"answer", *preferred_sections, "nextStep"}
+
+
+def voice_skip_reason(section: str, intent: str) -> str:
+    if section == "example":
+        return "Example was not needed for this voice turn."
+
+    if section == "formula":
+        return "Formula was not needed for this voice turn."
+
+    if section == "sources":
+        return "Source lookup was not needed for this voice turn."
+
+    if intent == "hint":
+        return "Not needed for this hint turn."
+
+    if intent == "find_source":
+        return "Not needed for this source lookup turn."
+
+    return "LangGraph chose a smaller useful section set for this voice turn."
+
+
+def sections_shown_for_voice_response(sections: dict[str, str], has_sources: bool) -> list[str]:
+    shown = [section for section in VOICE_SECTION_ORDER if section in sections and sections[section]]
+    if has_sources and "sources" not in shown:
+        shown.append("sources")
+    return shown
 
 
 def structured_tutor_output_from_answer(

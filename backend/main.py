@@ -124,6 +124,11 @@ class LangGraphChatRequest(BaseModel):
     answerPolicy: Optional[dict[str, Any]] = None
     sourceUsage: Optional[dict[str, Any]] = None
     studentLearningProfileContext: Optional[dict[str, Any]] = None
+    voice_intent: Optional[str] = Field(default=None, max_length=40)
+    preferred_sections: Optional[list[str]] = Field(default=None, max_length=8)
+    retrieval_mode: Optional[str] = Field(default=None, max_length=40)
+    response_budget: Optional[str] = Field(default=None, max_length=40)
+    known_context: Optional[dict[str, Any]] = None
     messages: list[dict[str, Any]] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES_PER_REQUEST)
 
 
@@ -175,6 +180,11 @@ async def langgraph_chat(
         answer_policy=request.answerPolicy,
         source_usage=request.sourceUsage,
         student_profile_context=request.studentLearningProfileContext,
+        voice_intent=request.voice_intent,
+        preferred_sections=request.preferred_sections,
+        retrieval_mode=request.retrieval_mode,
+        response_budget=request.response_budget,
+        known_context=request.known_context,
         professor_id=request.professorId,
         professor_name=request.professorName,
         openrouter_client=shared_langgraph_openrouter_client(),
@@ -213,6 +223,11 @@ async def langgraph_chat_stream(
                 answer_policy=request.answerPolicy,
                 source_usage=request.sourceUsage,
                 student_profile_context=request.studentLearningProfileContext,
+                voice_intent=request.voice_intent,
+                preferred_sections=request.preferred_sections,
+                retrieval_mode=request.retrieval_mode,
+                response_budget=request.response_budget,
+                known_context=request.known_context,
                 professor_id=request.professorId,
                 professor_name=request.professorName,
                 openrouter_client=shared_langgraph_openrouter_client(),

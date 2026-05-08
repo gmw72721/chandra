@@ -7318,6 +7318,115 @@ button.student-row[aria-pressed="true"] {
   padding: 28px 20px 24px 0;
 }
 
+.voice-dialogue-panel {
+  position: absolute;
+  z-index: 2;
+  right: 48px;
+  top: 246px;
+  display: grid;
+  gap: 10px;
+  width: min(330px, 26vw);
+  max-height: calc(100vh - 380px);
+  overflow: hidden;
+  border: 1px solid #ddd6cb;
+  border-radius: 8px;
+  background: rgba(255, 254, 251, 0.9);
+  padding: 12px;
+  box-shadow: 0 12px 28px rgba(42, 37, 25, 0.05);
+}
+
+.voice-dialogue-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 12px;
+  border-bottom: 1px solid #ece6dc;
+  padding-bottom: 9px;
+}
+
+.voice-dialogue-heading strong {
+  color: #102730;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+
+.voice-dialogue-heading span {
+  overflow: hidden;
+  color: #66716f;
+  font-size: 0.76rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-dialogue-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #ded8ce;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 8px 10px;
+}
+
+.voice-dialogue-progress p {
+  margin: 0;
+  overflow: hidden;
+  color: #1a2d34;
+  font-size: 0.82rem;
+  font-weight: 650;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-dialogue-list {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.voice-dialogue-turn {
+  display: grid;
+  gap: 4px;
+}
+
+.voice-dialogue-turn span {
+  color: #68726f;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.voice-dialogue-turn p,
+.voice-dialogue-empty {
+  margin: 0;
+  color: #1a2d34;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.voice-dialogue-turn p {
+  border: 1px solid #ded8ce;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 8px 10px;
+}
+
+.voice-dialogue-turn.student p {
+  border-color: var(--theme-primary-ring);
+  background: var(--theme-primary-soft);
+}
+
+.voice-dialogue-empty {
+  color: #66716f;
+}
+
 .student-workspace-message {
   width: 100%;
   max-width: 720px;
@@ -7636,17 +7745,17 @@ button.student-row[aria-pressed="true"] {
 .student-composer {
   display: grid;
   grid-row: 5;
-  grid-template-columns: minmax(0, 1fr) 84px;
-  align-items: end;
-  gap: 12px;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
   border: 1px solid #ddd6cb;
   border-radius: 8px;
   background: rgba(255, 254, 251, 0.94);
-  padding: 10px 12px;
+  padding: 9px 10px;
 }
 
 .student-composer textarea {
-  min-height: 48px;
+  min-height: 46px;
   max-height: 156px;
   border-color: #d6d1c8;
   background: white;
@@ -7655,6 +7764,79 @@ button.student-row[aria-pressed="true"] {
   resize: none;
   overflow-y: hidden;
   box-shadow: inset 0 1px 2px rgba(7, 17, 31, 0.03);
+}
+
+.student-voice-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  width: 46px;
+  min-width: 46px;
+  min-height: 46px;
+  border: 1px solid #ddd6cb;
+  border-radius: 8px;
+  background: white;
+  color: #12313a;
+  padding: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.student-voice-button[aria-pressed="true"] {
+  border-color: var(--theme-primary);
+  background: var(--theme-primary-soft);
+  color: var(--theme-primary);
+}
+
+.student-voice-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.student-voice-icon {
+  position: relative;
+  width: 13px;
+  height: 20px;
+  border: 2px solid currentColor;
+  border-radius: 8px;
+}
+
+.student-voice-icon::before,
+.student-voice-icon::after {
+  position: absolute;
+  content: "";
+}
+
+.student-voice-icon::before {
+  left: 50%;
+  bottom: -6px;
+  width: 19px;
+  height: 10px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  border-radius: 0 0 10px 10px;
+  transform: translateX(-50%);
+}
+
+.student-voice-icon::after {
+  left: 50%;
+  bottom: -12px;
+  width: 2px;
+  height: 7px;
+  background: currentColor;
+  transform: translateX(-50%);
+}
+
+.student-voice-button-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 .student-composer-add {
@@ -7678,9 +7860,17 @@ button.student-row[aria-pressed="true"] {
 }
 
 .student-send-button {
-  min-height: 48px;
-  padding: 0 14px;
+  min-width: 84px;
+  min-height: 46px;
+  padding: 0 16px;
   font-size: 0.96rem;
+}
+
+.student-send-button:disabled {
+  border-color: #d8d3cc;
+  background: rgba(255, 255, 255, 0.66);
+  color: #7d8791;
+  box-shadow: none;
 }
 
 @media (max-width: 820px) {
@@ -7740,6 +7930,13 @@ button.student-row[aria-pressed="true"] {
     padding-right: 0;
   }
 
+  .voice-dialogue-panel {
+    position: static;
+    width: 100%;
+    max-height: none;
+    margin-top: 14px;
+  }
+
   .student-workspace-message.assistant {
     grid-template-columns: 42px minmax(0, 1fr);
     gap: 12px;
@@ -7760,16 +7957,24 @@ button.student-row[aria-pressed="true"] {
   }
 
   .student-composer {
-    grid-template-columns: 1fr;
-    gap: 12px;
+    grid-template-columns: 46px minmax(0, 1fr);
+    gap: 10px;
   }
 
   .student-composer textarea {
+    grid-column: 1 / -1;
+    grid-row: 1;
     min-height: 72px;
   }
 
   .student-send-button {
+    grid-column: 2;
     width: 100%;
+  }
+
+  .student-voice-button {
+    grid-column: 1;
+    width: 46px;
   }
 }
 
@@ -7988,7 +8193,8 @@ button.student-row[aria-pressed="true"] {
 .student-new-mini-button:hover,
 .student-new-chat-button:hover,
 .student-signout-button:hover,
-.student-status-pill:hover {
+.student-status-pill:hover,
+.student-voice-button:hover {
   background: rgba(255, 253, 248, 0.96);
   box-shadow: 0 8px 18px rgba(42, 37, 25, 0.04);
 }
@@ -8017,6 +8223,7 @@ button.student-row[aria-pressed="true"] {
 .student-new-mini-button,
 .student-new-chat-button,
 .student-status-pill,
+.student-voice-button,
 .student-signout-button,
 .overview-date-button,
 .knowledge-filter-list button {
@@ -8882,6 +9089,7 @@ button.student-row[aria-pressed="true"] {
 .student-workspace-shell[data-appearance] .student-new-mini-button,
 .student-workspace-shell[data-appearance] .student-new-chat-button,
 .student-workspace-shell[data-appearance] .student-status-pill,
+.student-workspace-shell[data-appearance] .student-voice-button,
 .student-workspace-shell[data-appearance] .student-signout-button {
   border-color: var(--card-border);
   background: var(--card-bg);
@@ -8901,9 +9109,60 @@ button.student-row[aria-pressed="true"] {
 .student-workspace-shell[data-appearance] .student-new-mini-button:hover,
 .student-workspace-shell[data-appearance] .student-new-chat-button:hover,
 .student-workspace-shell[data-appearance] .student-status-pill:hover,
+.student-workspace-shell[data-appearance] .student-voice-button:hover,
 .student-workspace-shell[data-appearance] .student-signout-button:hover {
   background: var(--row-hover-bg);
   color: var(--theme-primary);
+}
+
+.student-workspace-shell[data-appearance] .student-voice-button[aria-pressed="true"] {
+  border-color: var(--theme-primary);
+  background: var(--theme-primary-soft);
+  color: var(--theme-primary);
+}
+
+.student-workspace-shell[data-appearance] .student-send-button:disabled {
+  border-color: var(--card-border);
+  background: var(--input-bg);
+  color: var(--text-muted);
+  box-shadow: none;
+}
+
+.student-workspace-shell[data-appearance] .voice-dialogue-panel {
+  border-color: var(--card-border);
+  background: var(--card-bg);
+  box-shadow: var(--app-shadow);
+}
+
+.student-workspace-shell[data-appearance] .voice-dialogue-heading {
+  border-bottom-color: var(--card-border);
+}
+
+.student-workspace-shell[data-appearance] .voice-dialogue-heading strong,
+.student-workspace-shell[data-appearance] .voice-dialogue-progress p,
+.student-workspace-shell[data-appearance] .voice-dialogue-turn p {
+  color: var(--text-primary);
+}
+
+.student-workspace-shell[data-appearance] .voice-dialogue-heading span,
+.student-workspace-shell[data-appearance] .voice-dialogue-turn span,
+.student-workspace-shell[data-appearance] .voice-dialogue-empty {
+  color: var(--text-muted);
+}
+
+.student-workspace-shell[data-appearance] .voice-dialogue-turn p {
+  border-color: var(--card-border);
+  background: var(--input-bg);
+}
+
+.student-workspace-shell[data-appearance] .voice-dialogue-progress {
+  border-color: var(--card-border);
+  background: var(--input-bg);
+}
+
+.student-workspace-shell[data-appearance] .voice-dialogue-turn.student p {
+  border-color: var(--theme-primary-ring);
+  background: var(--theme-primary-soft);
 }
 
 .teacher-dashboard[data-appearance] .class-code,

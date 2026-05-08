@@ -2417,12 +2417,19 @@ async def test_passage_lookup_verifies_exact_exercise_page_before_quote(tmp_path
         openrouter_client=client,
         page_asset_builder=page_asset_builder,
         professor_id="teacher-1",
+        preferred_sections=["answer", "sources"],
+        response_budget="ui_full",
+        retrieval_mode="force_search",
         retriever=retriever,
+        voice_intent="find_source",
     )
 
     assert [call["query"] for call in retriever.calls] == ["read quote Exercise 2.14 Given setup Exercise 2.13"]
     assert response["langGraphTrace"]["selectedPages"][0]["pageStart"] == 98
+    assert response["message"].startswith("Problem text: 2.14. Given the setup of Exercise 2.13")
+    assert "(i) rank(KL) <= min(rank(L), rank(K))." in response["message"]
     assert "page 98" in response["message"]
+    assert response["structuredOutput"]["sections"]["answer"].startswith("Problem text:")
     assert response["structuredOutput"]["metadata"]["mode"] in {"source_lookup", "explain"}
 
 
@@ -2512,3 +2519,226 @@ async def test_concept_method_query_can_use_semantic_context_without_exact_exerc
     ]
     assert response["langGraphTrace"]["selectedPages"][0]["pageStart"] == 91
     assert "rank-nullity" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_voice_retrieval_none_suppresses_forced_search_for_concrete_problem() -> None:
+    client = FakeOpenRouterClient([{"content": "Tell me what part is confusing first.", "tool_calls": []}])
+    retriever = FakeRetriever([])
+
+    response = await run_pdf_rag_agent(
+        class_id="class-calculus",
+        messages=[{"role": "user", "content": "Help with worksheet 4 problem 7."}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        professor_id="teacher-1",
+        retrieval_mode="none",
+        retriever=retriever,
+        voice_intent="clarify",
+    )
+
+    assert response["content"] == "Tell me what part is confusing first."
+    assert retriever.calls == []
+    assert response["langGraphTrace"]["toolCallCount"] == 0
+
+
+@pytest.mark.asyncio
+async def test_voice_reuse_sources_prefers_reliable_known_source_context() -> None:
+    client = FakeOpenRouterClient([{"content": "Use the same page context. Hint: identify the unknown first.", "tool_calls": []}])
+    retriever = FakeRetriever([])
+
+    response = await run_pdf_rag_agent(
+        class_id="class-calculus",
+        known_context={
+            "hasReliableSourceContext": True,
+            "knownSourceLabels": ["Worksheet 4 p. 2"],
+        },
+        messages=[{"role": "user", "content": "Can you explain the next step for worksheet 4 problem 7?"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        preferred_sections=["hint", "nextStep"],
+        professor_id="teacher-1",
+        retrieval_mode="reuse_sources",
+        retriever=retriever,
+        voice_intent="hint",
+    )
+
+    assert retriever.calls == []
+    assert response["langGraphTrace"]["toolCallCount"] == 0
+    assert "hint" in response["structuredOutput"]["sections"]
+
+
+@pytest.mark.asyncio
+async def test_voice_force_search_searches_without_reliable_source_context(tmp_path: Path) -> None:
+    image = tmp_path / "worksheet.png"
+    image.write_bytes(b"page")
+    client = FakeOpenRouterClient(
+        [
+            {"content": "I will check the class page first.", "tool_calls": []},
+            {"content": "The worksheet page shows the setup. Hint: identify what is given.", "tool_calls": []},
+        ]
+    )
+    retriever = FakeRetriever(
+        [
+            {
+                "doc_id": "worksheet",
+                "title": "Worksheet 4",
+                "page_start": 2,
+                "page_end": 2,
+                "section": "Problem 7",
+                "score": 0.95,
+                "chunk_text": "Problem 7 setup.",
+                "source_pdf_path": "data/pdfs/worksheet.pdf",
+            }
+        ]
+    )
+
+    async def page_asset_builder(pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "doc_id": page["doc_id"],
+                "title": page["title"],
+                "page_start": page["page_start"],
+                "page_end": page["page_end"],
+                "images": [str(image)],
+                "citation_label": f"{page['title']}, page {page['page_start']}",
+            }
+            for page in pages
+        ]
+
+    response = await run_pdf_rag_agent(
+        class_id="class-calculus",
+        known_context={"hasReliableSourceContext": False},
+        messages=[{"role": "user", "content": "Help with worksheet 4 problem 7."}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        page_asset_builder=page_asset_builder,
+        professor_id="teacher-1",
+        retrieval_mode="force_search",
+        retriever=retriever,
+        voice_intent="hint",
+    )
+
+    assert len(retriever.calls) == 1
+    assert response["langGraphTrace"]["toolCallCount"] == 1
+    assert response["sources"][0]["title"] == "Worksheet 4"
+
+
+@pytest.mark.asyncio
+async def test_voice_hint_filters_formula_and_example_sections() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": (
+                    "Hint: Identify what the problem asks for. Formula: Use $a^2+b^2=c^2$. "
+                    "Example: A similar triangle has sides 3, 4, and 5. What is the unknown?"
+                ),
+                "tool_calls": [],
+            }
+        ]
+    )
+    retriever = FakeRetriever([])
+
+    response = await run_pdf_rag_agent(
+        class_id="class-geometry",
+        messages=[{"role": "user", "content": "Can you help me start?"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        preferred_sections=["hint", "nextStep", "formula"],
+        professor_id="teacher-1",
+        retrieval_mode="none",
+        retriever=retriever,
+        voice_intent="hint",
+    )
+
+    sections = response["structuredOutput"]["sections"]
+    assert "hint" in sections
+    assert "nextStep" in sections
+    assert "formula" not in sections
+    assert "example" not in sections
+    assert {"section": "formula", "reason": "Formula was not needed for this voice turn."} in response["skippedSections"]
+
+
+@pytest.mark.asyncio
+async def test_voice_formula_request_does_not_keep_example_by_default() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": (
+                    "Formula: Use $d=rt$ to relate distance, rate, and time. "
+                    "Example: If r=2 and t=3, then d=6. Which value is unknown?"
+                ),
+                "tool_calls": [],
+            }
+        ]
+    )
+    retriever = FakeRetriever([])
+
+    response = await run_pdf_rag_agent(
+        class_id="class-algebra",
+        messages=[{"role": "user", "content": "What formula do I use?"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        preferred_sections=["formula", "nextStep"],
+        professor_id="teacher-1",
+        retrieval_mode="none",
+        retriever=retriever,
+        voice_intent="show_formula",
+    )
+
+    sections = response["structuredOutput"]["sections"]
+    assert "formula" in sections
+    assert "nextStep" in sections
+    assert "example" not in sections
+
+
+@pytest.mark.asyncio
+async def test_voice_fields_absent_keep_existing_forced_search_behavior(tmp_path: Path) -> None:
+    image = tmp_path / "worksheet.png"
+    image.write_bytes(b"page")
+    client = FakeOpenRouterClient(
+        [
+            {"content": "I should check the exact worksheet.", "tool_calls": []},
+            {"content": "The worksheet shows the problem. Which quantity is unknown?", "tool_calls": []},
+        ]
+    )
+    retriever = FakeRetriever(
+        [
+            {
+                "doc_id": "worksheet",
+                "title": "Worksheet 4",
+                "page_start": 2,
+                "page_end": 2,
+                "section": "Problem 7",
+                "score": 0.95,
+                "chunk_text": "Problem 7 setup.",
+                "source_pdf_path": "data/pdfs/worksheet.pdf",
+            }
+        ]
+    )
+
+    async def page_asset_builder(pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "doc_id": page["doc_id"],
+                "title": page["title"],
+                "page_start": page["page_start"],
+                "page_end": page["page_end"],
+                "images": [str(image)],
+                "citation_label": f"{page['title']}, page {page['page_start']}",
+            }
+            for page in pages
+        ]
+
+    response = await run_pdf_rag_agent(
+        class_id="class-algebra",
+        messages=[{"role": "user", "content": "Help with worksheet 4 problem 7."}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        page_asset_builder=page_asset_builder,
+        professor_id="teacher-1",
+        retriever=retriever,
+    )
+
+    assert len(retriever.calls) == 1
+    assert response["langGraphTrace"]["toolCallCount"] == 1
