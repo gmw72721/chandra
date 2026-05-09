@@ -49,6 +49,8 @@ test("student-entered join codes enroll the student through the server route", (
 test("student class joins are additive and keep enrolled class ids", () => {
   const joinSource = readFileSync(join(repoRoot, "frontend/app/api/classes/join/route.ts"), "utf8");
   const classesSource = readFileSync(join(repoRoot, "frontend/app/api/student/classes/route.ts"), "utf8");
+  const firebaseConfigSource = readFileSync(join(repoRoot, "firebase.json"), "utf8");
+  const indexSource = readFileSync(join(repoRoot, "firestore.indexes.json"), "utf8");
   const rulesSource = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
 
   assert.doesNotMatch(joinSource, /batch\.delete\(/);
@@ -57,6 +59,10 @@ test("student class joins are additive and keep enrolled class ids", () => {
   assert.match(classesSource, /classIds\.add\(classId\.trim\(\)\)/);
   assert.match(classesSource, /getRosterClassIdsByEmail\(email\)/);
   assert.match(classesSource, /Student roster class lookup failed; falling back to profile class ids/);
+  assert.match(firebaseConfigSource, /"indexes": "firestore\.indexes\.json"/);
+  assert.match(indexSource, /"collectionGroup": "students"/);
+  assert.match(indexSource, /"fieldPath": "email"/);
+  assert.match(indexSource, /"queryScope": "COLLECTION_GROUP"/);
   assert.match(rulesSource, /data\.classIds is list/);
   assert.match(rulesSource, /data\.classIds\.hasAny\(\[classId\]\)/);
 });
