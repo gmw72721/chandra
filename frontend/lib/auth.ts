@@ -40,13 +40,13 @@ export type UserProfile = {
 
 const presenceHeartbeatMs = 30000;
 
-export function subscribeToAuth(callback: (user: User | null) => void) {
+export function subscribeToAuth(callback: (user: User | null) => void, onError?: (error: Error) => void) {
   if (!auth) {
     callback(null);
     return () => {};
   }
 
-  return onAuthStateChanged(auth, callback);
+  return onAuthStateChanged(auth, callback, onError);
 }
 
 export function subscribeToUserProfile(
@@ -206,12 +206,17 @@ export function startUserPresenceHeartbeat(user: User, profile: UserProfile) {
 
   let stopped = false;
   const writeOnline = () => {
-    if (!stopped) {
+    if (!stopped && document.visibilityState === "visible") {
       void safelyWriteUserPresence(user, profile, true);
     }
   };
   const handleVisibilityChange = () => {
-    void safelyWriteUserPresence(user, profile, document.visibilityState === "visible");
+    if (document.visibilityState === "visible") {
+      writeOnline();
+      return;
+    }
+
+    void safelyWriteUserPresence(user, profile, false);
   };
 
   writeOnline();

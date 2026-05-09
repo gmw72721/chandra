@@ -7,7 +7,10 @@ from typing import Any, Protocol
 
 import httpx
 
+from backend.internal_next import internal_next_base_url, reusable_async_client
+
 logger = logging.getLogger(__name__)
+_NEXT_SEARCH_CLIENT: httpx.AsyncClient | None = None
 
 
 class PdfRetriever(Protocol):
@@ -128,26 +131,29 @@ async def search_pdf_pages_via_next(
     if not shared_secret:
         return []
 
-    next_base_url = internal_next_base_url()
+    next_base_url = internal_next_base_url("PDF retrieval")
 
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            response = await client.post(
-                f"{next_base_url}/api/internal/pdf-page-search",
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Chandra-Internal-Secret": shared_secret,
-                },
-                json={
-                    "classId": class_id,
-                    "professorId": professor_id,
-                    "query": query,
-                    "topK": top_k,
-                },
-            )
+        client = next_search_http_client()
+        response = await client.post(
+            f"{next_base_url}/api/internal/pdf-page-search",
+            headers={
+                "Content-Type": "application/json",
+                "X-Chandra-Internal-Secret": shared_secret,
+            },
+            json={
+                "classId": class_id,
+                "professorId": professor_id,
+                "query": query,
+                "topK": top_k,
+            },
+        )
         response.raise_for_status()
         payload = response.json()
     except Exception as error:
+        if isinstance(error, (httpx.TransportError, httpx.TimeoutException)):
+            await close_next_search_http_client()
+
         logger.warning(
             "Internal PDF retrieval failed.",
             extra={
@@ -163,16 +169,22 @@ async def search_pdf_pages_via_next(
     return pages if isinstance(pages, list) else []
 
 
-def internal_next_base_url() -> str:
-    configured_url = os.getenv("NEXT_INTERNAL_BASE_URL") or os.getenv("FRONTEND_ORIGIN")
+def next_search_http_client() -> httpx.AsyncClient:
+    global _NEXT_SEARCH_CLIENT
 
-    if configured_url:
-        return configured_url.rstrip("/")
+    _NEXT_SEARCH_CLIENT = reusable_async_client(_NEXT_SEARCH_CLIENT, timeout=45.0)
 
-    if os.getenv("CHANDRA_ENV", "").strip().lower() in {"prod", "production"}:
-        raise RuntimeError("NEXT_INTERNAL_BASE_URL or FRONTEND_ORIGIN is required for production PDF retrieval.")
+    return _NEXT_SEARCH_CLIENT
 
-    return "http://127.0.0.1:3000"
+
+async def close_next_search_http_client() -> None:
+    global _NEXT_SEARCH_CLIENT
+
+    if _NEXT_SEARCH_CLIENT is None:
+        return
+
+    await _NEXT_SEARCH_CLIENT.aclose()
+    _NEXT_SEARCH_CLIENT = None
 
 
 def normalize_pdf_page_result(page: dict[str, Any] | Any) -> dict[str, Any]:

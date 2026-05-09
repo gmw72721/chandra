@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ChangeEvent, DragEvent, FormEvent, KeyboardEvent, Suspense, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, KeyboardEvent, Suspense, memo, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
@@ -20,7 +20,15 @@ import {
   type TeacherClassThemeColor
 } from "@/lib/class-theme";
 import { normalizeOpeningMessage } from "@/lib/class-settings";
+import {
+  assistantMessageAnswerContent,
+  assistantStructuredSections,
+  condensedSourceLabels,
+  normalizeMarkdownMath,
+  normalizeStructuredSectionMarkdown
+} from "@/lib/chat-message-format";
 import { subscribeToClass, type TeacherClass } from "@/lib/classes";
+import { capitalizeLabel, coerceDate, formatConversationDate } from "@/lib/display-format";
 import type { ChatMessage, MessageAttachment, StudentConversationSummary, TutorApiResponse } from "@/lib/types";
 
 type ChatProgress = {
@@ -194,33 +202,63 @@ function StudentWorkspace() {
     };
   }, [activeCourseId, firebaseReady, isTeacherPreview, profile?.role, user]);
 
-  const activeStudentClass = studentClasses.find((studentClass) => studentClass.id === activeCourseId) ?? null;
-  const activeClass: StudentVisibleClass | null =
-    savedClass?.id === activeCourseId ? savedClass : activeStudentClass;
-  const activeAppearance = normalizeTeacherClassAppearance(
-    profile?.appearance ?? activeClass?.appearance ?? defaultTeacherClassAppearance
+  const activeStudentClass = useMemo(
+    () => studentClasses.find((studentClass) => studentClass.id === activeCourseId) ?? null,
+    [activeCourseId, studentClasses]
   );
-  const activeThemeColor = normalizeTeacherClassThemeColor(
-    profile?.themeColor ?? activeClass?.themeColor ?? defaultTeacherClassThemeColor
+  const activeClass: StudentVisibleClass | null = useMemo(
+    () => (savedClass?.id === activeCourseId ? savedClass : activeStudentClass),
+    [activeCourseId, activeStudentClass, savedClass]
+  );
+  const activeAppearance = useMemo(
+    () =>
+      normalizeTeacherClassAppearance(profile?.appearance ?? activeClass?.appearance ?? defaultTeacherClassAppearance),
+    [activeClass?.appearance, profile?.appearance]
+  );
+  const activeThemeColor = useMemo(
+    () =>
+      normalizeTeacherClassThemeColor(profile?.themeColor ?? activeClass?.themeColor ?? defaultTeacherClassThemeColor),
+    [activeClass?.themeColor, profile?.themeColor]
   );
   const className = activeClass?.name ?? (activeCourseId ? "Saved class" : "Class needed");
   const classSection = activeClass?.section ?? (activeCourseId ? "Student chat" : "Enter your class code");
   const classSectionLabel = formatClassSectionLabel(classSection, Boolean(activeCourseId));
   const compactClassLabel = formatCompactClassLabel(className);
   const visibleClassCode = activeClass?.joinCode || activeClass?.id || activeCourseId;
-  const visibleConversationSummaries = conversationSummaries.filter(
-    (conversation) => conversation.classId === activeCourseId && conversation.studentId === user?.uid
+  const visibleConversationSummaries = useMemo(
+    () =>
+      conversationSummaries.filter(
+        (conversation) => conversation.classId === activeCourseId && conversation.studentId === user?.uid
+      ),
+    [activeCourseId, conversationSummaries, user?.uid]
   );
   const activeSelectedConversationId = selectedConversationClassId === activeCourseId ? selectedConversationId : "";
-  const visibleStudentClasses = mergeStudentClasses(studentClasses, activeClass);
-  const selectedConversation =
-    visibleConversationSummaries.find((conversation) => conversation.id === activeSelectedConversationId) ?? null;
+  const visibleStudentClasses = useMemo(
+    () => mergeStudentClasses(studentClasses, activeClass),
+    [activeClass, studentClasses]
+  );
+  const selectedConversation = useMemo(
+    () => visibleConversationSummaries.find((conversation) => conversation.id === activeSelectedConversationId) ?? null,
+    [activeSelectedConversationId, visibleConversationSummaries]
+  );
   const conversationTitle = selectedConversation?.title ?? "";
   const conversationMessageCount = selectedConversation?.messageCount ?? 0;
   const accountName = profile?.displayName ?? user?.displayName ?? "Student";
   const accountEmail = profile?.email ?? user?.email ?? "";
-  const isUploadingAttachment = composerAttachments.some((attachment) => attachment.uploadStatus === "uploading");
-  const readyComposerAttachments = composerAttachments.filter((attachment) => attachment.uploadStatus === "ready");
+  const { isUploadingAttachment, readyComposerAttachments } = useMemo(() => {
+    const readyAttachments: ComposerAttachment[] = [];
+    let hasUploadInFlight = false;
+
+    for (const attachment of composerAttachments) {
+      if (attachment.uploadStatus === "uploading") {
+        hasUploadInFlight = true;
+      } else if (attachment.uploadStatus === "ready") {
+        readyAttachments.push(attachment);
+      }
+    }
+
+    return { isUploadingAttachment: hasUploadInFlight, readyComposerAttachments: readyAttachments };
+  }, [composerAttachments]);
   const canSendMessage = Boolean(
     activeCourseId &&
       !isSending &&
@@ -279,6 +317,7 @@ function StudentWorkspace() {
     }
 
     let isCancelled = false;
+    const controller = new AbortController();
 
     user
       .getIdToken()
@@ -286,6 +325,7 @@ function StudentWorkspace() {
         fetchStudentConversationMessages({
           classId: activeCourseId,
           conversationId: activeSelectedConversationId,
+          signal: controller.signal,
           token
         })
       )
@@ -296,6 +336,10 @@ function StudentWorkspace() {
         }
       })
       .catch((caughtError) => {
+        if (isAbortError(caughtError)) {
+          return;
+        }
+
         if (!isCancelled) {
           setConversationMessagesError(describeStudentConversationMessageError(caughtError));
         }
@@ -303,6 +347,7 @@ function StudentWorkspace() {
 
     return () => {
       isCancelled = true;
+      controller.abort();
     };
   }, [activeClass, activeCourseId, activeSelectedConversationId, firebaseReady, user]);
 
@@ -950,53 +995,7 @@ function StudentWorkspace() {
             {conversationMessagesError ? <p className="form-error chat-error">{conversationMessagesError}</p> : null}
             <div className="message-list student-message-list">
               {messages.map((message) => (
-                <article className={`student-workspace-message ${message.role === "student" ? "student" : "assistant"}`} key={message.id}>
-                  {message.role === "student" ? (
-                    <div className="student-message-stack">
-                      <div className="message-meta">You</div>
-                      <div className="student-message-bubble">
-                        <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-                          {normalizeMarkdownMath(message.content)}
-                        </ReactMarkdown>
-                      </div>
-                      {message.attachments?.length ? (
-                        <MessageAttachmentList attachments={message.attachments} />
-                      ) : null}
-                    </div>
-                  ) : (
-                    <>
-                      <span className="chandra-message-avatar" aria-hidden="true">
-                        C
-                      </span>
-                      <div className="assistant-message-stack">
-                        <div className="message-meta">Chandra</div>
-                        {assistantMessageAnswerContent(message) ? (
-                          <div className="assistant-message-bubble">
-                            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-                              {normalizeMarkdownMath(assistantMessageAnswerContent(message))}
-                            </ReactMarkdown>
-                          </div>
-                        ) : null}
-                        {assistantStructuredSections(message).map((section) => (
-                          <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
-                            <strong>{section.label}</strong>
-                            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-                              {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(section.content, section.kind))}
-                            </ReactMarkdown>
-                          </div>
-                        ))}
-                        {message.sources?.length ? (
-                          <div className="message-sources" aria-label="Sources used">
-                            <strong>Sources:</strong>
-                            {condensedSourceLabels(message.sources).map((label, index) => (
-                              <span key={`${label}-${index}`}>{label}</span>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                    </>
-                  )}
-                </article>
+                <StudentChatMessage message={message} key={message.id} />
               ))}
               {isSending && chatProgress ? <ChatProgressMessage progress={chatProgress} /> : null}
             </div>
@@ -1070,6 +1069,62 @@ function resizeStudentComposerTextarea(textarea: HTMLTextAreaElement | null) {
   textarea.style.height = `${nextHeight}px`;
   textarea.style.overflowY = textarea.scrollHeight > studentComposerTextareaMaxHeight ? "auto" : "hidden";
 }
+
+const StudentChatMessage = memo(function StudentChatMessage({ message }: { message: ChatMessage }) {
+  if (message.role === "student") {
+    return (
+      <article className="student-workspace-message student">
+        <div className="student-message-stack">
+          <div className="message-meta">You</div>
+          <div className="student-message-bubble">
+            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+              {normalizeMarkdownMath(message.content)}
+            </ReactMarkdown>
+          </div>
+          {message.attachments?.length ? <MessageAttachmentList attachments={message.attachments} /> : null}
+        </div>
+      </article>
+    );
+  }
+
+  const answerContent = assistantMessageAnswerContent(message);
+  const structuredSections = assistantStructuredSections(message);
+  const sourceLabels = message.sources?.length ? condensedSourceLabels(message.sources) : [];
+
+  return (
+    <article className="student-workspace-message assistant">
+      <span className="chandra-message-avatar" aria-hidden="true">
+        C
+      </span>
+      <div className="assistant-message-stack">
+        <div className="message-meta">Chandra</div>
+        {answerContent ? (
+          <div className="assistant-message-bubble">
+            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+              {normalizeMarkdownMath(answerContent)}
+            </ReactMarkdown>
+          </div>
+        ) : null}
+        {structuredSections.map((section) => (
+          <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
+            <strong>{section.label}</strong>
+            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+              {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(section.content, section.kind))}
+            </ReactMarkdown>
+          </div>
+        ))}
+        {sourceLabels.length ? (
+          <div className="message-sources" aria-label="Sources used">
+            <strong>Sources:</strong>
+            {sourceLabels.map((label, index) => (
+              <span key={`${label}-${index}`}>{label}</span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </article>
+  );
+});
 
 function StudentSettingsPanel({
   accountEmail,
@@ -1378,7 +1433,7 @@ function AttachmentVisual({ attachment }: { attachment: Partial<ComposerAttachme
   );
 }
 
-function ChatProgressMessage({ progress }: { progress: ChatProgress }) {
+const ChatProgressMessage = memo(function ChatProgressMessage({ progress }: { progress: ChatProgress }) {
   return (
     <article className="student-workspace-message assistant progress-message" aria-live="polite">
       <span className="chandra-message-avatar" aria-hidden="true">
@@ -1405,7 +1460,7 @@ function ChatProgressMessage({ progress }: { progress: ChatProgress }) {
       </div>
     </article>
   );
-}
+});
 
 async function readChatStream(response: Response, onEvent: (event: ChatStreamEvent) => void) {
   const reader = response.body?.getReader();
@@ -1479,10 +1534,12 @@ async function fetchStudentConversationSummaries({
 async function fetchStudentConversationMessages({
   classId,
   conversationId,
+  signal,
   token
 }: {
   classId: string;
   conversationId: string;
+  signal?: AbortSignal;
   token: string;
 }) {
   const response = await fetch(
@@ -1494,7 +1551,8 @@ async function fetchStudentConversationMessages({
     {
       headers: {
         Authorization: `Bearer ${token}`
-      }
+      },
+      signal
     }
   );
   const data = (await response.json()) as { messages?: ChatMessage[]; error?: string };
@@ -1504,6 +1562,10 @@ async function fetchStudentConversationMessages({
   }
 
   return data.messages ?? [];
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 async function createStudentConversationForAttachment({
@@ -1772,122 +1834,6 @@ function normalizeSearchQuery(query: string) {
   return query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-function assistantMessageAnswerContent(message: ChatMessage) {
-  return message.structuredOutput ? message.structuredOutput.sections.answer : message.content;
-}
-
-function assistantStructuredSections(message: ChatMessage) {
-  const sections = message.structuredOutput?.sections;
-
-  if (!sections) {
-    return [];
-  }
-
-  return [
-    { content: sections.hint, kind: "hint", label: "Hint" },
-    { content: sections.explanation, kind: "explanation", label: "Why this works" },
-    { content: sections.formula, kind: "formula", label: "Formula" },
-    { content: sections.example, kind: "example", label: "Example" },
-    { content: sections.checkWork, kind: "check-work", label: "Check your work" },
-    {
-      content: message.sources?.length || isGenericSourceNote(sections.sourceNote) ? undefined : sections.sourceNote,
-      kind: "source-note",
-      label: "Source"
-    },
-    { content: sections.nextStep, kind: "next-step", label: "Your next step" }
-  ].filter((section): section is { content: string; kind: string; label: string } => Boolean(section.content));
-}
-
-function isGenericSourceNote(note: string | undefined) {
-  return !note || /^based on the selected class material\.?$/i.test(note.trim());
-}
-
-function normalizeStructuredSectionMarkdown(content: string, kind: string) {
-  const cleaned = content
-    .trim()
-    .replace(/^\*\*\s*/, "")
-    .replace(/\s*\*\*$/, "");
-
-  if (kind !== "formula") {
-    return cleaned;
-  }
-
-  if (/^\$\$[\s\S]*\$\$$/.test(cleaned) || /^\\\[/.test(cleaned)) {
-    return cleaned;
-  }
-
-  const formulas = cleaned
-    .split(/\s*,\s*(?=(?:P|E|M|A|\\mu|μ|\$?\\?mu)\b)/)
-    .map((formula) => formula.trim())
-    .filter(Boolean);
-
-  if (formulas.length <= 1) {
-    return `$$\n${cleaned.replace(/^\$|\$$/g, "")}\n$$`;
-  }
-
-  return formulas.map((formula) => `$$\n${formula.replace(/^\$|\$$/g, "")}\n$$`).join("\n\n");
-}
-
-function formatSourceLabel(source: NonNullable<ChatMessage["sources"]>[number]) {
-  return [
-    source.title,
-    source.problemNumber ? `problem ${source.problemNumber}` : "",
-    source.pageNumber ? `p. ${source.pageNumber}` : ""
-  ].filter(Boolean).join(" · ");
-}
-
-function condensedSourceLabels(sources: NonNullable<ChatMessage["sources"]>) {
-  const groupedSources = new Map<string, { pages: Set<number>; source: NonNullable<ChatMessage["sources"]>[number] }>();
-
-  for (const source of sources) {
-    const key = [source.title, source.materialType, source.problemNumber ?? ""].join("|");
-    const existing = groupedSources.get(key) ?? { pages: new Set<number>(), source };
-
-    if (source.pageNumber) {
-      existing.pages.add(source.pageNumber);
-    }
-
-    groupedSources.set(key, existing);
-  }
-
-  const labels = Array.from(groupedSources.values()).map(({ pages, source }) =>
-    formatSourceLabel({
-      ...source,
-      pageNumber: undefined
-    }) + formatPageRange(Array.from(pages))
-  );
-  const visibleLabels = labels.slice(0, 3);
-
-  return labels.length > visibleLabels.length ? [...visibleLabels, `+${labels.length - visibleLabels.length} more`] : visibleLabels;
-}
-
-function formatPageRange(pages: number[]) {
-  const sortedPages = [...new Set(pages)].sort((first, second) => first - second);
-
-  if (!sortedPages.length) {
-    return "";
-  }
-
-  const ranges: string[] = [];
-  let rangeStart = sortedPages[0];
-  let previousPage = sortedPages[0];
-
-  for (const page of sortedPages.slice(1)) {
-    if (page === previousPage + 1) {
-      previousPage = page;
-      continue;
-    }
-
-    ranges.push(rangeStart === previousPage ? `${rangeStart}` : `${rangeStart}-${previousPage}`);
-    rangeStart = page;
-    previousPage = page;
-  }
-
-  ranges.push(rangeStart === previousPage ? `${rangeStart}` : `${rangeStart}-${previousPage}`);
-
-  return ` · ${ranges.length === 1 && !ranges[0].includes("-") ? "p." : "pp."} ${ranges.join(", ")}`;
-}
-
 function formatConversationMeta(conversation: StudentConversationSummary) {
   return [
     `${conversation.messageCount} messages`,
@@ -1937,45 +1883,4 @@ function getInitials(name: string, email: string) {
     .filter(Boolean);
 
   return (parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : source.slice(0, 2)).toUpperCase();
-}
-
-function capitalizeLabel(value: string) {
-  return value ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : "";
-}
-
-function formatConversationDate(value: unknown) {
-  const date = coerceDate(value);
-
-  if (!date) {
-    return "";
-  }
-
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit"
-  }).format(date);
-}
-
-function coerceDate(value: unknown) {
-  if (typeof value === "string") {
-    const timestamp = Date.parse(value);
-    return Number.isNaN(timestamp) ? null : new Date(timestamp);
-  }
-
-  if (value && typeof value === "object" && "toDate" in value && typeof value.toDate === "function") {
-    return value.toDate() as Date;
-  }
-
-  return null;
-}
-
-function normalizeMarkdownMath(content: string) {
-  return content
-    .replace(/\\\[/g, "$$")
-    .replace(/\\\]/g, "$$")
-    .replace(/\\\(/g, "$")
-    .replace(/\\\)/g, "$")
-    .replace(/^\[\s*(\\(?:int|frac|sqrt|sum|lim|prod)[\s\S]*?)\s*\]$/gm, "$$$$\n$1\n$$$$");
 }

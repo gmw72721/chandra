@@ -289,14 +289,16 @@ test("teacher transcript messages include retrieval confidence", () => {
 
 test("teacher transcript uses student chat markdown formatting and readable source labels", () => {
   const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const messageFormatSource = readFileSync(join(repoRoot, "frontend/lib/chat-message-format.ts"), "utf8");
   const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
   assert.match(teacherSource, /import ReactMarkdown from "react-markdown"/);
   assert.match(teacherSource, /remarkMath/);
   assert.match(teacherSource, /rehypeKatex/);
   assert.match(teacherSource, /assistantMessageAnswerContent\(message\)/);
-  assert.match(teacherSource, /assistantStructuredSections\(message\)\.map/);
+  assert.match(teacherSource, /structuredSections\.map/);
   assert.match(teacherSource, /condensedSourceLabels\(message\.sources\)/);
+  assert.match(messageFormatSource, /export function assistantStructuredSections/);
   assert.match(styles, /\.teacher-transcript-message/);
   assert.match(styles, /\.teacher-dashboard\[data-appearance="dark"\] \.teacher-transcript-sources span/);
 });
@@ -335,10 +337,12 @@ test("conversation Firestore rules are class-scoped and server-write-only", () =
 
 test("source labels render under tutor messages", () => {
   const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const messageFormatSource = readFileSync(join(repoRoot, "frontend/lib/chat-message-format.ts"), "utf8");
   const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
   assert.match(source, /className="message-sources"/);
-  assert.match(source, /formatSourceLabel/);
+  assert.match(source, /condensedSourceLabels\(message\.sources\)/);
+  assert.match(messageFormatSource, /function formatSourceLabel/);
   assert.match(styles, /\.message-sources/);
 });
 
@@ -460,12 +464,13 @@ test("student chat response normalization repairs split decimal example next ste
 
 test("student assistant renderer falls back for old messages without structured output", () => {
   const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const messageFormatSource = readFileSync(join(repoRoot, "frontend/lib/chat-message-format.ts"), "utf8");
 
   assert.match(source, /assistantMessageAnswerContent\(message\)/);
-  assert.match(source, /return message\.structuredOutput \? message\.structuredOutput\.sections\.answer : message\.content/);
-  assert.match(source, /assistantMessageAnswerContent\(message\) \? \(/);
+  assert.match(messageFormatSource, /return message\.structuredOutput \? message\.structuredOutput\.sections\.answer : message\.content/);
+  assert.match(source, /answerContent \? \(/);
   assert.match(source, /assistantStructuredSections\(message\)/);
-  assert.match(source, /Your next step/);
+  assert.match(messageFormatSource, /Your next step/);
   assert.doesNotMatch(source, /hintLevel|studentActionNeeded|sourceConfidence/);
 });
 

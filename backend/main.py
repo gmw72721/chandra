@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import hmac
 import os
 import re
 import json
 import traceback
 from functools import lru_cache
+from heapq import nlargest
 from typing import Any, Optional
 
 import httpx
@@ -95,6 +97,15 @@ async def close_shared_http_clients() -> None:
     if _LEGACY_OPENROUTER_HTTP_CLIENT is not None:
         await _LEGACY_OPENROUTER_HTTP_CLIENT.aclose()
         _LEGACY_OPENROUTER_HTTP_CLIENT = None
+
+    try:
+        from backend.agent.tools import close_next_search_http_client
+        from backend.retrieval.pdf_page_assets import close_next_page_asset_http_client
+
+        await close_next_search_http_client()
+        await close_next_page_asset_http_client()
+    except Exception:
+        pass
 
 
 class ChatMessage(BaseModel):
@@ -262,15 +273,15 @@ async def extract_material(
 ) -> dict[str, str]:
     authorize_class_teacher(classId, authorization)
     enforce_upload_content_length(content_length)
-    contents = await read_upload_file_with_limit(file)
+    await enforce_upload_file_size(file)
 
     file_name = file.filename or "material"
     is_pdf = file.content_type == "application/pdf" or file_name.lower().endswith(".pdf")
 
     if is_pdf:
-        text = extract_pdf_text(contents)
+        text = await asyncio.to_thread(extract_pdf_text_from_upload, file)
     else:
-        text = contents.decode("utf-8", errors="ignore")
+        text = await read_text_upload_with_limit(file)
 
     text = text.strip()
     enforce_extracted_text_size(text)
@@ -476,8 +487,36 @@ def enforce_upload_content_length(content_length: Optional[int]) -> None:
         raise HTTPException(status_code=413, detail="Material uploads must be 500 MB or smaller.")
 
 
-async def read_upload_file_with_limit(file: UploadFile) -> bytes:
-    contents = bytearray()
+async def enforce_upload_file_size(file: UploadFile) -> None:
+    reported_size = getattr(file, "size", None)
+
+    if isinstance(reported_size, int) and reported_size > MAX_MATERIAL_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Material uploads must be 500 MB or smaller.")
+
+    if isinstance(reported_size, int):
+        await file.seek(0)
+        return
+
+    total_bytes = 0
+    while True:
+        chunk = await file.read(UPLOAD_READ_CHUNK_BYTES)
+
+        if not chunk:
+            break
+
+        total_bytes += len(chunk)
+
+        if total_bytes > MAX_MATERIAL_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Material uploads must be 500 MB or smaller.")
+
+    await file.seek(0)
+
+
+async def read_text_upload_with_limit(file: UploadFile) -> str:
+    await file.seek(0)
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
+    parts: list[str] = []
+    total_chars = 0
 
     while True:
         chunk = await file.read(UPLOAD_READ_CHUNK_BYTES)
@@ -485,16 +524,27 @@ async def read_upload_file_with_limit(file: UploadFile) -> bytes:
         if not chunk:
             break
 
-        contents.extend(chunk)
+        decoded = decoder.decode(chunk)
+        if decoded:
+            parts.append(decoded)
+            total_chars += len(decoded)
+            enforce_extracted_text_size_length(total_chars)
 
-        if len(contents) > MAX_MATERIAL_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="Material uploads must be 500 MB or smaller.")
+    final = decoder.decode(b"", final=True)
+    if final:
+        parts.append(final)
+        total_chars += len(final)
+        enforce_extracted_text_size_length(total_chars)
 
-    return bytes(contents)
+    return "".join(parts)
 
 
 def enforce_extracted_text_size(text: str) -> None:
-    if len(text) > MAX_EXTRACTED_TEXT_CHARS:
+    enforce_extracted_text_size_length(len(text))
+
+
+def enforce_extracted_text_size_length(length: int) -> None:
+    if length > MAX_EXTRACTED_TEXT_CHARS:
         raise HTTPException(status_code=413, detail="Extracted material text is too large.")
 
 
@@ -510,48 +560,47 @@ def extract_pdf_text(contents: bytes) -> str:
     from io import BytesIO
 
     reader = PdfReader(BytesIO(contents))
-    page_text = [page.extract_text() or "" for page in reader.pages]
-    return "\n\n".join(page_text)
+    return extract_pdf_reader_text(reader)
+
+
+def extract_pdf_text_from_upload(file: UploadFile) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError as error:
+        raise HTTPException(
+            status_code=500,
+            detail="PDF support is not installed. Run `pip install -r backend/requirements.txt`.",
+        ) from error
+
+    file.file.seek(0)
+    reader = PdfReader(file.file)
+    return extract_pdf_reader_text(reader)
+
+
+def extract_pdf_reader_text(reader: Any) -> str:
+    parts: list[str] = []
+    total_chars = 0
+
+    for page in reader.pages:
+        page_text = page.extract_text() or ""
+        parts.append(page_text)
+        total_chars += len(page_text)
+        enforce_extracted_text_size_length(total_chars)
+
+    return "\n\n".join(parts)
 
 
 async def retrieve_course_context(course_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
     terms = tokenize(query)
     documents = [*DOCUMENTS, *(await get_firestore_material_documents(course_id))]
-    top_hits: list[dict[str, Any]] = []
-
-    for document in documents:
-        if document["courseId"] != course_id or document["status"] != "ready":
-            continue
-
-        for chunk in document["chunks"]:
-            score = score_chunk(chunk["content"], terms)
-
-            if score > 0:
-                insert_ranked_hit(
-                    top_hits,
-                    {"document": document, "chunk": chunk, "score": score},
-                    limit,
-                )
-
-    return top_hits
-
-
-def insert_ranked_hit(top_hits: list[dict[str, Any]], hit: dict[str, Any], limit: int) -> None:
-    insert_index = next(
-        (index for index, existing_hit in enumerate(top_hits) if hit["score"] > existing_hit["score"]),
-        -1,
+    hits = (
+        {"document": document, "chunk": chunk, "score": score}
+        for document in documents
+        if document["courseId"] == course_id and document["status"] == "ready"
+        for chunk in document["chunks"]
+        if (score := score_chunk(chunk["content"], terms)) > 0
     )
-
-    if insert_index == -1:
-        if len(top_hits) < limit:
-            top_hits.append(hit)
-
-        return
-
-    top_hits.insert(insert_index, hit)
-
-    if len(top_hits) > limit:
-        top_hits.pop()
+    return nlargest(limit, hits, key=lambda hit: hit["score"])
 
 
 async def get_firestore_material_documents(class_id: str) -> list[dict[str, Any]]:

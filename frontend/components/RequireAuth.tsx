@@ -11,7 +11,7 @@ export function RequireAuth({
   children: React.ReactNode;
   role?: AccountRole | AccountRole[];
 }) {
-  const { firebaseReady, isLoading, profile, profileError, user } = useAuth();
+  const { firebaseReady, isLoading, profile, profileError, sessionError, user } = useAuth();
   const allowedRoles = Array.isArray(role) ? role : role ? [role] : [];
 
   if (!firebaseReady) {
@@ -35,6 +35,7 @@ export function RequireAuth({
     return (
       <section className="auth-state-panel">
         <h1>Create an account or sign in to continue.</h1>
+        {sessionError ? <p className="form-error">{sessionError}</p> : null}
         <Link className="primary-button" href={`/auth?role=${allowedRoles[0] ?? "student"}`}>
           Go to sign in
         </Link>

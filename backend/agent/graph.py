@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -24,6 +25,8 @@ MAX_TOOL_CALLS = 8
 MAX_PARALLEL_SEARCHES = 3
 MAX_RETRIEVED_WINDOWS = 5
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini"
+MAX_PARALLEL_ASSET_ENCODERS = 4
+_SHARED_CLIENT_GRAPH_CACHE: dict[int, Any] = {}
 
 
 def build_pdf_rag_graph(
@@ -173,6 +176,19 @@ def build_pdf_rag_graph(
         },
     )
     return graph.compile()
+
+
+def cached_pdf_rag_graph_for_shared_client(client: OpenRouterClient | Any):
+    """Reuse the compiled graph for the process-wide OpenRouter client."""
+
+    cache_key = id(client)
+    cached_graph = _SHARED_CLIENT_GRAPH_CACHE.get(cache_key)
+
+    if cached_graph is None:
+        cached_graph = build_pdf_rag_graph(openrouter_client=client)
+        _SHARED_CLIENT_GRAPH_CACHE[cache_key] = cached_graph
+
+    return cached_graph
 
 
 def new_search_tool_calls(
@@ -882,41 +898,12 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
                 "and confirm citations/page details come only from selected page metadata or visible pages. "
                 "Do not show this private check to the student. "
                 "If this check fails, fix the reply once before sending it.\n\n"
-                f"Selected page metadata:\n{json.dumps(selected_context, indent=2)}"
+                f"Selected page metadata:\n{compact_json_dumps(selected_context)}"
             ),
         }
     ]
 
-    for asset in state.get("page_assets", []):
-        for image_path in asset.get("images") or []:
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": encode_file_as_data_url(image_path, "image/png")},
-                }
-            )
-
-        if asset.get("file"):
-            content.append(
-                {
-                    "type": "file",
-                    "file": {
-                        "filename": f"{asset.get('doc_id') or 'selected-pages'}.pdf",
-                        "file_data": encode_file_as_data_url(asset["file"], "application/pdf"),
-                    },
-                }
-            )
-
-        if asset.get("file_data_url"):
-            content.append(
-                {
-                    "type": "file",
-                    "file": {
-                        "filename": f"{asset.get('doc_id') or 'selected-pages'}.pdf",
-                        "file_data": asset["file_data_url"],
-                    },
-                }
-            )
+    content.extend(encoded_page_asset_content_parts(state.get("page_assets", [])))
 
     return [
         *base_messages,
@@ -925,6 +912,85 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
             "content": content,
         },
     ]
+
+
+def compact_json_dumps(value: Any) -> str:
+    return json.dumps(value, separators=(",", ": "))
+
+
+def encoded_page_asset_content_parts(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    encoding_jobs = page_asset_encoding_jobs(assets)
+
+    if len(encoding_jobs) > 1:
+        with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ASSET_ENCODERS, len(encoding_jobs))) as executor:
+            encoded_jobs = list(executor.map(encode_page_asset_job, encoding_jobs))
+    else:
+        encoded_jobs = [encode_page_asset_job(job) for job in encoding_jobs]
+
+    return [content_part for content_part in encoded_jobs if content_part]
+
+
+def page_asset_encoding_jobs(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
+
+    for asset in assets:
+        for image_path in asset.get("images") or []:
+            jobs.append(
+                {
+                    "kind": "image",
+                    "path": image_path,
+                }
+            )
+
+        if asset.get("file"):
+            jobs.append(
+                {
+                    "doc_id": asset.get("doc_id"),
+                    "kind": "file",
+                    "path": asset["file"],
+                }
+            )
+
+        if asset.get("file_data_url"):
+            jobs.append(
+                {
+                    "data_url": asset["file_data_url"],
+                    "doc_id": asset.get("doc_id"),
+                    "kind": "file_data_url",
+                }
+            )
+
+    return jobs
+
+
+def encode_page_asset_job(job: dict[str, Any]) -> dict[str, Any] | None:
+    kind = job.get("kind")
+
+    if kind == "image":
+        return {
+            "type": "image_url",
+            "image_url": {"url": encode_file_as_data_url(job["path"], "image/png")},
+        }
+
+    if kind in {"file", "file_data_url"}:
+        file_data = (
+            encode_file_as_data_url(job["path"], "application/pdf")
+            if kind == "file"
+            else str(job.get("data_url") or "")
+        )
+
+        if not file_data:
+            return None
+
+        return {
+            "type": "file",
+            "file": {
+                "filename": f"{job.get('doc_id') or 'selected-pages'}.pdf",
+                "file_data": file_data,
+            },
+        }
+
+    return None
 
 
 def normalize_answer_policy_state(value: Any) -> dict[str, bool]:
@@ -1265,10 +1331,14 @@ async def run_pdf_rag_agent(
     client = openrouter_client or OpenRouterClient()
 
     try:
-        graph = build_pdf_rag_graph(
-            openrouter_client=client,
-            retriever=retriever,
-            page_asset_builder=page_asset_builder,
+        graph = (
+            cached_pdf_rag_graph_for_shared_client(client)
+            if openrouter_client is not None and retriever is None and page_asset_builder is None
+            else build_pdf_rag_graph(
+                openrouter_client=client,
+                retriever=retriever,
+                page_asset_builder=page_asset_builder,
+            )
         )
         final_state = await graph.ainvoke(
             {

@@ -5,7 +5,6 @@ import hashlib
 import logging
 import os
 import re
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -13,9 +12,12 @@ from urllib.parse import unquote, urlparse
 import httpx
 from pypdf import PdfReader, PdfWriter
 
+from backend.internal_next import internal_next_base_url, reusable_async_client
+
 logger = logging.getLogger(__name__)
 
 MAX_TOTAL_PAGES = 12
+_NEXT_PAGE_ASSET_CLIENT: httpx.AsyncClient | None = None
 _PAGE_ASSET_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _PAGE_ASSET_CACHE_MAX = 256
 PRINTED_PAGE_FOOTER_PATTERNS = (
@@ -60,24 +62,27 @@ async def fetch_pdf_page_assets_via_next(
     if not shared_secret:
         return [metadata_only_page_asset(page) for page in selected_ranges]
 
-    next_base_url = internal_next_base_url()
+    next_base_url = internal_next_base_url("PDF assets")
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{next_base_url}/api/internal/pdf-page-assets",
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Chandra-Internal-Secret": shared_secret,
-                },
-                json={
-                    "maxTotalPages": max_total_pages,
-                    "pages": selected_ranges,
-                },
-            )
+        client = next_page_asset_http_client()
+        response = await client.post(
+            f"{next_base_url}/api/internal/pdf-page-assets",
+            headers={
+                "Content-Type": "application/json",
+                "X-Chandra-Internal-Secret": shared_secret,
+            },
+            json={
+                "maxTotalPages": max_total_pages,
+                "pages": selected_ranges,
+            },
+        )
         response.raise_for_status()
         payload = response.json()
     except Exception as error:
+        if isinstance(error, (httpx.TransportError, httpx.TimeoutException)):
+            await close_next_page_asset_http_client()
+
         logger.warning(
             "Internal PDF asset build failed.",
             extra={
@@ -92,16 +97,22 @@ async def fetch_pdf_page_assets_via_next(
     return assets if isinstance(assets, list) else [metadata_only_page_asset(page) for page in selected_ranges]
 
 
-def internal_next_base_url() -> str:
-    configured_url = os.getenv("NEXT_INTERNAL_BASE_URL") or os.getenv("FRONTEND_ORIGIN")
+def next_page_asset_http_client() -> httpx.AsyncClient:
+    global _NEXT_PAGE_ASSET_CLIENT
 
-    if configured_url:
-        return configured_url.rstrip("/")
+    _NEXT_PAGE_ASSET_CLIENT = reusable_async_client(_NEXT_PAGE_ASSET_CLIENT, timeout=60.0)
 
-    if os.getenv("CHANDRA_ENV", "").strip().lower() in {"prod", "production"}:
-        raise RuntimeError("NEXT_INTERNAL_BASE_URL or FRONTEND_ORIGIN is required for production PDF assets.")
+    return _NEXT_PAGE_ASSET_CLIENT
 
-    return "http://127.0.0.1:3000"
+
+async def close_next_page_asset_http_client() -> None:
+    global _NEXT_PAGE_ASSET_CLIENT
+
+    if _NEXT_PAGE_ASSET_CLIENT is None:
+        return
+
+    await _NEXT_PAGE_ASSET_CLIENT.aclose()
+    _NEXT_PAGE_ASSET_CLIENT = None
 
 
 def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
@@ -429,12 +440,20 @@ def safe_extract_mini_pdf(
 
 
 def extract_printed_page_range(source_pdf: Path, *, page_start: int, page_end: int) -> tuple[int | None, int | None]:
-    page_texts = cached_pdf_page_texts(source_pdf)
-    page_count = len(page_texts)
+    try:
+        reader = PdfReader(str(source_pdf))
+    except Exception:
+        return (None, None)
+
+    page_count = len(reader.pages)
     printed_pages: list[int] = []
 
     for page_number in range(page_start, min(page_end, page_count) + 1):
-        page_text = page_texts[page_number - 1]
+        try:
+            page_text = reader.pages[page_number - 1].extract_text() or ""
+        except Exception:
+            return (None, None)
+
         printed_page = extract_printed_page_number_from_text(page_text)
 
         if printed_page is None:
@@ -446,27 +465,6 @@ def extract_printed_page_range(source_pdf: Path, *, page_start: int, page_end: i
         return (None, None)
 
     return (printed_pages[0], printed_pages[-1])
-
-
-def cached_pdf_page_texts(source_pdf: Path) -> tuple[str, ...]:
-    return _cached_pdf_page_texts(str(source_pdf), *file_signature(source_pdf))
-
-
-@lru_cache(maxsize=64)
-def _cached_pdf_page_texts(source_pdf_path: str, _mtime_ns: int, _size: int) -> tuple[str, ...]:
-    try:
-        reader = PdfReader(source_pdf_path)
-    except Exception:
-        return ()
-
-    page_texts: list[str] = []
-    for page in reader.pages:
-        try:
-            page_texts.append(page.extract_text() or "")
-        except Exception:
-            page_texts.append("")
-
-    return tuple(page_texts)
 
 
 def extract_printed_page_number_from_text(text: str) -> int | None:

@@ -5,7 +5,14 @@ import "./styles.css";
 
 export const metadata: Metadata = {
   title: "Chandra",
-  description: "Teacher-guided AI tutoring for classrooms"
+  description: "Teacher-guided AI tutoring for classrooms",
+  icons: {
+    apple: [
+      { url: "/apple-touch-icon.png" },
+      { url: "/apple-touch-icon-precomposed.png" }
+    ],
+    icon: "/favicon.ico"
+  }
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

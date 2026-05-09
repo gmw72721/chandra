@@ -41,13 +41,13 @@ export type UserProfile = {
 
 const presenceHeartbeatMs = 30000;
 
-export function subscribeToAuth(callback: (user: User | null) => void) {
+export function subscribeToAuth(callback: (user: User | null) => void, onError?: (error: Error) => void) {
   if (!auth) {
     callback(null);
     return () => {};
   }
 
-  return onAuthStateChanged(auth, callback);
+  return onAuthStateChanged(auth, callback, onError);
 }
 
 export function subscribeToUserProfile(

@@ -54,7 +54,7 @@ export async function POST(request: Request) {
 }
 
 async function buildAssets(pages: RequestedPage[], maxTotalPages: number) {
-  const assets = [];
+  const selectedPages = [];
   let pagesUsed = 0;
 
   for (const page of pages) {
@@ -66,25 +66,31 @@ async function buildAssets(pages: RequestedPage[], maxTotalPages: number) {
     const requestedPageEnd = page.page_end ?? page.pageEnd ?? pageStart;
     const remainingPages = maxTotalPages - pagesUsed;
     const pageEnd = Math.max(pageStart, Math.min(requestedPageEnd, pageStart + remainingPages - 1));
-    const asset = metadataOnlyAsset(page, pageStart, pageEnd);
-    const sourcePdfPath = page.source_pdf_path ?? page.sourcePdfPath ?? "";
-
-    try {
-      const sourcePdf = await loadSourcePdf(sourcePdfPath);
-      const miniPdf = await extractCachedMiniPdf(sourcePdfPath, sourcePdf, pageStart, pageEnd);
-
-      if (miniPdf) {
-        asset.file_data_url = `data:application/pdf;base64,${miniPdf.toString("base64")}`;
-      }
-    } catch (error) {
-      console.error("Internal PDF asset build failed.", error);
-    }
-
-    assets.push(asset);
+    selectedPages.push({ page, pageEnd, pageStart });
     pagesUsed += pageEnd - pageStart + 1;
   }
 
-  return assets;
+  return Promise.all(
+    selectedPages.map(({ page, pageEnd, pageStart }) => buildAsset(page, pageStart, pageEnd))
+  );
+}
+
+async function buildAsset(page: RequestedPage, pageStart: number, pageEnd: number) {
+  const asset = metadataOnlyAsset(page, pageStart, pageEnd);
+  const sourcePdfPath = page.source_pdf_path ?? page.sourcePdfPath ?? "";
+
+  try {
+    const sourcePdf = await loadSourcePdf(sourcePdfPath);
+    const miniPdf = await extractCachedMiniPdf(sourcePdfPath, sourcePdf, pageStart, pageEnd);
+
+    if (miniPdf) {
+      asset.file_data_url = `data:application/pdf;base64,${miniPdf.toString("base64")}`;
+    }
+  } catch (error) {
+    console.error("Internal PDF asset build failed.", error);
+  }
+
+  return asset;
 }
 
 function metadataOnlyAsset(page: RequestedPage, pageStart: number, pageEnd: number) {

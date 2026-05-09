@@ -5,7 +5,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   createRoleProfile,
-  getUserProfile,
   signInWithEmail,
   signUpWithRole,
   type AccountRole
@@ -41,7 +40,7 @@ export function AuthForm() {
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isRepairingProfileRef = useRef(false);
-  const { firebaseReady, isLoading, profile, profileError, user } = useAuth();
+  const { firebaseReady, isLoading, profile, profileError, sessionError, user } = useAuth();
 
   const destination = useMemo(
     () => (profile?.role === "teacher" ? "/teacher" : "/student"),
@@ -104,9 +103,7 @@ export function AuthForm() {
         window.localStorage.removeItem(pendingProfileStorageKey);
         router.push(role === "teacher" ? "/teacher" : "/student");
       } else {
-        const credential = await signInWithEmail(email.trim(), password);
-        const signedInProfile = await getUserProfile(credential.user.uid);
-        router.push(signedInProfile?.role === "teacher" ? "/teacher" : signedInProfile ? "/student" : "/auth");
+        await signInWithEmail(email.trim(), password);
       }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Authentication failed.");
@@ -231,6 +228,7 @@ export function AuthForm() {
   return (
     <section className="auth-card">
       <h1>{mode === "signup" ? "Create your Chandra account" : "Welcome back."}</h1>
+      {sessionError ? <p className="form-error">{sessionError}</p> : null}
 
       <div className="segmented-control" aria-label="Authentication mode">
         <button

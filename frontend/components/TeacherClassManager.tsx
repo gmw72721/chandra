@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
-import { FormEvent, type CSSProperties, type ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, memo, type CSSProperties, type ReactNode, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
@@ -34,6 +34,13 @@ import {
   type SourceUsageSettings
 } from "@/lib/class-settings";
 import {
+  assistantMessageAnswerContent,
+  assistantStructuredSections,
+  condensedSourceLabels,
+  normalizeMarkdownMath,
+  normalizeStructuredSectionMarkdown
+} from "@/lib/chat-message-format";
+import {
   addStudentToClass,
   createTeacherClass,
   ensureClassJoinCode,
@@ -47,6 +54,7 @@ import {
   type ClassStudent,
   type TeacherClass
 } from "@/lib/classes";
+import { capitalizeLabel, coerceDate, formatConversationDate } from "@/lib/display-format";
 import { storage } from "@/lib/firebase";
 import { defaultModelOptions } from "@/lib/model-options";
 import {
@@ -259,6 +267,40 @@ const defaultAiTutorHiddenInstructions = [
 const defaultDirectAnswerRedirect =
   "If a student asks for a direct answer, redirect them toward the next useful step and ask a checking question.";
 
+const insightFeedbackOptionRows: Array<{
+  action: TeacherInsightFeedbackAction;
+  itemId: string;
+  label: string;
+  note: string;
+}> = [
+  { action: "useful", itemId: "overall", label: "Useful", note: "This insight was useful." },
+  { action: "notUseful", itemId: "feedback-too-vague", label: "Too vague", note: "This insight was too vague." },
+  {
+    action: "notUseful",
+    itemId: "feedback-wrong-pattern",
+    label: "Wrong pattern",
+    note: "This insight identified the wrong pattern."
+  },
+  {
+    action: "notUseful",
+    itemId: "feedback-too-much-help",
+    label: "Too much help",
+    note: "The suggested tutor support gives too much help."
+  },
+  {
+    action: "notUseful",
+    itemId: "feedback-not-enough-help",
+    label: "Not enough help",
+    note: "The suggested tutor support does not give enough help."
+  },
+  {
+    action: "addNote",
+    itemId: "future-tutoring",
+    label: "Apply to future tutoring",
+    note: "Apply this feedback to future tutoring."
+  }
+];
+
 const fallbackKnowledgeSourceSettings: KnowledgeSourceSettings = {
   activeForStudents: true,
   citationsRequired: true,
@@ -343,6 +385,60 @@ const responseFormatSettings = [
 
 const selectableModelOptions = defaultModelOptions.filter((modelOption) => modelOption.provider === "openrouter");
 const classAppearanceOptions = ["light", "dark"] as const;
+const shortDateFormatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+const longDateFormatter = new Intl.DateTimeFormat(undefined, { month: "long", day: "numeric", year: "numeric" });
+const overviewDateFormatter = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
+const knowledgeFilterKinds: Record<Exclude<KnowledgeFilter, "All">, TutorKnowledgeKind[]> = {
+  Assignments: ["Assignment", "Practice Problems"],
+  "Answer Keys": ["Practice Solutions"],
+  Notes: ["Notes"],
+  Rubrics: ["Rubric"],
+  Textbook: ["Reading"],
+  "Worked Examples": ["Example"]
+};
+const knowledgePriorityApiValues: Record<KnowledgeSourceSettings["priority"], NonNullable<ClassMaterial["priority"]>> = {
+  Low: "low",
+  Normal: "normal",
+  Primary: "primary"
+};
+const apiKnowledgePriorityValues: Record<NonNullable<ClassMaterial["priority"]>, KnowledgeSourceSettings["priority"]> = {
+  low: "Low",
+  normal: "Normal",
+  primary: "Primary"
+};
+const knowledgeStatusLabels: Record<ClassMaterial["status"], string> = {
+  processing: "Processing",
+  ready: "Ready",
+  uploaded: "Needs review"
+};
+const knowledgeStatusClasses: Record<ClassMaterial["status"], string> = {
+  processing: "processing",
+  ready: "ready",
+  uploaded: "review"
+};
+const conversationReviewRequiredStatuses = new Set<ConversationReviewStatus>([
+  "ai_answer_needs_review",
+  "misunderstanding_spotted",
+  "needs_follow_up",
+  "new"
+]);
+const reviewedConversationStatuses = new Set<ConversationReviewStatus>(["good_learning_moment", "reviewed"]);
+const conversationStatusClasses: Record<ConversationReviewStatus, string> = {
+  ai_answer_needs_review: "ai-review",
+  good_learning_moment: "reviewed",
+  misunderstanding_spotted: "follow-up",
+  needs_follow_up: "follow-up",
+  new: "new",
+  reviewed: "reviewed"
+};
+const conversationStatusLabels: Record<ConversationReviewStatus, string> = {
+  ai_answer_needs_review: "AI answer review",
+  good_learning_moment: "Good learning moment",
+  misunderstanding_spotted: "Misunderstanding spotted",
+  needs_follow_up: "Needs follow-up",
+  new: "New",
+  reviewed: "Reviewed"
+};
 
 export function TeacherClassManager() {
   const router = useRouter();
@@ -702,7 +798,10 @@ export function TeacherClassManager() {
   const hasTutorKnowledgeSource = Boolean(materialFile || materialSourceUrl.trim() || materialText.trim());
   const accountName = profile?.displayName ?? user?.displayName ?? "Teacher";
   const accountEmail = user?.email ?? "";
-  const totalConversationCount = rosterRows.reduce((sum, row) => sum + row.conversationsCount, 0);
+  const totalConversationCount = useMemo(
+    () => rosterRows.reduce((sum, row) => sum + row.conversationsCount, 0),
+    [rosterRows]
+  );
   const insightsDateLabel = formatInsightsDateLabel(new Date());
   const hasGeneratedTeacherInsights = Boolean(teacherInsights?.generatedAt);
 
@@ -734,8 +833,10 @@ export function TeacherClassManager() {
     hasGeneratedTeacherInsights && Array.isArray(teacherInsightContent?.evidenceLinks) && teacherInsightContent.evidenceLinks.length
       ? teacherInsightContent.evidenceLinks
       : null;
-  const insightTrendDisplayRows = displayedInsightTrends
-    ? displayedInsightTrends.map((row) => {
+  const insightTrendDisplayRows = useMemo(
+    () =>
+      displayedInsightTrends
+        ? displayedInsightTrends.map((row) => {
         const conversationIds = Array.isArray(row.evidenceConversationIds) ? row.evidenceConversationIds : [];
         const activeBuckets = countActiveInsightBuckets(row.sparkline);
         const isSingleObservation = conversationIds.length <= 1 || activeBuckets <= 1;
@@ -755,9 +856,13 @@ export function TeacherClassManager() {
           tone: row.direction
         };
       })
-    : [];
-  const insightTimelineDisplayRows = displayedInsightTimeline
-    ? displayedInsightTimeline.map((row) => {
+        : [],
+    [displayedInsightTrends]
+  );
+  const insightTimelineDisplayRows = useMemo(
+    () =>
+      displayedInsightTimeline
+        ? displayedInsightTimeline.map((row) => {
         const conversationIds = Array.isArray(row.evidenceConversationIds) ? row.evidenceConversationIds : [];
         const evidenceCount = conversationIds.length || row.seenInConversations;
         const isSingleObservation = evidenceCount <= 1;
@@ -784,9 +889,13 @@ export function TeacherClassManager() {
           teacherMove: getInsightMisconceptionTeacherMove(row)
         };
       })
-    : [];
-  const insightRecommendationDisplayRows = displayedInsightRecommendations
-    ? displayedInsightRecommendations.map((row) => {
+        : [],
+    [displayedInsightTimeline]
+  );
+  const insightRecommendationDisplayRows = useMemo(
+    () =>
+      displayedInsightRecommendations
+        ? displayedInsightRecommendations.map((row) => {
         const conversationIds = Array.isArray(row.evidenceConversationIds) ? row.evidenceConversationIds : [];
         const evidenceCount = conversationIds.length || row.evidenceCount;
 
@@ -813,9 +922,13 @@ export function TeacherClassManager() {
           workflowAction: formatRecommendationWorkflowAction(row.action)
         };
       })
-    : [];
-  const insightEvidenceDisplayRows = displayedInsightEvidenceLinks
-    ? displayedInsightEvidenceLinks.map((row) => {
+        : [],
+    [displayedInsightRecommendations]
+  );
+  const insightEvidenceDisplayRows = useMemo(
+    () =>
+      displayedInsightEvidenceLinks
+        ? displayedInsightEvidenceLinks.map((row) => {
         const conversationIds = Array.isArray(row.conversationIds) ? row.conversationIds : [];
         const conversationCount = row.conversationCount || conversationIds.length;
         const conversations = conversationIds
@@ -844,7 +957,9 @@ export function TeacherClassManager() {
             buildEvidenceSupportReason(row.topic, conversations[0] ?? null, conversationCount)
         };
       })
-    : [];
+        : [],
+    [conversationReviewRowById, displayedInsightEvidenceLinks]
+  );
   const dailySummaryEvidenceConversationId = teacherInsightDailySummary?.evidence?.find(
     (chip) => chip.conversationId
   )?.conversationId;
@@ -857,8 +972,11 @@ export function TeacherClassManager() {
     : displayedInsightEvidenceChips[0]?.conversationId
       ? [displayedInsightEvidenceChips[0].conversationId]
       : insightEvidenceDisplayRows[0]?.conversationIds ?? [];
-  const summaryRecommendationRows = insightRecommendationDisplayRows.slice(0, 3);
-  const recentEvidenceRows = insightEvidenceDisplayRows.slice(0, 2);
+  const summaryRecommendationRows = useMemo(
+    () => insightRecommendationDisplayRows.slice(0, 3),
+    [insightRecommendationDisplayRows]
+  );
+  const recentEvidenceRows = useMemo(() => insightEvidenceDisplayRows.slice(0, 2), [insightEvidenceDisplayRows]);
   const recommendationViewRows = insightRecommendationDisplayRows;
   const evidenceViewRows = insightEvidenceDisplayRows;
   const teachingFocusBriefing = buildInsightSummaryBriefing({
@@ -874,54 +992,25 @@ export function TeacherClassManager() {
     insightEvidenceDisplayRows.find((row) => row.key === selectedEvidenceId) ?? insightEvidenceDisplayRows[0] ?? null;
   const insightTimelineChartRows = insightTimelineDisplayRows;
   const insightTrendChartRows = insightTrendDisplayRows;
-  const resolvedInsightLabels = teacherInsights?.resolvedItemIds?.length
-    ? teacherInsights.resolvedItemIds.map(formatInsightItemId)
-    : [];
-  const dismissedInsightLabels = teacherInsights?.dismissedItemIds?.length
-    ? teacherInsights.dismissedItemIds.map(formatInsightItemId)
-    : [];
-  const savedFeedbackLabels = [
-    ...(teacherInsights?.usefulItemIds ?? []).map((itemId) => `Useful: ${formatInsightItemId(itemId)}`),
-    ...(teacherInsights?.notUsefulItemIds ?? []).map((itemId) => `Needs adjustment: ${formatInsightItemId(itemId)}`),
-    ...(teacherInsights?.teacherNotes ?? []).map((note) => `Note: ${note}`)
-  ];
-  const insightFeedbackOptionRows: Array<{
-    action: TeacherInsightFeedbackAction;
-    itemId: string;
-    label: string;
-    note: string;
-  }> = [
-    { action: "useful", itemId: "overall", label: "Useful", note: "This insight was useful." },
-    { action: "notUseful", itemId: "feedback-too-vague", label: "Too vague", note: "This insight was too vague." },
-    {
-      action: "notUseful",
-      itemId: "feedback-wrong-pattern",
-      label: "Wrong pattern",
-      note: "This insight identified the wrong pattern."
-    },
-    {
-      action: "notUseful",
-      itemId: "feedback-too-much-help",
-      label: "Too much help",
-      note: "The suggested tutor support gives too much help."
-    },
-    {
-      action: "notUseful",
-      itemId: "feedback-not-enough-help",
-      label: "Not enough help",
-      note: "The suggested tutor support does not give enough help."
-    },
-    {
-      action: "addNote",
-      itemId: "future-tutoring",
-      label: "Apply to future tutoring",
-      note: "Apply this feedback to future tutoring."
-    }
-  ];
+  const resolvedInsightLabels = useMemo(
+    () => (teacherInsights?.resolvedItemIds?.length ? teacherInsights.resolvedItemIds.map(formatInsightItemId) : []),
+    [teacherInsights]
+  );
+  const dismissedInsightLabels = useMemo(
+    () => (teacherInsights?.dismissedItemIds?.length ? teacherInsights.dismissedItemIds.map(formatInsightItemId) : []),
+    [teacherInsights]
+  );
+  const savedFeedbackLabels = useMemo(
+    () => [
+      ...(teacherInsights?.usefulItemIds ?? []).map((itemId) => `Useful: ${formatInsightItemId(itemId)}`),
+      ...(teacherInsights?.notUsefulItemIds ?? []).map((itemId) => `Needs adjustment: ${formatInsightItemId(itemId)}`),
+      ...(teacherInsights?.teacherNotes ?? []).map((note) => `Note: ${note}`)
+    ],
+    [teacherInsights]
+  );
   const insightMetricValue = (metricId: string) =>
     displayedInsightMetrics.find((metric) => metric.id === metricId)?.value ?? 0;
-  const overviewDateLabel =
-    classOverview?.dateLabel ?? new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const overviewDateLabel = classOverview?.dateLabel ?? overviewDateFormatter.format(new Date());
   const overviewKnowledgeStats = classOverview?.knowledgeStatus ?? buildOverviewKnowledgeStats(materials);
   const overviewReviewQueueRows = classOverview?.reviewQueueRows ?? [];
   const overviewNextActions = classOverview?.nextActions ?? [];
@@ -1014,9 +1103,16 @@ export function TeacherClassManager() {
     }
 
     let isCancelled = false;
+    let isLoadingRosterActivity = false;
     let refreshTimer: number | undefined;
 
     async function loadRosterActivity() {
+      if (isLoadingRosterActivity || document.visibilityState === "hidden") {
+        return;
+      }
+
+      isLoadingRosterActivity = true;
+
       try {
         const token = await user!.getIdToken();
         const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/roster/activity`), {
@@ -1038,14 +1134,24 @@ export function TeacherClassManager() {
           setRosterActivity([]);
           setError(formatConversationError(caughtError, "Roster activity load failed."));
         }
+      } finally {
+        isLoadingRosterActivity = false;
+      }
+    }
+
+    function handleRosterActivityVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void loadRosterActivity();
       }
     }
 
     void loadRosterActivity();
     refreshTimer = window.setInterval(loadRosterActivity, 15000);
+    document.addEventListener("visibilitychange", handleRosterActivityVisibilityChange);
 
     return () => {
       isCancelled = true;
+      document.removeEventListener("visibilitychange", handleRosterActivityVisibilityChange);
       if (refreshTimer) {
         window.clearInterval(refreshTimer);
       }
@@ -1143,10 +1249,12 @@ export function TeacherClassManager() {
 
   useEffect(() => {
     if (!activeClassId || !selectedStudent || !user) {
-      return;
+      const clearTimer = window.setTimeout(() => setStudentConversations([]), 0);
+      return () => window.clearTimeout(clearTimer);
     }
 
     let isCancelled = false;
+    const controller = new AbortController();
 
     user
       .getIdToken()
@@ -1160,7 +1268,8 @@ export function TeacherClassManager() {
           {
             headers: {
               Authorization: `Bearer ${token}`
-            }
+            },
+            signal: controller.signal
           }
         );
         const data = (await response.json()) as { conversations?: StudentConversationSummary[]; error?: string };
@@ -1175,6 +1284,10 @@ export function TeacherClassManager() {
         }
       })
       .catch((caughtError) => {
+        if (isAbortError(caughtError)) {
+          return;
+        }
+
         if (!isCancelled) {
           setStudentConversations([]);
           setConversationError(formatConversationError(caughtError, "Conversation load failed."));
@@ -1183,15 +1296,21 @@ export function TeacherClassManager() {
 
     return () => {
       isCancelled = true;
+      controller.abort();
     };
   }, [activeClassId, selectedStudent, user]);
 
   useEffect(() => {
     if (!activeClassId || !user) {
-      return;
+      const clearTimer = window.setTimeout(() => {
+        setClassConversations([]);
+        setClassConversationMetrics(null);
+      }, 0);
+      return () => window.clearTimeout(clearTimer);
     }
 
     let isCancelled = false;
+    const controller = new AbortController();
 
     user
       .getIdToken()
@@ -1199,7 +1318,8 @@ export function TeacherClassManager() {
         const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/conversations`), {
           headers: {
             Authorization: `Bearer ${token}`
-          }
+          },
+          signal: controller.signal
         });
         const data = (await response.json()) as {
           conversations?: TeacherConversationReviewSummary[];
@@ -1232,6 +1352,10 @@ export function TeacherClassManager() {
         }
       })
       .catch((caughtError) => {
+        if (isAbortError(caughtError)) {
+          return;
+        }
+
         if (!isCancelled) {
           setClassConversations([]);
           setClassConversationMetrics(null);
@@ -1241,6 +1365,7 @@ export function TeacherClassManager() {
 
     return () => {
       isCancelled = true;
+      controller.abort();
     };
   }, [activeClassId, user]);
 
@@ -1294,10 +1419,12 @@ export function TeacherClassManager() {
 
   useEffect(() => {
     if (!activeClassId || !activeSelectedConversationId || !user) {
-      return;
+      const clearTimer = window.setTimeout(() => setConversationMessages([]), 0);
+      return () => window.clearTimeout(clearTimer);
     }
 
     let isCancelled = false;
+    const controller = new AbortController();
 
     user
       .getIdToken()
@@ -1311,7 +1438,8 @@ export function TeacherClassManager() {
           {
             headers: {
               Authorization: `Bearer ${token}`
-            }
+            },
+            signal: controller.signal
           }
         );
         const data = (await response.json()) as { messages?: ChatMessage[]; error?: string };
@@ -1326,6 +1454,10 @@ export function TeacherClassManager() {
         }
       })
       .catch((caughtError) => {
+        if (isAbortError(caughtError)) {
+          return;
+        }
+
         if (!isCancelled) {
           setConversationMessages([]);
           setConversationError(formatConversationError(caughtError, "Conversation messages failed."));
@@ -1334,6 +1466,7 @@ export function TeacherClassManager() {
 
     return () => {
       isCancelled = true;
+      controller.abort();
     };
   }, [activeClassId, activeSelectedConversationId, user]);
 
@@ -6156,10 +6289,6 @@ function lowercaseFirst(value: string) {
   return value ? value.charAt(0).toLowerCase() + value.slice(1) : value;
 }
 
-function capitalizeLabel(value: string) {
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
 function formatMathNotationLabel(value: string) {
   if (value === "plain") {
     return "Plain language";
@@ -6305,31 +6434,7 @@ function formatChunkPageRange(pageStart: number, pageEnd?: number | null) {
 }
 
 function knowledgeFilterMatchesMaterial(filter: KnowledgeFilter, material: ClassMaterial) {
-  if (filter === "All") {
-    return true;
-  }
-
-  if (filter === "Assignments") {
-    return material.kind === "Assignment" || material.kind === "Practice Problems";
-  }
-
-  if (filter === "Textbook") {
-    return material.kind === "Reading";
-  }
-
-  if (filter === "Worked Examples") {
-    return material.kind === "Example";
-  }
-
-  if (filter === "Answer Keys") {
-    return material.kind === "Practice Solutions";
-  }
-
-  if (filter === "Rubrics") {
-    return material.kind === "Rubric";
-  }
-
-  return material.kind === "Notes";
+  return filter === "All" || knowledgeFilterKinds[filter].includes(material.kind);
 }
 
 function defaultKnowledgeSourceSettings(material?: ClassMaterial): KnowledgeSourceSettings {
@@ -6345,23 +6450,27 @@ function defaultKnowledgeSourceSettings(material?: ClassMaterial): KnowledgeSour
 }
 
 function buildOverviewKnowledgeStats(materials: ClassMaterial[]) {
-  const total = materials.length;
-  const ready = materials.filter((material) => material.status === "ready").length;
-  const processing = materials.filter((material) => material.status === "processing").length;
-  const needsReview =
-    materials.filter((material) => material.status !== "ready" && material.status !== "processing").length;
-  const teacherOnly =
-    materials.filter((material) => defaultKnowledgeSourceSettings(material).teacherOnly).length;
-  const activeForStudents =
-    materials.filter((material) => defaultKnowledgeSourceSettings(material).activeForStudents).length;
+  const stats = materials.reduce(
+    (currentStats, material) => {
+      const settings = defaultKnowledgeSourceSettings(material);
+
+      currentStats.ready += Number(material.status === "ready");
+      currentStats.processing += Number(material.status === "processing");
+      currentStats.needsReview += Number(material.status !== "ready" && material.status !== "processing");
+      currentStats.teacherOnly += Number(settings.teacherOnly);
+      currentStats.activeForStudents += Number(settings.activeForStudents);
+      return currentStats;
+    },
+    { activeForStudents: 0, needsReview: 0, processing: 0, ready: 0, teacherOnly: 0 }
+  );
 
   return [
-    { label: "Total uploaded", tone: "ink", value: total },
-    { label: "Ready", tone: "ready", value: ready },
-    { label: "Processing", tone: "processing", value: processing },
-    { label: "Failed / needs review", tone: "failed", value: needsReview },
-    { label: "Teacher-only", tone: "teacher-only", value: teacherOnly },
-    { label: "Active for students", tone: "ready", value: activeForStudents }
+    { label: "Total uploaded", tone: "ink", value: materials.length },
+    { label: "Ready", tone: "ready", value: stats.ready },
+    { label: "Processing", tone: "processing", value: stats.processing },
+    { label: "Failed / needs review", tone: "failed", value: stats.needsReview },
+    { label: "Teacher-only", tone: "teacher-only", value: stats.teacherOnly },
+    { label: "Active for students", tone: "ready", value: stats.activeForStudents }
   ];
 }
 
@@ -6382,27 +6491,11 @@ function knowledgeVisibilityClass(settings: KnowledgeSourceSettings) {
 }
 
 function formatKnowledgeStatus(material: ClassMaterial) {
-  if (material.status === "ready") {
-    return "Ready";
-  }
-
-  if (material.status === "processing") {
-    return "Processing";
-  }
-
-  return "Needs review";
+  return knowledgeStatusLabels[material.status];
 }
 
 function knowledgeStatusClass(material: ClassMaterial) {
-  if (material.status === "ready") {
-    return "ready";
-  }
-
-  if (material.status === "processing") {
-    return "processing";
-  }
-
-  return "review";
+  return knowledgeStatusClasses[material.status];
 }
 
 function formatMaterialChunkCount(material: ClassMaterial) {
@@ -6422,31 +6515,11 @@ function formatRetrievalConfidence(confidence: number) {
 }
 
 function knowledgePriorityToApi(priority: KnowledgeSourceSettings["priority"]) {
-  if (priority === "Primary") {
-    return "primary";
-  }
-
-  if (priority === "Low") {
-    return "low";
-  }
-
-  return "normal";
+  return knowledgePriorityApiValues[priority];
 }
 
 function knowledgePriorityFromApi(priority: ClassMaterial["priority"]): KnowledgeSourceSettings["priority"] | null {
-  if (priority === "primary") {
-    return "Primary";
-  }
-
-  if (priority === "low") {
-    return "Low";
-  }
-
-  if (priority === "normal") {
-    return "Normal";
-  }
-
-  return null;
+  return priority ? apiKnowledgePriorityValues[priority] : null;
 }
 
 function formatSectionLabel(section: string) {
@@ -6464,7 +6537,7 @@ function formatSectionLabel(section: string) {
 }
 
 function formatInsightsDateLabel(date: Date) {
-  return `Today · ${date.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+  return `Today · ${overviewDateFormatter.format(date)}`;
 }
 
 function formatInsightItemId(itemId: string) {
@@ -7237,10 +7310,14 @@ function normalizeProfileComparisonText(value: string) {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-function TeacherTranscriptMessage({ message, studentName }: { message: ChatMessage; studentName: string }) {
-  const isStudentMessage = message.role === "student";
-
-  if (isStudentMessage) {
+const TeacherTranscriptMessage = memo(function TeacherTranscriptMessage({
+  message,
+  studentName
+}: {
+  message: ChatMessage;
+  studentName: string;
+}) {
+  if (message.role === "student") {
     return (
       <article className="student-workspace-message teacher-transcript-message student">
         <div className="student-message-stack teacher-transcript-stack">
@@ -7256,6 +7333,10 @@ function TeacherTranscriptMessage({ message, studentName }: { message: ChatMessa
     );
   }
 
+  const answerContent = assistantMessageAnswerContent(message);
+  const structuredSections = assistantStructuredSections(message);
+  const sourceLabels = message.sources?.length ? condensedSourceLabels(message.sources) : [];
+
   return (
     <article className="student-workspace-message teacher-transcript-message assistant">
       <span className="chandra-message-avatar teacher-transcript-avatar" aria-hidden="true">
@@ -7263,14 +7344,14 @@ function TeacherTranscriptMessage({ message, studentName }: { message: ChatMessa
       </span>
       <div className="assistant-message-stack teacher-transcript-stack">
         <div className="message-meta">Chandra</div>
-        {assistantMessageAnswerContent(message) ? (
+        {answerContent ? (
           <div className="assistant-message-bubble teacher-transcript-bubble">
             <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-              {normalizeMarkdownMath(assistantMessageAnswerContent(message))}
+              {normalizeMarkdownMath(answerContent)}
             </ReactMarkdown>
           </div>
         ) : null}
-        {assistantStructuredSections(message).map((section) => (
+        {structuredSections.map((section) => (
           <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
             <strong>{section.label}</strong>
             <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
@@ -7278,10 +7359,10 @@ function TeacherTranscriptMessage({ message, studentName }: { message: ChatMessa
             </ReactMarkdown>
           </div>
         ))}
-        {message.sources?.length ? (
+        {sourceLabels.length ? (
           <div className="message-sources teacher-transcript-sources" aria-label="Sources used">
             <strong>Sources:</strong>
-            {condensedSourceLabels(message.sources).map((label, index) => (
+            {sourceLabels.map((label, index) => (
               <span key={`${label}-${index}`}>{label}</span>
             ))}
           </div>
@@ -7290,7 +7371,7 @@ function TeacherTranscriptMessage({ message, studentName }: { message: ChatMessa
       </div>
     </article>
   );
-}
+});
 
 function PlusIcon() {
   return (
@@ -7888,28 +7969,30 @@ function conversationMatchesFilter({
 }
 
 function conversationNeedsTeacherReview(row: Pick<ConversationReviewRow, "status">) {
-  return (
-    row.status === "new" ||
-    row.status === "needs_follow_up" ||
-    row.status === "misunderstanding_spotted" ||
-    row.status === "ai_answer_needs_review"
-  );
+  return conversationReviewRequiredStatuses.has(row.status);
 }
 
 function conversationIsReviewed(row: Pick<ConversationReviewRow, "status">) {
-  return row.status === "reviewed" || row.status === "good_learning_moment";
+  return reviewedConversationStatuses.has(row.status);
 }
 
 function buildConversationMetrics(rows: ConversationReviewRow[], rosterRows: RosterRow[]) {
   const total = rows.length || rosterRows.reduce((sum, row) => sum + row.conversationsCount, 0);
-  const openRows = rows.filter(conversationNeedsTeacherReview);
+  const metrics = rows.reduce(
+    (currentMetrics, row) => {
+      if (!conversationNeedsTeacherReview(row)) {
+        return currentMetrics;
+      }
 
-  return {
-    followUp: openRows.filter((row) => row.status === "needs_follow_up" || row.status === "misunderstanding_spotted").length,
-    lowConfidence: openRows.filter((row) => row.sourceAudit.lowSourceConfidence).length,
-    total,
-    unreviewed: openRows.filter((row) => row.status === "new").length
-  };
+      currentMetrics.followUp += Number(row.status === "needs_follow_up" || row.status === "misunderstanding_spotted");
+      currentMetrics.lowConfidence += Number(row.sourceAudit.lowSourceConfidence);
+      currentMetrics.unreviewed += Number(row.status === "new");
+      return currentMetrics;
+    },
+    { followUp: 0, lowConfidence: 0, unreviewed: 0 }
+  );
+
+  return { ...metrics, total };
 }
 
 function buildConversationSourceRows(
@@ -8119,45 +8202,19 @@ function dateKeyFromDate(date: Date) {
 }
 
 function formatTimelineDate(date: Date) {
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return shortDateFormatter.format(date);
 }
 
 function formatTimelineFullDate(date: Date) {
-  return date.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+  return longDateFormatter.format(date);
 }
 
 function conversationStatusClass(status: ConversationReviewStatus) {
-  if (status === "needs_follow_up" || status === "misunderstanding_spotted") {
-    return "follow-up";
-  }
-
-  if (status === "reviewed" || status === "good_learning_moment") {
-    return "reviewed";
-  }
-
-  if (status === "ai_answer_needs_review") {
-    return "ai-review";
-  }
-
-  return "new";
+  return conversationStatusClasses[status];
 }
 
 function formatConversationStatus(status: ConversationReviewStatus) {
-  switch (status) {
-    case "reviewed":
-      return "Reviewed";
-    case "needs_follow_up":
-      return "Needs follow-up";
-    case "misunderstanding_spotted":
-      return "Misunderstanding spotted";
-    case "good_learning_moment":
-      return "Good learning moment";
-    case "ai_answer_needs_review":
-      return "AI answer review";
-    case "new":
-    default:
-      return "New";
-  }
+  return conversationStatusLabels[status];
 }
 
 function formatRetrievalConfidenceLabel(confidence: TeacherConversationReviewSummary["latestRetrievalConfidence"]) {
@@ -8311,12 +8368,20 @@ function filterRosterRows(rows: RosterRow[], query: string, filter: RosterFilter
 }
 
 function buildRosterStats(rows: RosterRow[]) {
-  const totalQuestions = rows.reduce((sum, row) => sum + row.questionsPerDay, 0);
+  let activeToday = 0;
+  let noActivity = 0;
+  let totalQuestions = 0;
+
+  for (const row of rows) {
+    activeToday += Number(row.activeToday);
+    noActivity += Number(row.status === "No activity");
+    totalQuestions += row.questionsPerDay;
+  }
 
   return {
-    activeToday: rows.filter((row) => row.activeToday).length,
+    activeToday,
     averageQuestions: rows.length ? totalQuestions / rows.length : 0,
-    noActivity: rows.filter((row) => row.status === "No activity").length,
+    noActivity,
     totalStudents: rows.length
   };
 }
@@ -8403,21 +8468,6 @@ function formatLearningProfileUpdateResult(result: { reason?: string } | undefin
   return "";
 }
 
-function formatConversationDate(value: unknown) {
-  const date = coerceDate(value);
-
-  if (!date) {
-    return "";
-  }
-
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit"
-  }).format(date);
-}
-
 function formatInsightDateOnly(value: unknown) {
   const date = coerceDate(value);
 
@@ -8425,145 +8475,7 @@ function formatInsightDateOnly(value: unknown) {
     return String(value ?? "").trim();
   }
 
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric"
-  }).format(date);
-}
-
-function coerceDate(value: unknown) {
-  if (typeof value === "string") {
-    const timestamp = Date.parse(value);
-    return Number.isNaN(timestamp) ? null : new Date(timestamp);
-  }
-
-  if (value && typeof value === "object" && "toDate" in value && typeof value.toDate === "function") {
-    return value.toDate() as Date;
-  }
-
-  return null;
-}
-
-function formatSourceLabel(source: NonNullable<ChatMessage["sources"]>[number]) {
-  return [
-    source.title,
-    source.problemNumber ? `problem ${source.problemNumber}` : "",
-    source.pageNumber ? `p. ${source.pageNumber}` : ""
-  ].filter(Boolean).join(" · ");
-}
-
-function condensedSourceLabels(sources: NonNullable<ChatMessage["sources"]>) {
-  const groupedSources = new Map<string, { pages: Set<number>; source: NonNullable<ChatMessage["sources"]>[number] }>();
-
-  for (const source of sources) {
-    const key = [source.title, source.materialType, source.problemNumber ?? ""].join("|");
-    const existing = groupedSources.get(key) ?? { pages: new Set<number>(), source };
-
-    if (source.pageNumber) {
-      existing.pages.add(source.pageNumber);
-    }
-
-    groupedSources.set(key, existing);
-  }
-
-  const labels = Array.from(groupedSources.values()).map(
-    ({ pages, source }) => formatSourceLabel({ ...source, pageNumber: undefined }) + formatPageRange(Array.from(pages))
-  );
-  const visibleLabels = labels.slice(0, 3);
-
-  return labels.length > visibleLabels.length ? [...visibleLabels, `+${labels.length - visibleLabels.length} more`] : visibleLabels;
-}
-
-function formatPageRange(pages: number[]) {
-  const sortedPages = [...new Set(pages)].sort((first, second) => first - second);
-
-  if (!sortedPages.length) {
-    return "";
-  }
-
-  const ranges: string[] = [];
-  let rangeStart = sortedPages[0];
-  let previousPage = sortedPages[0];
-
-  for (const page of sortedPages.slice(1)) {
-    if (page === previousPage + 1) {
-      previousPage = page;
-      continue;
-    }
-
-    ranges.push(rangeStart === previousPage ? `${rangeStart}` : `${rangeStart}-${previousPage}`);
-    rangeStart = page;
-    previousPage = page;
-  }
-
-  ranges.push(rangeStart === previousPage ? `${rangeStart}` : `${rangeStart}-${previousPage}`);
-
-  return ` · ${ranges.length === 1 && !ranges[0].includes("-") ? "p." : "pp."} ${ranges.join(", ")}`;
-}
-
-function assistantMessageAnswerContent(message: ChatMessage) {
-  return message.structuredOutput ? message.structuredOutput.sections.answer : message.content;
-}
-
-function assistantStructuredSections(message: ChatMessage) {
-  const sections = message.structuredOutput?.sections;
-
-  if (!sections) {
-    return [];
-  }
-
-  return [
-    { content: sections.hint, kind: "hint", label: "Hint" },
-    { content: sections.explanation, kind: "explanation", label: "Why this works" },
-    { content: sections.formula, kind: "formula", label: "Formula" },
-    { content: sections.example, kind: "example", label: "Example" },
-    { content: sections.checkWork, kind: "check-work", label: "Check your work" },
-    {
-      content: message.sources?.length || isGenericSourceNote(sections.sourceNote) ? undefined : sections.sourceNote,
-      kind: "source-note",
-      label: "Source"
-    },
-    { content: sections.nextStep, kind: "next-step", label: "Your next step" }
-  ].filter((section): section is { content: string; kind: string; label: string } => Boolean(section.content));
-}
-
-function isGenericSourceNote(note: string | undefined) {
-  return !note || /^based on the selected class material\.?$/i.test(note.trim());
-}
-
-function normalizeStructuredSectionMarkdown(content: string, kind: string) {
-  const cleaned = content
-    .trim()
-    .replace(/^\*\*\s*/, "")
-    .replace(/\s*\*\*$/, "");
-
-  if (kind !== "formula") {
-    return cleaned;
-  }
-
-  if (/^\$\$[\s\S]*\$\$$/.test(cleaned) || /^\\\[/.test(cleaned)) {
-    return cleaned;
-  }
-
-  const formulas = cleaned
-    .split(/\s*,\s*(?=(?:P|E|M|A|\\mu|μ|\$?\\?mu)\b)/)
-    .map((formula) => formula.trim())
-    .filter(Boolean);
-
-  if (formulas.length <= 1) {
-    return `$$\n${cleaned.replace(/^\$|\$$/g, "")}\n$$`;
-  }
-
-  return formulas.map((formula) => `$$\n${formula.replace(/^\$|\$$/g, "")}\n$$`).join("\n\n");
-}
-
-function normalizeMarkdownMath(content: string) {
-  return content
-    .replace(/\\\[/g, "$$")
-    .replace(/\\\]/g, "$$")
-    .replace(/\\\(/g, "$")
-    .replace(/\\\)/g, "$")
-    .replace(/^\[\s*(\\(?:int|frac|sqrt|sum|lim|prod)[\s\S]*?)\s*\]$/gm, "$$$$\n$1\n$$$$");
+  return shortDateFormatter.format(date);
 }
 
 function formatClassError(caughtError: unknown, fallback: string) {
@@ -8938,6 +8850,10 @@ function uploadStepDetail(step: MaterialUploadProgress["step"]) {
   }
 
   return "Working on the tutor knowledge upload.";
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function validateTutorKnowledgeFile(file: File) {

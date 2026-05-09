@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any, Protocol
 import httpx
 
 SECTION_RELATED_TOP_K = 8
+VISIBLE_MATERIAL_DOC_CACHE_SIZE = 32
 _GEMINI_EMBEDDING_CLIENT: httpx.AsyncClient | None = None
 NORMALIZE_TEXT_SYMBOLS_RE = re.compile(r"[^a-z0-9#\s.-]")
 NORMALIZE_TEXT_WHITESPACE_RE = re.compile(r"\s+")
@@ -105,7 +107,7 @@ class GeminiPdfRetriever:
         self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY", "")
         self.embedding_model = embedding_model or os.getenv("VERTEX_EMBEDDING_MODEL") or "gemini-embedding-2"
         self.dimensions = dimensions or int(os.getenv("VERTEX_EMBEDDING_DIMENSIONS") or "768")
-        self._visible_material_docs_cache: dict[tuple[str, str], list[Any]] = {}
+        self._visible_material_docs_cache: OrderedDict[tuple[str, str], list[Any]] = OrderedDict()
 
     async def search(
         self,
@@ -250,9 +252,9 @@ class GeminiPdfRetriever:
                 )
 
                 if result:
-                    results.append(result)
+                    insert_ranked_page_result(results, result, top_k)
 
-        return sorted(results, key=lambda result: result.score, reverse=True)[:top_k]
+        return results
 
     async def _search_firestore_exact_candidates(
         self,
@@ -333,9 +335,9 @@ class GeminiPdfRetriever:
             )
 
             if result and has_exact_lookup_match(query_features, result):
-                results.append(result)
+                insert_ranked_page_result(results, result, top_k)
 
-        return sorted(results, key=lambda result: result.score, reverse=True)[:top_k]
+        return results
 
     async def _search_class_material_chunks_exact(
         self,
@@ -375,9 +377,9 @@ class GeminiPdfRetriever:
                 )
 
                 if result and has_exact_lookup_match(query_features, result):
-                    results.append(result)
+                    insert_ranked_page_result(results, result, top_k)
 
-        return sorted(results, key=lambda result: result.score, reverse=True)[:top_k]
+        return results
 
     async def _search_openable_class_pdfs_exact(
         self,
@@ -420,14 +422,18 @@ class GeminiPdfRetriever:
                         material_ref=material_doc.reference,
                         query_features=query_features,
                         source_pdf_path=source_pdf_path,
+                        top_k=top_k,
                     )
                 except Exception:
                     return []
 
         material_result_groups = await asyncio.gather(*(scan_material(material_doc) for material_doc in material_docs))
-        results = [result for group in material_result_groups for result in group]
+        results: list[PdfPageResult] = []
+        for group in material_result_groups:
+            for result in group:
+                insert_ranked_page_result(results, result, top_k)
 
-        return sorted(results, key=lambda result: result.score, reverse=True)[:top_k]
+        return results
 
     async def _load_visible_class_material_docs(
         self,
@@ -438,6 +444,7 @@ class GeminiPdfRetriever:
     ) -> list[Any]:
         cache_key = (class_id, professor_id)
         if cache_key in self._visible_material_docs_cache:
+            self._visible_material_docs_cache.move_to_end(cache_key)
             return self._visible_material_docs_cache[cache_key]
 
         try:
@@ -449,7 +456,7 @@ class GeminiPdfRetriever:
 
         material_docs: list[Any] = []
 
-        for material_doc in list(materials_snapshot):
+        for material_doc in materials_snapshot:
             material = material_doc.to_dict() or {}
             material_professor_id = str(material.get("professorId") or material.get("teacherId") or "")
 
@@ -459,6 +466,9 @@ class GeminiPdfRetriever:
             material_docs.append(material_doc)
 
         self._visible_material_docs_cache[cache_key] = material_docs
+        self._visible_material_docs_cache.move_to_end(cache_key)
+        while len(self._visible_material_docs_cache) > VISIBLE_MATERIAL_DOC_CACHE_SIZE:
+            self._visible_material_docs_cache.popitem(last=False)
         return material_docs
 
     def _result_from_chunk(
@@ -761,6 +771,24 @@ def merge_page_results(*groups: list[PdfPageResult]) -> list[PdfPageResult]:
     return sorted(merged.values(), key=lambda result: result.score, reverse=True)
 
 
+def insert_ranked_page_result(top_results: list[PdfPageResult], result: PdfPageResult, limit: int) -> None:
+    insert_index = next(
+        (index for index, existing_result in enumerate(top_results) if result.score > existing_result.score),
+        -1,
+    )
+
+    if insert_index == -1:
+        if len(top_results) < limit:
+            top_results.append(result)
+
+        return
+
+    top_results.insert(insert_index, result)
+
+    if len(top_results) > limit:
+        top_results.pop()
+
+
 def section_related_top_k(query_features: dict[str, Any], requested_top_k: int) -> int:
     if query_features.get("textbook_section_intent"):
         return max(requested_top_k, SECTION_RELATED_TOP_K)
@@ -871,6 +899,7 @@ def exact_results_from_pdf_text(
     material_ref: Any | None,
     query_features: dict[str, Any],
     source_pdf_path: str,
+    top_k: int | None = None,
 ) -> list[PdfPageResult]:
     results: list[PdfPageResult] = []
     title = str(material.get("title") or "Untitled PDF")
@@ -904,7 +933,10 @@ def exact_results_from_pdf_text(
         )
 
         if has_exact_lookup_match(query_features, result):
-            results.append(result)
+            if top_k is None:
+                results.append(result)
+            else:
+                insert_ranked_page_result(results, result, top_k)
 
     return results
 
@@ -922,7 +954,7 @@ def file_signature(path: Path) -> tuple[int, int]:
     return (stat.st_mtime_ns, stat.st_size)
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=16)
 def _cached_pdf_page_texts(source_pdf_path: str, _mtime_ns: int, _size: int) -> tuple[str, ...]:
     try:
         from pypdf import PdfReader

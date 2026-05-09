@@ -15,7 +15,7 @@ import type {
   SourceDocument,
   TutorSource
 } from "./types";
-import { VertexEmbeddingError, createVertexEmbedding } from "./vertex-embeddings";
+import { VertexEmbeddingError, createVertexEmbedding, type VertexEmbeddingResult } from "./vertex-embeddings";
 import type { RetrievalSourceHint } from "./retrieval-ranking";
 
 export type CourseRetrievalResult = {
@@ -37,6 +37,9 @@ type CachedMaterialDocument = {
   teacherId: string;
   title: string;
 };
+
+const queryEmbeddingCacheMaxEntries = 256;
+const queryEmbeddingCache = new Map<string, Promise<VertexEmbeddingResult | undefined>>();
 
 export async function retrieveCourseContext(
   scope: CourseRetrievalScope,
@@ -99,15 +102,34 @@ export async function retrieveCourseContext(
 }
 
 async function createQueryEmbedding(query: string) {
-  if (!query.trim()) {
+  const trimmedQuery = query.trim();
+
+  if (!trimmedQuery) {
     return undefined;
   }
 
+  const cacheKey = queryEmbeddingCacheKey(trimmedQuery);
+  const cachedEmbedding = queryEmbeddingCache.get(cacheKey);
+
+  if (cachedEmbedding) {
+    queryEmbeddingCache.delete(cacheKey);
+    queryEmbeddingCache.set(cacheKey, cachedEmbedding);
+    return await cachedEmbedding;
+  }
+
+  const pendingEmbedding = createVertexEmbedding({
+    taskType: "RETRIEVAL_QUERY",
+    text: trimmedQuery
+  }).catch((caughtError) => {
+    queryEmbeddingCache.delete(cacheKey);
+    throw caughtError;
+  });
+
+  queryEmbeddingCache.set(cacheKey, pendingEmbedding);
+  trimQueryEmbeddingCache();
+
   try {
-    return await createVertexEmbedding({
-      taskType: "RETRIEVAL_QUERY",
-      text: query
-    });
+    return await pendingEmbedding;
   } catch (caughtError) {
     if (caughtError instanceof VertexEmbeddingError) {
       console.warn("Vertex AI query embedding failed. Falling back to keyword tutor knowledge retrieval.", caughtError);
@@ -115,6 +137,29 @@ async function createQueryEmbedding(query: string) {
     }
 
     throw caughtError;
+  }
+}
+
+function queryEmbeddingCacheKey(query: string) {
+  return [
+    process.env.GOOGLE_CLOUD_PROJECT ?? process.env.FIREBASE_PROJECT_ID ?? "",
+    process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1",
+    process.env.VERTEX_EMBEDDING_MODEL ?? "gemini-embedding-2",
+    process.env.VERTEX_EMBEDDING_DIMENSIONS ?? "768",
+    "RETRIEVAL_QUERY",
+    query
+  ].join("\u001f");
+}
+
+function trimQueryEmbeddingCache() {
+  while (queryEmbeddingCache.size > queryEmbeddingCacheMaxEntries) {
+    const oldestKey = queryEmbeddingCache.keys().next().value;
+
+    if (!oldestKey) {
+      return;
+    }
+
+    queryEmbeddingCache.delete(oldestKey);
   }
 }
 

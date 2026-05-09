@@ -89,13 +89,15 @@ test("FastAPI CORS origins are environment-configurable for production", () => {
 test("production backend internal URLs and OpenRouter referer do not silently fall back to localhost", () => {
   const toolsSource = readFileSync(join(repoRoot, "backend/agent/tools.py"), "utf8");
   const assetsSource = readFileSync(join(repoRoot, "backend/retrieval/pdf_page_assets.py"), "utf8");
+  const internalNextSource = readFileSync(join(repoRoot, "backend/internal_next.py"), "utf8");
   const openRouterSource = readFileSync(join(repoRoot, "backend/agent/openrouter_client.py"), "utf8");
   const fastApiSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
   const appHosting = readFileSync(join(repoRoot, "apphosting.yaml"), "utf8");
   const inviteRoute = readFileSync(join(repoRoot, "frontend/app/api/teacher-invites/route.ts"), "utf8");
 
-  assert.match(toolsSource, /raise RuntimeError\("NEXT_INTERNAL_BASE_URL or FRONTEND_ORIGIN is required/);
-  assert.match(assetsSource, /raise RuntimeError\("NEXT_INTERNAL_BASE_URL or FRONTEND_ORIGIN is required/);
+  assert.match(internalNextSource, /raise RuntimeError\(f"NEXT_INTERNAL_BASE_URL or FRONTEND_ORIGIN is required/);
+  assert.match(toolsSource, /internal_next_base_url\("PDF retrieval"\)/);
+  assert.match(assetsSource, /internal_next_base_url\("PDF assets"\)/);
   assert.match(openRouterSource, /OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production/);
   assert.match(fastApiSource, /OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production/);
   assert.match(inviteRoute, /publicFrontendOrigin/);
@@ -145,7 +147,9 @@ test("material extraction and ingestion reject oversized uploads and text", () =
   assert.match(nextExtractSource, /validateTutorKnowledgeFile\(file\)/);
   assert.match(nextExtractSource, /assertTutorKnowledgeTextWithinLimit\(text, "Extracted material text"\)/);
   assert.match(fastApiSource, /MAX_MATERIAL_UPLOAD_BYTES = 500 \* 1024 \* 1024/);
-  assert.match(fastApiSource, /read_upload_file_with_limit\(file\)/);
+  assert.match(fastApiSource, /enforce_upload_file_size\(file\)/);
+  assert.match(fastApiSource, /read_text_upload_with_limit\(file\)/);
+  assert.match(fastApiSource, /extract_pdf_text_from_upload, file/);
   assert.match(fastApiSource, /enforce_extracted_text_size\(text\)/);
 });
 
@@ -228,10 +232,18 @@ test("browser-requested app icons are served instead of logging 404s", () => {
     "utf8"
   );
   const iconResponseSource = readFileSync(join(repoRoot, "frontend/lib/icon-response.ts"), "utf8");
+  const logoComponentSource = readFileSync(join(repoRoot, "frontend/components/ChandraLogoMark.tsx"), "utf8");
+  const layoutSource = readFileSync(join(repoRoot, "frontend/app/layout.tsx"), "utf8");
 
   assert.match(faviconRoute, /createIconResponse/);
   assert.match(appleIconRoute, /createIconResponse/);
   assert.match(applePrecomposedIconRoute, /createIconResponse/);
   assert.match(iconResponseSource, /Content-Type": "image\/svg\+xml/);
   assert.match(iconResponseSource, /Cache-Control": "public, max-age=31536000, immutable"/);
+  assert.match(iconResponseSource, /chandraIconSvg/);
+  assert.match(iconResponseSource, /crescent/);
+  assert.match(logoComponentSource, /ChandraLogoMark/);
+  assert.match(logoComponentSource, /chandra-logo-crescent/);
+  assert.match(layoutSource, /icon: "\/favicon\.ico"/);
+  assert.match(layoutSource, /url: "\/apple-touch-icon\.png"/);
 });
