@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import re
 import json
@@ -12,7 +13,7 @@ import httpx
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from .material_visibility import is_student_visible_ready_material
@@ -53,6 +54,15 @@ if should_load_dotenv_local():
 
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini"
 TOKENIZE_RE = re.compile(r"[^a-z0-9\s-]")
+MAX_CHAT_MESSAGES_PER_REQUEST = 40
+MAX_MESSAGE_CONTENT_CHARS = 20000
+MAX_TOTAL_MESSAGE_CHARS = 100000
+MAX_PROVIDER_MESSAGE_CONTENT_CHARS = 60000
+MAX_PROVIDER_TOTAL_MESSAGE_CHARS = 140000
+MAX_MODEL_RESPONSE_TOKENS = 8000
+MAX_MATERIAL_UPLOAD_BYTES = 500 * 1024 * 1024
+MAX_EXTRACTED_TEXT_CHARS = 250000
+UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 
 app = FastAPI(title="Chandra API")
 _LANGGRAPH_OPENROUTER_CLIENT: Any | None = None
@@ -88,33 +98,33 @@ async def close_shared_http_clients() -> None:
 
 
 class ChatMessage(BaseModel):
-    id: str
-    role: str
-    content: str
-    createdAt: str
+    id: str = Field(min_length=1, max_length=200)
+    role: str = Field(max_length=32)
+    content: str = Field(max_length=MAX_MESSAGE_CONTENT_CHARS)
+    createdAt: str = Field(max_length=80)
 
 
 class ChatRequest(BaseModel):
-    courseId: Optional[str] = None
+    courseId: Optional[str] = Field(default=None, max_length=200)
     modelId: Optional[str] = None
-    temperature: Optional[float] = None
-    maxTokens: Optional[int] = None
-    reasoningEffort: Optional[str] = None
-    messages: list[ChatMessage]
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    maxTokens: Optional[int] = Field(default=None, ge=1, le=MAX_MODEL_RESPONSE_TOKENS)
+    reasoningEffort: Optional[str] = Field(default=None, max_length=20)
+    messages: list[ChatMessage] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES_PER_REQUEST)
 
 
 class LangGraphChatRequest(BaseModel):
-    classId: str
-    professorId: str
-    professorName: Optional[str] = None
-    modelId: str
-    temperature: Optional[float] = None
-    maxTokens: Optional[int] = None
-    reasoningEffort: Optional[str] = None
+    classId: str = Field(min_length=1, max_length=200)
+    professorId: str = Field(min_length=1, max_length=200)
+    professorName: Optional[str] = Field(default=None, max_length=200)
+    modelId: str = Field(min_length=1, max_length=200)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    maxTokens: Optional[int] = Field(default=None, ge=1, le=MAX_MODEL_RESPONSE_TOKENS)
+    reasoningEffort: Optional[str] = Field(default=None, max_length=20)
     answerPolicy: Optional[dict[str, Any]] = None
     sourceUsage: Optional[dict[str, Any]] = None
     studentLearningProfileContext: Optional[dict[str, Any]] = None
-    messages: list[dict[str, Any]]
+    messages: list[dict[str, Any]] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES_PER_REQUEST)
 
 
 @app.get("/health")
@@ -131,7 +141,7 @@ def authorize_internal_backend_request(x_chandra_internal_secret: Optional[str])
             detail="BACKEND_SHARED_SECRET is required before the tutor backend can accept internal requests.",
         )
 
-    if x_chandra_internal_secret != expected_secret:
+    if not hmac.compare_digest(x_chandra_internal_secret or "", expected_secret):
         raise HTTPException(status_code=403, detail="Invalid backend shared secret.")
 
 
@@ -141,6 +151,11 @@ async def langgraph_chat(
     x_chandra_internal_secret: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     authorize_internal_backend_request(x_chandra_internal_secret)
+    validate_message_payload_size(
+        request.messages,
+        max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
+        max_total_message_chars=MAX_PROVIDER_TOTAL_MESSAGE_CHARS,
+    )
 
     try:
         from backend.agent.graph import run_pdf_rag_agent
@@ -172,6 +187,11 @@ async def langgraph_chat_stream(
     x_chandra_internal_secret: Optional[str] = Header(default=None),
 ) -> StreamingResponse:
     authorize_internal_backend_request(x_chandra_internal_secret)
+    validate_message_payload_size(
+        request.messages,
+        max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
+        max_total_message_chars=MAX_PROVIDER_TOTAL_MESSAGE_CHARS,
+    )
 
     try:
         from backend.agent.graph import run_pdf_rag_agent_stream
@@ -238,9 +258,11 @@ async def extract_material(
     classId: str = Form(...),
     file: UploadFile = File(...),
     authorization: Optional[str] = Header(default=None),
+    content_length: Optional[int] = Header(default=None),
 ) -> dict[str, str]:
     authorize_class_teacher(classId, authorization)
-    contents = await file.read()
+    enforce_upload_content_length(content_length)
+    contents = await read_upload_file_with_limit(file)
 
     file_name = file.filename or "material"
     is_pdf = file.content_type == "application/pdf" or file_name.lower().endswith(".pdf")
@@ -251,6 +273,7 @@ async def extract_material(
         text = contents.decode("utf-8", errors="ignore")
 
     text = text.strip()
+    enforce_extracted_text_size(text)
 
     if not text:
         raise HTTPException(status_code=400, detail="No searchable text was found in that file.")
@@ -260,6 +283,7 @@ async def extract_material(
 
 @app.post("/api/chat")
 async def chat(request: ChatRequest, authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
+    validate_message_payload_size(request.messages)
     scope = authorize_tutor_chat_request(request, authorization)
     course_id = scope["classId"]
     latest_student_message = next(
@@ -420,6 +444,58 @@ def bearer_token(authorization: Optional[str]) -> str:
         return ""
 
     return authorization.removeprefix("Bearer ").strip()
+
+
+def validate_message_payload_size(
+    messages: list[Any],
+    *,
+    max_message_content_chars: int = MAX_MESSAGE_CONTENT_CHARS,
+    max_total_message_chars: int = MAX_TOTAL_MESSAGE_CHARS,
+) -> None:
+    total_characters = 0
+
+    for message in messages:
+        content = ""
+
+        if isinstance(message, ChatMessage):
+            content = message.content
+        elif isinstance(message, dict):
+            content = str(message.get("content") or "")
+
+        if len(content) > max_message_content_chars:
+            raise HTTPException(status_code=413, detail="A chat message is too large.")
+
+        total_characters += len(content)
+
+    if total_characters > max_total_message_chars:
+        raise HTTPException(status_code=413, detail="The chat request is too large.")
+
+
+def enforce_upload_content_length(content_length: Optional[int]) -> None:
+    if content_length is not None and content_length > MAX_MATERIAL_UPLOAD_BYTES + UPLOAD_READ_CHUNK_BYTES:
+        raise HTTPException(status_code=413, detail="Material uploads must be 500 MB or smaller.")
+
+
+async def read_upload_file_with_limit(file: UploadFile) -> bytes:
+    contents = bytearray()
+
+    while True:
+        chunk = await file.read(UPLOAD_READ_CHUNK_BYTES)
+
+        if not chunk:
+            break
+
+        contents.extend(chunk)
+
+        if len(contents) > MAX_MATERIAL_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Material uploads must be 500 MB or smaller.")
+
+    return bytes(contents)
+
+
+def enforce_extracted_text_size(text: str) -> None:
+    if len(text) > MAX_EXTRACTED_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail="Extracted material text is too large.")
 
 
 def extract_pdf_text(contents: bytes) -> str:
@@ -641,7 +717,7 @@ async def build_tutor_system_prompt(course_id: str, retrieval_hits: list[dict[st
         )
         refusal_style = (teacher_class or {}).get(
             "refusalStyle",
-            "If a student asks for a direct answer, ask what they have tried, offer to check their work, or walk through a similar example instead.",
+            "If a student asks for a direct answer or homework-ready wording for the exact task, ask what they have tried, offer to check their work, or walk through a clearly different similar example instead.",
         )
         instructions = [
             line.strip()
@@ -839,6 +915,8 @@ def answer_policy_lines(answer_policy: dict[str, bool]) -> list[str]:
                 "- If the student asks to see, read, pull up, copy, quote, recite, identify, or locate the wording of a specific problem, exercise, question, passage, or page, or only supplies a specific problem/exercise/page/title reference without asking for solving help, treat that as source lookup, not solving help: retrieve the exact source and provide the visible task text when quotation is allowed, without solving it or asking for an attempt first.",
                 "- If a student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, first ask what they have tried or where they are stuck.",
                 "- In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example.",
+                "- Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task.",
+                "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. For proof or derivation tasks, a similar example must use a different claim or different numbers so it does not prove the assigned statement.",
                 "- A follow-up like 'I still need help', 'yes', 'tell me more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution.",
                 "- For the student's exact task, do not reveal a full solution, final answer, final artifact, final expression, final code, thesis, outline, or a chain of multiple intermediate steps before the student has shown work. If one small scaffold is allowed, stop there and ask the student to do the next piece.",
             ]
@@ -866,7 +944,10 @@ def academic_integrity_lines(answer_policy: dict[str, bool]) -> list[str]:
             else ["- You may give final answers when useful, but still explain reasoning and avoid completing graded work wholesale."]
         ),
         *(
-            ["- If the student asks for a direct answer, say you cannot give the final answer, ask what they have tried, and offer to check their work or walk through a similar example."]
+            [
+                "- If the student asks for a direct answer, say you cannot give the final answer, ask what they have tried, and offer to check their work or walk through a similar example.",
+                "- If the student asks for homework-ready wording, a proof paragraph, a complete response they can submit, or an `example of what I can say` for the exact task, treat it as a direct-answer request.",
+            ]
             if answer_policy["refuseAnswerOnlyRequests"]
             else ["- If the student asks for a direct answer, avoid answer-only output; explain the reasoning and check understanding."]
         ),
@@ -976,7 +1057,7 @@ async def call_openrouter(model_id: Optional[str], system_prompt: str, messages:
         payload["reasoning"] = {"effort": reasoning_effort}
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-        "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost:3000"),
+        "HTTP-Referer": openrouter_http_referer(),
         "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Chandra"),
     }
 
@@ -1004,6 +1085,18 @@ def create_demo_tutor_response(question: str, retrieval_hits: list[dict[str, Any
         "If you paste the exact task, I will help you choose the next step without jumping straight to the answer."
         f"{source_line}"
     )
+
+
+def openrouter_http_referer() -> str:
+    configured = (os.getenv("OPENROUTER_HTTP_REFERER") or os.getenv("FRONTEND_ORIGIN") or "").strip()
+
+    if configured:
+        return configured.rstrip("/")
+
+    if is_production_environment():
+        raise RuntimeError("OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production.")
+
+    return "http://localhost:3000"
 
 
 def legacy_openrouter_http_client() -> httpx.AsyncClient:

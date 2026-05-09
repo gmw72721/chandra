@@ -6,10 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY backend/requirements.txt backend/requirements.txt
-RUN pip install --no-cache-dir -r backend/requirements.txt
+COPY backend/requirements-prod.txt backend/requirements-prod.txt
+RUN pip install --no-cache-dir -r backend/requirements-prod.txt
 
 COPY backend backend
+COPY agent agent
+COPY retrieval retrieval
 
 EXPOSE 8000
 

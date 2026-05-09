@@ -1,17 +1,20 @@
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, type DocumentData, type DocumentReference } from "firebase-admin/firestore";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
 import {
   inferLearningStrategyObservedOutcome,
   normalizeLearningStrategyTelemetry
 } from "./learning-strategy-telemetry";
 import type { AuthorizedTutorChatScope } from "./tutor-chat-auth";
+import { associateStudentMessageAttachments } from "./student-attachments-server";
 import { normalizeStructuredTutorOutput } from "./tutor-response";
 import type {
   ChatMessage,
   ConversationReviewStatus,
+  MessageAttachment,
   RetrievalConfidence,
   StudentConversationSummary,
   StudentRosterActivitySummary,
+  TeacherConversationLearningSignalSummary,
   TeacherConversationReview,
   TeacherConversationReviewSummary,
   TeacherConversationSourceAuditSummary,
@@ -71,6 +74,7 @@ const vagueConversationTitles = new Set([
 
 export type StudentConversationPersistence = {
   assistantMessageId: string;
+  attachments: MessageAttachment[];
   conversationId: string;
   modelId: string;
   studentMessage: ChatMessage;
@@ -86,11 +90,13 @@ export class ConversationPersistenceError extends Error {
 }
 
 export async function prepareStudentConversationPersistence({
+  attachmentIds = [],
   conversationId,
   messages,
   modelId,
   scope
 }: {
+  attachmentIds?: string[];
   conversationId?: string;
   messages: ChatMessage[];
   modelId: string;
@@ -116,19 +122,61 @@ export async function prepareStudentConversationPersistence({
     studentMessage
   });
 
+  const attachments = await associateStudentMessageAttachments({
+    attachmentIds,
+    conversationId: resolvedConversationId,
+    messageId: studentMessage.id,
+    scope
+  });
+  const studentMessageWithAttachments = attachments.length
+    ? {
+        ...studentMessage,
+        attachments
+      }
+    : studentMessage;
+
   await saveStudentMessage({
     conversationId: resolvedConversationId,
     modelId,
     scope,
-    studentMessage
+    studentMessage: studentMessageWithAttachments
   });
 
   return {
     assistantMessageId: `${studentMessage.id}-assistant`,
+    attachments,
     conversationId: resolvedConversationId,
     modelId,
-    studentMessage
+    studentMessage: studentMessageWithAttachments
   };
+}
+
+export async function createStudentConversationDraft({
+  scope,
+  title
+}: {
+  scope: AuthorizedTutorChatScope;
+  title?: string;
+}): Promise<StudentConversationSummary> {
+  if (scope.role !== "student") {
+    throw new ConversationPersistenceError("Use a student account to start saved conversations.", 403);
+  }
+
+  assertFirebaseAdminAuthReady();
+
+  const conversationId = await createStudentConversation({
+    modelId: "",
+    scope,
+    title: title?.trim() || "New conversation"
+  });
+  const conversationSnapshot = await adminDb!
+    .collection("classes")
+    .doc(scope.classId)
+    .collection("conversations")
+    .doc(conversationId)
+    .get();
+
+  return conversationDocToSummary(conversationSnapshot.id, conversationSnapshot.data() ?? {});
 }
 
 export async function saveAssistantMessage({
@@ -273,9 +321,11 @@ export async function listTeacherClassConversations({
   const rows = await Promise.all(
     conversationsSnapshot.docs.map(async (conversationDoc) => {
       const conversation = conversationDoc.data();
-      const sourceAudit = await getConversationSourceAudit({
+      const sourceAudit = await getConversationSourceAuditForConversation({
         classId,
-        conversationId: conversationDoc.id
+        conversation,
+        conversationId: conversationDoc.id,
+        conversationReference: conversationDoc.ref
       });
       const review = reviewsByConversationId.get(conversationDoc.id) ?? defaultTeacherConversationReview({
         classId,
@@ -291,6 +341,7 @@ export async function listTeacherClassConversations({
         latestRetrievalConfidence: sourceAudit.latestRetrievalConfidence,
         messageCount: Number(conversation.messageCount ?? 0),
         modelId: String(conversation.modelId ?? ""),
+        learningSignals: sourceAudit.learningSignals,
         review,
         reviewStatus: review.status,
         sourceAudit,
@@ -338,6 +389,25 @@ export async function getConversationSourceAudit({
 
   const conversation = conversationSnapshot.data() ?? {};
 
+  return getConversationSourceAuditForConversation({
+    classId,
+    conversation,
+    conversationId,
+    conversationReference
+  });
+}
+
+async function getConversationSourceAuditForConversation({
+  classId,
+  conversation,
+  conversationId,
+  conversationReference
+}: {
+  classId: string;
+  conversation: DocumentData;
+  conversationId: string;
+  conversationReference: DocumentReference<DocumentData>;
+}): Promise<TeacherConversationSourceAuditSummary> {
   if (conversation.classId !== classId) {
     throw new ConversationPersistenceError("Conversation does not belong to this class.", 403);
   }
@@ -348,6 +418,7 @@ export async function getConversationSourceAudit({
   let latestRetrievalConfidence: RetrievalConfidence | undefined;
   let hasLowRetrievalConfidence = false;
   let hasClassMaterialQuestion = false;
+  const learningSignals = emptyConversationLearningSignals();
 
   messagesSnapshot.docs.forEach((messageDoc) => {
     const message = messageDoc.data();
@@ -362,14 +433,59 @@ export async function getConversationSourceAudit({
     }
 
     hasAssistantMessage = true;
+    learningSignals.assistantMessageCount += 1;
     const retrievalConfidence = normalizeRetrievalConfidence(message.retrievalConfidence);
 
     if (retrievalConfidence) {
       latestRetrievalConfidence = retrievalConfidence;
       hasLowRetrievalConfidence = hasLowRetrievalConfidence || retrievalConfidence === "low";
+      if (retrievalConfidence === "low") {
+        learningSignals.lowConfidenceMessageCount += 1;
+      }
     }
 
-    for (const source of normalizeTutorSources(message.sources)) {
+    const assistantSources = normalizeTutorSources(message.sources);
+
+    if (hasClassMaterialQuestion && !assistantSources.length) {
+      learningSignals.noSourceAssistantMessageCount += 1;
+    }
+
+    const structuredOutput = normalizeStructuredTutorOutput(message.structuredOutput, String(message.content ?? ""));
+    const metadata = structuredOutput?.metadata;
+
+    if (metadata) {
+      learningSignals.latestHintLevel = metadata.hintLevel;
+      learningSignals.latestMode = metadata.mode;
+      learningSignals.latestStudentActionNeeded = metadata.studentActionNeeded;
+
+      if (metadata.studentActionNeeded === "ask_teacher") {
+        learningSignals.askTeacherCount += 1;
+      } else if (metadata.studentActionNeeded === "paste_problem") {
+        learningSignals.pasteProblemCount += 1;
+      } else if (metadata.studentActionNeeded === "review_source") {
+        learningSignals.reviewSourceCount += 1;
+      } else if (metadata.studentActionNeeded === "show_attempt") {
+        learningSignals.showAttemptCount += 1;
+      }
+
+      if (metadata.hintLevel === "guided_step") {
+        learningSignals.guidedStepCount += 1;
+      } else if (metadata.hintLevel === "worked_example") {
+        learningSignals.workedExampleCount += 1;
+      }
+    }
+
+    const telemetry = normalizeLearningStrategyTelemetry(message.learningStrategyTelemetry);
+
+    if (telemetry?.observedOutcome === "student_still_stuck") {
+      learningSignals.stuckOutcomeCount += 1;
+    } else if (telemetry?.observedOutcome === "student_progressed") {
+      learningSignals.progressedOutcomeCount += 1;
+    } else if (telemetry?.observedOutcome === "student_disengaged") {
+      learningSignals.disengagedOutcomeCount += 1;
+    }
+
+    for (const source of assistantSources) {
       sourcesByKey.set(sourceKey(source), source);
     }
   });
@@ -380,10 +496,28 @@ export async function getConversationSourceAudit({
 
   return {
     latestRetrievalConfidence,
+    learningSignals,
     lowSourceConfidence: hasLowRetrievalConfidence || noSourceUsedWarning,
     noSourceUsedWarning,
     sourceCount: sources.length,
     sources
+  };
+}
+
+function emptyConversationLearningSignals(): TeacherConversationLearningSignalSummary {
+  return {
+    assistantMessageCount: 0,
+    lowConfidenceMessageCount: 0,
+    noSourceAssistantMessageCount: 0,
+    askTeacherCount: 0,
+    pasteProblemCount: 0,
+    reviewSourceCount: 0,
+    showAttemptCount: 0,
+    guidedStepCount: 0,
+    workedExampleCount: 0,
+    stuckOutcomeCount: 0,
+    progressedOutcomeCount: 0,
+    disengagedOutcomeCount: 0
   };
 }
 
@@ -537,7 +671,7 @@ export async function listTeacherRosterActivity({
   });
 
   const messageSnapshots = await Promise.all(
-    conversationDocs.map((conversationDoc) => conversationDoc.ref.collection("messages").orderBy("createdAt", "asc").get())
+    conversationDocs.map((conversationDoc) => conversationDoc.ref.collection("messages").where("role", "==", "student").get())
   );
 
   messageSnapshots.forEach((messageSnapshot, conversationIndex) => {
@@ -551,28 +685,25 @@ export async function listTeacherRosterActivity({
 
     messageSnapshot.docs.forEach((messageDoc) => {
       const message = messageDoc.data();
-      const role = String(message.role ?? "");
       const createdAt = serializeFirestoreValue(message.createdAt);
 
-      if (role === "student") {
-        activity.totalQuestions += 1;
+      activity.totalQuestions += 1;
 
-        const activeDay = dateKey(createdAt, timezone);
+      const activeDay = dateKey(createdAt, timezone);
 
-        if (activeDay) {
-          activeDaysByEmail.get(studentEmail)?.add(activeDay);
-        }
+      if (activeDay) {
+        activeDaysByEmail.get(studentEmail)?.add(activeDay);
+      }
 
-        if (activeDay === todayKey) {
-          activity.questionsToday += 1;
-        }
+      if (activeDay === todayKey) {
+        activity.questionsToday += 1;
+      }
 
-        const activeAt = timestampMillis(createdAt);
+      const activeAt = timestampMillis(createdAt);
 
-        if (activeAt >= (lastStudentMessageAtByEmail.get(studentEmail) ?? 0)) {
-          activity.lastActiveAt = String(createdAt ?? "");
-          lastStudentMessageAtByEmail.set(studentEmail, activeAt);
-        }
+      if (activeAt >= (lastStudentMessageAtByEmail.get(studentEmail) ?? 0)) {
+        activity.lastActiveAt = String(createdAt ?? "");
+        lastStudentMessageAtByEmail.set(studentEmail, activeAt);
       }
     });
 
@@ -606,16 +737,22 @@ export async function listTeacherRosterActivity({
 async function getStudentPresenceByEmail(classId: string, studentEmails: string[]) {
   const uniqueEmails = Array.from(new Set(studentEmails.map((email) => email.trim().toLowerCase()).filter(Boolean)));
   const presenceByEmail = new Map<string, { isOnline: boolean; lastSeenAt: string }>();
+  const emailBatches: string[][] = [];
 
   for (let index = 0; index < uniqueEmails.length; index += 30) {
     const emailBatch = uniqueEmails.slice(index, index + 30);
 
-    if (!emailBatch.length) {
-      continue;
+    if (emailBatch.length) {
+      emailBatches.push(emailBatch);
     }
+  }
 
-    const snapshot = await adminDb!.collection("userPresence").where("email", "in", emailBatch).get();
+  const snapshots = await Promise.all(
+    emailBatches.map((emailBatch) => adminDb!.collection("userPresence").where("email", "in", emailBatch).get())
+  );
+  const now = Date.now();
 
+  snapshots.forEach((snapshot) => {
     snapshot.docs.forEach((presenceDoc) => {
       const presence = presenceDoc.data() ?? {};
       const email = String(presence.email ?? "").trim().toLowerCase();
@@ -632,11 +769,11 @@ async function getStudentPresenceByEmail(classId: string, studentEmails: string[
       }
 
       presenceByEmail.set(email, {
-        isOnline: Boolean(presence.online) && Date.now() - timestampMillis(lastSeenAt) <= presenceActiveWindowMs,
+        isOnline: Boolean(presence.online) && now - timestampMillis(lastSeenAt) <= presenceActiveWindowMs,
         lastSeenAt
       });
     });
-  }
+  });
 
   return presenceByEmail;
 }
@@ -712,6 +849,7 @@ export async function listTeacherConversationMessages({
 
     return {
       content: String(data.content ?? ""),
+      attachments: normalizeMessageAttachments(data.attachments),
       createdAt: String(serializeFirestoreValue(data.createdAt) ?? ""),
       id: String(data.id ?? messageDoc.id),
       langGraphTrace: data.langGraphTrace,
@@ -828,6 +966,7 @@ export async function listStudentConversationMessages({
 
     return {
       content: String(data.content ?? ""),
+      attachments: normalizeMessageAttachments(data.attachments),
       createdAt: String(serializeFirestoreValue(data.createdAt) ?? ""),
       id: String(data.id ?? messageDoc.id),
       langGraphTrace: data.langGraphTrace,
@@ -1011,6 +1150,22 @@ async function createOrVerifyStudentConversation({
     return conversationId;
   }
 
+  return createStudentConversation({
+    modelId,
+    scope,
+    title: buildConversationTitle(studentMessage.content)
+  });
+}
+
+async function createStudentConversation({
+  modelId,
+  scope,
+  title
+}: {
+  modelId: string;
+  scope: AuthorizedTutorChatScope;
+  title: string;
+}) {
   const userSnapshot = await adminDb!.collection("users").doc(scope.uid).get();
   const profile = userSnapshot.data() ?? {};
   const conversationReference = adminDb!
@@ -1023,6 +1178,7 @@ async function createOrVerifyStudentConversation({
   await conversationReference.set({
     classId: scope.classId,
     createdAt,
+    lastMessageAt: createdAt,
     messageCount: 0,
     modelId,
     studentEmail: String(profile.email ?? "").trim().toLowerCase(),
@@ -1030,9 +1186,8 @@ async function createOrVerifyStudentConversation({
     studentName: String(profile.displayName ?? profile.email ?? "Student").trim() || "Student",
     teacherId: scope.professorId,
     teacherName: scope.professorName ?? "",
-    title: buildConversationTitle(studentMessage.content),
-    updatedAt: createdAt,
-    lastMessageAt: createdAt
+    title,
+    updatedAt: createdAt
   });
 
   return conversationReference.id;
@@ -1125,6 +1280,7 @@ async function saveConversationMessage({
       modelId: message.role === "assistant" ? modelId : undefined,
       retrievalConfidence: message.role === "assistant" ? message.retrievalConfidence : undefined,
       role: message.role,
+      attachments: message.attachments,
       sources: message.sources,
       structuredOutput: message.role === "assistant" ? message.structuredOutput : undefined
     }));
@@ -1291,6 +1447,48 @@ function normalizeTutorSources(value: unknown): TutorSource[] {
     sources.push(normalizedSource);
     return sources;
   }, []);
+}
+
+function normalizeMessageAttachments(value: unknown): MessageAttachment[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const attachments = value.reduce<MessageAttachment[]>((items, attachment) => {
+    if (!attachment || typeof attachment !== "object") {
+      return items;
+    }
+
+    const record = attachment as Record<string, unknown>;
+    const id = String(record.id ?? "").trim();
+    const fileName = String(record.fileName ?? "").trim();
+    const storageKey = String(record.storageKey ?? "").trim();
+
+    if (!id || !fileName || !storageKey) {
+      return items;
+    }
+
+    items.push({
+      classId: String(record.classId ?? ""),
+      conversationId: String(record.conversationId ?? ""),
+      createdAt: serializeFirestoreValue(record.createdAt),
+      extractedText: stringOrUndefined(record.extractedText) ?? null,
+      fileName,
+      fileSize: Number(record.fileSize ?? 0),
+      fileType: record.fileType === "pdf" ? "pdf" : "image",
+      id,
+      messageId: stringOrUndefined(record.messageId) ?? null,
+      mimeType: String(record.mimeType ?? ""),
+      pageCount: typeof record.pageCount === "number" ? record.pageCount : null,
+      storageKey,
+      studentId: String(record.studentId ?? ""),
+      updatedAt: serializeFirestoreValue(record.updatedAt),
+      uploadStatus: record.uploadStatus === "uploading" || record.uploadStatus === "failed" ? record.uploadStatus : "ready"
+    });
+    return items;
+  }, []);
+
+  return attachments.length ? attachments : undefined;
 }
 
 function sourceKey(source: TutorSource) {

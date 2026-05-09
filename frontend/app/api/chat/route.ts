@@ -16,6 +16,7 @@ import {
 } from "@/lib/learning-strategy-telemetry";
 import { defaultOpenRouterModelId } from "@/lib/model-options";
 import { buildTutorSystemPrompt, getTeacherClassTutorConfig, toProviderMessages } from "@/lib/prompts";
+import { maxStudentAttachmentsPerMessage } from "@/lib/student-attachments-server";
 import { getActiveStudentLearningProfileTutorContext } from "@/lib/student-learning-profiles-server";
 import {
   ConversationPersistenceError,
@@ -37,6 +38,10 @@ const STUDENT_TUTOR_BACKEND_UNAVAILABLE_MESSAGE =
   "Chandra is having trouble connecting. Try again in a moment.";
 const STUDENT_TUTOR_RESPONSE_FAILED_MESSAGE =
   "Chandra is having trouble responding right now. Try again in a moment.";
+const maxChatMessagesPerRequest = 40;
+const maxChatMessageCharacters = 12000;
+const maxChatRequestCharacters = 60000;
+const maxAttachmentContextCharacters = 4000;
 
 const safeDocumentIdSchema = z
   .string()
@@ -45,6 +50,7 @@ const safeDocumentIdSchema = z
   .refine((value) => !value.includes("/"));
 
 const chatRequestSchema = z.object({
+  attachmentIds: z.array(safeDocumentIdSchema).max(maxStudentAttachmentsPerMessage()).optional(),
   conversationId: safeDocumentIdSchema.optional(),
   courseId: z.string().optional(),
   modelId: z.string().optional(),
@@ -53,7 +59,7 @@ const chatRequestSchema = z.object({
     z.object({
       id: safeDocumentIdSchema,
       role: z.enum(["student", "teacher", "assistant", "system"]),
-      content: z.string(),
+      content: z.string().max(maxChatMessageCharacters),
       createdAt: z.string(),
       langGraphTrace: z
         .object({
@@ -117,12 +123,32 @@ const chatRequestSchema = z.object({
         ])
         .optional()
     })
-  )
+  ).min(1).max(maxChatMessagesPerRequest)
+}).superRefine((value, context) => {
+  const totalCharacters = value.messages.reduce((total, message) => total + message.content.length, 0);
+
+  if (totalCharacters > maxChatRequestCharacters) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Chat request is too large.",
+      path: ["messages"]
+    });
+  }
 });
 
 export async function POST(request: Request) {
   try {
-    const parsed = chatRequestSchema.safeParse(await request.json());
+    const requestBody = await readJsonRequest(request);
+
+    if (!requestBody.ok) {
+      const chatError = reportStudentChatError({
+        caughtError: requestBody.caughtError,
+        code: "CHAT_REQUEST_INVALID"
+      });
+      return NextResponse.json(studentChatErrorPayload(chatError), { status: 400 });
+    }
+
+    const parsed = chatRequestSchema.safeParse(requestBody.value);
 
     if (!parsed.success) {
       const chatError = reportStudentChatError({
@@ -197,6 +223,14 @@ export async function POST(request: Request) {
 
 type ParsedChatRequest = z.infer<typeof chatRequestSchema>;
 
+async function readJsonRequest(request: Request) {
+  try {
+    return { ok: true as const, value: (await request.json()) as unknown };
+  } catch (caughtError) {
+    return { caughtError, ok: false as const };
+  }
+}
+
 async function buildBackendChatRequest(request: Request, data: ParsedChatRequest) {
   const scope = await authorizeTutorChatRequest(request, data.courseId);
   const courseId = scope.classId;
@@ -242,11 +276,16 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
   ].join("\n\n");
 
   const persistence = await prepareStudentConversationPersistenceForTutor({
+    attachmentIds: data.attachmentIds ?? [],
     conversationId: data.conversationId,
     messages,
     modelId: model,
     scope
   });
+  const providerMessages = toProviderMessages(
+    systemPrompt,
+    appendAttachmentContextToStudentMessage(messages, persistence)
+  );
 
   return {
     backendRequest: {
@@ -260,7 +299,7 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
       answerPolicy: teacherClass?.answerPolicy,
       sourceUsage: teacherClass?.sourceUsage,
       studentLearningProfileContext: privateBackendLearningProfileContext(studentLearningProfileContext),
-      messages: toProviderMessages(systemPrompt, messages)
+      messages: providerMessages
     },
     learningProfileTelemetryContext: studentLearningProfileContext,
     persistence,
@@ -305,11 +344,13 @@ async function getStudentLearningProfileContextForTutor(input: { classId: string
 }
 
 async function prepareStudentConversationPersistenceForTutor({
+  attachmentIds,
   conversationId,
   messages,
   modelId,
   scope
 }: {
+  attachmentIds: string[];
   conversationId?: string;
   messages: ChatMessage[];
   modelId: string;
@@ -317,6 +358,7 @@ async function prepareStudentConversationPersistenceForTutor({
 }) {
   try {
     return await prepareStudentConversationPersistence({
+      attachmentIds,
       conversationId,
       messages,
       modelId,
@@ -335,6 +377,65 @@ async function prepareStudentConversationPersistenceForTutor({
     }));
     return null;
   }
+}
+
+function appendAttachmentContextToStudentMessage(
+  messages: ChatMessage[],
+  persistence: StudentConversationPersistence | null
+) {
+  if (!persistence?.attachments.length) {
+    return messages;
+  }
+
+  return messages.map((message) => {
+    if (message.id !== persistence.studentMessage.id || message.role !== "student") {
+      return message;
+    }
+
+    return {
+      ...message,
+      attachments: persistence.attachments,
+      content: [
+        message.content,
+        buildAttachmentTutorContext(persistence.attachments)
+      ].filter(Boolean).join("\n\n")
+    };
+  });
+}
+
+function buildAttachmentTutorContext(attachments: StudentConversationPersistence["attachments"]) {
+  const lines = [
+    "Student uploaded homework attachments for this message:",
+    ...attachments.map((attachment, index) => {
+      const details = [
+        `${index + 1}. ${attachment.fileName}`,
+        `${attachment.fileType.toUpperCase()}`,
+        formatAttachmentSize(attachment.fileSize),
+        attachment.pageCount ? `${attachment.pageCount} page${attachment.pageCount === 1 ? "" : "s"}` : ""
+      ].filter(Boolean).join(" | ");
+      const extractedText = attachment.extractedText?.trim();
+
+      if (extractedText) {
+        return `${details}\nExtracted text:\n${extractedText.slice(0, maxAttachmentContextCharacters)}`;
+      }
+
+      return `${details}\nNo readable PDF text was stored for this attachment. Do not invent file contents; ask the student to upload a text-readable PDF or paste the relevant problem text.`;
+    })
+  ];
+
+  return lines.join("\n");
+}
+
+function formatAttachmentSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "unknown size";
+  }
+
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  return `${Math.ceil(bytes / 1024)} KB`;
 }
 
 function streamTutorResponse(preparedRequest: PreparedBackendChatRequest) {
@@ -514,6 +615,7 @@ type StudentChatErrorCode =
   | "TUTOR_BACKEND_AUTH_FAILED"
   | "TUTOR_BACKEND_ERROR"
   | "TUTOR_BACKEND_RATE_LIMITED"
+  | "TUTOR_BACKEND_REQUEST_TOO_LARGE"
   | "TUTOR_BACKEND_REQUEST_FAILED"
   | "TUTOR_BACKEND_SETUP_INCOMPLETE"
   | "TUTOR_BACKEND_STREAM_FAILED"
@@ -626,6 +728,8 @@ function studentMessageForChatError(code: StudentChatErrorCode) {
       return "I could not save this message. Start a new chat and try again.";
     case "CHAT_REQUEST_INVALID":
       return "I could not send that message. Refresh the page and try again.";
+    case "TUTOR_BACKEND_REQUEST_TOO_LARGE":
+      return "This chat is too large to send. Start a new chat and try again.";
     case "TUTOR_BACKEND_UNREACHABLE":
       return STUDENT_TUTOR_BACKEND_UNAVAILABLE_MESSAGE;
     case "TUTOR_BACKEND_TIMEOUT":
@@ -734,6 +838,10 @@ function classifyBackendResponseError(status: number, detail: string): StudentCh
 
   if (status === 429 || normalizedDetail.includes("rate limit")) {
     return "TUTOR_BACKEND_RATE_LIMITED";
+  }
+
+  if (status === 413 || normalizedDetail.includes("too large")) {
+    return "TUTOR_BACKEND_REQUEST_TOO_LARGE";
   }
 
   if (status >= 500) {
@@ -945,6 +1053,7 @@ function buildPdfToolChoosingTutorSystemPrompt(
   const directAnswerRules = answerPolicy.refuseAnswerOnlyRequests
     ? [
         "- If the student asks for the answer, final answer, or asks you to just give the answer, do not complete their exact task. Search for textbook/readings/examples only if needed to offer a similar example walkthrough.",
+        "- If the student asks for homework-ready wording, a proof paragraph, a complete response they can submit, or an `example of what I can say` for the exact task, treat it as a direct-answer request and do not provide that artifact.",
         "- If the student asks for the answer/final answer, say you cannot give the final answer. Do not continue completing their exact task after that refusal.",
         "- For direct-answer requests, offer to walk through a similar textbook/readings/example task or check the student's attempted step. Use the textbook example, not the student's exact task, for the walkthrough."
       ]
@@ -1006,6 +1115,8 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- If the student asks to see, read, pull up, copy, quote, recite, identify, or locate the wording of a specific problem, exercise, question, passage, or page, or only supplies a specific problem/exercise/page/title reference without asking for solving help, treat that as source lookup, not solving help: retrieve the exact source and provide the visible task text when quotation is allowed, without solving it or asking for an attempt first.",
     "- Source-backed help does not override the attempt-first rule. If the student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, use retrieval to orient yourself, then first ask what they have tried or where they are stuck.",
     "- In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example.",
+    "- Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task.",
+    "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. For proof or derivation tasks, a similar example must use a different claim or different numbers so it does not prove the assigned statement.",
     "- A follow-up like 'I still need help', 'yes', 'tell me more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution.",
     "- For the student's exact task, do not reveal a full solution, final answer, final artifact, final expression, final code, thesis, outline, or a chain of multiple intermediate steps before the student has shown work. If one small scaffold is allowed, stop there and ask the student to do the next piece.",
     "- For textbook section or chapter help, answer from the selected pages for that section. If the selected pages do not match the requested section/chapter, search again before answering.",
@@ -1019,6 +1130,7 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- Choose optional sections from the student's intent, not from a fixed template.",
     "- The app can split optional student-facing sections from your final text. Only use these exact labels when they add clarity: `Hint:` for a short nudge, `Why this works:` for a brief conceptual explanation, `Formula:` for a compact formula block, `Example:` for a similar example that does not complete the student's exact task, and `Check your work:` when responding to the student's attempted work.",
     "- Use `Hint:` when the student is stuck or asks how to start. Use `Why this works:` when they ask why, what a concept means, or how to recognize a method. Use `Formula:` when they ask for a rule/formula or the formula is the main help. Use `Example:` only for a similar example or when redirecting from an answer-only request. Use `Check your work:` only when the student shows work, asks if a step is valid, or wants an error found.",
+    "- Never use `Example:` to provide homework-ready wording, a proof paragraph, or a student-submittable response for the exact assigned task.",
     "- Do not write `Source:`, `Sources:`, or `Based on selected class material` as a separate section. Cite source titles and page numbers naturally in the answer; the app renders source chips separately.",
     "- Do not write `Answer:`, `Question:`, `Next step:`, or `Your next step:`. End with one direct question for the student instead.",
     "- Do not force optional labels into every reply. Skip them for greetings, short clarifications, direct refusals, or already-clear answers.",

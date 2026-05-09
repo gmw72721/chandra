@@ -31,16 +31,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Use a student account to join a class." }, { status: 403 });
     }
 
-    const currentClassId = String(userData.classId ?? "").trim();
     const email = normalizeEmail(
-      firstString(userData.email, body.email, decodedToken.email, decodedToken.firebase?.identities?.email?.[0])
+      firstString(userData.email, decodedToken.email, decodedToken.firebase?.identities?.email?.[0], body.email)
     );
     const displayName =
       firstString(userData.displayName, body.displayName, decodedToken.name, email) || "Chandra student";
 
     if (!classCode) {
       await updateStudentEnrollment({
-        currentClassId,
         displayName,
         email,
         nextClassId: "",
@@ -58,7 +56,6 @@ export async function POST(request: Request) {
     }
 
     await updateStudentEnrollment({
-      currentClassId,
       displayName,
       email,
       nextClassId: classId,
@@ -89,14 +86,12 @@ async function resolveClassId(classCode: string) {
 }
 
 async function updateStudentEnrollment({
-  currentClassId,
   displayName,
   email,
   nextClassId,
   syncProfile,
   uid
 }: {
-  currentClassId: string;
   displayName: string;
   email: string;
   nextClassId: string;
@@ -106,10 +101,6 @@ async function updateStudentEnrollment({
   const batch = adminDb!.batch();
   const rosterStudentId = encodeURIComponent(email || uid);
   const userReference = adminDb!.collection("users").doc(uid);
-
-  if (currentClassId && currentClassId !== nextClassId) {
-    batch.delete(adminDb!.collection("classes").doc(currentClassId).collection("students").doc(rosterStudentId));
-  }
 
   if (nextClassId) {
     batch.set(adminDb!.collection("classes").doc(nextClassId).collection("students").doc(rosterStudentId), {
@@ -124,6 +115,7 @@ async function updateStudentEnrollment({
       userReference,
       nextClassId
         ? {
+            classIds: FieldValue.arrayUnion(nextClassId),
             classId: nextClassId,
             displayName,
             email,

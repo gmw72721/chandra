@@ -500,6 +500,7 @@ type StudentChatErrorCode =
   | "TUTOR_BACKEND_AUTH_FAILED"
   | "TUTOR_BACKEND_ERROR"
   | "TUTOR_BACKEND_RATE_LIMITED"
+  | "TUTOR_BACKEND_REQUEST_TOO_LARGE"
   | "TUTOR_BACKEND_REQUEST_FAILED"
   | "TUTOR_BACKEND_SETUP_INCOMPLETE"
   | "TUTOR_BACKEND_STREAM_FAILED"
@@ -604,6 +605,8 @@ function studentMessageForChatError(code: StudentChatErrorCode) {
       return "I could not save this message. Start a new chat and try again.";
     case "CHAT_REQUEST_INVALID":
       return "I could not send that message. Refresh the page and try again.";
+    case "TUTOR_BACKEND_REQUEST_TOO_LARGE":
+      return "This chat is too large to send. Start a new chat and try again.";
     case "TUTOR_BACKEND_UNREACHABLE":
       return STUDENT_TUTOR_BACKEND_UNAVAILABLE_MESSAGE;
     case "TUTOR_BACKEND_TIMEOUT":
@@ -708,6 +711,10 @@ function classifyBackendResponseError(status: number, detail: string): StudentCh
 
   if (status === 429 || normalizedDetail.includes("rate limit")) {
     return "TUTOR_BACKEND_RATE_LIMITED";
+  }
+
+  if (status === 413 || normalizedDetail.includes("too large")) {
+    return "TUTOR_BACKEND_REQUEST_TOO_LARGE";
   }
 
   if (status >= 500) {
@@ -867,6 +874,7 @@ function buildPdfToolChoosingTutorSystemPrompt(
   const directAnswerRules = answerPolicy.refuseAnswerOnlyRequests
     ? [
         "- If the student asks for the answer, final answer, or asks you to just give the answer, do not complete their exact task. Search for textbook/readings/examples only if needed to offer a similar example walkthrough.",
+        "- If the student asks for homework-ready wording, a proof paragraph, a complete response they can submit, or an `example of what I can say` for the exact task, treat it as a direct-answer request and do not provide that artifact.",
         "- If the student asks for the answer/final answer, say you cannot give the final answer. Do not continue completing their exact task after that refusal.",
         "- For direct-answer requests, offer to walk through a similar textbook/readings/example task or check the student's attempted step. Use the textbook example, not the student's exact task, for the walkthrough."
       ]
@@ -927,6 +935,8 @@ function buildPdfToolChoosingTutorSystemPrompt(
     ...directAnswerRules.slice(1),
     "- Source-backed help does not override the attempt-first rule. If the student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, use retrieval to orient yourself, then first ask what they have tried or where they are stuck.",
     "- In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example.",
+    "- Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task.",
+    "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. For proof or derivation tasks, a similar example must use a different claim or different numbers so it does not prove the assigned statement.",
     "- A follow-up like 'I still need help', 'yes', 'tell me more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution.",
     "- For the student's exact task, do not reveal a full solution, final answer, final artifact, final expression, final code, thesis, outline, or a chain of multiple intermediate steps before the student has shown work. If one small scaffold is allowed, stop there and ask the student to do the next piece.",
     "- For textbook section or chapter help, answer from the selected pages for that section. If the selected pages do not match the requested section/chapter, search again before answering.",
@@ -940,6 +950,7 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- Choose optional sections from the student's intent, not from a fixed template.",
     "- The app can split optional student-facing sections from your final text. Only use these exact labels when they add clarity: `Hint:` for a short nudge, `Why this works:` for a brief conceptual explanation, `Formula:` for a compact formula block, `Example:` for a similar example that does not complete the student's exact task, and `Check your work:` when responding to the student's attempted work.",
     "- Use `Hint:` when the student is stuck or asks how to start. Use `Why this works:` when they ask why, what a concept means, or how to recognize a method. Use `Formula:` when they ask for a rule/formula or the formula is the main help. Use `Example:` only for a similar example or when redirecting from an answer-only request. Use `Check your work:` only when the student shows work, asks if a step is valid, or wants an error found.",
+    "- Never use `Example:` to provide homework-ready wording, a proof paragraph, or a student-submittable response for the exact assigned task.",
     "- Do not write `Source:`, `Sources:`, or `Based on selected class material` as a separate section. Cite source titles and page numbers naturally in the answer; the app renders source chips separately.",
     "- Do not write `Answer:`, `Question:`, `Next step:`, or `Your next step:`. End with one direct question for the student instead.",
     "- Do not force optional labels into every reply. Skip them for greetings, short clarifications, direct refusals, or already-clear answers.",

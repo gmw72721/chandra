@@ -1,33 +1,48 @@
 # Chandra
 
-Chandra is a teacher-guided AI tutoring platform for classrooms. Teachers create class-specific AI tutors, define how they should help, ground responses in uploaded course materials, and review student conversations to understand where learners need support. The platform is designed to keep students doing the thinking while giving teachers control over tutor behavior, source usage, and follow-up interventions.
+Teacher-guided AI tutoring for classrooms. Teachers configure class-specific tutors, upload course materials, control source usage and answer policy, and review student conversations. Students chat through the Next.js app; production tutor responses are handled by a private FastAPI/LangGraph backend.
 
-## Features
+## Production
 
-- Student tutor chat with class, assignment, and model context.
-- Teacher dashboard for class settings, hidden tutor instructions, source materials, roster activity, and conversation review.
-- Teacher-reviewed student learning profiles with support notes and evidence from recent conversations.
-- Firebase Authentication, Firestore, and Storage integration.
-- PDF/source-grounded retrieval with embeddings, material visibility controls, and Firestore Vector Search.
-- LangGraph FastAPI backend for controlled PDF RAG chat through OpenRouter models.
+- Frontend: Firebase App Hosting
+  - `https://chandra-frontend--chandra-f6e13.us-central1.hosted.app`
+- Backend: authenticated Google Cloud Run
+  - `https://chandra-backend-whjsen4ula-uc.a.run.app`
+- Project: `chandra-f6e13`
+- Region: `us-central1`
+
+The backend is not public API surface for browsers. Browser requests go to the Next.js app. The Next.js server calls FastAPI with `X-Chandra-Internal-Secret` and a Cloud Run identity token.
 
 ## Stack
 
 - Next.js 16, React 19, TypeScript
 - Firebase Auth, Firestore, Firebase Storage
-- FastAPI, LangGraph
-- OpenRouter for model calls
-- Gemini/Vertex embeddings for retrieval
+- FastAPI, LangGraph, Uvicorn
+- OpenRouter for tutor model calls
+- Gemini embeddings and Firestore Vector Search for retrieval
+- Firebase App Hosting, Cloud Run, Artifact Registry, Secret Manager, Cloud Build
 
-## Requirements
+## Repository Layout
+
+```text
+frontend/                         Next.js app, API routes, UI, Firebase server code
+backend/                          FastAPI app and Python container config
+agent/                            LangGraph tutor workflow
+retrieval/                        PDF retrieval/rendering helpers
+tests/                            TypeScript and Python tests
+apphosting.yaml                   Firebase App Hosting runtime config
+cloudbuild.backend.deploy.yaml    Backend build/push/deploy pipeline
+```
+
+## Local Setup
+
+Requirements:
 
 - Node.js 20+
 - Python 3.11+
-- Firebase project with Email/Password auth, Firestore, and Storage enabled
-- OpenRouter API key for live tutor chat
-- Gemini API key or Google Cloud credentials for embeddings
-
-## Setup
+- Firebase project with Auth, Firestore, and Storage
+- OpenRouter API key
+- Gemini API key
 
 ```bash
 npm install
@@ -37,77 +52,74 @@ pip install -r backend/requirements.txt
 cp .env.example .env.local
 ```
 
-Fill in `.env.local` with the values for your Firebase project and model providers.
+Fill `.env.local`. Do not commit env files.
+
+Run both frontend and backend:
+
+```bash
+npm run dev:all
+```
+
+Or separately:
+
+```bash
+npm run dev
+npm run dev:api
+```
+
+Open `http://localhost:3000`.
 
 ## Environment
 
-Minimum local web app configuration:
+Frontend runtime needs:
 
 ```bash
+BACKEND_API_BASE_URL=
+BACKEND_ID_TOKEN_AUDIENCE=
+BACKEND_SHARED_SECRET=
 NEXT_PUBLIC_FIREBASE_API_KEY=
 NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
 NEXT_PUBLIC_FIREBASE_PROJECT_ID=
 NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
 NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
 NEXT_PUBLIC_FIREBASE_APP_ID=
-```
-
-Server-side Firebase access can use either `FIREBASE_SERVICE_ACCOUNT_KEY` or:
-
-```bash
 FIREBASE_PROJECT_ID=
-FIREBASE_CLIENT_EMAIL=
-FIREBASE_PRIVATE_KEY=
 FIREBASE_STORAGE_BUCKET=
+OPENROUTER_API_KEY=
+OPENROUTER_BASE_URL=
+DEFAULT_MODEL=
+GEMINI_API_KEY=
+GOOGLE_CLOUD_PROJECT=
+GOOGLE_CLOUD_LOCATION=
+VERTEX_EMBEDDING_MODEL=
+VERTEX_EMBEDDING_DIMENSIONS=
+LEARNING_PROFILE_UPDATE_SECRET=
 ```
 
-Live chat and retrieval:
+Backend runtime needs:
 
 ```bash
 OPENROUTER_API_KEY=
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-DEFAULT_MODEL=openai/gpt-5.4-mini
-
-BACKEND_API_BASE_URL=http://127.0.0.1:8000
+OPENROUTER_BASE_URL=
+OPENROUTER_HTTP_REFERER=
+OPENROUTER_APP_TITLE=
+DEFAULT_MODEL=
 BACKEND_SHARED_SECRET=
-LEARNING_PROFILE_UPDATE_SECRET=
-
+FRONTEND_ORIGIN=
+NEXT_INTERNAL_BASE_URL=
+FIREBASE_PROJECT_ID=
+FIREBASE_STORAGE_BUCKET=
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=
+NEXT_PUBLIC_FIREBASE_API_KEY=
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
 GEMINI_API_KEY=
 GOOGLE_CLOUD_PROJECT=
-GOOGLE_CLOUD_LOCATION=us
-VERTEX_EMBEDDING_MODEL=gemini-embedding-2
-VERTEX_EMBEDDING_DIMENSIONS=768
+GOOGLE_CLOUD_LOCATION=
+VERTEX_EMBEDDING_MODEL=
+VERTEX_EMBEDDING_DIMENSIONS=
 ```
 
-See `.env.example` for the full set of supported variables.
-
-## Development
-
-Run the full local stack:
-
-```bash
-npm run dev:all
-```
-
-That command loads `.env.local`, clears ports 3000 and 8000, starts the Next.js frontend, and starts the FastAPI backend without auto-reload so long streaming tutor responses are not interrupted.
-
-Or run the Next.js app by itself:
-
-```bash
-npm run dev
-```
-
-Run the FastAPI backend in a second terminal:
-
-```bash
-npm run dev:api
-```
-
-Open `http://localhost:3000`.
-
-Browser code calls the Next.js `/api/*` routes on the same origin. The Next.js server uses `BACKEND_API_BASE_URL` to reach the FastAPI LangGraph service, so do not set a public frontend API base URL for local FastAPI.
-
-Scheduled learning profile updates call `/api/student-learning-profiles/weekly` with `Authorization: Bearer $LEARNING_PROFILE_UPDATE_SECRET`.
+Production stores sensitive values in Secret Manager / App Hosting secrets. Cloud Run and App Hosting use service accounts for Firebase Admin where possible, not committed private keys.
 
 ## Quality Checks
 
@@ -115,15 +127,65 @@ Scheduled learning profile updates call `/api/student-learning-profiles/weekly` 
 npm run lint
 npm run typecheck
 npm test
-pytest
+python3 -m pytest tests/test_provider_retries.py tests/test_pdf_rag_graph.py tests/test_backend_visibility.py
 ```
 
-## Firebase Deployment
+## Deployment
 
-Deploy security rules before using a real Firebase project:
+Frontend deploys through Firebase App Hosting backend `chandra-frontend`.
+
+Backend deploys through Cloud Build trigger `deploy-chandra-backend-main` using:
+
+```text
+cloudbuild.backend.deploy.yaml
+```
+
+The backend pipeline builds `backend/Dockerfile`, pushes to Artifact Registry, and deploys Cloud Run service `chandra-backend` with:
+
+- `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+- timeout `900s`
+- concurrency `10`
+- memory `2Gi`
+- unauthenticated access disabled
+- runtime service account `chandra-backend@chandra-f6e13.iam.gserviceaccount.com`
+
+Normal production deploy:
 
 ```bash
-firebase deploy --only firestore:rules,storage
+git push origin main
 ```
 
-For vector retrieval, create a Firestore vector index on the `chunks` collection group with `classId` ascending and `embedding` using the same dimension as `VERTEX_EMBEDDING_DIMENSIONS`.
+Recommended backend trigger included-file filters:
+
+```text
+backend/**
+agent/**
+retrieval/**
+cloudbuild.backend.deploy.yaml
+.dockerignore
+.gcloudignore
+```
+
+## Firebase Setup
+
+Deploy rules:
+
+```bash
+npx firebase deploy --only firestore:rules,storage --project chandra-f6e13
+```
+
+Storage rules require Firebase Storage to be initialized in the Firebase console.
+
+For retrieval, create a Firestore vector index on the `chunks` collection group:
+
+- `classId` ascending
+- `embedding` vector field
+- dimensions must match `VERTEX_EMBEDDING_DIMENSIONS`
+
+## Security Notes
+
+- Never commit `.env`, `.env.local`, private keys, or service account JSON.
+- Keep `BACKEND_SHARED_SECRET` identical in App Hosting and Cloud Run.
+- Keep `BACKEND_API_BASE_URL` and `BACKEND_ID_TOKEN_AUDIENCE` set to the bare Cloud Run origin.
+- Backend chat endpoints require `X-Chandra-Internal-Secret`.
+- Cloud Run is private; App Hosting needs `roles/run.invoker`.

@@ -1,6 +1,5 @@
 import { randomUUID } from "crypto";
 import { FieldValue, type DocumentReference } from "firebase-admin/firestore";
-import { PDFParse } from "pdf-parse";
 import { PDFDocument } from "pdf-lib";
 import { adminAuth, adminDb, adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
 import { attachPdfSlicesToChunks } from "./pdf-embedding-chunks";
@@ -887,6 +886,7 @@ async function extractPdfPages(buffer: Buffer): Promise<TutorKnowledgePage[]> {
 }
 
 async function extractPdfTextPages(buffer: Buffer, options: { lineEnforce: boolean }) {
+  const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: buffer });
 
   try {
@@ -910,6 +910,7 @@ async function extractPdfTextPages(buffer: Buffer, options: { lineEnforce: boole
 }
 
 async function extractPdfPageInfo(buffer: Buffer) {
+  const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: buffer });
 
   try {

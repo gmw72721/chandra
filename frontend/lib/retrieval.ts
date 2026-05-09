@@ -384,6 +384,8 @@ function normalizeMaterialDocument({
     professorName: readOptionalString(material.professorName ?? material.professor_name),
     activeForStudents: readBooleanWithDefault(material.activeForStudents ?? material.studentVisible, true),
     citationsRequired: readBooleanWithDefault(material.citationsRequired ?? material.requireCitations, true),
+    filePath: readOptionalString(material.filePath),
+    fileUrl: readOptionalString(material.fileUrl),
     priority: normalizePriority(material.priority),
     status: material.status === "ready" ? "ready" : "processing",
     teacherOnly: material.teacherOnly === true || material.visibility === "teacher-only",

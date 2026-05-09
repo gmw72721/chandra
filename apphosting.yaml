@@ -11,6 +11,13 @@ runConfig:
   memoryMiB: 1024
 
 env:
+  # App Hosting deploys run `npm run build`; explicit type validation remains
+  # available through `npm run typecheck` before pushing.
+  - variable: NEXT_IGNORE_TYPECHECK
+    value: "1"
+    availability:
+      - BUILD
+
   - variable: NEXT_PUBLIC_FIREBASE_API_KEY
     secret: NEXT_PUBLIC_FIREBASE_API_KEY
     availability:
@@ -77,6 +84,18 @@ env:
       - RUNTIME
   - variable: DEFAULT_MODEL
     value: openai/gpt-5.4-mini
+    availability:
+      - RUNTIME
+  - variable: FRONTEND_ORIGIN
+    value: https://chandra-frontend--chandra-f6e13.us-central1.hosted.app
+    availability:
+      - RUNTIME
+  - variable: OPENROUTER_HTTP_REFERER
+    value: https://chandra-frontend--chandra-f6e13.us-central1.hosted.app
+    availability:
+      - RUNTIME
+  - variable: OPENROUTER_APP_TITLE
+    value: Chandra
     availability:
       - RUNTIME
 

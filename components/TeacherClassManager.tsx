@@ -587,30 +587,30 @@ export function TeacherClassManager() {
   const displayedInsightMetrics = hasGeneratedTeacherInsights ? teacherInsights?.insight.metrics ?? [] : [];
   const displayedInsightSummary = hasGeneratedTeacherInsights ? teacherInsights?.insight.dailySummary : null;
   const displayedInsightEvidenceChips =
-    hasGeneratedTeacherInsights && teacherInsights?.insight.evidenceChips.length
+    hasGeneratedTeacherInsights && teacherInsights?.insight.evidenceChips?.length
       ? teacherInsights.insight.evidenceChips
       : [];
   const displayedInsightTrends =
-    hasGeneratedTeacherInsights && teacherInsights?.insight.trends.length
+    hasGeneratedTeacherInsights && teacherInsights?.insight.trends?.length
       ? teacherInsights.insight.trends
       : null;
   const displayedInsightTimeline =
-    hasGeneratedTeacherInsights && teacherInsights?.insight.misconceptionTimeline.length
+    hasGeneratedTeacherInsights && teacherInsights?.insight.misconceptionTimeline?.length
       ? teacherInsights.insight.misconceptionTimeline
       : null;
   const displayedInsightRecommendations =
-    hasGeneratedTeacherInsights && teacherInsights?.insight.recommendations.length
+    hasGeneratedTeacherInsights && teacherInsights?.insight.recommendations?.length
       ? teacherInsights.insight.recommendations
       : null;
   const displayedInsightEvidenceLinks =
-    hasGeneratedTeacherInsights && teacherInsights?.insight.evidenceLinks.length
+    hasGeneratedTeacherInsights && teacherInsights?.insight.evidenceLinks?.length
       ? teacherInsights.insight.evidenceLinks
       : null;
   const insightTrendDisplayRows = displayedInsightTrends
     ? displayedInsightTrends.map((row) => ({
         change: row.change,
         conversationIds: row.evidenceConversationIds,
-        evidence: formatConversationCount(row.evidenceConversationIds.length),
+        evidence: formatInsightEvidenceConversationLabel(row.evidenceConversationIds.length),
         key: row.id,
         label: row.label,
         points: row.sparkline,
@@ -624,10 +624,18 @@ export function TeacherClassManager() {
         return {
           appeared: formatInsightDateOnly(row.firstAppeared),
           conversationIds: row.evidenceConversationIds,
+          confidence: formatInsightConfidenceLabel(row, evidenceCount),
+          confidenceClass: getInsightConfidenceClass(row, evidenceCount),
+          evidenceStrength: formatInsightEvidenceStrengthLabel(row, evidenceCount),
+          label: formatInsightConcernLabel(row, evidenceCount),
           key: row.id,
           misconception: row.misconception,
-          seen: formatConversationCount(evidenceCount),
-          status: capitalizeLabel(row.status)
+          rootCause: getInsightMisconceptionRootCause(row),
+          seen: formatInsightEvidenceConversationLabel(evidenceCount),
+          signal: getInsightMisconceptionSignal(row, evidenceCount),
+          status: capitalizeLabel(row.status),
+          statusClass: formatInsightStatusClass(row.status),
+          teacherMove: getInsightMisconceptionTeacherMove(row)
         };
       })
     : [];
@@ -647,7 +655,7 @@ export function TeacherClassManager() {
     : [];
   const insightEvidenceDisplayRows = displayedInsightEvidenceLinks
     ? displayedInsightEvidenceLinks.map((row) => ({
-        count: `${row.conversationCount} ${row.conversationCount === 1 ? "conversation" : "conversations"}`,
+        count: formatInsightEvidenceConversationLabel(row.conversationCount),
         conversationIds: row.conversationIds,
         initials: row.studentInitials,
         key: row.id,
@@ -655,6 +663,13 @@ export function TeacherClassManager() {
         topic: row.topic
       }))
     : [];
+  const teachingFocusBriefing = buildInsightSummaryBriefing({
+    evidenceChips: displayedInsightEvidenceChips,
+    evidenceRows: insightEvidenceDisplayRows,
+    hasGenerated: hasGeneratedTeacherInsights,
+    recommendations: insightRecommendationDisplayRows.slice(0, 3),
+    summary: displayedInsightSummary
+  });
   const insightMetricValue = (metricId: string) =>
     displayedInsightMetrics.find((metric) => metric.id === metricId)?.value ?? 0;
   const overviewTotalStudents = classOverview?.metrics.totalStudents ?? rosterStats.totalStudents;
@@ -2590,9 +2605,8 @@ export function TeacherClassManager() {
                         <section className="insights-panel daily-summary-panel" aria-labelledby="daily-summary-title">
                           <div className="daily-summary-header">
                             <div>
-                              <h3 id="daily-summary-title">
-                                {displayedInsightSummary?.title || "No insight generated yet"}
-                              </h3>
+                              <span className="eyebrow">Teaching Focus</span>
+                              <h3 id="daily-summary-title">{teachingFocusBriefing.title}</h3>
                             </div>
                             <InsightFeedbackActions
                               disabled={Boolean(savingInsightFeedback) || !hasGeneratedTeacherInsights}
@@ -2600,10 +2614,38 @@ export function TeacherClassManager() {
                               onAction={saveInsightFeedback}
                             />
                           </div>
-                          <p>
-                            {displayedInsightSummary?.body ||
-                              "Generate a class insight snapshot to summarize recent student conversations for this range."}
-                          </p>
+                          <div className="selected-insight-detail">
+                            <dl aria-label="Teaching focus briefing">
+                              <div>
+                                <dt>Signal</dt>
+                                <dd>{teachingFocusBriefing.signal}</dd>
+                              </div>
+                              <div>
+                                <dt>Evidence</dt>
+                                <dd>{teachingFocusBriefing.evidence}</dd>
+                              </div>
+                              <div>
+                                <dt>Confidence</dt>
+                                <dd>
+                                  <span className={`priority-pill ${teachingFocusBriefing.confidenceClass}`}>
+                                    {teachingFocusBriefing.confidence}
+                                  </span>
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>Why it matters</dt>
+                                <dd>{teachingFocusBriefing.whyItMatters}</dd>
+                              </div>
+                              <div>
+                                <dt>Recommended move</dt>
+                                <dd>{teachingFocusBriefing.recommendedMove}</dd>
+                              </div>
+                              <div>
+                                <dt>Tutor adjustment</dt>
+                                <dd>{teachingFocusBriefing.tutorAdjustment}</dd>
+                              </div>
+                            </dl>
+                          </div>
                           <div className="insight-evidence-chip-list" aria-label="Summary evidence">
                             {displayedInsightEvidenceChips.map((chip) => (
                                 <button
@@ -2613,7 +2655,7 @@ export function TeacherClassManager() {
                                   onClick={() => openInsightEvidenceConversations([chip.conversationId])}
                                   type="button"
                                 >
-                                  {chip.label}
+                                  {formatInsightEvidenceText(chip.label)}
                                   <ExternalLinkIcon />
                                 </button>
                             ))}
@@ -2659,28 +2701,38 @@ export function TeacherClassManager() {
                         </section>
 
                         <section className="insights-panel" aria-labelledby="timeline-title">
-                          <h3 id="timeline-title">Misconception Timeline</h3>
+                          <h3 id="timeline-title">Learning Signals</h3>
                           <div className="insights-table timeline-table" role="table" aria-label="Misconception timeline">
                             <div className="insights-table-header timeline-row" role="row">
-                              <span role="columnheader">Misconception</span>
-                              <span role="columnheader">First appeared</span>
-                              <span role="columnheader">Seen in conversations</span>
+                              <span role="columnheader">Signal</span>
+                              <span role="columnheader">Evidence</span>
+                              <span role="columnheader">Confidence</span>
                               <span role="columnheader">Status</span>
                             </div>
                             {insightTimelineDisplayRows.length ? insightTimelineDisplayRows.map((row) => (
                               <div className="timeline-row" key={row.key} role="row">
-                                <strong role="cell">{row.misconception}</strong>
-                                <span role="cell">{row.appeared}</span>
+                                <span className="trend-name-cell" role="cell">
+                                  <span>
+                                    <strong>{row.misconception}</strong>
+                                    <small>{row.label} · Likely root cause: {row.rootCause}</small>
+                                    <small>Student behavior / signal: {row.signal}</small>
+                                    <small>Suggested teacher move: {row.teacherMove}</small>
+                                    <small>Evidence strength: {row.evidenceStrength}</small>
+                                  </span>
+                                </span>
                                 <span role="cell">{row.seen}</span>
                                 <span role="cell">
-                                  <span className={`insight-status-pill ${row.status.toLowerCase()}`}>
+                                  <span className={`priority-pill ${row.confidenceClass}`}>{row.confidence}</span>
+                                </span>
+                                <span role="cell">
+                                  <span className={`insight-status-pill ${row.statusClass}`}>
                                     {row.status}
                                   </span>
                                 </span>
                               </div>
                             )) : (
                               <div className="insight-empty-row" role="row">
-                                No misconceptions have been generated for this range.
+                                No learning signals have been generated for this range.
                               </div>
                             )}
                           </div>
@@ -3924,7 +3976,7 @@ export function TeacherClassManager() {
                       </div>
                       {evidenceConversationIds.length ? (
                         <div className="conversation-evidence-filter">
-                          <span>{formatConversationCount(evidenceConversationIds.length)} from selected insight evidence</span>
+                          <span>{formatInsightEvidenceConversationLabel(evidenceConversationIds.length)} from selected insight evidence</span>
                           <button type="button" onClick={() => setEvidenceConversationIds([])}>
                             Clear evidence filter
                           </button>
@@ -4824,6 +4876,278 @@ function insightSparklinePoints(points: number[]) {
       return `${Math.round(x)},${Math.round(y)}`;
     })
     .join(" ");
+}
+
+type InsightRecord = Record<string, unknown>;
+type InsightConfidenceClass = "high" | "medium" | "low";
+
+function buildInsightSummaryBriefing({
+  evidenceChips,
+  evidenceRows,
+  hasGenerated,
+  recommendations,
+  summary
+}: {
+  evidenceChips: Array<{ conversationId?: string; label: string }>;
+  evidenceRows: Array<{ conversationIds: string[]; count: string; topic: string }>;
+  hasGenerated: boolean;
+  recommendations: Array<{ action: string; title: string }>;
+  summary: TeacherClassInsightsDocument["insight"]["dailySummary"] | null | undefined;
+}) {
+  const evidenceCount = countInsightEvidenceConversations(evidenceChips, evidenceRows);
+  const firstRecommendation = recommendations[0];
+  const title =
+    readInsightString(summary, ["teachingFocus", "focus", "title"]) ||
+    (hasGenerated ? "Review today's strongest learning signal" : "Generate insights to create a teaching focus");
+  const signal =
+    readInsightString(summary, ["signal", "studentSignal", "studentBehavior", "studentBehaviour", "body"]) ||
+    (hasGenerated
+      ? "Recent student conversations show a pattern worth checking before the next lesson."
+      : "Chandra will summarize class patterns after insights are generated from saved conversations.");
+  const evidence =
+    readInsightString(summary, ["evidenceSummary", "evidenceText", "evidenceStatement"]) ||
+    formatInsightEvidenceText(evidenceChips.find((chip) => chip.conversationId)?.label ?? "") ||
+    evidenceRows[0]?.count ||
+    "No student conversation evidence yet";
+  const recommendedMove =
+    readInsightString(summary, ["recommendedMove", "teacherMove", "suggestedTeacherMove", "nextMove"]) ||
+    firstRecommendation?.title ||
+    "Open the evidence conversation and decide whether this needs a quick check-in or a short reteach.";
+
+  return {
+    confidence: formatInsightConfidenceLabel(summary, evidenceCount),
+    confidenceClass: getInsightConfidenceClass(summary, evidenceCount),
+    evidence,
+    recommendedMove,
+    signal,
+    title,
+    tutorAdjustment:
+      readInsightString(summary, ["tutorAdjustment", "tutorMove", "recommendedTutorAdjustment", "aiTutorAdjustment"]) ||
+      `Have the tutor ask students to explain their reasoning before moving past ${lowercaseFirst(title)}.`,
+    whyItMatters:
+      readInsightString(summary, ["whyItMatters", "why_it_matters", "rationale", "instructionalRationale"]) ||
+      `If this pattern holds, ${lowercaseFirst(title)} can affect the next explanation, grouping decision, or practice prompt.`
+  };
+}
+
+function countInsightEvidenceConversations(
+  evidenceChips: Array<{ conversationId?: string }>,
+  evidenceRows: Array<{ conversationIds: string[] }>
+) {
+  const conversationIds = new Set<string>();
+  evidenceChips.forEach((chip) => {
+    if (chip.conversationId) {
+      conversationIds.add(chip.conversationId);
+    }
+  });
+  evidenceRows.forEach((row) => row.conversationIds.forEach((conversationId) => conversationIds.add(conversationId)));
+  return conversationIds.size;
+}
+
+function getInsightMisconceptionRootCause(row: unknown) {
+  return (
+    readInsightString(row, ["likelyRootCause", "rootCause", "root_cause", "cause"]) ||
+    "Students may be applying a familiar rule in a context where it no longer fits."
+  );
+}
+
+function getInsightMisconceptionSignal(row: unknown, evidenceCount: number) {
+  return (
+    readInsightString(row, ["studentBehavior", "studentBehaviour", "behavior", "behaviour", "signal"]) ||
+    formatInsightEvidenceConversationLabel(evidenceCount)
+  );
+}
+
+function getInsightMisconceptionTeacherMove(row: unknown) {
+  return (
+    readInsightString(row, ["suggestedTeacherMove", "teacherMove", "recommendedMove", "nextMove"]) ||
+    "Use one targeted check-for-understanding question, then model the missing distinction with student wording from the evidence."
+  );
+}
+
+function formatInsightConcernLabel(row: unknown, evidenceCount: number) {
+  const evidenceStrength = getInsightEvidenceStrengthKey(row, evidenceCount);
+  const confidenceClass = getInsightConfidenceClass(row, evidenceCount);
+
+  if (evidenceStrength === "early_signal") {
+    return "Early signal";
+  }
+
+  if (confidenceClass === "low") {
+    return "Support need";
+  }
+
+  return "Misconception";
+}
+
+function formatInsightConfidenceLabel(value: unknown, evidenceCount = 0) {
+  const confidence = readInsightString(value, ["confidence", "confidenceLabel"]);
+  const numericConfidence = readInsightNumber(value, ["confidence", "confidenceScore"]);
+
+  if (confidence) {
+    if (confidence.toLowerCase().includes("confidence")) {
+      return capitalizeLabel(confidence);
+    }
+
+    return `${capitalizeLabel(confidence)} confidence`;
+  }
+
+  if (typeof numericConfidence === "number") {
+    if (numericConfidence >= 0.75) {
+      return "High confidence";
+    }
+
+    if (numericConfidence >= 0.55) {
+      return "Medium confidence";
+    }
+
+    return "Low confidence";
+  }
+
+  return evidenceCount <= 1 ? "Low confidence" : "Medium confidence";
+}
+
+function getInsightConfidenceClass(value: unknown, evidenceCount = 0): InsightConfidenceClass {
+  const confidence = readInsightString(value, ["confidence", "confidenceLabel"]).toLowerCase();
+  const numericConfidence = readInsightNumber(value, ["confidence", "confidenceScore"]);
+
+  if (confidence.includes("high") || confidence.includes("strong")) {
+    return "high";
+  }
+
+  if (confidence.includes("low") || confidence.includes("early")) {
+    return "low";
+  }
+
+  if (typeof numericConfidence === "number") {
+    if (numericConfidence >= 0.75) {
+      return "high";
+    }
+
+    if (numericConfidence < 0.55) {
+      return "low";
+    }
+  }
+
+  return evidenceCount <= 1 ? "low" : "medium";
+}
+
+function formatInsightEvidenceStrengthLabel(value: unknown, evidenceCount = 0) {
+  const evidenceStrength = getInsightEvidenceStrengthKey(value, evidenceCount);
+
+  if (evidenceStrength === "early_signal") {
+    return "Early signal";
+  }
+
+  return capitalizeLabel(evidenceStrength.replaceAll("_", " "));
+}
+
+function getInsightEvidenceStrengthKey(value: unknown, evidenceCount = 0) {
+  const evidenceStrength = readInsightString(value, ["evidenceStrength", "evidence_strength", "evidenceLevel"]).toLowerCase();
+
+  if (evidenceStrength.includes("early")) {
+    return "early_signal";
+  }
+
+  if (evidenceStrength.includes("strong")) {
+    return "strong";
+  }
+
+  if (evidenceStrength.includes("moderate") || evidenceStrength.includes("medium")) {
+    return "moderate";
+  }
+
+  if (evidenceStrength.includes("weak") || evidenceStrength.includes("low")) {
+    return "early_signal";
+  }
+
+  if (evidenceCount <= 1) {
+    return "early_signal";
+  }
+
+  return evidenceCount >= 3 ? "strong" : "moderate";
+}
+
+function formatInsightEvidenceConversationLabel(count: number) {
+  if (count === 1) {
+    return "Early signal · Seen in 1 student conversation";
+  }
+
+  if (count <= 0) {
+    return "No student conversation evidence yet";
+  }
+
+  return `Seen in ${count} student conversations`;
+}
+
+function formatInsightEvidenceText(value: string) {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    return "";
+  }
+
+  if (trimmedValue.toLowerCase() === "1 conversation") {
+    return "Early signal · Seen in 1 student conversation";
+  }
+
+  return trimmedValue
+    .replace(/\bseen in 1 conversation\b/gi, "Early signal · Seen in 1 student conversation")
+    .replace(/\b1 conversation\b/gi, "1 student conversation");
+}
+
+function formatInsightStatusClass(status: string) {
+  const normalizedStatus = status.toLowerCase();
+
+  if (["active", "improving", "emerging", "resolved"].includes(normalizedStatus)) {
+    return normalizedStatus;
+  }
+
+  return "emerging";
+}
+
+function readInsightString(value: unknown, fieldNames: string[]) {
+  const record = asInsightRecord(value);
+
+  for (const fieldName of fieldNames) {
+    const fieldValue = record[fieldName];
+
+    if (typeof fieldValue === "string" && fieldValue.trim()) {
+      return fieldValue.trim();
+    }
+  }
+
+  return "";
+}
+
+function readInsightNumber(value: unknown, fieldNames: string[]) {
+  const record = asInsightRecord(value);
+
+  for (const fieldName of fieldNames) {
+    const fieldValue = record[fieldName];
+
+    if (typeof fieldValue === "number" && Number.isFinite(fieldValue)) {
+      return fieldValue;
+    }
+
+    if (typeof fieldValue === "string") {
+      const parsedValue = Number(fieldValue);
+
+      if (Number.isFinite(parsedValue)) {
+        return parsedValue;
+      }
+    }
+  }
+
+  return null;
+}
+
+function asInsightRecord(value: unknown): InsightRecord {
+  return value && typeof value === "object" ? (value as InsightRecord) : {};
+}
+
+function lowercaseFirst(value: string) {
+  return value ? value.charAt(0).toLowerCase() + value.slice(1) : value;
 }
 
 function capitalizeLabel(value: string) {

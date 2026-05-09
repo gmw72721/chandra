@@ -48,9 +48,11 @@ export type TeacherClass = {
   behaviorInstructions?: string;
   defaultAssignmentContext?: string;
   modelSettings?: ClassModelSettings;
+  openingMessage?: string;
   refusalStyle?: string;
   responseFormat?: ResponseFormatSettings;
   sourceUsage?: SourceUsageSettings;
+  studentFacingInstructions?: string;
   createdAt?: unknown;
 };
 
@@ -270,10 +272,12 @@ export async function updateTeacherClassSettings({
   defaultAssignmentContext,
   modelSettings,
   name,
+  openingMessage,
   refusalStyle,
   responseFormat,
   section,
   sourceUsage,
+  studentFacingInstructions,
   themeColor
 }: {
   answerPolicy: AnswerPolicySettings;
@@ -284,10 +288,12 @@ export async function updateTeacherClassSettings({
   defaultAssignmentContext: string;
   modelSettings: ClassModelSettings;
   name: string;
+  openingMessage: string;
   refusalStyle: string;
   responseFormat: ResponseFormatSettings;
   section: string;
   sourceUsage: SourceUsageSettings;
+  studentFacingInstructions: string;
   themeColor: TeacherClassThemeColor;
 }) {
   assertFirestoreReady();
@@ -300,10 +306,12 @@ export async function updateTeacherClassSettings({
     defaultAssignmentContext: defaultAssignmentContext.trim(),
     modelSettings,
     name: name.trim(),
+    openingMessage: openingMessage.trim(),
     refusalStyle: refusalStyle.trim(),
     responseFormat,
     section: section.trim(),
     sourceUsage,
+    studentFacingInstructions: studentFacingInstructions.trim(),
     themeColor: normalizeTeacherClassThemeColor(themeColor)
   });
 }

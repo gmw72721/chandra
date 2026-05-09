@@ -95,7 +95,7 @@ export const defaultResponseFormatSettings: ResponseFormatSettings = {
 export const defaultAssignmentContext = "";
 
 export const defaultRefusalStyle =
-  "If a student asks for a direct answer, ask what they have tried, offer to check their work, or walk through a similar example instead.";
+  "If a student asks for a direct answer or homework-ready wording for the exact task, ask what they have tried, offer to check their work, or walk through a clearly different similar example instead.";
 
 export function normalizeTutorBehavior(value: unknown): TutorBehavior {
   return tutorBehaviorOptions.includes(value as TutorBehavior)

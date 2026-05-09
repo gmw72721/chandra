@@ -1,8 +1,10 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
 import {
+  buildDefaultClassTutorSettings,
   defaultAnswerPolicySettings,
   defaultAssignmentContext,
+  defaultBehaviorInstructions,
   defaultClassModelSettings,
   defaultResponseFormatSettings,
   defaultRefusalStyle,
@@ -53,24 +55,22 @@ export async function POST(request: Request) {
     }
 
     const classCode = await createUniqueClassCode();
+    const tutorDefaults = buildDefaultClassTutorSettings({ name, section });
     await adminDb!.collection("classes").doc(classCode).set({
       answerPolicy: defaultAnswerPolicySettings,
-      behaviorInstructions: [
-        "Ask students to explain their thinking before giving hints.",
-        "If a student names a specific task without showing work, ask what they have tried before giving task-specific hints.",
-        "Do not provide final answers unless the student has already shown the main reasoning.",
-        "Use course materials to orient hints and explanations without starting the student's exact task for them."
-      ].join("\n"),
+      behaviorInstructions: defaultBehaviorInstructions,
       behaviorTitle: "Guided problem solving",
       createdAt: FieldValue.serverTimestamp(),
       defaultAssignmentContext,
       joinCode: classCode,
       modelSettings: defaultClassModelSettings,
       name,
+      openingMessage: tutorDefaults.openingMessage,
       refusalStyle: defaultRefusalStyle,
       responseFormat: defaultResponseFormatSettings,
       section,
       sourceUsage: defaultSourceUsageSettings,
+      studentFacingInstructions: tutorDefaults.studentFacingInstructions,
       teacherId: decodedToken.uid,
       teacherName,
       appearance: defaultTeacherClassAppearance,

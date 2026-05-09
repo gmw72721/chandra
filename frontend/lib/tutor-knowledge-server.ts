@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
+import { lookup } from "dns/promises";
 import { FieldValue, type DocumentReference } from "firebase-admin/firestore";
-import { PDFParse } from "pdf-parse";
+import { isIP } from "net";
 import { PDFDocument } from "pdf-lib";
 import { adminAuth, adminDb, adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
 import { attachPdfSlicesToChunks } from "./pdf-embedding-chunks";
@@ -39,6 +40,17 @@ export type TutorKnowledgePreview = {
   visualPageCount: number;
 };
 
+type TutorKnowledgeOriginalSource = {
+  contentType: string;
+  fileName: string;
+  filePath?: string;
+  fileSize: number;
+  fileUrl?: string;
+  originalSourceUrl?: string;
+  sourceKind: "file" | "storage" | "url";
+  sourceUrl?: string;
+};
+
 const supportedContentTypes = new Set([
   "application/pdf",
   "text/plain",
@@ -48,8 +60,24 @@ const supportedContentTypes = new Set([
   "text/x-markdown"
 ]);
 const embeddingConcurrencyLimit = 4;
+const maxTutorKnowledgeFileBytes = 500 * 1024 * 1024;
+const maxTutorKnowledgePastedTextCharacters = 250000;
+const maxTutorKnowledgeUrlRedirects = 4;
 
 export { TutorKnowledgeHttpError } from "./tutor-knowledge-errors";
+
+export function validateTutorKnowledgeFile(file: File) {
+  validateFile(file);
+}
+
+export function assertTutorKnowledgeTextWithinLimit(text: string, label = "Tutor knowledge text") {
+  if (text.length > maxTutorKnowledgePastedTextCharacters) {
+    throw new TutorKnowledgeHttpError(
+      `${label} is too large. Keep pasted text under ${maxTutorKnowledgePastedTextCharacters.toLocaleString()} characters.`,
+      413
+    );
+  }
+}
 
 type MaterialJobStep =
   | "upload_received"
@@ -118,15 +146,17 @@ export async function authorizeClassTeacher(request: Request, classId: string) {
 export async function buildTutorKnowledgePreview(formData: FormData): Promise<TutorKnowledgePreview> {
   const file = readOptionalFile(formData);
   const pastedText = String(formData.get("text") ?? "").trim();
+  const sourceUrl = String(formData.get("sourceUrl") ?? "").trim();
 
-  if (!file && !pastedText) {
-    throw new TutorKnowledgeHttpError("Add a supported file or paste tutor knowledge text before previewing.", 400);
+  if (!file && !pastedText && !sourceUrl) {
+    throw new TutorKnowledgeHttpError("Add a supported file, paste a URL, or paste tutor knowledge text before previewing.", 400);
   }
 
   const ingestion = await buildTutorKnowledgeIngestion({
     docId: "preview",
     file,
     pastedText,
+    sourceUrl,
     title: file?.name ?? "Pasted tutor knowledge"
   });
   const searchableText = ingestion.searchableText;
@@ -142,7 +172,7 @@ export async function buildTutorKnowledgePreview(formData: FormData): Promise<Tu
     chunkCount: ingestion.chunks.length,
     previewText: searchableText.slice(0, 1800),
     sourceMode: getTutorKnowledgeSourceMode({
-      hasFile: Boolean(file),
+      hasFile: Boolean(file || sourceUrl),
       hasPastedText: Boolean(pastedText)
     }),
     fileName: file?.name ?? "",
@@ -170,6 +200,9 @@ export async function saveTutorKnowledge({
   const kind = String(formData.get("kind") ?? "").trim();
   const file = readOptionalFile(formData);
   const pastedText = String(formData.get("text") ?? "").trim();
+  const sourceUrl = String(formData.get("sourceUrl") ?? "").trim();
+  const storagePath = String(formData.get("storagePath") ?? "").trim();
+  const requestedMaterialId = String(formData.get("materialId") ?? "").trim();
 
   if (!title) {
     throw new TutorKnowledgeHttpError("Add a title before saving tutor knowledge.", 400);
@@ -179,7 +212,13 @@ export async function saveTutorKnowledge({
     throw new TutorKnowledgeHttpError("Choose a valid tutor knowledge type.", 400);
   }
 
-  const materialRef = adminDb!.collection("classes").doc(classId).collection("materials").doc();
+  if (requestedMaterialId && !/^[a-zA-Z0-9_-]{8,80}$/.test(requestedMaterialId)) {
+    throw new TutorKnowledgeHttpError("Invalid tutor knowledge material id.", 400);
+  }
+
+  const materialRef = requestedMaterialId
+    ? adminDb!.collection("classes").doc(classId).collection("materials").doc(requestedMaterialId)
+    : adminDb!.collection("classes").doc(classId).collection("materials").doc();
   const updateProgress = createMaterialJobProgressWriter({
     classId,
     jobId,
@@ -193,10 +232,19 @@ export async function saveTutorKnowledge({
     percent: 15,
     step: "upload_received"
   });
+  const storedSource = storagePath
+    ? await readUploadedStorageSource({
+        classId,
+        materialId: materialRef.id,
+        storagePath
+      })
+    : null;
+  const sourceFile = file ?? storedSource?.file ?? null;
   const ingestion = await buildTutorKnowledgeIngestion({
     docId: materialRef.id,
-    file,
+    file: sourceFile,
     pastedText,
+    sourceUrl,
     title,
     updateProgress
   });
@@ -204,8 +252,14 @@ export async function saveTutorKnowledge({
   const chunks = ingestion.chunks;
   let fileMetadata = {};
 
+  if (!searchableText && !chunks.length) {
+    throw new TutorKnowledgeHttpError("No tutor knowledge text was found. This source may be private, scanned, or unsupported.", 400);
+  }
+
   try {
-    fileMetadata = file ? await uploadTutorKnowledgeFile({ classId, file, materialId: materialRef.id }) : {};
+    fileMetadata = storedSource?.metadata
+      ?? (file ? await uploadTutorKnowledgeFile({ classId, file, materialId: materialRef.id }) : {})
+      ?? {};
   } catch (caughtError) {
     await updateProgress({
       detail: "Tutor knowledge processing failed before it was ready.",
@@ -252,9 +306,10 @@ export async function saveTutorKnowledge({
     createdAt: FieldValue.serverTimestamp(),
     pageCount: ingestion.pageCount,
     sourceMode: getTutorKnowledgeSourceMode({
-      hasFile: Boolean(file),
+      hasFile: Boolean(sourceFile || sourceUrl),
       hasPastedText: Boolean(pastedText)
     }),
+    ...ingestion.sourceMetadata,
     ...(pastedText ? { textSource: pastedText } : {}),
     visualPageCount: ingestion.visualPageCount
   });
@@ -473,13 +528,14 @@ export async function reprocessTutorKnowledge({
   const professorName = String(material.professorName ?? material.professor_name ?? "").trim();
   const file = await readStoredMaterialFile(material);
   const textSource = String(material.textSource ?? "").trim();
-  const fallbackText = file ? "" : await readExistingChunkText(materialRef);
+  const sourceUrl = String(material.originalSourceUrl ?? material.sourceUrl ?? "").trim();
+  const fallbackText = file || sourceUrl ? "" : await readExistingChunkText(materialRef);
 
   if (!isTutorKnowledgeKind(kind)) {
     throw new TutorKnowledgeHttpError("Tutor knowledge has an invalid source type.", 400);
   }
 
-  if (!file && !textSource && !fallbackText) {
+  if (!file && !sourceUrl && !textSource && !fallbackText) {
     throw new TutorKnowledgeHttpError("No original source content is available to reprocess.", 400);
   }
 
@@ -487,6 +543,7 @@ export async function reprocessTutorKnowledge({
     docId: materialId,
     file,
     pastedText: textSource || fallbackText,
+    sourceUrl,
     title
   });
   const chunks = ingestion.chunks;
@@ -498,6 +555,7 @@ export async function reprocessTutorKnowledge({
     embeddingStatus: isVertexEmbeddingConfigured() ? "processing" : "not-configured",
     pageCount: ingestion.pageCount,
     reprocessedAt: FieldValue.serverTimestamp(),
+    ...ingestion.sourceMetadata,
     status: "processing",
     visualPageCount: ingestion.visualPageCount
   });
@@ -594,7 +652,8 @@ async function uploadTutorKnowledgeFile({
     filePath,
     fileUrl: `https://storage.googleapis.com/${bucketName}/${encodedPath}`,
     contentType: file.type || contentTypeFromFileName(file.name),
-    fileSize: file.size
+    fileSize: file.size,
+    sourceKind: "file"
   };
 }
 
@@ -737,6 +796,62 @@ async function readStoredMaterialFile(material: Record<string, unknown>) {
   });
 }
 
+async function readUploadedStorageSource({
+  classId,
+  materialId,
+  storagePath
+}: {
+  classId: string;
+  materialId: string;
+  storagePath: string;
+}) {
+  const expectedPrefix = `classes/${classId}/materials/${materialId}/original/`;
+
+  if (!storagePath.startsWith(expectedPrefix) || storagePath.includes("..")) {
+    throw new TutorKnowledgeHttpError("Uploaded material storage path is invalid.", 400);
+  }
+
+  const storageFile = adminStorage!.bucket().file(storagePath);
+  const [exists] = await storageFile.exists();
+
+  if (!exists) {
+    throw new TutorKnowledgeHttpError("Uploaded material file was not found in Storage.", 400);
+  }
+
+  const [metadata] = await storageFile.getMetadata();
+  const fileName = storagePath.split("/").pop() || "source";
+  const contentType = String(metadata.contentType ?? "") || contentTypeFromFileName(fileName);
+  const fileSize = Number(metadata.size ?? 0);
+
+  if (fileSize > maxTutorKnowledgeFileBytes) {
+    throw new TutorKnowledgeHttpError(
+      `Material files must be ${Math.floor(maxTutorKnowledgeFileBytes / 1024 / 1024)} MB or smaller.`,
+      413
+    );
+  }
+
+  validateStoredSourceMetadata({ contentType, fileName, fileSize });
+  const [buffer] = await storageFile.download();
+  const fileBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+  const bucketName = adminStorage!.bucket().name;
+  const encodedPath = storagePath
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+
+  return {
+    file: new File([fileBytes], fileName, { type: contentType }),
+    metadata: {
+      contentType,
+      fileName,
+      filePath: storagePath,
+      fileSize,
+      fileUrl: `https://storage.googleapis.com/${bucketName}/${encodedPath}`,
+      sourceKind: "storage"
+    } satisfies TutorKnowledgeOriginalSource
+  };
+}
+
 async function readExistingChunkText(
   materialRef: DocumentReference
 ) {
@@ -754,22 +869,41 @@ async function buildTutorKnowledgeIngestion({
   docId,
   file,
   pastedText,
+  sourceUrl,
   title,
   updateProgress
 }: {
   docId: string;
   file: File | null;
   pastedText: string;
+  sourceUrl?: string;
   title: string;
   updateProgress?: (progress: MaterialJobProgressUpdate) => Promise<void>;
 }) {
+  assertTutorKnowledgeTextWithinLimit(pastedText);
+  const normalizedSourceUrl = sourceUrl?.trim() ?? "";
   await updateProgress?.({
     detail: file
       ? "Reading the uploaded file and extracting usable text."
-      : "Reading pasted tutor knowledge text.",
+      : normalizedSourceUrl
+        ? "Downloading the URL and extracting usable text."
+        : "Reading pasted tutor knowledge text.",
     percent: 25,
     step: "reading_file"
   });
+  const urlIngestion = normalizedSourceUrl
+    ? await extractChunksFromUrl({
+        docId,
+        sourceUrl: normalizedSourceUrl,
+        title
+      })
+    : {
+        chunks: [] as TutorKnowledgeChunk[],
+        extractedText: "",
+        metadata: {} as Partial<TutorKnowledgeOriginalSource>,
+        pageCount: 0,
+        visualPageCount: 0
+      };
   const fileIngestion = file
     ? await extractChunksFromFile({
         docId,
@@ -790,11 +924,14 @@ async function buildTutorKnowledgeIngestion({
         title
       })
     : [];
-  const chunks = [...fileIngestion.chunks, ...pastedChunks].map((chunk, order) => ({
+  const chunks = [...urlIngestion.chunks, ...fileIngestion.chunks, ...pastedChunks].map((chunk, order) => ({
     ...chunk,
     order
   }));
-  const searchableText = [fileIngestion.extractedText, pastedText].filter((text) => text.trim()).join("\n\n").trim();
+  const searchableText = [urlIngestion.extractedText, fileIngestion.extractedText, pastedText]
+    .filter((text) => text.trim())
+    .join("\n\n")
+    .trim();
 
   await updateProgress?.({
     detail: `Built ${chunks.length} tutor knowledge chunk${chunks.length === 1 ? "" : "s"} for this class.`,
@@ -805,10 +942,11 @@ async function buildTutorKnowledgeIngestion({
 
   return {
     chunks,
-    extractedText: fileIngestion.extractedText,
-    pageCount: fileIngestion.pageCount,
+    extractedText: [urlIngestion.extractedText, fileIngestion.extractedText].filter((text) => text.trim()).join("\n\n"),
+    pageCount: urlIngestion.pageCount + fileIngestion.pageCount,
     searchableText,
-    visualPageCount: fileIngestion.visualPageCount
+    sourceMetadata: urlIngestion.metadata,
+    visualPageCount: urlIngestion.visualPageCount + fileIngestion.visualPageCount
   };
 }
 
@@ -856,6 +994,79 @@ async function extractChunksFromFile({
   };
 }
 
+async function extractChunksFromUrl({
+  docId,
+  sourceUrl,
+  title
+}: {
+  docId: string;
+  sourceUrl: string;
+  title: string;
+}) {
+  const downloaded = await downloadTutorKnowledgeUrl(sourceUrl);
+  const contentType = downloaded.contentType || contentTypeFromFileName(downloaded.fileName);
+  const metadata = {
+    contentType,
+    fileName: downloaded.fileName,
+    fileSize: downloaded.buffer.byteLength,
+    originalSourceUrl: sourceUrl,
+    sourceKind: "url" as const,
+    sourceUrl: downloaded.finalUrl
+  };
+
+  if (isPdfSource(downloaded.fileName, contentType)) {
+    const fileBytes = downloaded.buffer.buffer.slice(
+      downloaded.buffer.byteOffset,
+      downloaded.buffer.byteOffset + downloaded.buffer.byteLength
+    ) as ArrayBuffer;
+    const file = new File([fileBytes], downloaded.fileName, { type: contentType });
+    const extracted = await extractChunksFromFile({ docId, file, title });
+
+    return {
+      ...extracted,
+      metadata
+    };
+  }
+
+  if (isHtmlSource(contentType, downloaded.fileName)) {
+    const extractedText = extractReadableHtmlText(downloaded.buffer.toString("utf8"));
+    assertTutorKnowledgeTextWithinLimit(extractedText, "Extracted URL text");
+
+    return {
+      chunks: chunkTutorKnowledgeText(extractedText, {
+        docId,
+        labelPrefix: "URL knowledge chunk",
+        sourceType: "text",
+        title
+      }),
+      extractedText,
+      metadata,
+      pageCount: 0,
+      visualPageCount: 0
+    };
+  }
+
+  if (isTextSource(contentType, downloaded.fileName)) {
+    const extractedText = downloaded.buffer.toString("utf8").trim();
+    assertTutorKnowledgeTextWithinLimit(extractedText, "Extracted URL text");
+
+    return {
+      chunks: chunkTutorKnowledgeText(extractedText, {
+        docId,
+        labelPrefix: "URL knowledge chunk",
+        sourceType: "text",
+        title
+      }),
+      extractedText,
+      metadata,
+      pageCount: 0,
+      visualPageCount: 0
+    };
+  }
+
+  throw new TutorKnowledgeHttpError("This URL is not a supported PDF, HTML, TXT, MD, or CSV source.", 415);
+}
+
 async function extractPdfPages(buffer: Buffer): Promise<TutorKnowledgePage[]> {
   const pageInfoByNumberPromise = extractPdfPageInfo(buffer);
   let pages = await extractPdfTextPages(buffer, { lineEnforce: true }).catch(() =>
@@ -899,6 +1110,7 @@ async function extractPdfPages(buffer: Buffer): Promise<TutorKnowledgePage[]> {
 }
 
 async function extractPdfTextPages(buffer: Buffer, options: { lineEnforce: boolean }) {
+  const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: buffer });
 
   try {
@@ -922,6 +1134,7 @@ async function extractPdfTextPages(buffer: Buffer, options: { lineEnforce: boole
 }
 
 async function extractPdfPageInfo(buffer: Buffer) {
+  const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: buffer });
 
   try {
@@ -994,6 +1207,38 @@ function validateFile(file: File) {
 
   if (!supportedExtension || !supportedContentType) {
     throw new TutorKnowledgeHttpError("Only PDF, TXT, MD, and CSV files are supported.", 400);
+  }
+
+  if (file.size > maxTutorKnowledgeFileBytes) {
+    throw new TutorKnowledgeHttpError(
+      `Material files must be ${Math.floor(maxTutorKnowledgeFileBytes / 1024 / 1024)} MB or smaller.`,
+      413
+    );
+  }
+}
+
+function validateStoredSourceMetadata({
+  contentType,
+  fileName,
+  fileSize
+}: {
+  contentType: string;
+  fileName: string;
+  fileSize: number;
+}) {
+  const extension = getFileExtension(fileName);
+  const supportedExtension = supportedTutorKnowledgeExtensions.some((item) => item === extension);
+  const supportedContentType = !contentType || supportedContentTypes.has(contentType);
+
+  if (!supportedExtension || !supportedContentType) {
+    throw new TutorKnowledgeHttpError("Only PDF, TXT, MD, and CSV files are supported.", 400);
+  }
+
+  if (fileSize > maxTutorKnowledgeFileBytes) {
+    throw new TutorKnowledgeHttpError(
+      `Material files must be ${Math.floor(maxTutorKnowledgeFileBytes / 1024 / 1024)} MB or smaller.`,
+      413
+    );
   }
 }
 
@@ -1312,6 +1557,240 @@ function getFileExtension(fileName: string) {
 
 function isPdfFile(file: File) {
   return file.type === "application/pdf" || getFileExtension(file.name) === ".pdf";
+}
+
+function isPdfSource(fileName: string, contentType: string) {
+  return contentType.split(";")[0]?.trim().toLowerCase() === "application/pdf" || getFileExtension(fileName) === ".pdf";
+}
+
+function isHtmlSource(contentType: string, fileName: string) {
+  const normalizedContentType = contentType.split(";")[0]?.trim().toLowerCase();
+
+  return normalizedContentType === "text/html" || [".html", ".htm"].includes(getFileExtension(fileName));
+}
+
+function isTextSource(contentType: string, fileName: string) {
+  const normalizedContentType = contentType.split(";")[0]?.trim().toLowerCase();
+
+  return supportedContentTypes.has(normalizedContentType) || [".txt", ".md", ".csv"].includes(getFileExtension(fileName));
+}
+
+async function downloadTutorKnowledgeUrl(sourceUrl: string) {
+  let currentUrl = await validatePublicTutorKnowledgeUrl(sourceUrl);
+
+  for (let redirectCount = 0; redirectCount <= maxTutorKnowledgeUrlRedirects; redirectCount += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+
+    try {
+      const response = await fetch(currentUrl.toString(), {
+        headers: {
+          Accept: "application/pdf,text/html,text/plain,text/markdown,text/csv,*/*;q=0.5",
+          "User-Agent": "ChandraTutorKnowledgeBot/1.0"
+        },
+        redirect: "manual",
+        signal: controller.signal
+      });
+
+      if (isRedirectStatus(response.status)) {
+        const location = response.headers.get("location");
+
+        if (!location) {
+          throw new TutorKnowledgeHttpError("The URL redirected without a location header.", 400);
+        }
+
+        currentUrl = await validatePublicTutorKnowledgeUrl(new URL(location, currentUrl).toString());
+        continue;
+      }
+
+      if (!response.ok) {
+        throw new TutorKnowledgeHttpError(`The URL could not be downloaded. HTTP ${response.status}.`, 400);
+      }
+
+      const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
+      const contentLength = Number(response.headers.get("content-length") ?? 0);
+
+      if (contentLength > maxTutorKnowledgeFileBytes) {
+        throw new TutorKnowledgeHttpError(
+          `URL sources must be ${Math.floor(maxTutorKnowledgeFileBytes / 1024 / 1024)} MB or smaller.`,
+          413
+        );
+      }
+
+      const buffer = await readResponseBodyWithLimit(response);
+      const fileName = fileNameFromUrl(currentUrl, contentType);
+
+      if (!isPdfSource(fileName, contentType) && !isHtmlSource(contentType, fileName) && !isTextSource(contentType, fileName)) {
+        throw new TutorKnowledgeHttpError("This URL is not a supported PDF, HTML, TXT, MD, or CSV source.", 415);
+      }
+
+      return {
+        buffer,
+        contentType,
+        fileName,
+        finalUrl: currentUrl.toString()
+      };
+    } catch (caughtError) {
+      if (caughtError instanceof TutorKnowledgeHttpError) {
+        throw caughtError;
+      }
+
+      throw new TutorKnowledgeHttpError(
+        caughtError instanceof Error && caughtError.name === "AbortError"
+          ? "The URL download timed out."
+          : "The URL could not be downloaded. Make sure it is public and reachable.",
+        400
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw new TutorKnowledgeHttpError("The URL redirected too many times.", 400);
+}
+
+async function validatePublicTutorKnowledgeUrl(rawUrl: string) {
+  let parsed: URL;
+
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new TutorKnowledgeHttpError("Paste a valid HTTP or HTTPS URL.", 400);
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new TutorKnowledgeHttpError("Only HTTP and HTTPS URLs are supported.", 400);
+  }
+
+  if (isBlockedHostname(parsed.hostname)) {
+    throw new TutorKnowledgeHttpError("Private, local, and internal URLs are not supported.", 400);
+  }
+
+  const addresses = await lookup(parsed.hostname, { all: true }).catch(() => []);
+
+  if (!addresses.length || addresses.some((address) => isPrivateIpAddress(address.address))) {
+    throw new TutorKnowledgeHttpError("Private, local, and internal URLs are not supported.", 400);
+  }
+
+  parsed.hash = "";
+  return parsed;
+}
+
+function isRedirectStatus(status: number) {
+  return [301, 302, 303, 307, 308].includes(status);
+}
+
+async function readResponseBodyWithLimit(response: Response) {
+  if (!response.body) {
+    return Buffer.alloc(0);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+
+    if (done) {
+      break;
+    }
+
+    if (!value) {
+      continue;
+    }
+
+    totalBytes += value.byteLength;
+
+    if (totalBytes > maxTutorKnowledgeFileBytes) {
+      throw new TutorKnowledgeHttpError(
+        `URL sources must be ${Math.floor(maxTutorKnowledgeFileBytes / 1024 / 1024)} MB or smaller.`,
+        413
+      );
+    }
+
+    chunks.push(value);
+  }
+
+  return Buffer.concat(chunks);
+}
+
+function isBlockedHostname(hostname: string) {
+  const normalized = hostname.toLowerCase();
+
+  return (
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized.endsWith(".local") ||
+    isPrivateIpAddress(normalized)
+  );
+}
+
+function isPrivateIpAddress(address: string) {
+  const version = isIP(address);
+
+  if (version === 0) {
+    return false;
+  }
+
+  if (version === 6) {
+    const normalized = address.toLowerCase();
+    return normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:");
+  }
+
+  const parts = address.split(".").map((part) => Number(part));
+  const [first, second] = parts;
+
+  return (
+    first === 10 ||
+    first === 127 ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    first === 0
+  );
+}
+
+function fileNameFromUrl(url: URL, contentType: string) {
+  const pathName = decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() ?? "").trim();
+  const fallbackExtension = isPdfSource("", contentType)
+    ? ".pdf"
+    : isHtmlSource(contentType, "")
+      ? ".html"
+      : contentType.includes("csv")
+        ? ".csv"
+        : contentType.includes("markdown")
+          ? ".md"
+          : ".txt";
+  const fileName = pathName && getFileExtension(pathName) ? pathName : `url-source${fallbackExtension}`;
+
+  return sanitizeFileName(fileName);
+}
+
+function extractReadableHtmlText(html: string) {
+  const withoutHidden = html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, " ");
+  const withBreaks = withoutHidden
+    .replace(/<\/(p|div|section|article|header|footer|li|tr|h[1-6])>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n");
+
+  return decodeBasicHtmlEntities(withBreaks.replace(/<[^>]+>/g, " "))
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function decodeBasicHtmlEntities(value: string) {
+  return value
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
 }
 
 function contentTypeFromFileName(fileName: string) {

@@ -27,7 +27,7 @@ class OpenRouterClient:
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY", "")
         self.base_url = (base_url or os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1").rstrip("/")
         self.app_title = app_title or os.getenv("OPENROUTER_APP_TITLE") or "Chandra"
-        self.http_referer = http_referer or os.getenv("OPENROUTER_HTTP_REFERER") or "http://localhost:3000"
+        self.http_referer = http_referer or openrouter_http_referer()
         self.max_retries = max(0, max_retries)
         self.timeout = timeout
         self._chat_completions_url = f"{self.base_url}/chat/completions"
@@ -126,6 +126,18 @@ def make_async_client(*, timeout: float) -> httpx.AsyncClient:
         )
     except TypeError:
         return httpx.AsyncClient(timeout=timeout)
+
+
+def openrouter_http_referer() -> str:
+    configured = (os.getenv("OPENROUTER_HTTP_REFERER") or os.getenv("FRONTEND_ORIGIN") or "").strip()
+
+    if configured:
+        return configured.rstrip("/")
+
+    if os.getenv("CHANDRA_ENV", "").strip().lower() in {"prod", "production"}:
+        raise RuntimeError("OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production.")
+
+    return "http://localhost:3000"
 
 
 @lru_cache(maxsize=128)

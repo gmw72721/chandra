@@ -3,8 +3,10 @@ import {
   defaultRefusalStyle,
   normalizeAnswerPolicySettings,
   normalizeClassModelSettings,
+  normalizeOpeningMessage,
   normalizeResponseFormatSettings,
   normalizeSourceUsageSettings,
+  normalizeStudentFacingInstructions,
   normalizeTutorBehavior,
   type AnswerPolicySettings,
   type ClassModelSettings,
@@ -23,10 +25,12 @@ export type TeacherClassTutorConfig = {
   defaultAssignmentContext?: string;
   modelSettings: ClassModelSettings;
   name: string;
+  openingMessage: string;
   refusalStyle: string;
   responseFormat: ResponseFormatSettings;
   section: string;
   sourceUsage: SourceUsageSettings;
+  studentFacingInstructions: string;
 };
 
 export async function buildTutorSystemPrompt({
@@ -81,6 +85,7 @@ export async function buildTutorSystemPrompt({
         answerPolicy: teacherClass?.answerPolicy ?? normalizeAnswerPolicySettings(null),
         defaultAssignmentContext: teacherClass?.defaultAssignmentContext,
         modelSettings: teacherClass?.modelSettings ?? normalizeClassModelSettings(null),
+        openingMessage: teacherClass?.openingMessage ?? normalizeOpeningMessage(null, { name: className, section: classSection }),
         policyTitle: teacherClass?.behaviorTitle ?? "Guided problem solving",
         instructions,
         refusalStyle:
@@ -88,6 +93,9 @@ export async function buildTutorSystemPrompt({
           defaultRefusalStyle,
         responseFormat: teacherClass?.responseFormat ?? normalizeResponseFormatSettings(null),
         sourceUsage: teacherClass?.sourceUsage ?? normalizeSourceUsageSettings(null),
+        studentFacingInstructions:
+          teacherClass?.studentFacingInstructions ??
+          normalizeStudentFacingInstructions(null, { name: className, section: classSection }),
         studentLearningProfileDigest,
         retrievalInstruction
       }),
@@ -124,11 +132,13 @@ function buildCoreTutorInstructions({
   defaultAssignmentContext,
   instructions,
   modelSettings,
+  openingMessage,
   policyTitle,
   refusalStyle,
   responseFormat,
   retrievalGuidance,
   retrievalInstruction,
+  studentFacingInstructions,
   studentLearningProfileDigest,
   sourceUsage
 }: {
@@ -136,12 +146,14 @@ function buildCoreTutorInstructions({
   defaultAssignmentContext?: string;
   instructions: string[];
   modelSettings: ClassModelSettings;
+  openingMessage?: string;
   policyTitle: string;
   refusalStyle: string;
   responseFormat: ResponseFormatSettings;
   retrievalGuidance?: string;
   retrievalInstruction: string;
   sourceUsage: SourceUsageSettings;
+  studentFacingInstructions?: string;
   studentLearningProfileDigest?: string;
 }) {
   return [
@@ -150,6 +162,8 @@ function buildCoreTutorInstructions({
     `Teacher policy: ${policyTitle}`,
     ...buildTutorBehaviorInstructions(policyTitle),
     ...instructions.map((instruction) => `- ${instruction}`),
+    ...(studentFacingInstructions ? [`Student-facing class instructions: ${studentFacingInstructions}`] : []),
+    ...(openingMessage ? [`Default student opening message: ${openingMessage}`] : []),
     ...(defaultAssignmentContext ? [`Default assignment context: ${defaultAssignmentContext}`] : []),
     `Refusal and redirection style: ${refusalStyle}`,
     ...(retrievalGuidance ? [`Retrieval guidance: ${retrievalGuidance}`] : []),
@@ -272,6 +286,8 @@ function buildAnswerPolicyInstructions(answerPolicy: AnswerPolicySettings) {
           "- If the student asks to see, read, pull up, copy, quote, recite, identify, or locate the wording of a specific problem, exercise, question, passage, or page, or only supplies a specific problem/exercise/page/title reference without asking for solving help, treat that as source lookup, not solving help: retrieve the exact source and provide the visible task text when quotation is allowed, without solving it or asking for an attempt first.",
           "- If a student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, first ask what they have tried or where they are stuck.",
           "- In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example.",
+          "- Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task.",
+          "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. For proof or derivation tasks, a similar example must use a different claim or different numbers so it does not prove the assigned statement.",
           "- A follow-up like 'I still need help', 'yes', 'tell me more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution.",
           "- For the student's exact task, do not reveal a full solution, final answer, final artifact, final expression, final code, thesis, outline, or a chain of multiple intermediate steps before the student has shown work. If one small scaffold is allowed, stop there and ask the student to do the next piece."
         ]
@@ -297,6 +313,7 @@ function buildAcademicIntegrityInstructions(answerPolicy: AnswerPolicySettings) 
     ...(answerPolicy.refuseAnswerOnlyRequests
       ? [
           "- If the student asks for a direct answer, say you cannot give the final answer. Do not continue completing their exact task in that reply.",
+          "- If the student asks for homework-ready wording, a proof paragraph, a complete response they can submit, or an `example of what I can say` for the exact task, treat it as a direct-answer request.",
           "- After refusing a direct answer request, offer to help by walking through a similar textbook/readings/example task or by checking the student's attempted next step."
         ]
       : ["- If the student asks for a direct answer, prefer explaining the reasoning and checking understanding instead of giving an answer alone."])
@@ -416,17 +433,22 @@ export async function getTeacherClassTutorConfig(courseId: string): Promise<Teac
       return null;
     }
 
+    const name = String(data.name ?? "Class");
+    const section = String(data.section ?? "Workspace");
+
     return {
       answerPolicy: normalizeAnswerPolicySettings(data.answerPolicy),
       behaviorInstructions: data.behaviorInstructions as string | undefined,
       behaviorTitle: normalizeTutorBehavior(data.behaviorTitle),
       defaultAssignmentContext: data.defaultAssignmentContext as string | undefined,
       modelSettings: normalizeClassModelSettings(data.modelSettings),
-      name: String(data.name ?? "Class"),
+      name,
+      openingMessage: normalizeOpeningMessage(data.openingMessage, { name, section }),
       refusalStyle: String(data.refusalStyle ?? "").trim() || defaultRefusalStyle,
       responseFormat: normalizeResponseFormatSettings(data.responseFormat),
-      section: String(data.section ?? "Workspace"),
-      sourceUsage: normalizeSourceUsageSettings(data.sourceUsage)
+      section,
+      sourceUsage: normalizeSourceUsageSettings(data.sourceUsage),
+      studentFacingInstructions: normalizeStudentFacingInstructions(data.studentFacingInstructions, { name, section })
     };
   } catch {
     return null;

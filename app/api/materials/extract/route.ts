@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { PDFParse } from "pdf-parse";
 import {
   TutorKnowledgeHttpError,
   authorizeClassTeacher
@@ -27,6 +26,7 @@ export async function POST(request: Request) {
     const buffer = Buffer.from(await file.arrayBuffer());
 
     if (isPdf) {
+      const { PDFParse } = await import("pdf-parse");
       const parser = new PDFParse({ data: buffer });
 
       try {

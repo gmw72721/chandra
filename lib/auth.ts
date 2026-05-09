@@ -34,6 +34,7 @@ export type UserProfile = {
   role: AccountRole;
   appearance?: TeacherClassAppearance;
   classId?: string;
+  classIds?: string[];
   themeColor?: TeacherClassThemeColor;
   createdAt?: unknown;
 };
@@ -109,6 +110,7 @@ export async function signUpWithRole({
 
   if (role === "student" && cleanClassId) {
     profile.classId = cleanClassId;
+    profile.classIds = [cleanClassId];
   }
 
   await setDoc(doc(db!, "users", credential.user.uid), profile);
@@ -152,6 +154,7 @@ export async function createRoleProfile({
 
   if (role === "student" && cleanClassId) {
     profile.classId = cleanClassId;
+    profile.classIds = [cleanClassId];
   }
 
   await setDoc(doc(db!, "users", user.uid), profile);

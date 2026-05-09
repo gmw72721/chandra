@@ -1,12 +1,30 @@
+substitutions:
+  _IMAGE: us-central1-docker.pkg.dev/chandra-f6e13/chandra/chandra-backend:manual
+  _CACHE_IMAGE: us-central1-docker.pkg.dev/chandra-f6e13/chandra/chandra-backend:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
 steps:
+  - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - docker pull ${_CACHE_IMAGE} || true
+
   - name: gcr.io/cloud-builders/docker
     args:
       - build
       - -f
       - backend/Dockerfile
+      - --cache-from
+      - ${_CACHE_IMAGE}
       - -t
       - ${_IMAGE}
+      - -t
+      - ${_CACHE_IMAGE}
       - .
 
 images:
   - ${_IMAGE}
+  - ${_CACHE_IMAGE}

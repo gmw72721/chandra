@@ -271,6 +271,8 @@ function buildAnswerPolicyInstructions(answerPolicy: AnswerPolicySettings) {
           "- Require a student attempt before substantial help on graded-looking work.",
           "- If a student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, first ask what they have tried or where they are stuck.",
           "- In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example.",
+          "- Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task.",
+          "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. For proof or derivation tasks, a similar example must use a different claim or different numbers so it does not prove the assigned statement.",
           "- A follow-up like 'I still need help', 'yes', 'tell me more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution.",
           "- For the student's exact task, do not reveal a full solution, final answer, final artifact, final expression, final code, thesis, outline, or a chain of multiple intermediate steps before the student has shown work. If one small scaffold is allowed, stop there and ask the student to do the next piece."
         ]
@@ -296,6 +298,7 @@ function buildAcademicIntegrityInstructions(answerPolicy: AnswerPolicySettings) 
     ...(answerPolicy.refuseAnswerOnlyRequests
       ? [
           "- If the student asks for a direct answer, say you cannot give the final answer. Do not continue completing their exact task in that reply.",
+          "- If the student asks for homework-ready wording, a proof paragraph, a complete response they can submit, or an `example of what I can say` for the exact task, treat it as a direct-answer request.",
           "- After refusing a direct answer request, offer to help by walking through a similar textbook/readings/example task or by checking the student's attempted next step."
         ]
       : ["- If the student asks for a direct answer, prefer explaining the reasoning and checking understanding instead of giving an answer alone."])

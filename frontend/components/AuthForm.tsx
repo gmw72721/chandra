@@ -22,12 +22,15 @@ type PendingProfile = {
   displayName: string;
   email: string;
   role: AccountRole;
+  teacherInviteToken?: string;
 };
 
 export function AuthForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const requestedRole = searchParams.get("role") === "teacher" ? "teacher" : "student";
+  const teacherInviteToken = searchParams.get("teacherInvite")?.trim() ?? "";
+  const canCreateTeacher = Boolean(teacherInviteToken);
+  const requestedRole = searchParams.get("role") === "teacher" && canCreateTeacher ? "teacher" : "student";
   const requestedClassId = formatClassCodeInput(searchParams.get("classId") ?? "");
   const [mode, setMode] = useState<AuthMode>("signup");
   const [role, setRole] = useState<AccountRole>(requestedRole);
@@ -61,6 +64,7 @@ export function AuthForm() {
       classId: pendingProfile.classId,
       displayName: pendingProfile.displayName,
       role: pendingProfile.role,
+      teacherInviteToken: teacherInviteToken || pendingProfile.teacherInviteToken,
       user
     })
       .then((nextProfile) => {
@@ -73,7 +77,7 @@ export function AuthForm() {
       .finally(() => {
         isRepairingProfileRef.current = false;
       });
-  }, [isLoading, profile, router, user]);
+  }, [isLoading, profile, router, teacherInviteToken, user]);
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -86,14 +90,16 @@ export function AuthForm() {
           classId: role === "student" ? classId.trim() : "",
           displayName: displayName.trim(),
           email: email.trim().toLowerCase(),
-          role
+          role,
+          teacherInviteToken: role === "teacher" ? teacherInviteToken : ""
         });
         await signUpWithRole({
           displayName: displayName.trim(),
           email: email.trim(),
           password,
           role,
-          classId: role === "student" ? classId.trim() : ""
+          classId: role === "student" ? classId.trim() : "",
+          teacherInviteToken: role === "teacher" ? teacherInviteToken : ""
         });
         window.localStorage.removeItem(pendingProfileStorageKey);
         router.push(role === "teacher" ? "/teacher" : "/student");
@@ -151,6 +157,7 @@ export function AuthForm() {
                   classId: role === "student" ? classId.trim() : "",
                   displayName: displayName.trim() || user.displayName || user.email || "",
                   role,
+                  teacherInviteToken: role === "teacher" ? teacherInviteToken : "",
                   user
                 });
                 window.localStorage.removeItem(pendingProfileStorageKey);
@@ -171,7 +178,7 @@ export function AuthForm() {
               onChange={(event) => setRole(event.target.value as AccountRole)}
             >
               <option value="student">Student</option>
-              <option value="teacher">Teacher</option>
+              {canCreateTeacher ? <option value="teacher">Teacher</option> : null}
             </select>
 
             {role === "student" ? (
@@ -254,7 +261,7 @@ export function AuthForm() {
               onChange={(event) => setRole(event.target.value as AccountRole)}
             >
               <option value="student">Student</option>
-              <option value="teacher">Teacher</option>
+              {canCreateTeacher ? <option value="teacher">Teacher</option> : null}
             </select>
 
             {role === "student" ? (

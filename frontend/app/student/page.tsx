@@ -2,23 +2,26 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, Suspense, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, KeyboardEvent, Suspense, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useAuth } from "@/components/AuthProvider";
 import { RequireAuth } from "@/components/RequireAuth";
 import { apiUrl } from "@/lib/api-client";
-import { signOutCurrentUser, updateUserThemePreference } from "@/lib/auth";
+import { signOutCurrentUser, updateStudentClass, updateUserAccountSettings, updateUserThemePreference } from "@/lib/auth";
 import {
   defaultTeacherClassAppearance,
   defaultTeacherClassThemeColor,
   normalizeTeacherClassAppearance,
   normalizeTeacherClassThemeColor,
-  teacherClassThemeColorOptions
+  teacherClassThemeColorOptions,
+  type TeacherClassAppearance,
+  type TeacherClassThemeColor
 } from "@/lib/class-theme";
+import { normalizeOpeningMessage } from "@/lib/class-settings";
 import { subscribeToClass, type TeacherClass } from "@/lib/classes";
-import type { ChatMessage, StudentConversationSummary, TutorApiResponse } from "@/lib/types";
+import type { ChatMessage, MessageAttachment, StudentConversationSummary, TutorApiResponse } from "@/lib/types";
 
 type ChatProgress = {
   message: string;
@@ -45,18 +48,35 @@ type ChatStreamEvent =
   | { errorCode?: string; errorId?: string; message: string; stage: string; type: "error" }
   | { payload: TutorApiResponse; type: "final" };
 
-const studentComposerTextareaMaxHeight = 156;
-const studentAppearanceOptions = ["light", "dark"] as const;
+type StudentVisibleClass = {
+  appearance?: TeacherClassAppearance;
+  id: string;
+  joinCode?: string;
+  name: string;
+  openingMessage?: string;
+  section: string;
+  themeColor?: TeacherClassThemeColor;
+};
 
-const initialMessages: ChatMessage[] = [
-  {
-    id: "welcome",
-    role: "assistant",
-    content:
-      "Hi. I can help you work through the assignment step by step. What problem are you on?",
-    createdAt: new Date().toISOString()
-  }
-];
+type StudentClassSummary = StudentVisibleClass;
+
+type ComposerAttachment = MessageAttachment & {
+  error?: string;
+  localUrl?: string;
+  progress: number;
+};
+
+const studentComposerTextareaMaxHeight = 156;
+const markdownRemarkPlugins = [remarkMath];
+const markdownRehypePlugins = [rehypeKatex];
+const maxComposerAttachments = 3;
+const allowedComposerAttachmentExtensions = [".pdf"];
+const allowedComposerAttachmentAccept = ".pdf,application/pdf";
+const maxComposerPdfBytes = 25 * 1024 * 1024;
+
+const welcomeMessageId = "welcome";
+
+type StudentMainView = "chat" | "settings";
 
 export default function StudentPage() {
   return (
@@ -78,9 +98,13 @@ function StudentWorkspace() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { firebaseReady, profile, user } = useAuth();
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => buildInitialStudentMessages(null));
   const [draft, setDraft] = useState("");
   const draftTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState("");
+  const [isDraggingAttachment, setIsDraggingAttachment] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [chatProgress, setChatProgress] = useState<ChatProgress | null>(null);
   const [classLoadError, setClassLoadError] = useState<{ classId: string; message: string } | null>(null);
@@ -90,6 +114,15 @@ function StudentWorkspace() {
   const [conversationMessagesError, setConversationMessagesError] = useState("");
   const [themePreferenceError, setThemePreferenceError] = useState("");
   const [isSavingThemePreference, setIsSavingThemePreference] = useState(false);
+  const [accountDisplayName, setAccountDisplayName] = useState<string | null>(null);
+  const [accountSettingsError, setAccountSettingsError] = useState("");
+  const [isSavingAccountSettings, setIsSavingAccountSettings] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isClassDropdownOpen, setIsClassDropdownOpen] = useState(false);
+  const [studentMainView, setStudentMainView] = useState<StudentMainView>("chat");
+  const [studentClasses, setStudentClasses] = useState<StudentClassSummary[]>([]);
+  const [studentClassesError, setStudentClassesError] = useState("");
+  const [isSwitchingClass, setIsSwitchingClass] = useState(false);
   const [conversationSummaries, setConversationSummaries] = useState<StudentConversationSummary[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState("");
   const [selectedConversationClassId, setSelectedConversationClassId] = useState("");
@@ -105,7 +138,8 @@ function StudentWorkspace() {
   );
 
   useEffect(() => {
-    if (!firebaseReady || !activeCourseId) {
+    if (!firebaseReady || !activeCourseId || !isTeacherPreview) {
+      setSavedClass(null);
       return () => {};
     }
 
@@ -114,6 +148,9 @@ function StudentWorkspace() {
       (nextClass) => {
         setSavedClass(nextClass);
         setLoadedClassId(activeCourseId);
+        setMessages((currentMessages) =>
+          isOnlyWelcomeMessage(currentMessages) ? buildInitialStudentMessages(nextClass) : currentMessages
+        );
       },
       (caughtError) => {
         setSavedClass(null);
@@ -127,7 +164,7 @@ function StudentWorkspace() {
         );
       }
     );
-  }, [activeCourseId, firebaseReady]);
+  }, [activeCourseId, firebaseReady, isTeacherPreview]);
 
   useEffect(() => {
     if (!firebaseReady || !activeCourseId || !user || profile?.role !== "student" || isTeacherPreview) {
@@ -157,7 +194,9 @@ function StudentWorkspace() {
     };
   }, [activeCourseId, firebaseReady, isTeacherPreview, profile?.role, user]);
 
-  const activeClass = savedClass?.id === activeCourseId ? savedClass : null;
+  const activeStudentClass = studentClasses.find((studentClass) => studentClass.id === activeCourseId) ?? null;
+  const activeClass: StudentVisibleClass | null =
+    savedClass?.id === activeCourseId ? savedClass : activeStudentClass;
   const activeAppearance = normalizeTeacherClassAppearance(
     profile?.appearance ?? activeClass?.appearance ?? defaultTeacherClassAppearance
   );
@@ -167,22 +206,72 @@ function StudentWorkspace() {
   const className = activeClass?.name ?? (activeCourseId ? "Saved class" : "Class needed");
   const classSection = activeClass?.section ?? (activeCourseId ? "Student chat" : "Enter your class code");
   const classSectionLabel = formatClassSectionLabel(classSection, Boolean(activeCourseId));
+  const compactClassLabel = formatCompactClassLabel(className);
   const visibleClassCode = activeClass?.joinCode || activeClass?.id || activeCourseId;
-  const pinnedTeacherInstructions = activeClass ? formatPinnedTeacherInstructions(activeClass.defaultAssignmentContext) : "";
   const visibleConversationSummaries = conversationSummaries.filter(
     (conversation) => conversation.classId === activeCourseId && conversation.studentId === user?.uid
   );
   const activeSelectedConversationId = selectedConversationClassId === activeCourseId ? selectedConversationId : "";
+  const visibleStudentClasses = mergeStudentClasses(studentClasses, activeClass);
   const selectedConversation =
     visibleConversationSummaries.find((conversation) => conversation.id === activeSelectedConversationId) ?? null;
   const conversationTitle = selectedConversation?.title ?? "";
   const conversationMessageCount = selectedConversation?.messageCount ?? 0;
   const accountName = profile?.displayName ?? user?.displayName ?? "Student";
   const accountEmail = profile?.email ?? user?.email ?? "";
+  const isUploadingAttachment = composerAttachments.some((attachment) => attachment.uploadStatus === "uploading");
+  const readyComposerAttachments = composerAttachments.filter((attachment) => attachment.uploadStatus === "ready");
+  const canSendMessage = Boolean(
+    activeCourseId &&
+      !isSending &&
+      !isUploadingAttachment &&
+      (draft.trim() || readyComposerAttachments.length)
+  );
 
   useEffect(() => {
     resizeStudentComposerTextarea(draftTextareaRef.current);
   }, [draft]);
+
+  useEffect(() => {
+    if (!firebaseReady || !user || profile?.role !== "student" || isTeacherPreview) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    user
+      .getIdToken()
+      .then((token) => fetchStudentClasses(token))
+      .then((nextClasses) => {
+        if (!isCancelled) {
+          setStudentClasses(nextClasses);
+          setStudentClassesError("");
+          if (activeCourseId && nextClasses.some((studentClass) => studentClass.id === activeCourseId)) {
+            setLoadedClassId(activeCourseId);
+          }
+        }
+      })
+      .catch((caughtError) => {
+        if (!isCancelled) {
+          setStudentClasses([]);
+          setStudentClassesError(describeStudentClassesError(caughtError));
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeCourseId, firebaseReady, isTeacherPreview, profile?.role, user]);
+
+  useEffect(() => {
+    if (!activeClass) {
+      return;
+    }
+
+    setMessages((currentMessages) =>
+      isOnlyWelcomeMessage(currentMessages) ? buildInitialStudentMessages(activeClass) : currentMessages
+    );
+  }, [activeClass]);
 
   useEffect(() => {
     if (!firebaseReady || !activeCourseId || !activeSelectedConversationId || !user) {
@@ -202,7 +291,7 @@ function StudentWorkspace() {
       )
       .then((savedMessages) => {
         if (!isCancelled) {
-          setMessages(savedMessages.length ? savedMessages : initialMessages);
+          setMessages(savedMessages.length ? savedMessages : buildInitialStudentMessages(activeClass));
           setConversationMessagesError("");
         }
       })
@@ -215,13 +304,202 @@ function StudentWorkspace() {
     return () => {
       isCancelled = true;
     };
-  }, [activeCourseId, activeSelectedConversationId, firebaseReady, user]);
+  }, [activeClass, activeCourseId, activeSelectedConversationId, firebaseReady, user]);
+
+  function clearComposerAttachments({ revokeLocalUrls = true }: { revokeLocalUrls?: boolean } = {}) {
+    setComposerAttachments((currentAttachments) => {
+      if (revokeLocalUrls) {
+        currentAttachments.forEach((attachment) => {
+          if (attachment.localUrl) {
+            URL.revokeObjectURL(attachment.localUrl);
+          }
+        });
+      }
+      return [];
+    });
+    setAttachmentError("");
+  }
+
+  async function handleAttachmentSelection(event: ChangeEvent<HTMLInputElement>) {
+    const selectedFiles = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    await uploadComposerFiles(selectedFiles);
+  }
+
+  async function handleAttachmentDrop(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsDraggingAttachment(false);
+    await uploadComposerFiles(Array.from(event.dataTransfer.files ?? []));
+  }
+
+  function handleAttachmentDragOver(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsDraggingAttachment(true);
+  }
+
+  async function uploadComposerFiles(files: File[]) {
+    if (!files.length || !user || isSending) {
+      return;
+    }
+
+    if (!activeCourseId) {
+      setAttachmentError("Join a class before uploading homework files.");
+      return;
+    }
+
+    setAttachmentError("");
+
+    const availableSlots = maxComposerAttachments - composerAttachments.length;
+    const filesToUpload = files.slice(0, Math.max(availableSlots, 0));
+
+    if (!filesToUpload.length) {
+      setAttachmentError(`Attach up to ${maxComposerAttachments} files per message.`);
+      return;
+    }
+
+    if (files.length > filesToUpload.length) {
+      setAttachmentError(`Attach up to ${maxComposerAttachments} files per message.`);
+    }
+
+    const invalidFileMessage = filesToUpload.map(validateComposerAttachmentFile).find(Boolean);
+
+    if (invalidFileMessage) {
+      setAttachmentError(invalidFileMessage);
+      return;
+    }
+
+    try {
+      const token = await user.getIdToken();
+      const conversationId = await ensureAttachmentConversation(token);
+
+      await Promise.all(filesToUpload.map((file) => uploadSingleComposerAttachment({ conversationId, file, token })));
+    } catch (caughtError) {
+      setAttachmentError(caughtError instanceof Error ? caughtError.message : "Homework file upload failed.");
+    }
+  }
+
+  async function ensureAttachmentConversation(token: string) {
+    if (activeSelectedConversationId) {
+      return activeSelectedConversationId;
+    }
+
+    const conversation = await createStudentConversationForAttachment({
+      classId: activeCourseId,
+      token
+    });
+
+    setSelectedConversationId(conversation.id);
+    setSelectedConversationClassId(activeCourseId);
+    setConversationSummaries((currentConversations) =>
+      currentConversations.some((item) => item.id === conversation.id)
+        ? currentConversations
+        : [conversation, ...currentConversations]
+    );
+
+    return conversation.id;
+  }
+
+  async function uploadSingleComposerAttachment({
+    conversationId,
+    file,
+    token
+  }: {
+    conversationId: string;
+    file: File;
+    token: string;
+  }) {
+    const temporaryId = crypto.randomUUID();
+    const localUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
+    const temporaryAttachment: ComposerAttachment = {
+      classId: activeCourseId,
+      conversationId,
+      createdAt: new Date().toISOString(),
+      fileName: file.name,
+      fileSize: file.size,
+      fileType: file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf") ? "pdf" : "image",
+      id: temporaryId,
+      localUrl,
+      messageId: null,
+      mimeType: file.type || contentTypeFromFileName(file.name),
+      pageCount: null,
+      progress: 0,
+      storageKey: "",
+      studentId: user?.uid ?? "",
+      updatedAt: new Date().toISOString(),
+      uploadStatus: "uploading"
+    };
+
+    setComposerAttachments((currentAttachments) => [...currentAttachments, temporaryAttachment]);
+
+    try {
+      const attachment = await uploadHomeworkAttachmentWithProgress({
+        classId: activeCourseId,
+        conversationId,
+        file,
+        token,
+        onProgress: (progress) => {
+          setComposerAttachments((currentAttachments) =>
+            currentAttachments.map((item) => (item.id === temporaryId ? { ...item, progress } : item))
+          );
+        }
+      });
+
+      setComposerAttachments((currentAttachments) =>
+        currentAttachments.map((item) =>
+          item.id === temporaryId
+            ? {
+                ...attachment,
+                localUrl,
+                progress: 100
+              }
+            : item
+        )
+      );
+    } catch (caughtError) {
+      setComposerAttachments((currentAttachments) =>
+        currentAttachments.map((item) =>
+          item.id === temporaryId
+            ? {
+                ...item,
+                error: caughtError instanceof Error ? caughtError.message : "Upload failed.",
+                progress: 100,
+                uploadStatus: "failed"
+              }
+            : item
+        )
+      );
+    }
+  }
+
+  async function removeComposerAttachment(attachment: ComposerAttachment) {
+    if (attachment.localUrl) {
+      URL.revokeObjectURL(attachment.localUrl);
+    }
+
+    setComposerAttachments((currentAttachments) => currentAttachments.filter((item) => item.id !== attachment.id));
+
+    if (attachment.uploadStatus !== "ready" || !user) {
+      return;
+    }
+
+    try {
+      const token = await user.getIdToken();
+      await deleteHomeworkAttachment({
+        attachmentId: attachment.id,
+        classId: activeCourseId,
+        conversationId: attachment.conversationId,
+        token
+      });
+    } catch (caughtError) {
+      setAttachmentError(caughtError instanceof Error ? caughtError.message : "Attachment could not be removed.");
+    }
+  }
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
 
-    if (!content || isSending) {
+    if (!canSendMessage) {
       return;
     }
 
@@ -232,13 +510,16 @@ function StudentWorkspace() {
     const studentMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "student",
-      content,
+      attachments: readyComposerAttachments,
+      content: content || "Can you help me with this attached homework material?",
       createdAt: new Date().toISOString()
     };
 
+    const sentAttachmentIds = readyComposerAttachments.map((attachment) => attachment.id);
     const nextMessages = [...messages, studentMessage];
     setMessages(nextMessages);
     setDraft("");
+    clearComposerAttachments({ revokeLocalUrls: false });
     setIsSending(true);
     setChatProgress({
       message: "Getting ready.",
@@ -254,6 +535,7 @@ function StudentWorkspace() {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
+          attachmentIds: sentAttachmentIds,
           conversationId: activeSelectedConversationId || undefined,
           courseId: activeCourseId,
           messages: nextMessages,
@@ -367,11 +649,61 @@ function StudentWorkspace() {
     }
   }
 
+  async function saveAccountSettings() {
+    if (!user) {
+      return;
+    }
+
+    setAccountSettingsError("");
+    setIsSavingAccountSettings(true);
+
+    try {
+      await updateUserAccountSettings({
+        appearance: activeAppearance,
+        displayName: accountDisplayName ?? accountName,
+        themeColor: activeThemeColor,
+        uid: user.uid
+      });
+      setAccountDisplayName(null);
+    } catch (caughtError) {
+      setAccountSettingsError(caughtError instanceof Error ? caughtError.message : "Account settings failed.");
+    } finally {
+      setIsSavingAccountSettings(false);
+    }
+  }
+
   function startNewConversation() {
+    setStudentMainView("chat");
     setSelectedConversationId("");
     setSelectedConversationClassId(activeCourseId);
-    setMessages(initialMessages);
+    setMessages(buildInitialStudentMessages(activeClass));
+    clearComposerAttachments();
     setConversationMessagesError("");
+  }
+
+  async function switchStudentClass(classId: string) {
+    if (!user || !classId || classId === activeCourseId || isSwitchingClass) {
+      setIsClassDropdownOpen(false);
+      return;
+    }
+
+    setIsSwitchingClass(true);
+    setStudentClassesError("");
+
+    try {
+      await updateStudentClass({ classId, uid: user.uid });
+      setStudentMainView("chat");
+      setSelectedConversationId("");
+      setSelectedConversationClassId(classId);
+      setMessages(buildInitialStudentMessages(null));
+      clearComposerAttachments();
+      setConversationMessagesError("");
+      setIsClassDropdownOpen(false);
+    } catch (caughtError) {
+      setStudentClassesError(describeStudentClassesError(caughtError));
+    } finally {
+      setIsSwitchingClass(false);
+    }
   }
 
   async function handleSignOut() {
@@ -379,90 +711,106 @@ function StudentWorkspace() {
     router.push("/auth");
   }
 
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+      return;
+    }
+
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  }
+
   return (
     <RequireAuth role={isTeacherPreview ? ["student", "teacher"] : "student"}>
       <section
         className="student-workspace-shell"
         data-appearance={activeAppearance}
+        data-sidebar-collapsed={isSidebarCollapsed}
+        data-student-view={studentMainView}
         data-theme-color={activeThemeColor}
       >
         <aside className="student-workspace-sidebar" aria-label="Student workspace navigation">
+          <button
+            className="student-sidebar-collapse-toggle"
+            type="button"
+            aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-pressed={isSidebarCollapsed}
+            onClick={() => setIsSidebarCollapsed((collapsed) => !collapsed)}
+          >
+            <span aria-hidden="true" />
+          </button>
           <div className="student-sidebar-scroll">
-            <Link className="student-brand" href="/">
-              <span className="student-wordmark">Chandra</span>
-            </Link>
+            <section className="student-class-section" aria-label="Current class">
+              <h2 className="student-sidebar-title">Classes</h2>
+              <div className="student-sidebar-card student-current-class-card">
+                <button
+                  className="student-class-select-card"
+                  type="button"
+                  aria-expanded={isClassDropdownOpen}
+                  aria-haspopup="listbox"
+                  disabled={isTeacherPreview || isSwitchingClass}
+                  onClick={() => setIsClassDropdownOpen((isOpen) => !isOpen)}
+                >
+                  <h3>{className}</h3>
+                  {classSectionLabel ? <span>{classSectionLabel}</span> : null}
+                  <span className="student-class-compact-label" aria-hidden="true">
+                    {compactClassLabel}
+                  </span>
+                  <span className="student-class-chevron" aria-hidden="true" />
+                </button>
+                {isClassDropdownOpen && !isTeacherPreview ? (
+                  <div className="student-class-dropdown" role="listbox" aria-label="Student classes">
+                    {visibleStudentClasses.map((studentClass) => (
+                      <button
+                        aria-selected={studentClass.id === activeCourseId}
+                        className="student-class-option"
+                        disabled={isSwitchingClass}
+                        key={studentClass.id}
+                        role="option"
+                        type="button"
+                        onClick={() => void switchStudentClass(studentClass.id)}
+                      >
+                        <span>
+                          <strong>{studentClass.name}</strong>
+                          <small>{formatClassSectionLabel(studentClass.section, true) || "Class"}</small>
+                        </span>
+                        {studentClass.id === activeCourseId ? <mark>Active</mark> : null}
+                      </button>
+                    ))}
+                    {!visibleStudentClasses.length ? <p className="sidebar-note">No enrolled classes found.</p> : null}
+                  </div>
+                ) : null}
+                {isLoadingClass ? <p className="sidebar-note">Loading class.</p> : null}
+                {classLoadMessage ? <p className="form-error">{classLoadMessage}</p> : null}
+                {studentClassesError ? <p className="form-error">{studentClassesError}</p> : null}
+                {isTeacherPreview ? (
+                  <Link className="student-sidebar-action student-dashboard-link" href="/teacher" aria-label="Back to teacher dashboard">
+                    <svg className="student-dashboard-link-icon" aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M10.5 19 3.5 12l7-7" />
+                      <path d="M4 12h16" />
+                    </svg>
+                    <span className="student-dashboard-link-label">Back to dashboard</span>
+                  </Link>
+                ) : null}
 
-            <section className="student-sidebar-card student-current-class-card" aria-label="Current class">
-              <h2>
-                <span>{className}</span>
-                {classSectionLabel ? <span>{classSectionLabel}</span> : null}
-              </h2>
-              {isLoadingClass ? <p className="sidebar-note">Loading class.</p> : null}
-              {classLoadMessage ? <p className="form-error">{classLoadMessage}</p> : null}
-              {isTeacherPreview ? (
-                <Link className="student-sidebar-action" href="/teacher">
-                  Back to dashboard
-                </Link>
-              ) : null}
-
-              {profile?.role === "student" && !isTeacherPreview ? (
-                <div className="student-class-code-display" aria-label="Class code">
-                  <span>Class code</span>
-                  <strong>{visibleClassCode || "No class joined"}</strong>
-                </div>
-              ) : null}
-
-              <div className="student-theme-preferences" aria-label="Theme preferences">
-                <span className="field-label">Personal theme color</span>
-                <div className="settings-theme-swatches" role="radiogroup" aria-label="Personal theme color">
-                  {teacherClassThemeColorOptions.map((option) => (
-                    <label className="settings-theme-swatch" key={option.id}>
-                      <input
-                        checked={activeThemeColor === option.id}
-                        disabled={isSavingThemePreference}
-                        name="studentThemeColor"
-                        type="radio"
-                        value={option.id}
-                        onChange={() => updatePersonalThemePreference({ themeColor: option.id })}
-                      />
-                      <span>
-                        <span
-                          className="settings-theme-swatch-dot"
-                          style={{ backgroundColor: option.color }}
-                          aria-hidden="true"
-                        />
-                        {option.label}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-
-                <span className="field-label">Personal appearance</span>
-                <div className="settings-appearance-pills" role="radiogroup" aria-label="Personal appearance">
-                  {studentAppearanceOptions.map((appearance) => (
-                    <label className="settings-choice-pill" key={appearance}>
-                      <input
-                        checked={activeAppearance === appearance}
-                        disabled={isSavingThemePreference}
-                        name="studentAppearance"
-                        type="radio"
-                        value={appearance}
-                        onChange={() => updatePersonalThemePreference({ appearance })}
-                      />
-                      <span>{capitalizeLabel(appearance)}</span>
-                    </label>
-                  ))}
-                </div>
-                {themePreferenceError ? <p className="form-error">{themePreferenceError}</p> : null}
+                {profile?.role === "student" && !isTeacherPreview ? (
+                  <div className="student-class-code-display" aria-label="Class code">
+                    <span>Class code</span>
+                    <strong>{visibleClassCode || "No class joined"}</strong>
+                  </div>
+                ) : null}
               </div>
             </section>
 
             {profile?.role === "student" && !isTeacherPreview ? (
-              <section className="student-sidebar-card student-conversation-history" aria-label="Saved conversations">
+              <section className="student-conversation-history" aria-label="Saved conversations">
                 <div className="sidebar-section-heading">
                   <strong>Conversations</strong>
                   <button className="student-new-mini-button" type="button" onClick={startNewConversation}>
-                    New
+                    <span className="student-new-label">New</span>
+                    <svg className="student-new-icon" aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
                   </button>
                 </div>
                 {conversationLoadError ? <p className="form-error">{conversationLoadError}</p> : null}
@@ -473,18 +821,22 @@ function StudentWorkspace() {
                       className="student-conversation-row"
                       key={conversation.id}
                       type="button"
-                      onClick={() => {
-                        setSelectedConversationId(conversation.id);
-                        setSelectedConversationClassId(activeCourseId);
-                      }}
+                  onClick={() => {
+                    setStudentMainView("chat");
+                    clearComposerAttachments();
+                    setSelectedConversationId(conversation.id);
+                    setSelectedConversationClassId(activeCourseId);
+                  }}
                     >
                       <span className="student-conversation-icon" aria-hidden="true" />
                       <span className="student-conversation-copy">
                         <strong>{conversation.title}</strong>
                         <span>{formatConversationMeta(conversation)}</span>
                       </span>
-                      <span className="student-row-chevron" aria-hidden="true">
-                        ›
+                      <span className="student-row-menu" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
                       </span>
                     </button>
                   ))}
@@ -496,123 +848,213 @@ function StudentWorkspace() {
             ) : null}
           </div>
 
-          <section className="student-account-card" aria-label="Signed in account">
-            <span className="student-avatar" aria-hidden="true">
-              {getInitials(accountName, accountEmail)}
-            </span>
-            <span className="student-account-copy">
-              <strong>{accountName}</strong>
-              <span>{accountEmail}</span>
-            </span>
-            <button className="student-signout-button" type="button" onClick={handleSignOut}>
-              Sign out
-            </button>
-          </section>
+          <div className="student-sidebar-footer">
+            <section className="student-account-card" aria-label="Signed in account">
+              <span className="student-avatar" aria-hidden="true">
+                {getInitials(accountName, accountEmail)}
+              </span>
+              <span className="student-account-copy">
+                <strong>{accountName}</strong>
+                <span>{accountEmail}</span>
+              </span>
+              <button className="student-signout-button" type="button" onClick={handleSignOut}>
+                Sign out
+              </button>
+            </section>
+
+            <div className="student-brand-row" aria-label="Chandra">
+              <Link className="student-brand" href="/">
+                <span className="student-wordmark">Chandra</span>
+              </Link>
+              <span className="student-brand-divider" aria-hidden="true" />
+              <button
+                className="student-brand-mode-toggle"
+                disabled={isSavingThemePreference}
+                type="button"
+                aria-label={activeAppearance === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                onClick={() =>
+                  updatePersonalThemePreference({
+                    appearance: activeAppearance === "dark" ? "light" : "dark"
+                  })
+                }
+              >
+                <svg className="student-mode-icon" aria-hidden="true" viewBox="0 0 24 24">
+                  {activeAppearance === "dark" ? (
+                    <>
+                      <circle cx="12" cy="12" r="4" />
+                      <path d="M12 2.7v2.1M12 19.2v2.1M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2.7 12h2.1M19.2 12h2.1M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5" />
+                    </>
+                  ) : (
+                    <path d="M20.2 15.2A7.6 7.6 0 0 1 8.8 3.8 8.4 8.4 0 1 0 20.2 15.2Z" />
+                  )}
+                </svg>
+              </button>
+              <button
+                className="student-brand-settings-toggle"
+                type="button"
+                aria-label={studentMainView === "settings" ? "Back to chat" : "Open settings"}
+                aria-pressed={studentMainView === "settings"}
+                onClick={() => setStudentMainView((currentView) => (currentView === "settings" ? "chat" : "settings"))}
+              >
+                <svg className="student-mode-icon" aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M12 15.4a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8Z" />
+                  <path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.06.06a2.2 2.2 0 0 1-3.11 3.11l-.06-.06a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.09 1.65V21.5a2.2 2.2 0 0 1-4.4 0v-.09a1.8 1.8 0 0 0-1.08-1.65 1.8 1.8 0 0 0-2 .36l-.06.06a2.2 2.2 0 0 1-3.11-3.11l.06-.06a1.8 1.8 0 0 0 .36-2 1.8 1.8 0 0 0-1.65-1.09H1.5a2.2 2.2 0 0 1 0-4.4h.09a1.8 1.8 0 0 0 1.65-1.08 1.8 1.8 0 0 0-.36-2l-.06-.06a2.2 2.2 0 1 1 3.11-3.11l.06.06a1.8 1.8 0 0 0 2 .36H8a1.8 1.8 0 0 0 1.08-1.65V1.5a2.2 2.2 0 0 1 4.4 0v.09A1.8 1.8 0 0 0 14.56 3.2a1.8 1.8 0 0 0 2-.36l.06-.06a2.2 2.2 0 0 1 3.11 3.11l-.06.06a1.8 1.8 0 0 0-.36 2v.01a1.8 1.8 0 0 0 1.65 1.08h.09a2.2 2.2 0 0 1 0 4.4h-.09A1.8 1.8 0 0 0 19.4 15Z" />
+                </svg>
+              </button>
+            </div>
+            {themePreferenceError ? <p className="form-error">{themePreferenceError}</p> : null}
+          </div>
         </aside>
 
-        <section className="student-workspace-main" aria-label="Student tutor chat">
-          <header className="student-main-header">
-            <div>
-              <h1>
-                <span>{className}</span>
-                {classSectionLabel ? <span>{classSectionLabel}</span> : null}
-              </h1>
-            </div>
-            <div className="student-status-actions" aria-label="Workspace status">
-              <span className="student-status-pill">
-                <span className="student-user-icon" aria-hidden="true" />
-                Student
-              </span>
-              <span className="student-status-pill">
-                <span className="student-connected-dot" aria-hidden="true" />
-                Connected
-              </span>
-            </div>
-          </header>
-
-          {pinnedTeacherInstructions ? (
-            <section className="student-teacher-instructions" aria-label="Teacher instructions">
+        {studentMainView === "settings" ? (
+          <StudentSettingsPanel
+            accountEmail={accountEmail}
+            accountDisplayName={accountDisplayName ?? accountName}
+            accountSettingsError={accountSettingsError}
+            activeAppearance={activeAppearance}
+            activeClass={activeClass}
+            activeClassId={activeCourseId}
+            activeThemeColor={activeThemeColor}
+            classLoadMessage={classLoadMessage}
+            classes={visibleStudentClasses}
+            isSavingAccountSettings={isSavingAccountSettings}
+            isSavingThemePreference={isSavingThemePreference}
+            role={profile?.role ?? "student"}
+            themePreferenceError={themePreferenceError}
+            onAccountDisplayNameChange={setAccountDisplayName}
+            onSaveAccountSettings={saveAccountSettings}
+            onSignOut={handleSignOut}
+            onBackToChat={() => setStudentMainView("chat")}
+            onUpdateThemePreference={updatePersonalThemePreference}
+          />
+        ) : (
+          <section className="student-workspace-main" aria-label="Student tutor chat">
+            <header className="student-main-header">
               <div>
-                <strong className="student-instructions-heading">Teacher instructions</strong>
-                <p>{pinnedTeacherInstructions}</p>
+                <h1>
+                  <span>{className}</span>
+                  {classSectionLabel ? <span>{classSectionLabel}</span> : null}
+                </h1>
               </div>
-            </section>
-          ) : null}
+            </header>
 
-          {selectedConversation ? (
-            <section className="student-conversation-header" aria-label="Current conversation">
-              <div>
-                <h2>{conversationTitle}</h2>
-                <p>{formatMessageCount(conversationMessageCount)}</p>
-              </div>
-            </section>
-          ) : null}
+            {selectedConversation ? (
+              <section className="student-conversation-header" aria-label="Current conversation">
+                <div>
+                  <h2>{conversationTitle}</h2>
+                  <p>{formatMessageCount(conversationMessageCount)}</p>
+                </div>
+              </section>
+            ) : null}
 
-          {conversationMessagesError ? <p className="form-error chat-error">{conversationMessagesError}</p> : null}
-          <div className="message-list student-message-list">
-            {messages.map((message) => (
-              <article className={`student-workspace-message ${message.role === "student" ? "student" : "assistant"}`} key={message.id}>
-                {message.role === "student" ? (
-                  <div className="student-message-stack">
-                    <div className="message-meta">You</div>
-                    <div className="student-message-bubble">
-                      <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                        {normalizeMarkdownMath(message.content)}
-                      </ReactMarkdown>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <span className="chandra-message-avatar" aria-hidden="true">
-                      C
-                    </span>
-                    <div className="assistant-message-stack">
-                      <div className="message-meta">Chandra</div>
-                      {assistantMessageAnswerContent(message) ? (
-                        <div className="assistant-message-bubble">
-                          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                            {normalizeMarkdownMath(assistantMessageAnswerContent(message))}
-                          </ReactMarkdown>
-                        </div>
-                      ) : null}
-                      {assistantStructuredSections(message).map((section) => (
-                        <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
-                          <strong>{section.label}</strong>
-                          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                            {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(section.content, section.kind))}
-                          </ReactMarkdown>
-                        </div>
-                      ))}
-                      {message.sources?.length ? (
-                        <div className="message-sources" aria-label="Sources used">
-                          <strong>Sources:</strong>
-                          {condensedSourceLabels(message.sources).map((label, index) => (
-                            <span key={`${label}-${index}`}>{label}</span>
-                          ))}
-                        </div>
+            {conversationMessagesError ? <p className="form-error chat-error">{conversationMessagesError}</p> : null}
+            <div className="message-list student-message-list">
+              {messages.map((message) => (
+                <article className={`student-workspace-message ${message.role === "student" ? "student" : "assistant"}`} key={message.id}>
+                  {message.role === "student" ? (
+                    <div className="student-message-stack">
+                      <div className="message-meta">You</div>
+                      <div className="student-message-bubble">
+                        <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                          {normalizeMarkdownMath(message.content)}
+                        </ReactMarkdown>
+                      </div>
+                      {message.attachments?.length ? (
+                        <MessageAttachmentList attachments={message.attachments} />
                       ) : null}
                     </div>
-                  </>
-                )}
-              </article>
-            ))}
-            {isSending && chatProgress ? <ChatProgressMessage progress={chatProgress} /> : null}
-          </div>
+                  ) : (
+                    <>
+                      <span className="chandra-message-avatar" aria-hidden="true">
+                        C
+                      </span>
+                      <div className="assistant-message-stack">
+                        <div className="message-meta">Chandra</div>
+                        {assistantMessageAnswerContent(message) ? (
+                          <div className="assistant-message-bubble">
+                            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                              {normalizeMarkdownMath(assistantMessageAnswerContent(message))}
+                            </ReactMarkdown>
+                          </div>
+                        ) : null}
+                        {assistantStructuredSections(message).map((section) => (
+                          <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
+                            <strong>{section.label}</strong>
+                            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                              {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(section.content, section.kind))}
+                            </ReactMarkdown>
+                          </div>
+                        ))}
+                        {message.sources?.length ? (
+                          <div className="message-sources" aria-label="Sources used">
+                            <strong>Sources:</strong>
+                            {condensedSourceLabels(message.sources).map((label, index) => (
+                              <span key={`${label}-${index}`}>{label}</span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
+                </article>
+              ))}
+              {isSending && chatProgress ? <ChatProgressMessage progress={chatProgress} /> : null}
+            </div>
 
-          <form className="composer student-composer" onSubmit={sendMessage}>
-            <textarea
-              aria-label="Message Chandra"
-              ref={draftTextareaRef}
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder={activeCourseId ? "Ask about a problem, step, or equation..." : "Join a class to start chatting."}
-              rows={1}
-            />
-            <button className="student-send-button" type="submit" disabled={isSending || !draft.trim() || !activeCourseId}>
-              {isSending ? "Sending" : "Send"}
-            </button>
-          </form>
-        </section>
+            <form
+              className={`composer student-composer${isDraggingAttachment ? " is-dragging" : ""}`}
+              onDragLeave={() => setIsDraggingAttachment(false)}
+              onDragOver={handleAttachmentDragOver}
+              onDrop={(event) => void handleAttachmentDrop(event)}
+              onSubmit={sendMessage}
+            >
+              {composerAttachments.length || attachmentError ? (
+                <div className="student-composer-attachments" aria-live="polite">
+                  {composerAttachments.map((attachment) => (
+                    <ComposerAttachmentPreview
+                      attachment={attachment}
+                      key={attachment.id}
+                      onRemove={() => void removeComposerAttachment(attachment)}
+                    />
+                  ))}
+                  {attachmentError ? <p className="form-error student-attachment-error">{attachmentError}</p> : null}
+                </div>
+              ) : null}
+              <input
+                ref={attachmentInputRef}
+                accept={allowedComposerAttachmentAccept}
+                className="student-attachment-input"
+                multiple
+                type="file"
+                onChange={(event) => void handleAttachmentSelection(event)}
+              />
+              <button
+                className="student-composer-add"
+                type="button"
+                aria-label="Attach homework file"
+                disabled={isSending || isUploadingAttachment || composerAttachments.length >= maxComposerAttachments || !activeCourseId}
+                onClick={() => attachmentInputRef.current?.click()}
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="m8.5 12.8 5.8-5.8a3.4 3.4 0 0 1 4.8 4.8l-7.4 7.4a5 5 0 0 1-7.1-7.1l7.7-7.7" />
+                  <path d="m9.6 15 7.1-7.1" />
+                </svg>
+              </button>
+              <textarea
+                aria-label="Message Chandra"
+                ref={draftTextareaRef}
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={handleComposerKeyDown}
+                placeholder={activeCourseId ? "Ask about a problem, step, or equation..." : "Join a class to start chatting."}
+                rows={1}
+              />
+              <button className="student-send-button" type="submit" disabled={!canSendMessage}>
+                {isSending ? "Sending" : isUploadingAttachment ? "Uploading" : "Send"}
+              </button>
+            </form>
+          </section>
+        )}
       </section>
     </RequireAuth>
   );
@@ -627,6 +1069,313 @@ function resizeStudentComposerTextarea(textarea: HTMLTextAreaElement | null) {
   const nextHeight = Math.min(textarea.scrollHeight, studentComposerTextareaMaxHeight);
   textarea.style.height = `${nextHeight}px`;
   textarea.style.overflowY = textarea.scrollHeight > studentComposerTextareaMaxHeight ? "auto" : "hidden";
+}
+
+function StudentSettingsPanel({
+  accountEmail,
+  accountDisplayName,
+  accountSettingsError,
+  activeAppearance,
+  activeClass,
+  activeClassId,
+  activeThemeColor,
+  classLoadMessage,
+  classes,
+  isSavingAccountSettings,
+  isSavingThemePreference,
+  role,
+  themePreferenceError,
+  onAccountDisplayNameChange,
+  onSaveAccountSettings,
+  onSignOut,
+  onBackToChat,
+  onUpdateThemePreference
+}: {
+  accountEmail: string;
+  accountDisplayName: string;
+  accountSettingsError: string;
+  activeAppearance: TeacherClassAppearance;
+  activeClass: StudentVisibleClass | null;
+  activeClassId: string;
+  activeThemeColor: TeacherClassThemeColor;
+  classLoadMessage: string;
+  classes: StudentClassSummary[];
+  isSavingAccountSettings: boolean;
+  isSavingThemePreference: boolean;
+  role: string;
+  themePreferenceError: string;
+  onAccountDisplayNameChange: (displayName: string) => void;
+  onSaveAccountSettings: () => Promise<void>;
+  onSignOut: () => Promise<void>;
+  onBackToChat: () => void;
+  onUpdateThemePreference: (nextPreference: {
+    appearance?: unknown;
+    themeColor?: unknown;
+  }) => Promise<void>;
+}) {
+  return (
+    <section className="student-workspace-main student-settings-main" aria-label="Student settings">
+      <header className="student-settings-heading">
+        <h1>Settings</h1>
+        <p>Manage your account, appearance, and class memberships.</p>
+        <div className="student-settings-heading-actions">
+          <button className="student-settings-back-button" type="button" onClick={onBackToChat}>
+            Back to chat
+          </button>
+          <button
+            className="student-settings-save-button"
+            disabled={isSavingAccountSettings || isSavingThemePreference}
+            type="button"
+            onClick={() => void onSaveAccountSettings()}
+          >
+            {isSavingAccountSettings ? "Saving" : "Save changes"}
+          </button>
+        </div>
+      </header>
+
+      <div className="student-settings-stack">
+        <section className="student-settings-card student-account-settings-card" aria-labelledby="student-account-settings">
+          <div className="student-settings-card-heading">
+            <h2 id="student-account-settings">Account</h2>
+            <p>Update your student profile information.</p>
+          </div>
+          <div className="student-account-field-list">
+            <div>
+              <label className="student-settings-control-label" htmlFor="student-account-name">
+                Name
+              </label>
+              <input
+                id="student-account-name"
+                maxLength={80}
+                value={accountDisplayName}
+                onChange={(event) => onAccountDisplayNameChange(event.target.value)}
+              />
+            </div>
+          </div>
+          <dl className="student-settings-data-list">
+            <div>
+              <dt>Email</dt>
+              <dd>{accountEmail || "No email on file"}</dd>
+            </div>
+            <div>
+              <dt>Role</dt>
+              <dd>{capitalizeLabel(role)}</dd>
+            </div>
+          </dl>
+          {accountSettingsError ? <p className="form-error">{accountSettingsError}</p> : null}
+        </section>
+
+        <section className="student-settings-card student-credentials-card" aria-labelledby="student-email-password-settings">
+          <div className="student-settings-card-heading">
+            <h2 id="student-email-password-settings">Email &amp; Password</h2>
+          </div>
+          <div className="student-credentials-grid">
+            <dl className="student-settings-data-list">
+              <div>
+                <dt>Email address</dt>
+                <dd>{accountEmail || "No email on file"}</dd>
+              </div>
+              <div>
+                <dt>Password</dt>
+                <dd aria-label="Password hidden">**********</dd>
+              </div>
+            </dl>
+            <div className="student-settings-action-stack">
+              <button className="student-settings-secondary-button" disabled type="button">
+                Change email
+              </button>
+              <button className="student-settings-secondary-button" disabled type="button">
+                Change password
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className="student-settings-card" aria-labelledby="student-theme-settings">
+          <div className="student-settings-card-heading">
+            <h2 id="student-theme-settings">Theme</h2>
+            <p>Choose how Chandra looks for you.</p>
+          </div>
+          <div className="student-settings-control-row">
+            <span className="student-settings-control-label">Appearance</span>
+            <div className="student-settings-pill-group" role="radiogroup" aria-label="Appearance">
+              {(["light", "dark"] as const).map((appearance) => (
+                <button
+                  aria-pressed={activeAppearance === appearance}
+                  className="student-settings-pill"
+                  disabled={isSavingThemePreference}
+                  key={appearance}
+                  type="button"
+                  onClick={() => void onUpdateThemePreference({ appearance })}
+                >
+                  <StudentSettingsAppearanceIcon appearance={appearance} />
+                  <span>{capitalizeLabel(appearance)}</span>
+                </button>
+              ))}
+              <button className="student-settings-pill" disabled type="button" aria-pressed={false}>
+                <StudentSettingsSystemIcon />
+                <span>System</span>
+              </button>
+            </div>
+          </div>
+          <div className="student-settings-control-row">
+            <span className="student-settings-control-label">Accent color</span>
+            <div className="student-settings-pill-group wide" role="radiogroup" aria-label="Accent color">
+              {teacherClassThemeColorOptions.map((option) => (
+                <button
+                  aria-pressed={activeThemeColor === option.id}
+                  className="student-settings-pill"
+                  disabled={isSavingThemePreference}
+                  key={option.id}
+                  type="button"
+                  onClick={() => void onUpdateThemePreference({ themeColor: option.id })}
+                >
+                  <span className="student-settings-color-dot" style={{ backgroundColor: option.color }} aria-hidden="true" />
+                  <span>{option.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          {themePreferenceError ? <p className="form-error">{themePreferenceError}</p> : null}
+        </section>
+
+        <section className="student-settings-card" aria-labelledby="student-class-membership-settings">
+          <div className="student-settings-card-heading">
+            <h2 id="student-class-membership-settings">Class Memberships</h2>
+            <p>Manage the classes you are enrolled in.</p>
+          </div>
+          <div className="student-membership-list">
+            {classes.length ? (
+              classes.map((studentClass) => (
+                <div className="student-membership-row" key={studentClass.id}>
+                  <strong>{studentClass.name}</strong>
+                  <span>{formatClassSectionLabel(studentClass.section, true) || "Section"}</span>
+                  {studentClass.id === activeClassId ? <mark>Active</mark> : <span />}
+                  <span className="student-row-menu" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </span>
+                </div>
+              ))
+            ) : activeClass ? (
+              <div className="student-membership-row" key={activeClass.id}>
+                <strong>{activeClass.name}</strong>
+                <span>{formatClassSectionLabel(activeClass.section, true) || "Section"}</span>
+                <mark>Active</mark>
+                <span className="student-row-menu" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+              </div>
+            ) : (
+              <p className="sidebar-note">{classLoadMessage || "No active class membership."}</p>
+            )}
+          </div>
+        </section>
+
+        <section className="student-settings-card student-session-card" aria-labelledby="student-session-settings">
+          <div className="student-settings-card-heading">
+            <h2 id="student-session-settings">Session</h2>
+            <p>Sign out of your account on this device.</p>
+          </div>
+          <button className="student-settings-danger-button" type="button" onClick={() => void onSignOut()}>
+            Sign out
+          </button>
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function StudentSettingsAppearanceIcon({ appearance }: { appearance: TeacherClassAppearance }) {
+  if (appearance === "dark") {
+    return (
+      <svg className="student-settings-pill-icon" aria-hidden="true" viewBox="0 0 24 24">
+        <path d="M20.2 15.2A7.6 7.6 0 0 1 8.8 3.8 8.4 8.4 0 1 0 20.2 15.2Z" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg className="student-settings-pill-icon" aria-hidden="true" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2.7v2.1M12 19.2v2.1M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2.7 12h2.1M19.2 12h2.1M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5" />
+    </svg>
+  );
+}
+
+function StudentSettingsSystemIcon() {
+  return (
+    <svg className="student-settings-pill-icon" aria-hidden="true" viewBox="0 0 24 24">
+      <path d="M5 5.5h14v10H5z" />
+      <path d="M9 19h6M12 15.5V19" />
+    </svg>
+  );
+}
+
+function ComposerAttachmentPreview({
+  attachment,
+  onRemove
+}: {
+  attachment: ComposerAttachment;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="student-attachment-preview" data-status={attachment.uploadStatus}>
+      <AttachmentVisual attachment={attachment} />
+      <span className="student-attachment-copy">
+        <strong>{attachment.fileName}</strong>
+        <span>{formatAttachmentMeta(attachment)}</span>
+        {attachment.uploadStatus === "uploading" ? (
+          <span className="student-attachment-progress" aria-label={`Upload ${attachment.progress}% complete`}>
+            <span style={{ width: `${attachment.progress}%` }} />
+          </span>
+        ) : null}
+        {attachment.error ? <small>{attachment.error}</small> : null}
+      </span>
+      <button className="student-attachment-remove" type="button" aria-label={`Remove ${attachment.fileName}`} onClick={onRemove}>
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M6 6l12 12M18 6 6 18" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+function MessageAttachmentList({ attachments }: { attachments: Array<MessageAttachment & { localUrl?: string }> }) {
+  return (
+    <div className="student-message-attachments" aria-label="Message attachments">
+      {attachments.map((attachment) => (
+        <div className="student-message-attachment" key={attachment.id}>
+          <AttachmentVisual attachment={attachment} />
+          <span>
+            <strong>{attachment.fileName}</strong>
+            <small>{formatAttachmentMeta(attachment)}</small>
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AttachmentVisual({ attachment }: { attachment: Partial<ComposerAttachment> & Pick<MessageAttachment, "fileType" | "fileName"> }) {
+  if (attachment.fileType === "image" && attachment.localUrl) {
+    return (
+      <span
+        className="student-attachment-thumbnail"
+        style={{ backgroundImage: `url(${attachment.localUrl})` }}
+        aria-hidden="true"
+      />
+    );
+  }
+
+  return (
+    <span className="student-attachment-file-icon" data-file-type={attachment.fileType} aria-hidden="true">
+      {attachment.fileType === "pdf" ? "PDF" : "IMG"}
+    </span>
+  );
 }
 
 function ChatProgressMessage({ progress }: { progress: ChatProgress }) {
@@ -757,12 +1506,216 @@ async function fetchStudentConversationMessages({
   return data.messages ?? [];
 }
 
+async function createStudentConversationForAttachment({
+  classId,
+  token
+}: {
+  classId: string;
+  token: string;
+}) {
+  const response = await fetch(apiUrl("/api/student/conversations"), {
+    body: JSON.stringify({
+      courseId: classId,
+      title: "New conversation"
+    }),
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    method: "POST"
+  });
+  const data = (await response.json()) as { conversation?: StudentConversationSummary; error?: string };
+
+  if (!response.ok || !data.conversation) {
+    throw new Error(data.error ?? "Conversation failed to start.");
+  }
+
+  return data.conversation;
+}
+
+function uploadHomeworkAttachmentWithProgress({
+  classId,
+  conversationId,
+  file,
+  onProgress,
+  token
+}: {
+  classId: string;
+  conversationId: string;
+  file: File;
+  onProgress: (progress: number) => void;
+  token: string;
+}) {
+  return new Promise<MessageAttachment>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    const formData = new FormData();
+    formData.append("file", file);
+
+    request.open(
+      "POST",
+      apiUrl(
+        `/api/student/conversations/${encodeURIComponent(conversationId)}/attachments?courseId=${encodeURIComponent(
+          classId
+        )}`
+      )
+    );
+    request.setRequestHeader("Authorization", `Bearer ${token}`);
+    request.responseType = "json";
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        return;
+      }
+
+      onProgress(Math.min(99, Math.round((event.loaded / Math.max(event.total, 1)) * 100)));
+    };
+    request.onerror = () => reject(new Error("Network error while uploading homework file."));
+    request.onabort = () => reject(new Error("Homework file upload was canceled."));
+    request.onload = () => {
+      const data = request.response as { attachment?: MessageAttachment; error?: string } | null;
+
+      if (request.status < 200 || request.status >= 300 || !data?.attachment) {
+        reject(new Error(data?.error ?? "Homework file upload failed."));
+        return;
+      }
+
+      resolve(data.attachment);
+    };
+    request.send(formData);
+  });
+}
+
+async function deleteHomeworkAttachment({
+  attachmentId,
+  classId,
+  conversationId,
+  token
+}: {
+  attachmentId: string;
+  classId: string;
+  conversationId: string;
+  token: string;
+}) {
+  const response = await fetch(
+    apiUrl(
+      `/api/student/conversations/${encodeURIComponent(conversationId)}/attachments/${encodeURIComponent(
+        attachmentId
+      )}?courseId=${encodeURIComponent(classId)}`
+    ),
+    {
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      method: "DELETE"
+    }
+  );
+  const data = (await response.json()) as { error?: string };
+
+  if (!response.ok) {
+    throw new Error(data.error ?? "Attachment could not be removed.");
+  }
+}
+
+async function fetchStudentClasses(token: string) {
+  const response = await fetch(apiUrl("/api/student/classes"), {
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+  const data = (await response.json()) as { classes?: StudentClassSummary[]; error?: string };
+
+  if (!response.ok) {
+    throw new Error(data.error ?? "Classes failed to load.");
+  }
+
+  return data.classes ?? [];
+}
+
+function mergeStudentClasses(classes: StudentClassSummary[], activeClass: StudentVisibleClass | null) {
+  const classMap = new Map<string, StudentClassSummary>();
+
+  for (const studentClass of classes) {
+    classMap.set(studentClass.id, studentClass);
+  }
+
+  if (activeClass) {
+    classMap.set(activeClass.id, {
+      id: activeClass.id,
+      joinCode: activeClass.joinCode,
+      name: activeClass.name,
+      section: activeClass.section
+    });
+  }
+
+  return Array.from(classMap.values()).sort((firstClass, secondClass) =>
+    [firstClass.name, firstClass.section].join(" ").localeCompare([secondClass.name, secondClass.section].join(" "))
+  );
+}
+
+function describeStudentClassesError(caughtError: unknown) {
+  return caughtError instanceof Error ? caughtError.message : "Classes failed to load.";
+}
+
 function describeStudentConversationLoadError(caughtError: unknown) {
   return caughtError instanceof Error ? caughtError.message : "Saved conversations failed to load.";
 }
 
 function describeStudentConversationMessageError(caughtError: unknown) {
   return caughtError instanceof Error ? caughtError.message : "Conversation messages failed to load.";
+}
+
+function validateComposerAttachmentFile(file: File) {
+  const extension = fileExtension(file.name);
+
+  if (!allowedComposerAttachmentExtensions.includes(extension)) {
+    return "Only text-readable PDF homework files are supported.";
+  }
+
+  if (file.size > maxComposerPdfBytes) {
+    return `PDFs must be ${Math.floor(maxComposerPdfBytes / 1024 / 1024)} MB or smaller.`;
+  }
+
+  const expectedContentType = contentTypeFromFileName(file.name);
+
+  if (file.type && file.type !== expectedContentType) {
+    return "That file type does not match the selected homework file.";
+  }
+
+  return "";
+}
+
+function contentTypeFromFileName(fileName: string) {
+  const extension = fileExtension(fileName);
+
+  if (extension === ".pdf") {
+    return "application/pdf";
+  }
+
+  return "";
+}
+
+function fileExtension(fileName: string) {
+  return fileName.toLowerCase().match(/\.[a-z0-9]+$/)?.[0] ?? "";
+}
+
+function formatAttachmentMeta(attachment: Pick<MessageAttachment, "fileSize" | "fileType" | "pageCount" | "uploadStatus">) {
+  return [
+    attachment.fileType === "pdf" ? "PDF" : "Image",
+    formatFileSize(attachment.fileSize),
+    attachment.pageCount ? `${attachment.pageCount} page${attachment.pageCount === 1 ? "" : "s"}` : "",
+    attachment.uploadStatus === "uploading" ? "Uploading" : attachment.uploadStatus === "failed" ? "Failed" : ""
+  ].filter(Boolean).join(" / ");
+}
+
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "Unknown size";
+  }
+
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  return `${Math.ceil(bytes / 1024)} KB`;
 }
 
 function appendProgressSearches(
@@ -942,8 +1895,11 @@ function formatConversationMeta(conversation: StudentConversationSummary) {
   ].filter(Boolean).join(" / ");
 }
 
-function capitalizeLabel(value: string) {
-  return value.charAt(0).toUpperCase() + value.slice(1);
+function formatCompactClassLabel(className: string) {
+  const trimmedName = className.trim();
+  const firstLetter = trimmedName.match(/[A-Za-z]/)?.[0]?.toUpperCase() ?? "C";
+  const trailingNumber = trimmedName.match(/\d{1,3}/)?.[0] ?? "";
+  return `${firstLetter}${trailingNumber}`.slice(0, 4);
 }
 
 function formatMessageCount(count: number) {
@@ -958,10 +1914,19 @@ function formatClassSectionLabel(classSection: string, hasClass: boolean) {
   return `Section ${classSection}`;
 }
 
-function formatPinnedTeacherInstructions(defaultAssignmentContext?: string) {
-  const customInstructions = defaultAssignmentContext?.replace(/\s+/g, " ").trim();
+function buildInitialStudentMessages(teacherClass: StudentVisibleClass | null): ChatMessage[] {
+  return [
+    {
+      id: welcomeMessageId,
+      role: "assistant",
+      content: normalizeOpeningMessage(teacherClass?.openingMessage, teacherClass ?? undefined),
+      createdAt: new Date().toISOString()
+    }
+  ];
+}
 
-  return customInstructions || "Show your work. Do not use decimals unless asked.";
+function isOnlyWelcomeMessage(messages: ChatMessage[]) {
+  return messages.length === 1 && messages[0]?.id === welcomeMessageId && messages[0]?.role === "assistant";
 }
 
 function getInitials(name: string, email: string) {
@@ -972,6 +1937,10 @@ function getInitials(name: string, email: string) {
     .filter(Boolean);
 
   return (parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : source.slice(0, 2)).toUpperCase();
+}
+
+function capitalizeLabel(value: string) {
+  return value ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : "";
 }
 
 function formatConversationDate(value: unknown) {

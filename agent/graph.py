@@ -731,6 +731,8 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
                 "If they answer the student, give a source-backed reply with enough detail for the requested response length. "
                 "Source-backed help does not override the attempt-first rule: if the student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, use the selected pages to orient yourself, then first ask what they have tried or where they are stuck. "
                 "In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example. "
+                "Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task. "
+                "Concept explanations and similar examples are not exceptions for completing the exact assigned task. For proof or derivation tasks, a similar example must use a different claim or different numbers so it does not prove the assigned statement. "
                 "A follow-up like 'I still need help', 'yes', 'tell me more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution. "
                 "For the student's exact task, do not reveal a full solution, final answer, final artifact, final expression, final code, thesis, outline, or a chain of multiple intermediate steps before the student has shown work. If one small scaffold is allowed, stop there and ask the student to do the next piece. "
                 "If they are insufficient or mismatched, call search_pdf_pages again with a genuinely new, sharper query. "
@@ -765,6 +767,7 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
                 "Use optional labels only when they match the student's intent: `Hint:` for stuck/start requests, "
                 "`Why this works:` for concept/why requests, `Formula:` for formula requests, `Example:` only for similar examples, "
                 "and `Check your work:` only when the student shows work. "
+                "Never use `Example:` to provide homework-ready wording, a proof paragraph, or a student-submittable response for the exact assigned task. "
                 "Do not write `Answer:`, `Question:`, `Next step:`, `Your next step:`, `Source:`, or `Sources:`. "
                 "For simple greetings or check-ins, reply naturally in one short chat message and ask what course problem or concept the student wants to work on; do not frame it as a next-step tutoring move. "
                 "Usually use no more than two optional labeled sections, then end with one direct question. "
@@ -838,6 +841,7 @@ def final_direct_answer_instruction(answer_policy: dict[str, bool]) -> str:
         return (
             "If the student asks for the answer, final answer, or says to just give the answer, "
             "say you cannot give the final answer and do not continue completing their exact task in that reply. "
+            "If the student asks for homework-ready wording, a proof paragraph, a complete response they can submit, or an `example of what I can say` for the exact task, treat it as a direct-answer request. "
             "For direct-answer requests, offer to walk through a similar textbook/readings/example task or check their attempted step instead."
         )
 
@@ -870,7 +874,7 @@ def final_citation_instruction(source_usage: dict[str, bool]) -> str:
 
 def final_example_boundary_instruction(answer_policy: dict[str, bool]) -> str:
     if answer_policy["refuseAnswerOnlyRequests"]:
-        return "Use textbook examples to teach a similar pattern; do not finish the student's exact task after refusing a direct answer request."
+        return "Use textbook examples to teach a similar pattern; do not finish the student's exact task after refusing a direct answer request. For proof or derivation tasks, a similar example must use a different claim or different numbers so it does not prove the assigned statement."
 
     return "Use textbook examples to teach patterns, and avoid completing graded work wholesale."
 

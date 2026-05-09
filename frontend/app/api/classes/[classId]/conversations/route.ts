@@ -10,11 +10,17 @@ export async function GET(request: Request, { params }: { params: Promise<{ clas
     await authorizeClassTeacher(request, classId);
 
     const conversations = await listTeacherClassConversations({ classId });
+    const openConversations = conversations.filter((conversation) =>
+      ["new", "needs_follow_up", "misunderstanding_spotted", "ai_answer_needs_review"].includes(conversation.reviewStatus)
+    );
     const metrics = {
-      lowConfidence: conversations.filter((conversation) => conversation.sourceAudit.lowSourceConfidence).length,
-      needsFollowUp: conversations.filter((conversation) => conversation.reviewStatus === "needs_follow_up").length,
+      lowConfidence: openConversations.filter((conversation) => conversation.sourceAudit.lowSourceConfidence).length,
+      needsFollowUp: openConversations.filter(
+        (conversation) =>
+          conversation.reviewStatus === "needs_follow_up" || conversation.reviewStatus === "misunderstanding_spotted"
+      ).length,
       total: conversations.length,
-      unreviewed: conversations.filter((conversation) => conversation.reviewStatus === "new").length
+      unreviewed: openConversations.filter((conversation) => conversation.reviewStatus === "new").length
     };
 
     return NextResponse.json({ conversations, metrics });

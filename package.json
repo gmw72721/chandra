@@ -3,13 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "description": "Teacher-guided AI learning platform for classrooms.",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "next dev frontend",
     "dev:all": "node scripts/start-dev.mjs",
     "dev:web": "next dev frontend",
     "dev:api": "python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 8000",
     "setup:run": "node scripts/setup-and-run.mjs",
-    "build": "next build frontend && node scripts/prepare-apphosting-next-output.mjs",
+    "build": "npm run build:web && node scripts/prepare-apphosting-next-output.mjs",
+    "build:web": "next build frontend",
+    "build:fast": "NEXT_IGNORE_TYPECHECK=1 next build frontend",
     "start": "next start frontend",
     "eval:retrieval:live": "node --env-file=.env.local --experimental-strip-types scripts/live-retrieval-eval.mjs",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
@@ -39,7 +44,6 @@
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.2.4",
-    "firebase-tools": "^15.16.0",
     "typescript": "^5.5.3"
   }
 }

@@ -13,8 +13,7 @@ import {
   getDoc,
   onSnapshot,
   serverTimestamp,
-  setDoc,
-  updateDoc
+  setDoc
 } from "firebase/firestore";
 import { normalizeClassCode } from "./class-code";
 import {
@@ -34,6 +33,7 @@ export type UserProfile = {
   role: AccountRole;
   appearance?: TeacherClassAppearance;
   classId?: string;
+  classIds?: string[];
   themeColor?: TeacherClassThemeColor;
   createdAt?: unknown;
 };
@@ -75,18 +75,28 @@ export async function signUpWithRole({
   email,
   password,
   role,
-  classId
+  classId,
+  teacherInviteToken
 }: {
   displayName: string;
   email: string;
   password: string;
   role: AccountRole;
   classId?: string;
+  teacherInviteToken?: string;
 }) {
   assertFirebaseReady();
 
   const credential = await createUserWithEmailAndPassword(auth!, email, password);
   await updateProfile(credential.user, { displayName });
+
+  if (role === "teacher") {
+    return createTeacherProfile({
+      displayName,
+      teacherInviteToken,
+      user: credential.user
+    });
+  }
 
   const profile: UserProfile = {
     uid: credential.user.uid,
@@ -96,22 +106,26 @@ export async function signUpWithRole({
     createdAt: serverTimestamp()
   };
 
-  const cleanClassId =
-    role === "student"
-      ? await joinStudentClass({
-          classCode: classId ?? "",
-          displayName,
-          email,
-          syncProfile: false,
-          user: credential.user
-        })
-      : "";
+  await setDoc(doc(db!, "users", credential.user.uid), profile);
 
-  if (role === "student" && cleanClassId) {
-    profile.classId = cleanClassId;
+  if (role === "student" && classId?.trim()) {
+    const cleanClassId = await joinStudentClass({
+      classCode: classId,
+      displayName,
+      email,
+      syncProfile: true,
+      user: credential.user
+    });
+
+    if (cleanClassId) {
+      return {
+        ...profile,
+        classId: cleanClassId,
+        classIds: [cleanClassId]
+      };
+    }
   }
 
-  await setDoc(doc(db!, "users", credential.user.uid), profile);
   return profile;
 }
 
@@ -119,17 +133,27 @@ export async function createRoleProfile({
   displayName,
   role,
   user,
-  classId
+  classId,
+  teacherInviteToken
 }: {
   displayName: string;
   role: AccountRole;
   user: User;
   classId?: string;
+  teacherInviteToken?: string;
 }) {
   assertFirebaseReady();
 
   const cleanDisplayName = displayName.trim() || user.displayName || user.email || "Chandra user";
   await updateProfile(user, { displayName: cleanDisplayName });
+
+  if (role === "teacher") {
+    return createTeacherProfile({
+      displayName: cleanDisplayName,
+      teacherInviteToken,
+      user
+    });
+  }
 
   const profile: UserProfile = {
     uid: user.uid,
@@ -139,22 +163,26 @@ export async function createRoleProfile({
     createdAt: serverTimestamp()
   };
 
-  const cleanClassId =
-    role === "student"
-      ? await joinStudentClass({
-          classCode: classId ?? "",
-          displayName: cleanDisplayName,
-          email: user.email ?? "",
-          syncProfile: false,
-          user
-        })
-      : "";
+  await setDoc(doc(db!, "users", user.uid), profile);
 
-  if (role === "student" && cleanClassId) {
-    profile.classId = cleanClassId;
+  if (role === "student" && classId?.trim()) {
+    const cleanClassId = await joinStudentClass({
+      classCode: classId,
+      displayName: cleanDisplayName,
+      email: user.email ?? "",
+      syncProfile: true,
+      user
+    });
+
+    if (cleanClassId) {
+      return {
+        ...profile,
+        classId: cleanClassId,
+        classIds: [cleanClassId]
+      };
+    }
   }
 
-  await setDoc(doc(db!, "users", user.uid), profile);
   return profile;
 }
 
@@ -238,16 +266,54 @@ export async function updateUserThemePreference({
   themeColor: TeacherClassThemeColor;
   uid: string;
 }) {
+  return updateUserAccountSettings({
+    appearance,
+    themeColor,
+    uid
+  });
+}
+
+export async function updateUserAccountSettings({
+  appearance,
+  displayName,
+  themeColor,
+  uid
+}: {
+  appearance?: TeacherClassAppearance;
+  displayName?: string;
+  themeColor?: TeacherClassThemeColor;
+  uid: string;
+}) {
   assertFirebaseReady();
 
   if (auth!.currentUser?.uid !== uid) {
-    throw new Error("Sign in before changing your theme.");
+    throw new Error("Sign in before changing account settings.");
   }
 
-  await updateDoc(doc(db!, "users", uid), {
-    appearance: normalizeTeacherClassAppearance(appearance),
-    themeColor: normalizeTeacherClassThemeColor(themeColor)
+  const token = await auth!.currentUser.getIdToken();
+  const response = await fetch("/api/account/settings", {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      ...(appearance ? { appearance: normalizeTeacherClassAppearance(appearance) } : {}),
+      ...(typeof displayName === "string" ? { displayName } : {}),
+      ...(themeColor ? { themeColor: normalizeTeacherClassThemeColor(themeColor) } : {})
+    })
   });
+  const data = (await response.json()) as { profile?: UserProfile; error?: string };
+
+  if (!response.ok || !data.profile) {
+    throw new Error(data.error ?? "Account settings failed.");
+  }
+
+  if (typeof displayName === "string") {
+    await updateProfile(auth!.currentUser, { displayName: data.profile.displayName });
+  }
+
+  return data.profile;
 }
 
 function assertFirebaseReady() {
@@ -335,4 +401,34 @@ async function joinStudentClass({
   }
 
   return data.classId ?? "";
+}
+
+async function createTeacherProfile({
+  displayName,
+  teacherInviteToken,
+  user
+}: {
+  displayName: string;
+  teacherInviteToken?: string;
+  user: User;
+}) {
+  const token = await user.getIdToken();
+  const response = await fetch("/api/teacher-signup", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      displayName,
+      inviteToken: teacherInviteToken ?? ""
+    })
+  });
+  const data = (await response.json()) as { profile?: UserProfile; error?: string };
+
+  if (!response.ok || !data.profile) {
+    throw new Error(data.error ?? "Teacher signup failed.");
+  }
+
+  return data.profile;
 }
