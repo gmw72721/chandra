@@ -219,3 +219,19 @@ test("account settings route updates profile fields server-side for students and
   assert.match(source, /where\("teacherId", "==", uid\)/);
   assert.match(source, /collectionGroup\("students"\)/);
 });
+
+test("browser-requested app icons are served instead of logging 404s", () => {
+  const faviconRoute = readFileSync(join(repoRoot, "frontend/app/favicon.ico/route.ts"), "utf8");
+  const appleIconRoute = readFileSync(join(repoRoot, "frontend/app/apple-touch-icon.png/route.ts"), "utf8");
+  const applePrecomposedIconRoute = readFileSync(
+    join(repoRoot, "frontend/app/apple-touch-icon-precomposed.png/route.ts"),
+    "utf8"
+  );
+  const iconResponseSource = readFileSync(join(repoRoot, "frontend/lib/icon-response.ts"), "utf8");
+
+  assert.match(faviconRoute, /createIconResponse/);
+  assert.match(appleIconRoute, /createIconResponse/);
+  assert.match(applePrecomposedIconRoute, /createIconResponse/);
+  assert.match(iconResponseSource, /Content-Type": "image\/svg\+xml/);
+  assert.match(iconResponseSource, /Cache-Control": "public, max-age=31536000, immutable"/);
+});
