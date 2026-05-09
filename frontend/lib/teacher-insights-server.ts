@@ -7,10 +7,12 @@ import type {
   TeacherClassInsightsContent,
   TeacherClassInsightsDocument,
   TeacherInsightEvidenceChip,
+  TeacherInsightEvidenceStrength,
   TeacherInsightEvidenceLink,
   TeacherInsightFeedbackAction,
   TeacherInsightMisconceptionStatus,
   TeacherInsightMisconceptionTimelineItem,
+  TeacherInsightQualityLevel,
   TeacherInsightRange,
   TeacherInsightRecommendation,
   TeacherInsightRecommendationAction,
@@ -26,6 +28,7 @@ const maxTranscriptTextLength = 1200;
 const maxSummaryTitleLength = 120;
 const maxSummaryBodyLength = 900;
 const maxShortTextLength = 180;
+const maxQualityTextLength = 280;
 const maxEvidenceChips = 8;
 const maxTrends = 6;
 const maxMisconceptions = 8;
@@ -37,6 +40,8 @@ const maxTeacherNoteLength = 800;
 const unsafeInsightLabels =
   /\b(lazy|weak|anxious|disabled|unmotivated|slow|low[-\s]?ability|adhd|autistic|depressed|traumatized|race|religion|gender|sexuality|citizenship|immigration|diagnosis)\b/i;
 const insightRanges = new Set<TeacherInsightRange>(["today", "yesterday", "7d", "30d"]);
+const insightQualityLevels = new Set<TeacherInsightQualityLevel>(["low", "medium", "high"]);
+const evidenceStrengths = new Set<TeacherInsightEvidenceStrength>(["early_signal", "moderate", "strong"]);
 const trendDirections = new Set<TeacherInsightTrendDirection>(["up", "down", "new", "recurring"]);
 const misconceptionStatuses = new Set<TeacherInsightMisconceptionStatus>([
   "active",
@@ -317,7 +322,12 @@ export function buildTeacherInsightsSystemPrompt() {
     "Use prior teacher feedback to avoid repeating dismissed or not-useful items, preserve useful items when still supported, and treat resolved items as resolved unless new evidence contradicts that.",
     "Use student display names or initials only when needed for evidence chips. Avoid unnecessary email or identity details.",
     "Cite evidence with conversationId and messageId when available. Flag low source confidence through trends, recommendations, or evidence links when supported.",
-    "Return this JSON shape exactly: dailySummary { title, body, evidence }, trends [{ id, label, change, direction, evidenceConversationIds, sparkline }], misconceptionTimeline [{ id, misconception, firstAppeared, seenInConversations, status, evidenceConversationIds }], recommendations [{ id, priority, title, evidenceCount, action, evidenceConversationIds }], evidenceLinks [{ id, topic, conversationCount, studentInitials, lastSeenAt, conversationIds }].",
+    "For each insight, reason and write in this order: Pattern \u2192 Evidence \u2192 Root cause \u2192 Confidence \u2192 Impact \u2192 Next action \u2192 Tutor adjustment \u2192 Teacher feedback.",
+    "Every dailySummary, trend, misconceptionTimeline item, recommendation, evidenceLink, and dailySummary.evidence chip must include quality fields: confidence, impact, severity, evidenceStrength, rootCause, whyItMatters, nextTeacherMove, tutorAdjustment, affectedStudentCount, relevantMessageCount.",
+    "dailySummary.body must be useful to a teacher in the dashboard: combine the observed student pattern with one concrete next teaching move. Avoid bodies that only restate a problem such as 'students need more scaffolding' without saying what to do next.",
+    "Use confidence/impact/severity values low, medium, or high. Use evidenceStrength values early_signal, moderate, or strong.",
+    "One conversation or one represented student is an early_signal, not a class trend. Do not use increasing, rising, or trend language unless evidence spans multiple time buckets.",
+    "Return this JSON shape exactly: dailySummary { title, body, evidence [{ id, label, conversationId, messageId, confidence, impact, severity, evidenceStrength, rootCause, whyItMatters, nextTeacherMove, tutorAdjustment, affectedStudentCount, relevantMessageCount }], confidence, impact, severity, evidenceStrength, rootCause, whyItMatters, nextTeacherMove, tutorAdjustment, affectedStudentCount, relevantMessageCount }, trends [{ id, label, change, direction, evidenceConversationIds, sparkline, confidence, impact, severity, evidenceStrength, rootCause, whyItMatters, nextTeacherMove, tutorAdjustment, affectedStudentCount, relevantMessageCount }], misconceptionTimeline [{ id, misconception, firstAppeared, seenInConversations, status, evidenceConversationIds, confidence, impact, severity, evidenceStrength, rootCause, whyItMatters, nextTeacherMove, tutorAdjustment, affectedStudentCount, relevantMessageCount }], recommendations [{ id, priority, title, evidenceCount, action, evidenceConversationIds, confidence, impact, severity, evidenceStrength, rootCause, whyItMatters, nextTeacherMove, tutorAdjustment, affectedStudentCount, relevantMessageCount }], evidenceLinks [{ id, topic, conversationCount, studentInitials, lastSeenAt, conversationIds, confidence, impact, severity, evidenceStrength, rootCause, whyItMatters, nextTeacherMove, tutorAdjustment, affectedStudentCount, relevantMessageCount }].",
     "Allowed direction values: up, down, new, recurring. Allowed misconception status values: active, improving, emerging, resolved. Allowed priorities: high, medium, low. Allowed recommendation actions: inspect, upload, adjust, approve.",
     "Keep all text concise, avoid overfitting to one conversation, and output JSON only."
   ].join("\n");
@@ -474,40 +484,40 @@ export async function buildTeacherInsightsModelInput({
     .filter((conversationDoc) => isInTeacherInsightRange(conversationDoc.data().lastMessageAt, range))
     .sort((first, second) => timestampMillis(second.data().lastMessageAt) - timestampMillis(first.data().lastMessageAt))
     .slice(0, insightModelMaxConversations);
-  const conversations: TeacherInsightsConversationForModel[] = [];
+  const conversations = (await Promise.all(
+    conversationDocs.map(async (conversationDoc): Promise<TeacherInsightsConversationForModel | null> => {
+      const conversation = conversationDoc.data() ?? {};
+      const messages = await listTeacherConversationMessages({ classId, conversationId: conversationDoc.id });
+      const filteredMessages = messages
+        .filter((message) => message.role === "student" || message.role === "assistant")
+        .filter((message) => isInTeacherInsightRange(message.createdAt, range))
+        .slice(-insightModelMaxMessagesPerConversation);
 
-  for (const conversationDoc of conversationDocs) {
-    const conversation = conversationDoc.data() ?? {};
-    const messages = await listTeacherConversationMessages({ classId, conversationId: conversationDoc.id });
-    const filteredMessages = messages
-      .filter((message) => message.role === "student" || message.role === "assistant")
-      .filter((message) => isInTeacherInsightRange(message.createdAt, range))
-      .slice(-insightModelMaxMessagesPerConversation);
+      if (!filteredMessages.length) {
+        return null;
+      }
 
-    if (!filteredMessages.length) {
-      continue;
-    }
-
-    conversations.push({
-      createdAt: String(serializeFirestoreValue(conversation.createdAt) ?? ""),
-      id: conversationDoc.id,
-      lastMessageAt: String(serializeFirestoreValue(conversation.lastMessageAt) ?? ""),
-      messageCount: Number(conversation.messageCount ?? filteredMessages.length),
-      messages: filteredMessages.map((message) => ({
-        content: sanitizeTranscriptText(message.content),
-        createdAt: message.createdAt,
-        id: message.id,
-        retrievalConfidence: message.role === "assistant" ? message.retrievalConfidence : undefined,
-        role: message.role as "student" | "assistant",
-        selectedPages: message.role === "assistant" ? message.langGraphTrace?.selectedPages : undefined,
-        sources: message.role === "assistant" ? sanitizeTutorSources(message.sources) : undefined
-      })),
-      studentId: String(conversation.studentId ?? ""),
-      studentInitials: initialsForName(String(conversation.studentName ?? "Student")),
-      studentName: sanitizeInsightText(conversation.studentName, 80) || "Student",
-      title: sanitizeInsightText(conversation.title, 120) || "Conversation"
-    });
-  }
+      return {
+        createdAt: String(serializeFirestoreValue(conversation.createdAt) ?? ""),
+        id: conversationDoc.id,
+        lastMessageAt: String(serializeFirestoreValue(conversation.lastMessageAt) ?? ""),
+        messageCount: Number(conversation.messageCount ?? filteredMessages.length),
+        messages: filteredMessages.map((message) => ({
+          content: sanitizeTranscriptText(message.content),
+          createdAt: message.createdAt,
+          id: message.id,
+          retrievalConfidence: message.role === "assistant" ? message.retrievalConfidence : undefined,
+          role: message.role as "student" | "assistant",
+          selectedPages: message.role === "assistant" ? message.langGraphTrace?.selectedPages : undefined,
+          sources: message.role === "assistant" ? sanitizeTutorSources(message.sources) : undefined
+        })),
+        studentId: String(conversation.studentId ?? ""),
+        studentInitials: initialsForName(String(conversation.studentName ?? "Student")),
+        studentName: sanitizeInsightText(conversation.studentName, 80) || "Student",
+        title: sanitizeInsightText(conversation.title, 120) || "Conversation"
+      };
+    })
+  )).filter((conversation): conversation is TeacherInsightsConversationForModel => conversation !== null);
 
   return {
     classId,
@@ -610,18 +620,64 @@ function normalizeDailySummary(value: unknown) {
   const evidence = Array.isArray(source.evidence)
     ? source.evidence.slice(0, maxEvidenceChips).map(normalizeEvidenceChip).filter((chip) => chip.label)
     : [];
+  const quality = normalizeInsightQualityFields(source);
+  const title = sanitizeInsightText(source.title, maxSummaryTitleLength) || "Class insight summary";
 
   return {
-    body: sanitizeInsightText(source.body, maxSummaryBodyLength),
+    ...quality,
+    body: helpfulDailySummaryBody({
+      body: sanitizeInsightText(source.body, maxSummaryBodyLength),
+      nextTeacherMove: quality.nextTeacherMove,
+      title,
+      whyItMatters: quality.whyItMatters
+    }),
     evidence,
-    title: sanitizeInsightText(source.title, maxSummaryTitleLength) || "Class insight summary"
+    title
   };
+}
+
+function helpfulDailySummaryBody({
+  body,
+  nextTeacherMove,
+  title,
+  whyItMatters
+}: {
+  body: string;
+  nextTeacherMove: string;
+  title: string;
+  whyItMatters: string;
+}) {
+  const observation = body || whyItMatters || "Recent student conversations show a teaching pattern worth checking.";
+
+  if (containsTeacherAction(observation)) {
+    return observation;
+  }
+
+  const move = nextTeacherMove || defaultDailySummaryTeacherMove(`${title} ${observation}`);
+  return sanitizeInsightText(`${stripTrailingSentencePunctuation(observation)}; suggested move: ${stripTrailingSentencePunctuation(move)}.`, maxSummaryBodyLength);
+}
+
+function containsTeacherAction(text: string) {
+  return /\b(suggested move|next teacher move|try|use|start|ask|review|reteach|model|show|give|group|check|plan|upload|open|have students)\b/i.test(text);
+}
+
+function defaultDailySummaryTeacherMove(context: string) {
+  if (/\b(limit[-\s]?point|proof|prove|theorem|definition)\b/i.test(context)) {
+    return "start with a proof frame that names the definition, writes the first line together, and leaves one justification blank for students to complete";
+  }
+
+  return "open one evidence conversation, name the exact sticking point, and plan a five-minute warm-up or check-in before the next assignment step";
+}
+
+function stripTrailingSentencePunctuation(text: string) {
+  return text.trim().replace(/[.!?]+$/g, "");
 }
 
 function normalizeEvidenceChip(value: unknown): TeacherInsightEvidenceChip {
   const source = isRecord(value) ? value : {};
 
   return {
+    ...normalizeInsightQualityFields(source),
     conversationId: sanitizeInsightId(source.conversationId, 120),
     id: sanitizeInsightId(source.id, 80) || stableInsightId("evidence", source.label),
     label: sanitizeInsightText(source.label, maxShortTextLength),
@@ -636,6 +692,7 @@ function normalizeTrend(value: unknown): TeacherInsightTrend {
     : "recurring";
 
   return {
+    ...normalizeInsightQualityFields(source),
     change: sanitizeInsightText(source.change, maxShortTextLength),
     direction,
     evidenceConversationIds: sanitizeIdArray(source.evidenceConversationIds, maxConversationIds),
@@ -652,6 +709,7 @@ function normalizeMisconceptionTimelineItem(value: unknown): TeacherInsightMisco
     : "active";
 
   return {
+    ...normalizeInsightQualityFields(source),
     evidenceConversationIds: sanitizeIdArray(source.evidenceConversationIds, maxConversationIds),
     firstAppeared: sanitizeInsightText(source.firstAppeared, 80),
     id: sanitizeInsightId(source.id, 80) || stableInsightId("misconception", source.misconception),
@@ -671,6 +729,7 @@ function normalizeRecommendation(value: unknown): TeacherInsightRecommendation {
     : "inspect";
 
   return {
+    ...normalizeInsightQualityFields(source, { impact: priority, severity: priority }),
     action,
     evidenceConversationIds: sanitizeIdArray(source.evidenceConversationIds, maxConversationIds),
     evidenceCount: clampNonNegativeInteger(source.evidenceCount, 999),
@@ -684,6 +743,7 @@ function normalizeEvidenceLink(value: unknown): TeacherInsightEvidenceLink {
   const source = isRecord(value) ? value : {};
 
   return {
+    ...normalizeInsightQualityFields(source),
     conversationCount: clampNonNegativeInteger(source.conversationCount, 999),
     conversationIds: sanitizeIdArray(source.conversationIds, maxConversationIds),
     id: sanitizeInsightId(source.id, 80) || stableInsightId("link", source.topic),
@@ -696,6 +756,162 @@ function normalizeEvidenceLink(value: unknown): TeacherInsightEvidenceLink {
       : [],
     topic: sanitizeInsightText(source.topic, maxShortTextLength)
   };
+}
+
+function normalizeInsightQualityFields(
+  value: unknown,
+  fallback: { confidence?: TeacherInsightQualityLevel; impact?: TeacherInsightQualityLevel; severity?: TeacherInsightQualityLevel } = {}
+) {
+  const source = isRecord(value) ? value : {};
+  const evidenceConversationCount = inferSourceEvidenceConversationCount(source);
+  const affectedStudentCount = inferSourceAffectedStudentCount(source);
+  const relevantMessageCount = clampNonNegativeInteger(source.relevantMessageCount, 999);
+  const impact = normalizeQualityLevel(source.impact, fallback.impact ?? "medium");
+  const severity = normalizeQualityLevel(source.severity, fallback.severity ?? impact);
+  const evidenceStrength = capEvidenceStrengthForSupport(
+    normalizeEvidenceStrength(source.evidenceStrength, inferEvidenceStrength({
+      affectedStudentCount,
+      conversationCount: evidenceConversationCount,
+      relevantMessageCount
+    })),
+    evidenceConversationCount,
+    affectedStudentCount
+  );
+
+  return {
+    affectedStudentCount,
+    confidence: capInsightConfidenceForEvidence(
+      normalizeQualityLevel(source.confidence, fallback.confidence ?? "medium"),
+      evidenceConversationCount
+    ),
+    evidenceStrength,
+    impact,
+    nextTeacherMove: sanitizeInsightText(source.nextTeacherMove, maxQualityTextLength),
+    relevantMessageCount,
+    rootCause: sanitizeInsightText(source.rootCause, maxQualityTextLength),
+    severity,
+    tutorAdjustment: sanitizeInsightText(source.tutorAdjustment, maxQualityTextLength),
+    whyItMatters: sanitizeInsightText(source.whyItMatters, maxQualityTextLength)
+  };
+}
+
+function buildDeterministicInsightQuality(
+  source: unknown,
+  citedConversations: TeacherInsightsConversationForModel[],
+  explicitRelevantMessageCount?: number
+) {
+  const base = normalizeInsightQualityFields(source);
+  const conversationCount = citedConversations.length;
+  const affectedStudentCount = countAffectedStudents(citedConversations);
+  const relevantMessageCount =
+    explicitRelevantMessageCount ?? (conversationCount ? countRelevantMessages(citedConversations) : base.relevantMessageCount);
+  const evidenceStrength = inferEvidenceStrength({
+    affectedStudentCount,
+    conversationCount,
+    relevantMessageCount
+  });
+
+  return {
+    ...base,
+    affectedStudentCount,
+    confidence: capInsightConfidenceForEvidence(base.confidence, conversationCount),
+    evidenceStrength,
+    relevantMessageCount
+  };
+}
+
+function normalizeQualityLevel(value: unknown, fallback: TeacherInsightQualityLevel): TeacherInsightQualityLevel {
+  return insightQualityLevels.has(value as TeacherInsightQualityLevel) ? (value as TeacherInsightQualityLevel) : fallback;
+}
+
+function normalizeEvidenceStrength(
+  value: unknown,
+  fallback: TeacherInsightEvidenceStrength
+): TeacherInsightEvidenceStrength {
+  return evidenceStrengths.has(value as TeacherInsightEvidenceStrength)
+    ? (value as TeacherInsightEvidenceStrength)
+    : fallback;
+}
+
+function capInsightConfidenceForEvidence(
+  confidence: TeacherInsightQualityLevel,
+  evidenceConversationCount: number
+): TeacherInsightQualityLevel {
+  if (evidenceConversationCount <= 0) {
+    return "low";
+  }
+
+  if (evidenceConversationCount === 1 && confidence === "high") {
+    return "medium";
+  }
+
+  return confidence;
+}
+
+function capEvidenceStrengthForSupport(
+  evidenceStrength: TeacherInsightEvidenceStrength,
+  evidenceConversationCount: number,
+  affectedStudentCount: number
+): TeacherInsightEvidenceStrength {
+  if (evidenceConversationCount <= 1 || affectedStudentCount === 1) {
+    return "early_signal";
+  }
+
+  return evidenceStrength;
+}
+
+function inferEvidenceStrength({
+  affectedStudentCount,
+  conversationCount,
+  relevantMessageCount
+}: {
+  affectedStudentCount: number;
+  conversationCount: number;
+  relevantMessageCount: number;
+}): TeacherInsightEvidenceStrength {
+  if (conversationCount <= 1 || affectedStudentCount === 1 || relevantMessageCount === 1) {
+    return "early_signal";
+  }
+
+  if (conversationCount >= 4 && affectedStudentCount >= 3 && relevantMessageCount >= 8) {
+    return "strong";
+  }
+
+  return "moderate";
+}
+
+function inferSourceEvidenceConversationCount(source: Record<string, unknown>) {
+  const idArrays = [source.evidenceConversationIds, source.conversationIds].filter(Array.isArray) as unknown[][];
+  const arrayCount = idArrays.length
+    ? Math.max(...idArrays.map((ids) => sanitizeIdArray(ids, maxConversationIds).length))
+    : 0;
+  return Math.max(
+    arrayCount,
+    clampNonNegativeInteger(source.evidenceCount, 999),
+    clampNonNegativeInteger(source.conversationCount, 999),
+    clampNonNegativeInteger(source.seenInConversations, 999),
+    sanitizeInsightId(source.conversationId, 120) ? 1 : 0
+  );
+}
+
+function inferSourceAffectedStudentCount(source: Record<string, unknown>) {
+  const explicitCount = clampNonNegativeInteger(source.affectedStudentCount, 999);
+
+  if (explicitCount) {
+    return explicitCount;
+  }
+
+  return Array.isArray(source.studentInitials)
+    ? source.studentInitials.map((initials) => sanitizeInsightText(initials, 8)).filter(Boolean).length
+    : 0;
+}
+
+function countAffectedStudents(conversations: TeacherInsightsConversationForModel[]) {
+  return new Set(conversations.map((conversation) => conversation.studentId || conversation.studentInitials)).size;
+}
+
+function countRelevantMessages(conversations: TeacherInsightsConversationForModel[]) {
+  return conversations.reduce((sum, conversation) => sum + conversation.messages.length, 0);
 }
 
 function applyDeterministicInsightStats(
@@ -713,15 +929,23 @@ function applyDeterministicInsightStats(
     });
   const trends = insight.trends.map((trend) => {
     const citedConversations = resolveEvidence(trend.evidenceConversationIds, `${trend.label} ${trend.change}`);
+    const quality = buildDeterministicInsightQuality(trend, citedConversations);
 
     if (!citedConversations.length) {
-      return trend;
+      return {
+        ...trend,
+        ...quality,
+        change: normalizeTrendChangeLanguage(trend.change, 0, trend.sparkline),
+        direction: trend.direction === "up" ? "recurring" : trend.direction
+      };
     }
 
     const sparkline = bucketConversationCounts(citedConversations, range);
 
     return {
       ...trend,
+      ...quality,
+      change: normalizeTrendChangeLanguage(trend.change, citedConversations.length, sparkline),
       direction: inferTrendDirection(sparkline),
       evidenceConversationIds: citedConversations.map((conversation) => conversation.id),
       sparkline
@@ -739,6 +963,7 @@ function applyDeterministicInsightStats(
 
       return {
         ...item,
+        ...buildDeterministicInsightQuality(item, citedConversations),
         evidenceConversationIds: citedConversations.map((conversation) => conversation.id),
         firstAppeared: firstConversationSeenAt(citedConversations),
         seenInConversations: citedConversations.length,
@@ -757,6 +982,7 @@ function applyDeterministicInsightStats(
 
       return {
         ...recommendation,
+        ...buildDeterministicInsightQuality(recommendation, citedConversations),
         evidenceConversationIds: citedConversations.map((conversation) => conversation.id),
         evidenceCount: citedConversations.length
       };
@@ -772,6 +998,7 @@ function applyDeterministicInsightStats(
 
       return {
         ...evidenceLink,
+        ...buildDeterministicInsightQuality(evidenceLink, citedConversations),
         conversationCount: citedConversations.length,
         conversationIds: citedConversations.map((conversation) => conversation.id),
         lastSeenAt: lastConversationSeenAt(citedConversations),
@@ -782,11 +1009,25 @@ function applyDeterministicInsightStats(
     })
     .filter((evidenceLink): evidenceLink is TeacherInsightEvidenceLink => Boolean(evidenceLink))
     .sort(sortEvidenceLinks);
+  const dailySummaryEvidence = insight.dailySummary.evidence.length
+    ? insight.dailySummary.evidence
+    : buildSummaryEvidenceChips({ evidenceLinks, recommendations, trends }, conversationById);
+  const groundedDailySummaryEvidence = dailySummaryEvidence.map((chip) => {
+    const citedConversations = resolveEvidence(chip.conversationId ? [chip.conversationId] : [], chip.label);
+
+    return {
+      ...chip,
+      ...buildDeterministicInsightQuality(chip, citedConversations, chip.messageId ? 1 : undefined)
+    };
+  });
+  const dailySummaryConversations = resolveEvidence(
+    groundedDailySummaryEvidence.map((chip) => chip.conversationId),
+    `${insight.dailySummary.title} ${insight.dailySummary.body}`
+  );
   const dailySummary = {
     ...insight.dailySummary,
-    evidence: insight.dailySummary.evidence.length
-      ? insight.dailySummary.evidence
-      : buildSummaryEvidenceChips({ evidenceLinks, recommendations, trends }, conversationById)
+    ...buildDeterministicInsightQuality(insight.dailySummary, dailySummaryConversations),
+    evidence: groundedDailySummaryEvidence
   };
 
   return {
@@ -990,6 +1231,7 @@ function buildSummaryEvidenceChips(
 
     seenIds.add(conversation.id);
     chips.push({
+      ...buildDeterministicInsightQuality({}, [conversation]),
       conversationId: conversation.id,
       id: `summary-${conversation.id}`,
       label: `${conversation.studentInitials} · ${conversation.title}`
@@ -1035,7 +1277,7 @@ function inferTrendDirection(sparkline: number[]): TeacherInsightTrendDirection 
     return "new";
   }
 
-  if (later > earlier) {
+  if (later > earlier && hasMultipleEvidenceBuckets(sparkline)) {
     return "up";
   }
 
@@ -1044,6 +1286,29 @@ function inferTrendDirection(sparkline: number[]): TeacherInsightTrendDirection 
   }
 
   return "recurring";
+}
+
+function normalizeTrendChangeLanguage(text: string, evidenceConversationCount: number, sparkline: number[]) {
+  const sanitized = sanitizeInsightText(text, maxShortTextLength);
+
+  if (evidenceConversationCount > 1 && hasMultipleEvidenceBuckets(sparkline)) {
+    return sanitized;
+  }
+
+  const earlySignalText = sanitized.replace(
+    /\b(increasing|increased|increases|increase|rising|rose|growing|grew|accelerating|trending up|upward trend)\b/gi,
+    "appearing"
+  );
+
+  if (!earlySignalText) {
+    return "Early signal";
+  }
+
+  return /^early signal\b/i.test(earlySignalText) ? earlySignalText : `Early signal: ${earlySignalText}`;
+}
+
+function hasMultipleEvidenceBuckets(sparkline: number[]) {
+  return sparkline.filter((value) => value > 0).length > 1;
 }
 
 function sanitizeTutorSources(value: unknown) {

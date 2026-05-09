@@ -137,7 +137,7 @@ export function buildDefaultClassTutorSettings({ name, section }: ClassTutorDefa
   if (/\b(biology|chemistry|physics|science|anatomy|environmental)\b/.test(lowerName)) {
     return {
       openingMessage: `Hi. I can help with ${classLabel} concepts, data, and practice problems. What question are you working on?`,
-      studentFacingInstructions: "Show your setup, include units, and explain what concept or step is confusing."
+      studentFacingInstructions: ""
     };
   }
 

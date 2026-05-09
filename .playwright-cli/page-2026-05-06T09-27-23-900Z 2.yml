@@ -1,7 +1,0 @@
-- generic [active] [ref=e1]:
-  - main [ref=e2]:
-    - generic [ref=e3]:
-      - paragraph [ref=e4]: Loading
-      - heading "Checking your account." [level=1] [ref=e5]
-  - button "Open Next.js Dev Tools" [ref=e11] [cursor=pointer]:
-    - img [ref=e12]

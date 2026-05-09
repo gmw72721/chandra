@@ -12,6 +12,7 @@ import type {
   RetrievalConfidence,
   StudentConversationSummary,
   StudentRosterActivitySummary,
+  TeacherConversationLearningSignalSummary,
   TeacherConversationReview,
   TeacherConversationReviewSummary,
   TeacherConversationSourceAuditSummary,
@@ -291,6 +292,7 @@ export async function listTeacherClassConversations({
         latestRetrievalConfidence: sourceAudit.latestRetrievalConfidence,
         messageCount: Number(conversation.messageCount ?? 0),
         modelId: String(conversation.modelId ?? ""),
+        learningSignals: sourceAudit.learningSignals,
         review,
         reviewStatus: review.status,
         sourceAudit,
@@ -348,6 +350,7 @@ export async function getConversationSourceAudit({
   let latestRetrievalConfidence: RetrievalConfidence | undefined;
   let hasLowRetrievalConfidence = false;
   let hasClassMaterialQuestion = false;
+  const learningSignals = emptyConversationLearningSignals();
 
   messagesSnapshot.docs.forEach((messageDoc) => {
     const message = messageDoc.data();
@@ -362,14 +365,59 @@ export async function getConversationSourceAudit({
     }
 
     hasAssistantMessage = true;
+    learningSignals.assistantMessageCount += 1;
     const retrievalConfidence = normalizeRetrievalConfidence(message.retrievalConfidence);
 
     if (retrievalConfidence) {
       latestRetrievalConfidence = retrievalConfidence;
       hasLowRetrievalConfidence = hasLowRetrievalConfidence || retrievalConfidence === "low";
+      if (retrievalConfidence === "low") {
+        learningSignals.lowConfidenceMessageCount += 1;
+      }
     }
 
-    for (const source of normalizeTutorSources(message.sources)) {
+    const assistantSources = normalizeTutorSources(message.sources);
+
+    if (hasClassMaterialQuestion && !assistantSources.length) {
+      learningSignals.noSourceAssistantMessageCount += 1;
+    }
+
+    const structuredOutput = normalizeStructuredTutorOutput(message.structuredOutput, String(message.content ?? ""));
+    const metadata = structuredOutput?.metadata;
+
+    if (metadata) {
+      learningSignals.latestHintLevel = metadata.hintLevel;
+      learningSignals.latestMode = metadata.mode;
+      learningSignals.latestStudentActionNeeded = metadata.studentActionNeeded;
+
+      if (metadata.studentActionNeeded === "ask_teacher") {
+        learningSignals.askTeacherCount += 1;
+      } else if (metadata.studentActionNeeded === "paste_problem") {
+        learningSignals.pasteProblemCount += 1;
+      } else if (metadata.studentActionNeeded === "review_source") {
+        learningSignals.reviewSourceCount += 1;
+      } else if (metadata.studentActionNeeded === "show_attempt") {
+        learningSignals.showAttemptCount += 1;
+      }
+
+      if (metadata.hintLevel === "guided_step") {
+        learningSignals.guidedStepCount += 1;
+      } else if (metadata.hintLevel === "worked_example") {
+        learningSignals.workedExampleCount += 1;
+      }
+    }
+
+    const telemetry = normalizeLearningStrategyTelemetry(message.learningStrategyTelemetry);
+
+    if (telemetry?.observedOutcome === "student_still_stuck") {
+      learningSignals.stuckOutcomeCount += 1;
+    } else if (telemetry?.observedOutcome === "student_progressed") {
+      learningSignals.progressedOutcomeCount += 1;
+    } else if (telemetry?.observedOutcome === "student_disengaged") {
+      learningSignals.disengagedOutcomeCount += 1;
+    }
+
+    for (const source of assistantSources) {
       sourcesByKey.set(sourceKey(source), source);
     }
   });
@@ -380,10 +428,28 @@ export async function getConversationSourceAudit({
 
   return {
     latestRetrievalConfidence,
+    learningSignals,
     lowSourceConfidence: hasLowRetrievalConfidence || noSourceUsedWarning,
     noSourceUsedWarning,
     sourceCount: sources.length,
     sources
+  };
+}
+
+function emptyConversationLearningSignals(): TeacherConversationLearningSignalSummary {
+  return {
+    assistantMessageCount: 0,
+    lowConfidenceMessageCount: 0,
+    noSourceAssistantMessageCount: 0,
+    askTeacherCount: 0,
+    pasteProblemCount: 0,
+    reviewSourceCount: 0,
+    showAttemptCount: 0,
+    guidedStepCount: 0,
+    workedExampleCount: 0,
+    stuckOutcomeCount: 0,
+    progressedOutcomeCount: 0,
+    disengagedOutcomeCount: 0
   };
 }
 

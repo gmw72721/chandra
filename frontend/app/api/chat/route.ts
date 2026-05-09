@@ -16,6 +16,7 @@ import {
 } from "@/lib/learning-strategy-telemetry";
 import { defaultOpenRouterModelId } from "@/lib/model-options";
 import { buildTutorSystemPrompt, getTeacherClassTutorConfig, toProviderMessages } from "@/lib/prompts";
+import { maxStudentAttachmentsPerMessage } from "@/lib/student-attachments-server";
 import { getActiveStudentLearningProfileTutorContext } from "@/lib/student-learning-profiles-server";
 import {
   ConversationPersistenceError,
@@ -40,6 +41,7 @@ const STUDENT_TUTOR_RESPONSE_FAILED_MESSAGE =
 const maxChatMessagesPerRequest = 40;
 const maxChatMessageCharacters = 12000;
 const maxChatRequestCharacters = 60000;
+const maxAttachmentContextCharacters = 4000;
 
 const safeDocumentIdSchema = z
   .string()
@@ -48,6 +50,7 @@ const safeDocumentIdSchema = z
   .refine((value) => !value.includes("/"));
 
 const chatRequestSchema = z.object({
+  attachmentIds: z.array(safeDocumentIdSchema).max(maxStudentAttachmentsPerMessage()).optional(),
   conversationId: safeDocumentIdSchema.optional(),
   courseId: z.string().optional(),
   modelId: z.string().optional(),
@@ -135,7 +138,17 @@ const chatRequestSchema = z.object({
 
 export async function POST(request: Request) {
   try {
-    const parsed = chatRequestSchema.safeParse(await request.json());
+    const requestBody = await readJsonRequest(request);
+
+    if (!requestBody.ok) {
+      const chatError = reportStudentChatError({
+        caughtError: requestBody.caughtError,
+        code: "CHAT_REQUEST_INVALID"
+      });
+      return NextResponse.json(studentChatErrorPayload(chatError), { status: 400 });
+    }
+
+    const parsed = chatRequestSchema.safeParse(requestBody.value);
 
     if (!parsed.success) {
       const chatError = reportStudentChatError({
@@ -210,6 +223,14 @@ export async function POST(request: Request) {
 
 type ParsedChatRequest = z.infer<typeof chatRequestSchema>;
 
+async function readJsonRequest(request: Request) {
+  try {
+    return { ok: true as const, value: (await request.json()) as unknown };
+  } catch (caughtError) {
+    return { caughtError, ok: false as const };
+  }
+}
+
 async function buildBackendChatRequest(request: Request, data: ParsedChatRequest) {
   const scope = await authorizeTutorChatRequest(request, data.courseId);
   const courseId = scope.classId;
@@ -255,11 +276,16 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
   ].join("\n\n");
 
   const persistence = await prepareStudentConversationPersistenceForTutor({
+    attachmentIds: data.attachmentIds ?? [],
     conversationId: data.conversationId,
     messages,
     modelId: model,
     scope
   });
+  const providerMessages = toProviderMessages(
+    systemPrompt,
+    appendAttachmentContextToStudentMessage(messages, persistence)
+  );
 
   return {
     backendRequest: {
@@ -273,7 +299,7 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
       answerPolicy: teacherClass?.answerPolicy,
       sourceUsage: teacherClass?.sourceUsage,
       studentLearningProfileContext: privateBackendLearningProfileContext(studentLearningProfileContext),
-      messages: toProviderMessages(systemPrompt, messages)
+      messages: providerMessages
     },
     learningProfileTelemetryContext: studentLearningProfileContext,
     persistence,
@@ -318,11 +344,13 @@ async function getStudentLearningProfileContextForTutor(input: { classId: string
 }
 
 async function prepareStudentConversationPersistenceForTutor({
+  attachmentIds,
   conversationId,
   messages,
   modelId,
   scope
 }: {
+  attachmentIds: string[];
   conversationId?: string;
   messages: ChatMessage[];
   modelId: string;
@@ -330,6 +358,7 @@ async function prepareStudentConversationPersistenceForTutor({
 }) {
   try {
     return await prepareStudentConversationPersistence({
+      attachmentIds,
       conversationId,
       messages,
       modelId,
@@ -348,6 +377,65 @@ async function prepareStudentConversationPersistenceForTutor({
     }));
     return null;
   }
+}
+
+function appendAttachmentContextToStudentMessage(
+  messages: ChatMessage[],
+  persistence: StudentConversationPersistence | null
+) {
+  if (!persistence?.attachments.length) {
+    return messages;
+  }
+
+  return messages.map((message) => {
+    if (message.id !== persistence.studentMessage.id || message.role !== "student") {
+      return message;
+    }
+
+    return {
+      ...message,
+      attachments: persistence.attachments,
+      content: [
+        message.content,
+        buildAttachmentTutorContext(persistence.attachments)
+      ].filter(Boolean).join("\n\n")
+    };
+  });
+}
+
+function buildAttachmentTutorContext(attachments: StudentConversationPersistence["attachments"]) {
+  const lines = [
+    "Student uploaded homework attachments for this message:",
+    ...attachments.map((attachment, index) => {
+      const details = [
+        `${index + 1}. ${attachment.fileName}`,
+        `${attachment.fileType.toUpperCase()}`,
+        formatAttachmentSize(attachment.fileSize),
+        attachment.pageCount ? `${attachment.pageCount} page${attachment.pageCount === 1 ? "" : "s"}` : ""
+      ].filter(Boolean).join(" | ");
+      const extractedText = attachment.extractedText?.trim();
+
+      if (extractedText) {
+        return `${details}\nExtracted text:\n${extractedText.slice(0, maxAttachmentContextCharacters)}`;
+      }
+
+      return `${details}\nNo readable PDF text was stored for this attachment. Do not invent file contents; ask the student to upload a text-readable PDF or paste the relevant problem text.`;
+    })
+  ];
+
+  return lines.join("\n");
+}
+
+function formatAttachmentSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "unknown size";
+  }
+
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  return `${Math.ceil(bytes / 1024)} KB`;
 }
 
 function streamTutorResponse(preparedRequest: PreparedBackendChatRequest) {

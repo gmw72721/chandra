@@ -49,6 +49,14 @@ test("model selector is hidden from student chat", () => {
   assert.doesNotMatch(source, /customModelStorageKey/);
 });
 
+test("student settings can return to chat view", () => {
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+
+  assert.match(source, /Back to chat/);
+  assert.match(source, /setStudentMainView\(\(currentView\) => \(currentView === "settings" \? "chat" : "settings"\)\)/);
+  assert.match(source, /onBackToChat=\{\(\) => setStudentMainView\("chat"\)\}/);
+});
+
 test("student chat posts the saved class and auth token to the tutor API", () => {
   const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
   const apiClientSource = readFileSync(join(repoRoot, "frontend/lib/api-client.ts"), "utf8");
@@ -87,16 +95,50 @@ test("student chat persists and resumes class-scoped conversations", () => {
   assert.match(studentMessageRouteSource, /listStudentConversationMessages/);
 });
 
-test("student view pins teacher assignment guidance above chat", () => {
-  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
-  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+test("student PDF homework attachments are scoped, extracted, and sent with chat messages", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const chatRouteSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const attachmentServerSource = readFileSync(join(repoRoot, "frontend/lib/student-attachments-server.ts"), "utf8");
+  const typesSource = readFileSync(join(repoRoot, "frontend/lib/types.ts"), "utf8");
+  const attachmentRouteSource = readFileSync(
+    join(repoRoot, "frontend/app/api/student/conversations/[conversationId]/attachments/route.ts"),
+    "utf8"
+  );
 
-  assert.match(source, /className="student-teacher-instructions"/);
-  assert.match(source, /Class instructions/);
-  assert.match(source, /formatPinnedTeacherInstructions\(activeClass\)/);
-  assert.match(source, /normalizeStudentFacingInstructions/);
+  assert.match(typesSource, /export type MessageAttachment/);
+  assert.match(studentSource, /student-composer-add/);
+  assert.match(studentSource, /uploadHomeworkAttachmentWithProgress/);
+  assert.match(studentSource, /attachmentIds: sentAttachmentIds/);
+  assert.match(studentSource, /maxComposerAttachments = 3/);
+  assert.match(studentSource, /allowedComposerAttachmentExtensions = \["\.pdf"\]/);
+  assert.match(studentSource, /Only text-readable PDF homework files are supported/);
+  assert.match(attachmentRouteSource, /request\.formData\(\)/);
+  assert.match(attachmentRouteSource, /maxStudentAttachmentFileBytes/);
+  assert.match(attachmentRouteSource, /content-length/);
+  assert.match(attachmentRouteSource, /status: 413/);
+  assert.match(attachmentRouteSource, /uploadStudentConversationAttachment/);
+  assert.match(attachmentServerSource, /export function maxStudentAttachmentFileBytes/);
+  assert.match(attachmentServerSource, /function validateAttachmentMetadata\(file: File\)/);
+  assert.match(attachmentServerSource, /const allowedType = validateAttachmentMetadata\(file\)/);
+  assert.match(attachmentServerSource, /student-uploads/);
+  assert.match(attachmentServerSource, /scope\.classId/);
+  assert.match(attachmentServerSource, /scope\.uid/);
+  assert.match(attachmentServerSource, /matchesMagicBytes/);
+  assert.match(attachmentServerSource, /extractAttachmentText/);
+  assert.match(attachmentServerSource, /PDFParse/);
+  assert.match(attachmentServerSource, /extractedText/);
+  assert.match(chatRouteSource, /attachmentIds: z\.array\(safeDocumentIdSchema\)/);
+  assert.match(chatRouteSource, /appendAttachmentContextToStudentMessage/);
+  assert.match(chatRouteSource, /Extracted text:/);
+});
+
+test("student view does not pin teacher assignment guidance above chat", () => {
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+
+  assert.doesNotMatch(source, /className="student-teacher-instructions"/);
+  assert.doesNotMatch(source, /Class\s+instructions/);
+  assert.doesNotMatch(source, /formatPinnedTeacherInstructions\(activeClass\)/);
   assert.doesNotMatch(source, /Show your work\. Do not use decimals unless asked\./);
-  assert.match(styles, /\.student-teacher-instructions/);
 });
 
 test("student opening message is class-specific and professor editable", () => {
@@ -130,7 +172,7 @@ test("class tutor defaults vary by class name and normalize missing fields", () 
   assert.match(source, /export function buildDefaultClassTutorSettings/);
   assert.match(source, /algebra\|calculus\|geometry\|math/);
   assert.match(source, /prompt, passage, or draft/);
-  assert.match(source, /include units/);
+  assert.doesNotMatch(source, /Show your setup, include units, and explain what concept or step is confusing\./);
   assert.match(source, /Share the prompt, your code or approach/);
   assert.match(source, /export function normalizeOpeningMessage/);
   assert.match(source, /return buildDefaultClassTutorSettings\(classDefaults \?\? \{\}\)\.openingMessage/);

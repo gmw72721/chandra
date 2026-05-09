@@ -108,6 +108,8 @@ test("chat routes enforce bounded request sizes before backend work", () => {
   const nextSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
   const fastApiSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
 
+  assert.match(nextSource, /readJsonRequest\(request\)/);
+  assert.match(nextSource, /code: "CHAT_REQUEST_INVALID"/);
   assert.match(nextSource, /maxChatMessagesPerRequest = 40/);
   assert.match(nextSource, /maxChatMessageCharacters = 12000/);
   assert.match(nextSource, /maxChatRequestCharacters = 60000/);
@@ -167,4 +169,53 @@ test("Firestore user theme preference updates only validate theme fields", () =>
   assert.match(rules, /validOptionalProfileAppearance\(request\.resource\.data\)/);
   assert.match(rules, /validOptionalProfileThemeColor\(request\.resource\.data\)/);
   assert.match(rules, /validProfileUpdate\(userId\)\s*\|\|\s*validProfileThemePreferenceUpdate\(\)/);
+});
+
+test("Firestore profile class membership fields are server-owned", () => {
+  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+
+  assert.match(rules, /request\.resource\.data\.role == "student"\s*&& !request\.resource\.data\.keys\(\)\.hasAny\(\["classId", "classIds"\]\)/);
+  assert.match(rules, /request\.resource\.data\.diff\(resource\.data\)\.affectedKeys\(\)\.hasOnly\(\[\s*"displayName",\s*"appearance",\s*"themeColor"\s*\]\)/);
+  assert.match(rules, /function isStudentInClass\(classId\)/);
+});
+
+test("Firestore student material reads honor source visibility", () => {
+  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+
+  assert.match(rules, /function isStudentVisibleMaterial\(data\)/);
+  assert.match(rules, /data\.status == "ready"/);
+  assert.match(rules, /data\.teacherOnly != true/);
+  assert.match(rules, /!\(data\.visibility in \["teacher-only", "hidden"\]\)/);
+  assert.match(rules, /isStudentInClass\(classId\) && isStudentVisibleMaterial\(resource\.data\)/);
+  assert.match(rules, /isStudentInClass\(classId\) && isStudentVisibleMaterialDocument\(classId, materialId\)/);
+});
+
+test("students load sanitized class summaries instead of full class policy documents", () => {
+  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const studentClassesRoute = readFileSync(join(repoRoot, "frontend/app/api/student/classes/route.ts"), "utf8");
+
+  assert.match(rules, /allow get: if isClassTeacher\(\)/);
+  assert.match(studentSource, /!firebaseReady \|\| !activeCourseId \|\| !isTeacherPreview/);
+  assert.match(studentSource, /fetchStudentClasses\(token\)/);
+  assert.match(studentClassesRoute, /openingMessage/);
+  assert.match(studentClassesRoute, /normalizeTeacherClassAppearance/);
+  assert.doesNotMatch(studentClassesRoute, /behaviorInstructions/);
+  assert.doesNotMatch(studentClassesRoute, /answerPolicy/);
+  assert.doesNotMatch(studentClassesRoute, /sourceUsage/);
+});
+
+test("account settings route updates profile fields server-side for students and teachers", () => {
+  const source = readFileSync(join(repoRoot, "frontend/app/api/account/settings/route.ts"), "utf8");
+
+  assert.match(source, /adminAuth!\.verifyIdToken\(token\)/);
+  assert.match(source, /const shouldUpdateDisplayName = bodyHasKey\(body, "displayName"\)/);
+  assert.match(source, /normalizeDisplayName\(body\.displayName\)/);
+  assert.match(source, /normalizeTeacherClassAppearance/);
+  assert.match(source, /normalizeTeacherClassThemeColor/);
+  assert.match(source, /profileUpdates\.displayName = displayName/);
+  assert.match(source, /shouldUpdateDisplayName && displayName !== currentDisplayName/);
+  assert.match(source, /adminAuth!\.updateUser\(decodedToken\.uid, \{ displayName \}\)/);
+  assert.match(source, /where\("teacherId", "==", uid\)/);
+  assert.match(source, /collectionGroup\("students"\)/);
 });

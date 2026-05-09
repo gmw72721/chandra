@@ -168,7 +168,6 @@ function StudentWorkspace() {
   const classSection = activeClass?.section ?? (activeCourseId ? "Student chat" : "Enter your class code");
   const classSectionLabel = formatClassSectionLabel(classSection, Boolean(activeCourseId));
   const visibleClassCode = activeClass?.joinCode || activeClass?.id || activeCourseId;
-  const pinnedTeacherInstructions = activeClass ? formatPinnedTeacherInstructions(activeClass.defaultAssignmentContext) : "";
   const visibleConversationSummaries = conversationSummaries.filter(
     (conversation) => conversation.classId === activeCourseId && conversation.studentId === user?.uid
   );
@@ -529,15 +528,6 @@ function StudentWorkspace() {
               </span>
             </div>
           </header>
-
-          {pinnedTeacherInstructions ? (
-            <section className="student-teacher-instructions" aria-label="Class instructions">
-              <div>
-                <strong className="student-instructions-heading">Class instructions</strong>
-                <p>{pinnedTeacherInstructions}</p>
-              </div>
-            </section>
-          ) : null}
 
           {selectedConversation ? (
             <section className="student-conversation-header" aria-label="Current conversation">
@@ -956,12 +946,6 @@ function formatClassSectionLabel(classSection: string, hasClass: boolean) {
   }
 
   return `Section ${classSection}`;
-}
-
-function formatPinnedTeacherInstructions(defaultAssignmentContext?: string) {
-  const customInstructions = defaultAssignmentContext?.replace(/\s+/g, " ").trim();
-
-  return customInstructions || "Show your work. Do not use decimals unless asked.";
 }
 
 function getInitials(name: string, email: string) {

@@ -24,7 +24,13 @@ service cloud.firestore {
       return isSignedIn()
         && userProfileExists(request.auth.uid)
         && userProfile(request.auth.uid).data.role == "student"
-        && userProfile(request.auth.uid).data.classId == classId;
+        && (
+          userProfile(request.auth.uid).data.classId == classId
+          || (
+            userProfile(request.auth.uid).data.classIds is list
+            && userProfile(request.auth.uid).data.classIds.hasAny([classId])
+          )
+        );
     }
 
     function isClassTeacher() {
@@ -41,17 +47,31 @@ service cloud.firestore {
       return data.keys().hasAny(["classId"]);
     }
 
+    function hasClassIds(data) {
+      return data.keys().hasAny(["classIds"]);
+    }
+
     function validRole(role) {
       return role == "student" || role == "teacher";
     }
 
     function validProfileClass(data) {
-      return !hasClassId(data)
-        || (
-          data.role == "student"
-          && data.classId is string
-          && data.classId.size() > 0
-          && exists(/databases/$(database)/documents/classes/$(data.classId))
+      return (
+          !hasClassId(data)
+          || (
+            data.role == "student"
+            && data.classId is string
+            && data.classId.size() > 0
+            && exists(/databases/$(database)/documents/classes/$(data.classId))
+          )
+        )
+        && (
+          !hasClassIds(data)
+          || (
+            data.role == "student"
+            && data.classIds is list
+            && data.classIds.size() <= 50
+          )
         );
     }
 
@@ -62,6 +82,7 @@ service cloud.firestore {
           "displayName",
           "role",
           "classId",
+          "classIds",
           "appearance",
           "themeColor",
           "createdAt"
@@ -79,6 +100,7 @@ service cloud.firestore {
     function validProfileCreate(userId) {
       return validProfileBase(userId, request.resource.data)
         && request.resource.data.role == "student"
+        && !request.resource.data.keys().hasAny(["classId", "classIds"])
         && request.resource.data.createdAt == request.time;
     }
 
@@ -86,7 +108,6 @@ service cloud.firestore {
       return validProfileBase(userId, request.resource.data)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "displayName",
-          "classId",
           "appearance",
           "themeColor"
         ])
@@ -361,6 +382,21 @@ service cloud.firestore {
         && request.resource.data.updatedAt == request.time;
     }
 
+    function isStudentVisibleMaterial(data) {
+      return data.status == "ready"
+        && data.activeForStudents != false
+        && data.studentVisible != false
+        && data.teacherOnly != true
+        && !(data.visibility in ["teacher-only", "hidden"])
+        && data.private != true;
+    }
+
+    function isStudentVisibleMaterialDocument(classId, materialId) {
+      return isStudentVisibleMaterial(
+        get(/databases/$(database)/documents/classes/$(classId)/materials/$(materialId)).data
+      );
+    }
+
     match /users/{userId} {
       allow create: if isSignedIn()
         && request.auth.uid == userId
@@ -389,8 +425,8 @@ service cloud.firestore {
     match /classes/{classId} {
       allow create: if isTeacher()
         && validClassCreate();
-      allow get: if isSignedIn();
-      allow list: if isTeacher();
+      allow get: if isClassTeacher();
+      allow list: if isClassTeacher();
       allow update: if isClassTeacher() && validClassUpdate();
       allow delete: if isClassTeacher();
 
@@ -401,11 +437,13 @@ service cloud.firestore {
       }
 
       match /materials/{materialId} {
-        allow read: if isTargetClassTeacher(classId) || isStudentInClass(classId);
+        allow read: if isTargetClassTeacher(classId)
+          || (isStudentInClass(classId) && isStudentVisibleMaterial(resource.data));
         allow write: if isTargetClassTeacher(classId);
 
         match /chunks/{chunkId} {
-          allow read: if isTargetClassTeacher(classId) || isStudentInClass(classId);
+          allow read: if isTargetClassTeacher(classId)
+            || (isStudentInClass(classId) && isStudentVisibleMaterialDocument(classId, materialId));
           allow write: if isTargetClassTeacher(classId);
         }
       }

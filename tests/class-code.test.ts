@@ -23,32 +23,40 @@ test("student-entered six-letter class codes normalize to uppercase", () => {
   assert.equal(formatClassCodeInput("ab-12cdefg"), "ABCDEF");
 });
 
-test("teacher workspace displays the short join code instead of the internal id", () => {
+test("teacher workspace keeps join codes available without rendering top-page invite controls", () => {
   const source = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
-  assert.match(source, /selectedClass\?\.joinCode/);
-  assert.match(source, /Class code: \{selectedClassCode \|\| "Creating code\.\.\."\}/);
-  assert.doesNotMatch(source, /Class code: \{selectedClass\.id\}/);
+  assert.match(source, /selectedClass\.joinCode/);
+  assert.match(source, /ensureClassJoinCode\(selectedClass\.id\)/);
+  assert.doesNotMatch(source, /Class code\s*<strong>/);
+  assert.doesNotMatch(source, /Copy student invite link/);
 });
 
-test("teacher workspace copies a student auth invite link with the short class code", () => {
-  const source = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
-
-  assert.match(source, /new URL\("\/auth", window\.location\.origin\)/);
-  assert.match(source, /inviteUrl\.searchParams\.set\("role", "student"\)/);
-  assert.match(source, /inviteUrl\.searchParams\.set\("classId", selectedClassCode\)/);
-  assert.match(source, /Copy student invite link/);
-});
-
-test("student-entered join codes enroll the student before saving profile classId", () => {
+test("student-entered join codes enroll the student through the server route", () => {
   const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
   const joinSource = readFileSync(join(repoRoot, "frontend/app/api/classes/join/route.ts"), "utf8");
 
   assert.match(authSource, /fetch\("\/api\/classes\/join"/);
   assert.match(authSource, /Authorization: `Bearer \$\{token\}`/);
+  assert.match(authSource, /await setDoc\(doc\(db!, "users", credential\.user\.uid\), profile\)/);
+  assert.match(authSource, /syncProfile: true/);
   assert.match(joinSource, /\.where\("joinCode", "==", classCode\)/);
+  assert.match(joinSource, /firstString\(userData\.email, decodedToken\.email, decodedToken\.firebase\?\.identities\?\.email\?\.\[0\], body\.email\)/);
   assert.match(joinSource, /collection\("classes"\)\.doc\(nextClassId\)\.collection\("students"\)/);
   assert.match(joinSource, /batch\.set\(/);
+});
+
+test("student class joins are additive and keep enrolled class ids", () => {
+  const joinSource = readFileSync(join(repoRoot, "frontend/app/api/classes/join/route.ts"), "utf8");
+  const classesSource = readFileSync(join(repoRoot, "frontend/app/api/student/classes/route.ts"), "utf8");
+  const rulesSource = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+
+  assert.doesNotMatch(joinSource, /batch\.delete\(/);
+  assert.match(joinSource, /classIds: FieldValue\.arrayUnion\(nextClassId\)/);
+  assert.match(classesSource, /Array\.isArray\(profile\.classIds\)/);
+  assert.match(classesSource, /classIds\.add\(classId\.trim\(\)\)/);
+  assert.match(rulesSource, /data\.classIds is list/);
+  assert.match(rulesSource, /data\.classIds\.hasAny\(\[classId\]\)/);
 });
 
 test("teacher roster sync backfills students who already saved the classId", () => {

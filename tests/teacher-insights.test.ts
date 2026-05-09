@@ -5,6 +5,7 @@ import test from "node:test";
 
 const repoRoot = process.cwd();
 const source = () => readFileSync(join(repoRoot, "frontend/lib/teacher-insights-server.ts"), "utf8");
+const typesSource = () => readFileSync(join(repoRoot, "frontend/lib/types.ts"), "utf8");
 
 test("teacher insight ranges normalize and filter timestamps", () => {
   const serverSource = source();
@@ -22,6 +23,9 @@ test("normalization clamps bad and partial model JSON", () => {
 
   assert.match(serverSource, /normalizeTeacherInsightsContent/);
   assert.match(serverSource, /maxSummaryBodyLength = 900/);
+  assert.match(serverSource, /helpfulDailySummaryBody/);
+  assert.match(serverSource, /suggested move:/);
+  assert.match(serverSource, /start with a proof frame/);
   assert.match(serverSource, /source\.evidence\.slice\(0, maxEvidenceChips\)/);
   assert.match(serverSource, /source\.trends\.slice\(0, maxTrends\)/);
   assert.match(serverSource, /source\.misconceptionTimeline\s*\.slice\(0, maxMisconceptions\)/s);
@@ -30,6 +34,31 @@ test("normalization clamps bad and partial model JSON", () => {
   assert.match(serverSource, /clampNonNegativeInteger\(source\.evidenceCount, 999\)/);
   assert.match(serverSource, /sanitizeSparkline/);
   assert.match(serverSource, /unsafeInsightLabels/);
+  assert.match(serverSource, /normalizeInsightQualityFields/);
+  assert.match(serverSource, /const insightQualityLevels = new Set<TeacherInsightQualityLevel>/);
+  assert.match(serverSource, /const evidenceStrengths = new Set<TeacherInsightEvidenceStrength>/);
+  assert.match(serverSource, /confidence: capInsightConfidenceForEvidence/);
+  assert.match(serverSource, /evidenceStrength: TeacherInsightEvidenceStrength/);
+});
+
+test("teacher insight types include normalized quality metadata", () => {
+  const sharedTypes = typesSource();
+
+  assert.match(sharedTypes, /export type TeacherInsightQualityLevel = "low" \| "medium" \| "high"/);
+  assert.match(sharedTypes, /export type TeacherInsightEvidenceStrength = "early_signal" \| "moderate" \| "strong"/);
+  assert.match(sharedTypes, /export type TeacherInsightQuality = \{/);
+  assert.match(sharedTypes, /confidence: TeacherInsightQualityLevel/);
+  assert.match(sharedTypes, /impact: TeacherInsightQualityLevel/);
+  assert.match(sharedTypes, /severity: TeacherInsightQualityLevel/);
+  assert.match(sharedTypes, /rootCause: string/);
+  assert.match(sharedTypes, /whyItMatters: string/);
+  assert.match(sharedTypes, /nextTeacherMove: string/);
+  assert.match(sharedTypes, /tutorAdjustment: string/);
+  assert.match(sharedTypes, /affectedStudentCount: number/);
+  assert.match(sharedTypes, /relevantMessageCount: number/);
+  assert.match(sharedTypes, /TeacherInsightDailySummary[\s\S]*& TeacherInsightQuality/);
+  assert.match(sharedTypes, /TeacherInsightRecommendation[\s\S]*& TeacherInsightQuality/);
+  assert.match(sharedTypes, /TeacherInsightEvidenceLink[\s\S]*& TeacherInsightQuality/);
 });
 
 test("safe fallback response is deterministic", () => {
@@ -63,6 +92,10 @@ test("system prompt constrains class-level teaching insight output", () => {
   assert.match(serverSource, /protected or sensitive traits/);
   assert.match(serverSource, /Return this JSON shape exactly/);
   assert.match(serverSource, /conversationId and messageId/);
+  assert.match(serverSource, /Pattern \\u2192 Evidence \\u2192 Root cause \\u2192 Confidence \\u2192 Impact \\u2192 Next action \\u2192 Tutor adjustment \\u2192 Teacher feedback/);
+  assert.match(serverSource, /quality fields: confidence, impact, severity, evidenceStrength, rootCause, whyItMatters, nextTeacherMove, tutorAdjustment, affectedStudentCount, relevantMessageCount/);
+  assert.match(serverSource, /dailySummary\.body must be useful to a teacher/);
+  assert.match(serverSource, /One conversation or one represented student is an early_signal, not a class trend/);
 });
 
 test("server generation mirrors profile architecture without live OpenRouter calls in tests", () => {
@@ -82,6 +115,7 @@ test("model input construction is bounded and includes evidence metadata", () =>
 
   assert.match(serverSource, /const insightModelMaxConversations = 30/);
   assert.match(serverSource, /const insightModelMaxMessagesPerConversation = 12/);
+  assert.match(serverSource, /Promise\.all\(\s*conversationDocs\.map\(async/s);
   assert.match(serverSource, /sanitizeTranscriptText\(message\.content\)/);
   assert.match(serverSource, /retrievalConfidence: message\.role === "assistant"/);
   assert.match(serverSource, /selectedPages: message\.role === "assistant"/);
@@ -104,6 +138,30 @@ test("generated insight sections are grounded against actual conversations", () 
   assert.match(serverSource, /evidenceLinks = insight\.evidenceLinks/);
   assert.match(serverSource, /conversationCount: citedConversations\.length/);
   assert.match(serverSource, /buildSummaryEvidenceChips/);
+});
+
+test("insight quality post-processing caps weak evidence safely", () => {
+  const serverSource = source();
+
+  assert.match(serverSource, /function buildDeterministicInsightQuality/);
+  assert.match(serverSource, /function capInsightConfidenceForEvidence/);
+  assert.match(serverSource, /evidenceConversationCount === 1 && confidence === "high"/);
+  assert.match(serverSource, /return "medium"/);
+  assert.match(serverSource, /function capEvidenceStrengthForSupport/);
+  assert.match(serverSource, /evidenceConversationCount <= 1 \|\| affectedStudentCount === 1/);
+  assert.match(serverSource, /return "early_signal"/);
+  assert.match(serverSource, /function countAffectedStudents/);
+  assert.match(serverSource, /function countRelevantMessages/);
+});
+
+test("trend language is not marked increasing without multiple evidence buckets", () => {
+  const serverSource = source();
+
+  assert.match(serverSource, /function hasMultipleEvidenceBuckets/);
+  assert.match(serverSource, /later > earlier && hasMultipleEvidenceBuckets\(sparkline\)/);
+  assert.match(serverSource, /normalizeTrendChangeLanguage/);
+  assert.match(serverSource, /Early signal:/);
+  assert.match(serverSource, /trend\.direction === "up" \? "recurring" : trend\.direction/);
 });
 
 test("teacher-only insight routes and Firestore rules are server owned", () => {

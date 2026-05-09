@@ -27,12 +27,17 @@ test("teacher overview aggregates existing roster, conversations, knowledge, and
   assert.match(serverSource, /const reviewQueueRows = buildReviewQueueRows/);
   assert.match(serverSource, /filter\(conversationNeedsTeacherReview\)/);
   assert.match(serverSource, /nextActions: buildNextActions/);
-  assert.match(serverSource, /getOverviewInsightSummary/);
+  assert.match(serverSource, /getOverviewInsightContext/);
   assert.match(serverSource, /collection\("teacherInsights"\)\.doc\("today"\)/);
   assert.match(serverSource, /type ScoredAction/);
+  assert.match(serverSource, /scoreOverviewAction/);
+  assert.match(serverSource, /learningSignals/);
+  assert.match(serverSource, /rationale: compactRationale/);
   assert.match(serverSource, /Check high-volume student/);
-  assert.match(serverSource, /Review flagged chat/);
-  assert.match(serverSource, /sort\(\(first, second\) => second\.score - first\.score/);
+  assert.match(serverSource, /Review student support/);
+  assert.match(serverSource, /Check source accuracy/);
+  assert.match(serverSource, /rankOverviewActions/);
+  assert.match(serverSource, /second\.score - first\.score/);
 });
 
 test("teacher overview review queue excludes reviewed conversations even when source flags remain", () => {
@@ -66,12 +71,16 @@ test("overview UI consumes API rows instead of screenshot literals", () => {
 
   assert.match(componentSource, /TeacherClassOverview/);
   assert.match(componentSource, /\/api\/classes\/\$\{encodeURIComponent\(activeClassId\)\}\/overview/);
-  assert.match(componentSource, /overviewPriorityRows\.map/);
-  assert.match(componentSource, /overviewRecentActivityRows\.map/);
   assert.match(componentSource, /overviewReviewQueueRows\.map/);
-  assert.match(componentSource, /overviewLearningProfileRows\.map/);
+  assert.match(componentSource, /row\.issue/);
+  assert.match(componentSource, /row\.suggestedAction/);
+  assert.match(componentSource, /row\.sourceLabel/);
   assert.match(componentSource, /overviewNextActions\.map/);
   assert.match(componentSource, /handleOverviewNextAction/);
+  assert.doesNotMatch(componentSource, /overviewPriorityRows\.map/);
+  assert.doesNotMatch(componentSource, /overviewRecentActivityRows\.map/);
+  assert.doesNotMatch(componentSource, /overviewLearningProfileRows\.map/);
+  assert.doesNotMatch(componentSource, /Class activity/);
   assert.doesNotMatch(componentSource, /High question volume today",\s*name:/);
   assert.doesNotMatch(componentSource, /Derivative chain rule", "6 messages"/);
 });

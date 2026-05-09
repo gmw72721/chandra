@@ -215,7 +215,26 @@ export type TeacherConversationSourceAuditSummary = {
   sources: TutorSource[];
   noSourceUsedWarning: boolean;
   lowSourceConfidence: boolean;
+  learningSignals: TeacherConversationLearningSignalSummary;
   latestRetrievalConfidence?: RetrievalConfidence;
+};
+
+export type TeacherConversationLearningSignalSummary = {
+  assistantMessageCount: number;
+  lowConfidenceMessageCount: number;
+  noSourceAssistantMessageCount: number;
+  askTeacherCount: number;
+  pasteProblemCount: number;
+  reviewSourceCount: number;
+  showAttemptCount: number;
+  guidedStepCount: number;
+  workedExampleCount: number;
+  stuckOutcomeCount: number;
+  progressedOutcomeCount: number;
+  disengagedOutcomeCount: number;
+  latestStudentActionNeeded?: TutorStructuredMetadata["studentActionNeeded"];
+  latestHintLevel?: TutorStructuredMetadata["hintLevel"];
+  latestMode?: TutorStructuredMetadata["mode"];
 };
 
 export type TeacherConversationReviewSummary = {
@@ -232,6 +251,7 @@ export type TeacherConversationReviewSummary = {
   lastMessageAt: unknown;
   topic: string;
   modelId: string;
+  learningSignals: TeacherConversationLearningSignalSummary;
   sourceAudit: TeacherConversationSourceAuditSummary;
   latestRetrievalConfidence?: RetrievalConfidence;
   review: TeacherConversationReview;
@@ -389,13 +409,30 @@ export type TeacherInsightEvidenceChip = {
   label: string;
   conversationId: string;
   messageId?: string;
+} & TeacherInsightQuality;
+
+export type TeacherInsightQualityLevel = "low" | "medium" | "high";
+
+export type TeacherInsightEvidenceStrength = "early_signal" | "moderate" | "strong";
+
+export type TeacherInsightQuality = {
+  confidence: TeacherInsightQualityLevel;
+  impact: TeacherInsightQualityLevel;
+  severity: TeacherInsightQualityLevel;
+  evidenceStrength: TeacherInsightEvidenceStrength;
+  rootCause: string;
+  whyItMatters: string;
+  nextTeacherMove: string;
+  tutorAdjustment: string;
+  affectedStudentCount: number;
+  relevantMessageCount: number;
 };
 
 export type TeacherInsightDailySummary = {
   title: string;
   body: string;
   evidence: TeacherInsightEvidenceChip[];
-};
+} & TeacherInsightQuality;
 
 export type TeacherInsightTrendDirection = "up" | "down" | "new" | "recurring";
 
@@ -406,7 +443,7 @@ export type TeacherInsightTrend = {
   direction: TeacherInsightTrendDirection;
   evidenceConversationIds: string[];
   sparkline: number[];
-};
+} & TeacherInsightQuality;
 
 export type TeacherInsightMisconceptionStatus = "active" | "improving" | "emerging" | "resolved";
 
@@ -417,7 +454,7 @@ export type TeacherInsightMisconceptionTimelineItem = {
   seenInConversations: number;
   status: TeacherInsightMisconceptionStatus;
   evidenceConversationIds: string[];
-};
+} & TeacherInsightQuality;
 
 export type TeacherInsightRecommendationPriority = "high" | "medium" | "low";
 
@@ -430,7 +467,7 @@ export type TeacherInsightRecommendation = {
   evidenceCount: number;
   action: TeacherInsightRecommendationAction;
   evidenceConversationIds: string[];
-};
+} & TeacherInsightQuality;
 
 export type TeacherInsightEvidenceLink = {
   id: string;
@@ -439,7 +476,7 @@ export type TeacherInsightEvidenceLink = {
   studentInitials: string[];
   lastSeenAt: string;
   conversationIds: string[];
-};
+} & TeacherInsightQuality;
 
 export type TeacherClassInsightsContent = {
   metrics: TeacherInsightMetric[];
@@ -531,10 +568,16 @@ export type TeacherClassOverviewRecentActivityRow = {
 export type TeacherClassOverviewReviewQueueRow = {
   conversationId: string;
   id: string;
+  issue: string;
+  lastMessageAt: unknown;
+  lastMessageLabel: string;
   meta: string;
+  sourceLabel: string;
+  sourceCount: number;
   status: string;
   studentId: string;
   studentName: string;
+  suggestedAction: string;
   title: string;
   tone: TeacherOverviewStatusTone;
 };
@@ -555,6 +598,8 @@ export type TeacherClassOverviewKnowledgeStat = {
   value: number;
 };
 
+export type TeacherClassOverviewActionPriority = "critical" | "high" | "medium" | "low";
+
 export type TeacherClassOverviewNextAction = {
   action:
     | "addKnowledge"
@@ -569,8 +614,11 @@ export type TeacherClassOverviewNextAction = {
     | "viewStudentChats";
   detail: string;
   conversationId?: string;
+  evidenceConversationIds?: string[];
   id: string;
   label: string;
+  priority: TeacherClassOverviewActionPriority;
+  rationale: string[];
   studentEmail?: string;
   studentId?: string;
   studentName?: string;
