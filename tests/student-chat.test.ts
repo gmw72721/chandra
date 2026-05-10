@@ -848,6 +848,8 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(routeSource, /do not provide task-specific starting points/);
   assert.match(routeSource, /give me an example of what I can say/);
   assert.match(routeSource, /proof scaffolds, or all-parts breakdowns/);
+  assert.match(routeSource, /how a source, example, prior exercise, hint, rubric, rule, method, or instructor note connects/);
+  assert.match(routeSource, /do not map the whole route, enumerate all required pieces, provide a response structure, fill in task content, or give a sequence of steps/);
   assert.match(routeSource, /Never use `Example:` to provide homework-ready wording/);
   assert.match(routeSource, /explain like I am 5' is not a student attempt/);
   assert.match(routeSource, /do not reveal a full solution, final answer, final artifact/);
@@ -858,6 +860,8 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(promptSource, /do not provide task-specific starting points/);
   assert.match(promptSource, /give me an example of what I can say/);
   assert.match(promptSource, /similar example must use a different claim or different numbers/);
+  assert.match(promptSource, /how a source, example, prior exercise, hint, rubric, rule, method, or instructor note connects/);
+  assert.match(promptSource, /do not map the whole route, enumerate all required pieces, provide a response structure, fill in task content, or give a sequence of steps/);
   assert.match(promptSource, /explain like I am 5' is not a student attempt/);
   assert.match(promptSource, /do not reveal a full solution, final answer, final artifact/);
   assert.match(routeSource, /relationships, family conflict, emotional support, unrelated coding/);
