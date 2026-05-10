@@ -720,6 +720,16 @@ test("student chat errors include stable codes and student-safe messages", () =>
   assert.match(source, /TUTOR_BACKEND_STREAM_FAILED/);
 });
 
+test("streamed backend setup failures map to setup incomplete errors", () => {
+  const source = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+
+  assert.match(source, /normalizedDetail\.includes\("openrouter_api_key"\)/);
+  assert.match(source, /normalizedDetail\.includes\("openrouter_http_referer"\)/);
+  assert.match(source, /normalizedDetail\.includes\("frontend_origin"\)/);
+  assert.match(source, /normalizedDetail\.includes\("next_internal_base_url"\)/);
+  assert.match(source, /return "TUTOR_BACKEND_SETUP_INCOMPLETE";/);
+});
+
 test("student AI limits are token-budget based and student-safe", () => {
   const usageSource = readFileSync(join(repoRoot, "frontend/lib/ai-usage-limits.ts"), "utf8");
   const settingsSource = readFileSync(join(repoRoot, "frontend/lib/class-settings.ts"), "utf8");

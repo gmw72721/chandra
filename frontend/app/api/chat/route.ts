@@ -1263,6 +1263,10 @@ function classifyBackendStreamError(detail: string): StudentChatErrorCode {
   }
 
   if (
+    normalizedDetail.includes("openrouter_api_key") ||
+    normalizedDetail.includes("openrouter_http_referer") ||
+    normalizedDetail.includes("frontend_origin") ||
+    normalizedDetail.includes("next_internal_base_url") ||
     normalizedDetail.includes("not installed") ||
     normalizedDetail.includes("pip install") ||
     normalizedDetail.includes("backend_shared_secret")
