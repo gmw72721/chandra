@@ -16815,6 +16815,8 @@ button.student-row[aria-pressed="true"] {
 
 .student-workspace-shell .student-conversation-list,
 .student-workspace-shell[data-appearance] .student-conversation-list {
+  align-content: start;
+  grid-auto-rows: max-content;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;

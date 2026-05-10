@@ -925,7 +925,7 @@ function studentMessageForChatError(code: StudentChatErrorCode) {
     case "CHAT_REQUEST_INVALID":
       return "I could not send that message. Refresh the page and try again.";
     case "CHAT_AI_USAGE_EXHAUSTED":
-      return "Sorry, you have used your daily or weekly Chandra limit today. Ask your professor to allow more usage for today.";
+      return "Sorry, you have reached your Chandra usage limit. Ask your professor to allow more usage.";
     case "TUTOR_BACKEND_REQUEST_TOO_LARGE":
       return "This chat is too large to send. Start a new chat and try again.";
     case "TUTOR_BACKEND_UNREACHABLE":

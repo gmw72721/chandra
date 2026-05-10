@@ -92,9 +92,9 @@ const allowedComposerAttachmentExtensions = [".pdf"];
 const allowedComposerAttachmentAccept = ".pdf,application/pdf";
 const maxComposerPdfBytes = 25 * 1024 * 1024;
 const aiUsageLimitMessage =
-  "Sorry, you have used your daily or weekly Chandra limit today. Ask your professor to allow more usage for today.";
+  "Sorry, you have reached your Chandra usage limit.";
 const aiUsageIncreaseRequestComment =
-  "Usage increase request: I used my daily or weekly Chandra limit today and would like my professor to allow more usage for today.";
+  "Usage increase request: I reached my Chandra usage limit and would like my professor to allow more usage.";
 
 const welcomeMessageId = "welcome";
 
@@ -132,6 +132,7 @@ function StudentWorkspace() {
   const draftTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  const sendInFlightRef = useRef(false);
   const [attachmentError, setAttachmentError] = useState("");
   const [isDraggingAttachment, setIsDraggingAttachment] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -715,7 +716,7 @@ function StudentWorkspace() {
     event.preventDefault();
     const content = draft.trim();
 
-    if (!canSendMessage) {
+    if (!canSendMessage || sendInFlightRef.current) {
       return;
     }
 
@@ -736,6 +737,7 @@ function StudentWorkspace() {
     setMessages(nextMessages);
     setDraft("");
     clearComposerAttachments({ revokeLocalUrls: false });
+    sendInFlightRef.current = true;
     setIsSending(true);
     setChatProgress({
       message: "Getting ready.",
@@ -831,7 +833,7 @@ function StudentWorkspace() {
         structuredOutput: data.structuredOutput
       };
 
-      setMessages((current) => [...current, assistantMessage]);
+      setMessages((current) => upsertChatMessage(current, assistantMessage));
       pendingFeedbackPrompt = buildFeedbackPromptCandidate({
         assistantMessage,
         classId: activeCourseId,
@@ -853,6 +855,7 @@ function StudentWorkspace() {
         }
       ]);
     } finally {
+      sendInFlightRef.current = false;
       setIsSending(false);
       setChatProgress(null);
       if (pendingFeedbackPrompt) {
@@ -1293,7 +1296,7 @@ function StudentWorkspace() {
                   studentChatPaused
                     ? "Your teacher has paused chat for this class."
                     : aiUsageStatus?.blocked
-                    ? "Ask your professor for more Chandra usage today."
+                    ? "Ask your professor for more Chandra usage."
                     : activeCourseId
                       ? "Ask about a problem, step, or equation..."
                       : "Join a class to start chatting."
@@ -1879,10 +1882,10 @@ const StudentAiUsagePanel = memo(function StudentAiUsagePanel({
       </div>
       {status.blocked ? (
         <div className="student-ai-usage-request">
-          <p>{aiUsageLimitMessage}</p>
+          <p>{formatAiUsageLimitMessage(status)}</p>
           {onRequestMoreUsage ? (
             <button type="button" disabled={isRequestingMoreUsage} onClick={onRequestMoreUsage}>
-              {isRequestingMoreUsage ? "Sending request" : "Ask professor for more usage today"}
+              {isRequestingMoreUsage ? "Sending request" : "Ask professor for more usage"}
             </button>
           ) : null}
           {requestMessage ? <span>{requestMessage}</span> : null}
@@ -1893,6 +1896,12 @@ const StudentAiUsagePanel = memo(function StudentAiUsagePanel({
     </section>
   );
 });
+
+function formatAiUsageLimitMessage(status: StudentAiUsageStatus) {
+  const resetHint = status.resetHint?.trim();
+
+  return resetHint ? `${aiUsageLimitMessage} It resets ${resetHint}.` : aiUsageLimitMessage;
+}
 
 function StudentAiUsageMeter({ label, percent }: { label: string; percent: number }) {
   const cleanPercent = Math.max(0, Math.min(100, Math.round(percent)));
@@ -1978,6 +1987,16 @@ async function readChatStream(response: Response, onEvent: (event: ChatStreamEve
   }
 
   return finalPayload;
+}
+
+function upsertChatMessage(messages: ChatMessage[], message: ChatMessage) {
+  const existingIndex = messages.findIndex((currentMessage) => currentMessage.id === message.id);
+
+  if (existingIndex === -1) {
+    return [...messages, message];
+  }
+
+  return messages.map((currentMessage, index) => (index === existingIndex ? message : currentMessage));
 }
 
 async function fetchStudentAiUsageStatus({

@@ -10,9 +10,7 @@ import {
 import { adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
 
 export const AI_TOKEN_LIMITS = {
-  ...defaultAiTokenLimitSettings,
-  ipPerFiveMinutes: 30_000,
-  ipPerHour: 250_000
+  ...defaultAiTokenLimitSettings
 } as const;
 
 const nearLimitThresholdPercent = 10;
@@ -193,7 +191,7 @@ export async function reserveAiTokenUsage({
     const blockedQuota = blockedRequestQuotaBucket(requestQuotaBuckets);
 
     if (blockedQuota) {
-      throw new AiUsageLimitError(blockedUsageStatus(), blockedQuota.scope);
+      throw new AiUsageLimitError(blockedRealUsageStatus(buckets), blockedQuota.scope);
     }
 
     const blockedStatus = blockedStudentStatusAfterReservation(buckets, cleanEstimate);
@@ -296,7 +294,7 @@ export async function reserveAiTokenUsage({
         provider,
         role
       },
-      studentStatus: buckets.length ? studentStatusFromBuckets(buckets, cleanEstimate) : null
+      studentStatus: buckets.length ? studentStatusFromBuckets(buckets) : null
     };
   });
 }
@@ -388,7 +386,7 @@ export async function finalizeAiTokenUsage({
       { merge: true }
     );
 
-    return nextStudentStatus ?? reservation.studentStatus;
+    return nextStudentStatus;
   });
 }
 
@@ -457,7 +455,7 @@ export async function adjustAiTokenReservation({
       updatedAt: FieldValue.serverTimestamp()
     });
 
-    return studentStatusFromBuckets(buckets, deltaTokens);
+    return studentStatusFromBuckets(buckets);
   });
 }
 
@@ -476,6 +474,10 @@ function blockedUsageStatus(): StudentAiUsageStatus {
     todayPercentRemaining: 0,
     weekPercentRemaining: 0
   };
+}
+
+function blockedRealUsageStatus(buckets: TokenBucketSnapshot[]): StudentAiUsageStatus {
+  return buckets.length ? studentStatusFromBuckets(buckets, true) : blockedUsageStatus();
 }
 
 export async function getStudentAiUsageStatus(
@@ -498,14 +500,16 @@ export async function getStudentAiUsageStatus(
     now,
     studentId,
     tokenLimits: limits
-  }).filter((spec) => spec.scope === "student" && (spec.period === "day" || spec.period === "week"));
+  }).filter(
+    (spec) => spec.scope === "student" && (spec.period === "day" || spec.period === "week")
+  );
   const snapshots = await Promise.all(specs.map((spec) => spec.reference.get()));
   const buckets = snapshots.map((snapshot, index) => ({
     ...specs[index]!,
     ...tokenBucketValues(snapshot.data() ?? {})
   }));
 
-  return studentStatusFromBuckets(buckets, 0);
+  return studentStatusFromBuckets(buckets);
 }
 
 export async function grantStudentAiUsageAllowance({
@@ -612,23 +616,22 @@ function blockedRequestQuotaBucket(buckets: RequestQuotaSnapshot[]) {
 function blockedStudentStatusAfterReservation(buckets: TokenBucketSnapshot[], estimatedTokens: number) {
   const blocked = buckets.some((bucket) => bucket.actualTotalTokens + bucket.reservedTokens + estimatedTokens > bucket.limit);
 
-  return blocked ? studentStatusFromBuckets(buckets, 0, true) : null;
+  return blocked ? blockedRealUsageStatus(buckets) : null;
 }
 
 function studentStatusFromBuckets(
   buckets: Pick<TokenBucketSnapshot, "actualTotalTokens" | "limit" | "period" | "reservedTokens" | "scope">[],
-  reservationTokens = 0,
   forceBlocked = false
 ): StudentAiUsageStatus {
   let dayRemaining = 100;
   let weekRemaining = 100;
 
   for (const bucket of buckets) {
-    if (bucket.scope !== "student") {
+    if (bucket.scope !== "student" || (bucket.period !== "day" && bucket.period !== "week")) {
       continue;
     }
 
-    const usedTokens = bucket.actualTotalTokens + bucket.reservedTokens + reservationTokens;
+    const usedTokens = bucket.actualTotalTokens;
     const remainingPercent = percentRemaining(bucket.limit, usedTokens);
 
     if (bucket.period === "day") {
@@ -684,7 +687,6 @@ async function tokenLimitsWithActiveAllowance({
 
   return {
     perDay: applyAllowancePercent(limits.perDay, allowancePercent),
-    perHour: applyAllowancePercent(limits.perHour, allowancePercent),
     perWeek: applyAllowancePercent(limits.perWeek, allowancePercent)
   };
 }
@@ -714,21 +716,10 @@ function tokenBucketSpecs({
 }): TokenBucketSpec[] {
   const limits = normalizeAiTokenLimitSettings(tokenLimits);
   const studentHash = stableHash(classId ? `${classId}:${studentId}` : studentId);
-  const specs: TokenBucketSpec[] = [
-    bucketSpec({ bucketKey: hourBucketKey(now), limit: limits.perHour, period: "hour", scope: "student", scopeHash: studentHash }),
+  return [
     bucketSpec({ bucketKey: dayBucketKey(now), limit: limits.perDay, period: "day", scope: "student", scopeHash: studentHash }),
     bucketSpec({ bucketKey: weekBucketKey(now), limit: limits.perWeek, period: "week", scope: "student", scopeHash: studentHash })
   ];
-
-  if (ipAddress) {
-    const ipHash = stableHash(ipAddress);
-    specs.push(
-      bucketSpec({ bucketKey: fiveMinuteBucketKey(now), limit: AI_TOKEN_LIMITS.ipPerFiveMinutes, period: "fiveMinute", scope: "ip", scopeHash: ipHash }),
-      bucketSpec({ bucketKey: hourBucketKey(now), limit: AI_TOKEN_LIMITS.ipPerHour, period: "hour", scope: "ip", scopeHash: ipHash })
-    );
-  }
-
-  return specs;
 }
 
 function requestQuotaBucketSpecs({

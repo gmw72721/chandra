@@ -1574,7 +1574,6 @@ export function TeacherClassManager({
           },
           tokenLimits: {
             perDay: formValue("modelSettings.tokenLimits.perDay"),
-            perHour: formValue("modelSettings.tokenLimits.perHour"),
             perWeek: formValue("modelSettings.tokenLimits.perWeek")
           }
         }),
@@ -6237,19 +6236,6 @@ function TokenLimitInputs({
           step={1}
           type="number"
           defaultValue={requestLimits.teacherPreviewDaily ?? 0}
-        />
-      </div>
-      <div>
-        <label className={labelClassName} htmlFor={`${idPrefix}-hour`}>
-          Tokens per student per hour
-        </label>
-        <input
-          id={`${idPrefix}-hour`}
-          min={1000}
-          name="modelSettings.tokenLimits.perHour"
-          step={1000}
-          type="number"
-          defaultValue={tokenLimits.perHour}
         />
       </div>
       <div>

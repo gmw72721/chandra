@@ -709,14 +709,18 @@ test("student AI limits are token-budget based and student-safe", () => {
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
   const typesSource = readFileSync(join(repoRoot, "frontend/lib/types.ts"), "utf8");
 
-  assert.match(settingsSource, /perHour: 75_000/);
   assert.match(settingsSource, /perDay: 300_000/);
   assert.match(settingsSource, /perWeek: 1_200_000/);
+  assert.doesNotMatch(settingsSource, /perHour:/);
+  assert.doesNotMatch(usageSource, /limits\.perHour/);
   assert.match(settingsSource, /tokenLimits: defaultAiTokenLimitSettings/);
-  assert.match(usageSource, /ipPerFiveMinutes: 30_000/);
-  assert.match(usageSource, /ipPerHour: 250_000/);
+  assert.doesNotMatch(usageSource, /ipPerFiveMinutes/);
+  assert.doesNotMatch(usageSource, /ipPerHour/);
   assert.match(usageSource, /estimateAiRequestTokens/);
   assert.match(usageSource, /normalizeAiTokenUsage/);
+  assert.match(usageSource, /studentStatus: buckets\.length \? studentStatusFromBuckets\(buckets\) : null/);
+  assert.match(usageSource, /const usedTokens = bucket\.actualTotalTokens/);
+  assert.match(usageSource, /blockedRealUsageStatus\(buckets\)/);
   assert.match(routeSource, /reserveAiTokenUsage/);
   assert.match(routeSource, /tokenLimits: classModelSettings\?\.tokenLimits/);
   assert.match(routeSource, /finalizeAiTokenUsage/);
@@ -922,5 +926,5 @@ test("student feedback prompt avoids nagging while covering learning signals", (
   assert.match(studentSource, /sources\?\.length \?\? 0\) >= 3/);
   assert.match(studentSource, /feedbackPromptShownToday/);
   assert.match(studentSource, /studentFeedbackPrompt:\$\{classId\}:\$\{conversationId\}/);
-  assert.match(studentSource, /finally \{\s*setIsSending\(false\);\s*setChatProgress\(null\);/s);
+  assert.match(studentSource, /finally \{\s*sendInFlightRef\.current = false;\s*setIsSending\(false\);\s*setChatProgress\(null\);/s);
 });
