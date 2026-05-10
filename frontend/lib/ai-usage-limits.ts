@@ -617,7 +617,7 @@ function blockedRequestQuotaBucket(buckets: RequestQuotaSnapshot[]) {
 }
 
 function blockedStudentStatusAfterReservation(buckets: TokenBucketSnapshot[], estimatedTokens: number) {
-  const blocked = buckets.some((bucket) => bucket.actualTotalTokens + bucket.reservedTokens + estimatedTokens > bucket.limit);
+  const blocked = buckets.some((bucket) => bucket.actualTotalTokens + estimatedTokens > bucket.limit);
 
   return blocked ? blockedRealUsageStatus(buckets) : null;
 }

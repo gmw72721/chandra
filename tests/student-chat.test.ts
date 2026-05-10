@@ -735,6 +735,8 @@ test("student AI limits are token-budget based and student-safe", () => {
   assert.match(usageSource, /normalizeAiTokenUsage/);
   assert.match(usageSource, /studentStatus: buckets\.length \? studentStatusFromBuckets\(buckets\) : null/);
   assert.match(usageSource, /const usedTokens = bucket\.actualTotalTokens/);
+  assert.match(usageSource, /bucket\.actualTotalTokens \+ estimatedTokens > bucket\.limit/);
+  assert.doesNotMatch(usageSource, /bucket\.actualTotalTokens \+ bucket\.reservedTokens \+ estimatedTokens > bucket\.limit/);
   assert.match(usageSource, /blockedRealUsageStatus\(buckets\)/);
   assert.match(routeSource, /reserveAiTokenUsage/);
   assert.match(routeSource, /tokenLimits: classModelSettings\?\.tokenLimits/);
