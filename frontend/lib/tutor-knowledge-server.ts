@@ -144,7 +144,7 @@ export async function authorizeClassTeacher(request: Request, classId: string) {
     throw new TutorKnowledgeHttpError("Only the class teacher can manage tutor knowledge.", 403);
   }
 
-  return { classSnapshot, uid: decodedToken.uid };
+  return { classSnapshot, email: decodedToken.email, uid: decodedToken.uid };
 }
 
 function readCoTeacherRole(coTeachers: unknown, uid: string) {

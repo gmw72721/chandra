@@ -14,9 +14,29 @@ import {
   stripTeacherOnlyTutorResponseFields,
   type LearningStrategyProfileContext
 } from "@/lib/learning-strategy-telemetry";
+import {
+  AiUsageLimitError,
+  estimateAiRequestTokens,
+  finalizeAiTokenUsage,
+  getClientIpAddress,
+  normalizeAiTokenUsage,
+  releaseAiTokenReservation,
+  reserveAiTokenUsage,
+  type AiUsageReservation,
+  type StudentAiUsageStatus
+} from "@/lib/ai-usage-limits";
 import { defaultOpenRouterModelId } from "@/lib/model-options";
+import {
+  captureException,
+  logEvent,
+  logApiRequest,
+  logProviderFailure,
+  requestIdFromRequest,
+  withRequestIdHeader
+} from "@/lib/observability";
 import { buildTutorSystemPrompt, getTeacherClassTutorConfig, toProviderMessages } from "@/lib/prompts";
 import { maxStudentAttachmentsPerMessage } from "@/lib/student-attachments-server";
+import { writeAuditLog } from "@/lib/audit-log";
 import { getActiveStudentLearningProfileTutorContext } from "@/lib/student-learning-profiles-server";
 import {
   ConversationPersistenceError,
@@ -137,13 +157,54 @@ const chatRequestSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const requestId = requestIdFromRequest(request);
+  const startedAt = performance.now();
+  let response: Response;
+  let userId: string | undefined;
+
+  try {
+    response = await handlePost(request, requestId, (scopeUserId) => {
+      userId = scopeUserId;
+    });
+  } catch (caughtError) {
+    await captureException(caughtError, {
+      event: "student_chat.unhandled",
+      method: "POST",
+      requestId,
+      route: "/api/chat",
+      userId
+    });
+    const chatError = reportStudentChatError({
+      caughtError,
+      code: classifyUnexpectedChatError(caughtError),
+      requestId
+    });
+    response = NextResponse.json(studentChatErrorPayload(chatError), { status: 500 });
+  }
+
+  logApiRequest({
+    latencyMs: performance.now() - startedAt,
+    method: "POST",
+    requestId,
+    route: "/api/chat",
+    status: response.status,
+    userId
+  });
+
+  return withRequestIdHeader(response, requestId);
+}
+
+async function handlePost(request: Request, requestId: string, setUserId: (userId: string) => void) {
+  let preparedRequest: PreparedBackendChatRequest | null = null;
+
   try {
     const requestBody = await readJsonRequest(request);
 
     if (!requestBody.ok) {
       const chatError = reportStudentChatError({
         caughtError: requestBody.caughtError,
-        code: "CHAT_REQUEST_INVALID"
+        code: "CHAT_REQUEST_INVALID",
+        requestId
       });
       return NextResponse.json(studentChatErrorPayload(chatError), { status: 400 });
     }
@@ -153,35 +214,44 @@ export async function POST(request: Request) {
     if (!parsed.success) {
       const chatError = reportStudentChatError({
         caughtError: parsed.error,
-        code: "CHAT_REQUEST_INVALID"
+        code: "CHAT_REQUEST_INVALID",
+        requestId
       });
       return NextResponse.json(studentChatErrorPayload(chatError), { status: 400 });
     }
 
-    const preparedRequest = await buildBackendChatRequest(request, parsed.data);
+    preparedRequest = await buildBackendChatRequest(request, parsed.data);
+    setUserId(preparedRequest.scope.uid);
 
     if (parsed.data.stream) {
-      return streamTutorResponse(preparedRequest);
+      return streamTutorResponse(preparedRequest, requestId);
     }
 
     const response = await fetch(`${langGraphBackendBaseUrl()}/api/langgraph/chat`, {
       body: JSON.stringify(preparedRequest.backendRequest),
-      headers: await backendHeaders(),
+      headers: await backendHeaders(requestId),
       method: "POST"
     });
 
     if (!response.ok) {
+      await releaseAiTokenReservationSafely(preparedRequest.aiUsageReservation, requestId);
       const detail = await readBackendError(response);
       const chatError = reportStudentChatError({
         backendDetail: detail,
         backendStatus: response.status,
-        code: classifyBackendResponseError(response.status, detail)
+        code: classifyBackendResponseError(response.status, detail),
+        requestId
       });
       return NextResponse.json(studentChatErrorPayload(chatError), { status: response.status });
     }
 
+    const backendPayload = (await response.json()) as RawTutorApiResponse;
+    const usageStatus = await finalizeAiTokenUsage({
+      actualUsage: actualTokenUsageFromTutorPayload(backendPayload),
+      reservation: preparedRequest.aiUsageReservation
+    });
     const tutorResponse = withLearningStrategyTelemetry(
-      normalizeTutorResponse(await response.json()),
+      normalizeTutorResponse(backendPayload),
       preparedRequest.learningProfileTelemetryContext
     );
 
@@ -190,17 +260,60 @@ export async function POST(request: Request) {
         assistantMessageId: preparedRequest.persistence.assistantMessageId,
         conversationId: preparedRequest.persistence.conversationId,
         modelId: preparedRequest.persistence.modelId,
+        requestId,
         response: tutorResponse,
         scope: preparedRequest.scope
       });
     }
 
-    return NextResponse.json(studentSafeTutorResponse(withConversationMetadata(tutorResponse, preparedRequest.persistence)));
+    return NextResponse.json(
+      withStudentAiUsageStatus(
+        studentSafeTutorResponse(withConversationMetadata(tutorResponse, preparedRequest.persistence)),
+        usageStatus ?? preparedRequest.aiUsageReservation?.studentStatus
+      )
+    );
   } catch (caughtError) {
-    if (caughtError instanceof TutorChatHttpError) {
+    if (!(caughtError instanceof AiUsageLimitError)) {
+      await releaseAiTokenReservationSafely(preparedRequest?.aiUsageReservation ?? null, requestId);
+    }
+
+    if (caughtError instanceof AiUsageLimitError) {
+      await logChatAccessDecision({
+        classId: preparedRequest?.scope.classId,
+        decision: "quota_exceeded",
+        metadata: {
+          quotaScope: caughtError.quotaScope
+        },
+        requestId,
+        userId: preparedRequest?.scope.uid
+      });
       const chatError = reportStudentChatError({
         caughtError,
-        code: classifyTutorChatHttpError(caughtError)
+        code: "CHAT_AI_USAGE_EXHAUSTED",
+        requestId
+      });
+      return NextResponse.json(
+        {
+          ...studentChatErrorPayload(chatError),
+          aiUsageStatus: caughtError.studentStatus
+        },
+        { status: caughtError.status }
+      );
+    }
+
+    if (caughtError instanceof TutorChatHttpError) {
+      if (caughtError.decision) {
+        await logChatAccessDecision({
+          classId: caughtError.classId,
+          decision: caughtError.decision,
+          requestId,
+          userId: caughtError.userId
+        });
+      }
+      const chatError = reportStudentChatError({
+        caughtError,
+        code: classifyTutorChatHttpError(caughtError),
+        requestId
       });
       return NextResponse.json(studentChatErrorPayload(chatError), { status: caughtError.status });
     }
@@ -208,20 +321,27 @@ export async function POST(request: Request) {
     if (caughtError instanceof ConversationPersistenceError) {
       const chatError = reportStudentChatError({
         caughtError,
-        code: classifyConversationPersistenceError(caughtError)
+        code: classifyConversationPersistenceError(caughtError),
+        requestId
       });
       return NextResponse.json(studentChatErrorPayload(chatError), { status: caughtError.status });
     }
 
     const chatError = reportStudentChatError({
       caughtError,
-      code: classifyUnexpectedChatError(caughtError)
+      code: classifyUnexpectedChatError(caughtError),
+      requestId
     });
     return NextResponse.json(studentChatErrorPayload(chatError), { status: 500 });
   }
 }
 
 type ParsedChatRequest = z.infer<typeof chatRequestSchema>;
+type RawTutorApiResponse = Partial<TutorApiResponse> & {
+  tokenUsage?: {
+    actual?: unknown;
+  };
+};
 
 async function readJsonRequest(request: Request) {
   try {
@@ -286,8 +406,29 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
     systemPrompt,
     appendAttachmentContextToStudentMessage(messages, persistence)
   );
+  const estimatedTokens = estimateAiRequestTokens({
+    attachmentCount: persistence?.attachments.length ?? 0,
+    maxTokens,
+    messages: providerMessages,
+    useClassMaterialsFirst: teacherClass?.sourceUsage?.useClassMaterialsFirst !== false
+  });
+  const aiUsageReservation = await reserveAiTokenUsage({
+    classId: courseId,
+    estimatedInputTokens: Math.max(1, estimatedTokens - maxTokens),
+    estimatedOutputTokens: maxTokens,
+    estimatedTokens,
+    ipAddress: getClientIpAddress(request),
+    modelId: model,
+    provider: "langgraph",
+    requestLimits: classModelSettings?.requestLimits,
+    role: scope.role,
+    studentId: scope.role === "student" ? scope.uid : undefined,
+    tokenLimits: classModelSettings?.tokenLimits,
+    userId: scope.uid
+  });
 
   return {
+    aiUsageReservation,
     backendRequest: {
       classId: courseId,
       professorId: scope.professorId,
@@ -297,6 +438,13 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
       maxTokens,
       reasoningEffort,
       answerPolicy: teacherClass?.answerPolicy,
+          aiUsageReservation: aiUsageReservation
+        ? {
+            estimatedTokens: aiUsageReservation.estimatedTokens,
+            id: aiUsageReservation.id,
+            studentId: scope.role === "student" ? scope.uid : undefined
+          }
+        : undefined,
       sourceUsage: teacherClass?.sourceUsage,
       studentLearningProfileContext: privateBackendLearningProfileContext(studentLearningProfileContext),
       messages: providerMessages
@@ -438,7 +586,7 @@ function formatAttachmentSize(bytes: number) {
   return `${Math.ceil(bytes / 1024)} KB`;
 }
 
-function streamTutorResponse(preparedRequest: PreparedBackendChatRequest) {
+function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, requestId: string) {
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -456,16 +604,18 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest) {
 
         const response = await fetch(`${langGraphBackendBaseUrl()}/api/langgraph/chat/stream`, {
           body: JSON.stringify(preparedRequest.backendRequest),
-          headers: await backendHeaders(),
+          headers: await backendHeaders(requestId),
           method: "POST"
         });
 
         if (!response.ok) {
+          await releaseAiTokenReservationSafely(preparedRequest.aiUsageReservation, requestId);
           const detail = await readBackendError(response);
           const chatError = reportStudentChatError({
             backendDetail: detail,
             backendStatus: response.status,
-            code: classifyBackendResponseError(response.status, detail)
+            code: classifyBackendResponseError(response.status, detail),
+            requestId
           });
           send({
             errorCode: chatError.code,
@@ -481,7 +631,8 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest) {
 
         if (!reader) {
           const chatError = reportStudentChatError({
-            code: "TUTOR_BACKEND_STREAM_MISSING"
+            code: "TUTOR_BACKEND_STREAM_MISSING",
+            requestId
           });
           send({
             errorCode: chatError.code,
@@ -515,8 +666,13 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest) {
             const event = JSON.parse(line) as Record<string, unknown>;
 
             if (event.type === "final" && event.payload) {
+              const backendPayload = event.payload as RawTutorApiResponse;
+              const usageStatus = await finalizeAiTokenUsage({
+                actualUsage: actualTokenUsageFromTutorPayload(backendPayload),
+                reservation: preparedRequest.aiUsageReservation
+              });
               const tutorResponse = withLearningStrategyTelemetry(
-                normalizeTutorResponse(event.payload as Partial<TutorApiResponse>),
+                normalizeTutorResponse(backendPayload),
                 preparedRequest.learningProfileTelemetryContext
               );
 
@@ -525,6 +681,7 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest) {
                   assistantMessageId: preparedRequest.persistence.assistantMessageId,
                   conversationId: preparedRequest.persistence.conversationId,
                   modelId: preparedRequest.persistence.modelId,
+                  requestId,
                   response: tutorResponse,
                   scope: preparedRequest.scope
                 });
@@ -536,14 +693,19 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest) {
                 type: "step"
               });
               send({
-                payload: studentSafeTutorResponse(withConversationMetadata(tutorResponse, preparedRequest.persistence)),
+                payload: withStudentAiUsageStatus(
+                  studentSafeTutorResponse(withConversationMetadata(tutorResponse, preparedRequest.persistence)),
+                  usageStatus ?? preparedRequest.aiUsageReservation?.studentStatus
+                ),
                 type: "final"
               });
             } else if (event.type === "error") {
+              await releaseAiTokenReservationSafely(preparedRequest.aiUsageReservation, requestId);
               const backendDetail = typeof event.message === "string" ? event.message : "";
               const chatError = reportStudentChatError({
                 backendDetail,
-                code: classifyBackendStreamError(backendDetail)
+                code: classifyBackendStreamError(backendDetail),
+                requestId
               });
               send({
                 errorCode: chatError.code,
@@ -558,9 +720,11 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest) {
           }
         }
       } catch (caughtError) {
+        await releaseAiTokenReservationSafely(preparedRequest.aiUsageReservation, requestId);
         const chatError = reportStudentChatError({
           caughtError,
-          code: classifyUnexpectedChatError(caughtError)
+          code: classifyUnexpectedChatError(caughtError),
+          requestId
         });
         send({
           errorCode: chatError.code,
@@ -598,8 +762,11 @@ function langGraphBackendBaseUrl() {
 }
 
 type StudentChatErrorCode =
+  | "CHAT_CLASS_DISABLED"
+  | "CHAT_STUDENT_BLOCKED"
   | "CHAT_CLASS_NOT_FOUND"
   | "CHAT_CLASS_REQUIRED"
+  | "CHAT_AI_USAGE_EXHAUSTED"
   | "CHAT_CONVERSATION_FORBIDDEN"
   | "CHAT_CONVERSATION_ID_INVALID"
   | "CHAT_CONVERSATION_NOT_FOUND"
@@ -635,15 +802,34 @@ function reportStudentChatError({
   backendDetail,
   backendStatus,
   caughtError,
-  code
+  code,
+  requestId
 }: {
   backendDetail?: string;
   backendStatus?: number;
   caughtError?: unknown;
   code: StudentChatErrorCode;
+  requestId?: string;
 }): ReportedStudentChatError {
   const errorId = randomUUID().slice(0, 8).toUpperCase();
   const studentMessage = studentMessageForChatError(code);
+  const providerMetadata = backendStatus || code.startsWith("TUTOR_BACKEND_")
+    ? {
+        provider: "fastapi-backend",
+        providerErrorClass: code,
+        providerStatus: backendStatus
+      }
+    : {};
+
+  if (providerMetadata.provider) {
+    logProviderFailure({
+      provider: providerMetadata.provider,
+      providerErrorClass: providerMetadata.providerErrorClass,
+      providerStatus: providerMetadata.providerStatus,
+      requestId,
+      route: "/api/chat"
+    });
+  }
 
   console.error("Student chat error", JSON.stringify({
     backendBaseUrl: langGraphBackendBaseUrlForLog(),
@@ -651,7 +837,9 @@ function reportStudentChatError({
     backendStatus,
     code,
     errorId,
-    message: errorMessageForLog(caughtError)
+    message: errorMessageForLog(caughtError),
+    requestId,
+    ...providerMetadata
   }));
 
   return {
@@ -708,6 +896,10 @@ function studentMessageForChatError(code: StudentChatErrorCode) {
       return "Join a class before chatting with Chandra.";
     case "CHAT_CLASS_NOT_FOUND":
       return "Your saved class was not found. Ask your teacher for the current class code.";
+    case "CHAT_CLASS_DISABLED":
+      return "Your teacher has paused chat for this class.";
+    case "CHAT_STUDENT_BLOCKED":
+      return "Chat is paused for your account right now. Ask your teacher for help.";
     case "CHAT_TEACHER_SETUP_REQUIRED":
       return "This class needs a setup fix before chat can start. Ask your teacher for help.";
     case "CHAT_TEACHER_PREVIEW_CLASS_REQUIRED":
@@ -728,6 +920,8 @@ function studentMessageForChatError(code: StudentChatErrorCode) {
       return "I could not save this message. Start a new chat and try again.";
     case "CHAT_REQUEST_INVALID":
       return "I could not send that message. Refresh the page and try again.";
+    case "CHAT_AI_USAGE_EXHAUSTED":
+      return "You are out of AI usage for now. Try again when your usage refreshes.";
     case "TUTOR_BACKEND_REQUEST_TOO_LARGE":
       return "This chat is too large to send. Start a new chat and try again.";
     case "TUTOR_BACKEND_UNREACHABLE":
@@ -774,6 +968,14 @@ function classifyTutorChatHttpError(error: TutorChatHttpError): StudentChatError
 
   if (message.includes("saved class was not found")) {
     return "CHAT_CLASS_NOT_FOUND";
+  }
+
+  if (message.includes("teacher has paused chat")) {
+    return "CHAT_CLASS_DISABLED";
+  }
+
+  if (message.includes("chat is paused")) {
+    return "CHAT_STUDENT_BLOCKED";
   }
 
   if (message.includes("missing teacher ownership metadata")) {
@@ -837,6 +1039,10 @@ function classifyBackendResponseError(status: number, detail: string): StudentCh
   }
 
   if (status === 429 || normalizedDetail.includes("rate limit")) {
+    if (normalizedDetail.includes("ai usage limit")) {
+      return "CHAT_AI_USAGE_EXHAUSTED";
+    }
+
     return "TUTOR_BACKEND_RATE_LIMITED";
   }
 
@@ -864,6 +1070,10 @@ function classifyBackendStreamError(detail: string): StudentChatErrorCode {
 
   if (normalizedDetail.includes("rate limit")) {
     return "TUTOR_BACKEND_RATE_LIMITED";
+  }
+
+  if (normalizedDetail.includes("ai usage limit")) {
+    return "CHAT_AI_USAGE_EXHAUSTED";
   }
 
   if (
@@ -917,7 +1127,7 @@ function isBackendConfigurationError(caughtError: unknown) {
   );
 }
 
-async function backendHeaders() {
+async function backendHeaders(requestId: string) {
   const sharedSecret = process.env.BACKEND_SHARED_SECRET?.trim();
 
   if (!sharedSecret) {
@@ -926,6 +1136,7 @@ async function backendHeaders() {
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    "X-Request-Id": requestId,
     "X-Chandra-Internal-Secret": sharedSecret
   };
   const identityToken = await backendIdentityToken();
@@ -985,16 +1196,83 @@ function withConversationMetadata(
   };
 }
 
+function withStudentAiUsageStatus(
+  response: TutorApiResponse,
+  usageStatus: StudentAiUsageStatus | null | undefined
+): TutorApiResponse {
+  if (!usageStatus) {
+    return response;
+  }
+
+  return {
+    ...response,
+    aiUsageStatus: usageStatus
+  };
+}
+
+function actualTokenUsageFromTutorPayload(payload: RawTutorApiResponse) {
+  return normalizeAiTokenUsage(payload.tokenUsage?.actual);
+}
+
+async function releaseAiTokenReservationSafely(
+  reservation: AiUsageReservation | null | undefined,
+  requestId: string
+) {
+  try {
+    await releaseAiTokenReservation(reservation ?? null);
+  } catch (caughtError) {
+    console.error("AI token reservation release failed", JSON.stringify({
+      message: errorMessageForLog(caughtError),
+      requestId,
+      reservationId: reservation?.id
+    }));
+  }
+}
+
+async function logChatAccessDecision({
+  classId,
+  decision,
+  metadata = {},
+  requestId,
+  userId
+}: {
+  classId?: string;
+  decision: "class_chat_disabled" | "quota_exceeded" | "student_chat_blocked";
+  metadata?: Record<string, string | number | boolean | null | undefined>;
+  requestId: string;
+  userId?: string;
+}) {
+  const eventType = `student_chat.${decision}`;
+  const safeMetadata = {
+    classId,
+    decision,
+    requestId,
+    userId,
+    ...metadata
+  };
+
+  logEvent(eventType, "warn", safeMetadata);
+  await writeAuditLog({
+    actor: { uid: userId ?? null },
+    eventType,
+    metadata: safeMetadata,
+    route: "/api/chat",
+    target: { classId: classId ?? null, userId: userId ?? null }
+  });
+}
+
 async function saveAssistantMessageWithoutBlockingTutorResponse({
   assistantMessageId,
   conversationId,
   modelId,
+  requestId,
   response,
   scope
 }: {
   assistantMessageId: string;
   conversationId: string;
   modelId: string;
+  requestId?: string;
   response: TutorApiResponse;
   scope: PreparedBackendChatRequest["scope"];
 }) {
@@ -1012,7 +1290,8 @@ async function saveAssistantMessageWithoutBlockingTutorResponse({
       code:
         caughtError instanceof ConversationPersistenceError
           ? classifyConversationPersistenceError(caughtError)
-          : "CHAT_CONVERSATION_ID_INVALID"
+          : "CHAT_CONVERSATION_ID_INVALID",
+      requestId
     });
   }
 }

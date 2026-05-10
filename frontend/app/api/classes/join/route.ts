@@ -1,5 +1,6 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
+import { checkAbuseLockout, recordAbuseFailure, resetAbuseFailures } from "@/lib/abuse-lockout";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -9,6 +10,15 @@ type JoinClassBody = {
   displayName?: unknown;
   email?: unknown;
   syncProfile?: unknown;
+};
+
+const classJoinLockoutPolicy = {
+  resetWindowMs: 60 * 60 * 1000,
+  lockoutSteps: [
+    { failures: 5, cooldownMs: 5 * 60 * 1000 },
+    { failures: 10, cooldownMs: 30 * 60 * 1000 },
+    { failures: 20, cooldownMs: 24 * 60 * 60 * 1000 }
+  ]
 };
 
 export async function POST(request: Request) {
@@ -49,12 +59,27 @@ export async function POST(request: Request) {
       return NextResponse.json({ classId: "" });
     }
 
+    const abuseScope = {
+      actorUid: decodedToken.uid,
+      identifier: `${classCode}:${email || decodedToken.uid}`,
+      namespace: "classes.join",
+      request,
+      route: "/api/classes/join"
+    };
+    const lockout = await checkAbuseLockout(abuseScope, classJoinLockoutPolicy);
+
+    if (lockout.locked) {
+      return NextResponse.json({ error: "Class join failed." }, { status: 429 });
+    }
+
     const classId = await resolveClassId(classCode);
 
     if (!classId) {
-      return NextResponse.json({ error: "Class code was not found." }, { status: 404 });
+      await recordAbuseFailure(abuseScope, classJoinLockoutPolicy);
+      return NextResponse.json({ error: "Class join failed." }, { status: 404 });
     }
 
+    await resetAbuseFailures(abuseScope);
     await updateStudentEnrollment({
       displayName,
       email,

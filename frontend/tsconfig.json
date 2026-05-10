@@ -35,6 +35,8 @@
     "app/**/*.tsx",
     "components/**/*.ts",
     "components/**/*.tsx",
+    "instrumentation.ts",
+    "instrumentation-client.ts",
     "lib/**/*.ts",
     "lib/**/*.tsx",
     ".next/types/**/*.ts",

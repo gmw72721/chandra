@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { writeAuditLog } from "@/lib/audit-log";
 import {
   ConversationPersistenceError,
   updateTeacherConversationReview
@@ -23,7 +24,7 @@ export async function PATCH(
 ) {
   try {
     const { classId, conversationId } = await params;
-    const { uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
     const data = (await request.json()) as {
       flags?: unknown;
       privateNote?: unknown;
@@ -42,6 +43,20 @@ export async function PATCH(
       privateNote: String(data.privateNote ?? "").slice(0, 1000),
       status,
       teacherId: uid
+    });
+
+    await writeAuditLog({
+      actor: { email: actorEmail, uid },
+      eventType: "conversation.review.updated",
+      metadata: {
+        flags: Array.isArray(data.flags) ? data.flags.map(String) : [],
+        status
+      },
+      route: "/api/classes/[classId]/conversations/[conversationId]/review",
+      target: {
+        classId,
+        conversationId
+      }
     });
 
     return NextResponse.json({ review });

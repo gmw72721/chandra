@@ -1,6 +1,8 @@
 import { createHash, timingSafeEqual } from "crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
+import { writeAuditLog } from "@/lib/audit-log";
+import { checkAbuseLockout, recordAbuseFailure, resetAbuseFailures } from "@/lib/abuse-lockout";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -20,7 +22,18 @@ class TeacherSignupError extends Error {
   }
 }
 
+const teacherInviteSignupLockoutPolicy = {
+  resetWindowMs: 60 * 60 * 1000,
+  lockoutSteps: [
+    { failures: 5, cooldownMs: 5 * 60 * 1000 },
+    { failures: 10, cooldownMs: 30 * 60 * 1000 },
+    { failures: 20, cooldownMs: 24 * 60 * 60 * 1000 }
+  ]
+};
+
 export async function POST(request: Request) {
+  let inviteAbuseScope: Parameters<typeof recordAbuseFailure>[0] | null = null;
+
   try {
     const token = getBearerToken(request);
 
@@ -32,13 +45,29 @@ export async function POST(request: Request) {
     const decodedToken = await adminAuth!.verifyIdToken(token);
     const body = (await request.json().catch(() => ({}))) as TeacherSignupBody;
     const inviteToken = String(body.inviteToken ?? "").trim();
+    const inviteTokenHash = inviteToken ? hashInviteToken(inviteToken) : "missing";
+    const abuseScope = {
+      actorUid: decodedToken.uid,
+      identifier: `${inviteTokenHash}:${String(decodedToken.email ?? "").trim().toLowerCase()}`,
+      namespace: "teacher_invite.signup",
+      request,
+      route: "/api/teacher-signup"
+    };
+    inviteAbuseScope = abuseScope;
+    const lockout = await checkAbuseLockout(abuseScope, teacherInviteSignupLockoutPolicy);
+
+    if (lockout.locked) {
+      return genericTeacherInviteError();
+    }
+
     const bootstrapInviteIsValid = isValidBootstrapTeacherInviteToken(inviteToken);
     const inviteReference = bootstrapInviteIsValid
       ? null
-      : adminDb!.collection("teacherInvites").doc(hashInviteToken(inviteToken));
+      : adminDb!.collection("teacherInvites").doc(inviteTokenHash);
 
     if (!bootstrapInviteIsValid && !inviteToken) {
-      return NextResponse.json({ error: "Use a valid teacher invite link to create a teacher account." }, { status: 403 });
+      await recordAbuseFailure(abuseScope, teacherInviteSignupLockoutPolicy);
+      return genericTeacherInviteError();
     }
 
     const displayName =
@@ -77,10 +106,11 @@ export async function POST(request: Request) {
         if (
           !inviteSnapshot.exists
           || invite?.usedAt
+          || invite?.revokedAt
           || !(expiresAt instanceof Timestamp)
           || expiresAt.toMillis() <= Date.now()
         ) {
-          throw new TeacherSignupError("Use a valid teacher invite link to create a teacher account.", 403);
+          throw new TeacherSignupError("Teacher signup failed.", 403);
         }
 
         transaction.update(inviteReference, {
@@ -93,6 +123,24 @@ export async function POST(request: Request) {
       transaction.set(userReference, profile);
     });
 
+    await resetAbuseFailures(abuseScope);
+    if (inviteReference) {
+      await writeAuditLog({
+        actor: {
+          email,
+          uid: decodedToken.uid
+        },
+        eventType: "teacher_invite.used",
+        metadata: {
+          inviteId: inviteTokenHash
+        },
+        route: "/api/teacher-signup",
+        target: {
+          inviteId: inviteTokenHash
+        }
+      });
+    }
+
     return NextResponse.json({
       profile: {
         ...profile,
@@ -101,6 +149,14 @@ export async function POST(request: Request) {
     });
   } catch (caughtError) {
     if (caughtError instanceof TeacherSignupError) {
+      if (caughtError.status === 403) {
+        if (inviteAbuseScope) {
+          await recordAbuseFailure(inviteAbuseScope, teacherInviteSignupLockoutPolicy);
+        }
+
+        return genericTeacherInviteError();
+      }
+
       return NextResponse.json({ error: caughtError.message }, { status: caughtError.status });
     }
 
@@ -112,6 +168,10 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ error: "Teacher signup failed." }, { status: 500 });
   }
+}
+
+function genericTeacherInviteError() {
+  return NextResponse.json({ error: "Teacher signup failed." }, { status: 403 });
 }
 
 function getBearerToken(request: Request) {

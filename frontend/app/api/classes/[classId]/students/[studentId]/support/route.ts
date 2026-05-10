@@ -11,17 +11,19 @@ export async function PATCH(
   try {
     const { classId, studentId } = await params;
     const { uid } = await authorizeClassTeacher(request, classId);
-    const data = (await request.json()) as { teacherNotes?: unknown };
+    const data = (await request.json()) as { chatBlocked?: unknown; teacherNotes?: unknown };
+    const chatBlocked = typeof data.chatBlocked === "boolean" ? data.chatBlocked : undefined;
     const teacherNotes = String(data.teacherNotes ?? "");
 
     await updateTeacherStudentSupport({
+      chatBlocked,
       classId,
       notes: teacherNotes,
       studentEmail: decodeURIComponent(studentId),
       teacherId: uid
     });
 
-    return NextResponse.json({ teacherNotes: teacherNotes.slice(0, 1000) });
+    return NextResponse.json({ chatBlocked: chatBlocked ?? false, teacherNotes: teacherNotes.slice(0, 1000) });
   } catch (caughtError) {
     if (caughtError instanceof TutorKnowledgeHttpError) {
       return NextResponse.json({ error: caughtError.message }, { status: caughtError.status });

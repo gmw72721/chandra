@@ -1,5 +1,6 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
+import { writeAuditLog } from "@/lib/audit-log";
 import { classAccessRoleOptions, normalizeClassAccessRole } from "@/lib/class-settings";
 import { adminDb } from "@/lib/firebase-admin";
 import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
@@ -16,7 +17,7 @@ export async function POST(
 ) {
   try {
     const { classId } = await params;
-    const { uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
     const body = (await request.json().catch(() => ({}))) as {
       email?: unknown;
       role?: unknown;
@@ -48,6 +49,17 @@ export async function POST(
       { merge: true }
     );
 
+    await writeAuditLog({
+      actor: { email: actorEmail, uid },
+      eventType: "class.co_teacher.added",
+      metadata: { role },
+      route: "/api/classes/[classId]/co-teachers",
+      target: {
+        classId,
+        targetUid: targetTeacher.uid
+      }
+    });
+
     return NextResponse.json({
       coTeacher: {
         displayName: targetTeacher.displayName,
@@ -67,7 +79,7 @@ export async function PATCH(
 ) {
   try {
     const { classId } = await params;
-    const { uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
     const body = (await request.json().catch(() => ({}))) as {
       role?: unknown;
       uid?: unknown;
@@ -87,6 +99,17 @@ export async function PATCH(
       [`coTeachers.${targetUid}.role`]: role
     });
 
+    await writeAuditLog({
+      actor: { email: actorEmail, uid },
+      eventType: "class.co_teacher.updated",
+      metadata: { role },
+      route: "/api/classes/[classId]/co-teachers",
+      target: {
+        classId,
+        targetUid
+      }
+    });
+
     return NextResponse.json({ role, uid: targetUid });
   } catch (caughtError) {
     return coTeacherErrorResponse(caughtError, "Co-teacher update failed.");
@@ -99,7 +122,7 @@ export async function DELETE(
 ) {
   try {
     const { classId } = await params;
-    const { uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
     const body = (await request.json().catch(() => ({}))) as {
       uid?: unknown;
     };
@@ -116,6 +139,16 @@ export async function DELETE(
     await adminDb!.collection("classes").doc(classId).update({
       coTeacherIds: FieldValue.arrayRemove(targetUid),
       [`coTeachers.${targetUid}`]: FieldValue.delete()
+    });
+
+    await writeAuditLog({
+      actor: { email: actorEmail, uid },
+      eventType: "class.co_teacher.removed",
+      route: "/api/classes/[classId]/co-teachers",
+      target: {
+        classId,
+        targetUid
+      }
     });
 
     return NextResponse.json({ uid: targetUid });

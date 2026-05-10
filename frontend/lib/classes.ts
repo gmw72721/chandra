@@ -30,6 +30,7 @@ import {
   type ResponseFormatSettings,
   type SourceDefaultsSettings,
   type SourceUsageSettings,
+  type TutorAccessSettings,
   type TutorBehavior
 } from "./class-settings";
 import { auth, db, isFirebaseConfigured } from "./firebase";
@@ -62,6 +63,8 @@ export type TeacherClass = {
   sourceDefaults?: SourceDefaultsSettings;
   sourceUsage?: SourceUsageSettings;
   studentFacingInstructions?: string;
+  studentChatEnabled?: boolean;
+  tutorAccess?: TutorAccessSettings;
   createdAt?: unknown;
 };
 
@@ -69,6 +72,7 @@ export type ClassStudent = {
   id: string;
   email: string;
   displayName: string;
+  chatBlocked?: boolean;
   addedAt?: unknown;
 };
 
@@ -317,6 +321,7 @@ export async function updateTeacherClassSettings({
   sourceDefaults,
   sourceUsage,
   studentFacingInstructions,
+  tutorAccess,
   themeColor
 }: {
   answerPolicy: AnswerPolicySettings;
@@ -336,6 +341,7 @@ export async function updateTeacherClassSettings({
   sourceDefaults: SourceDefaultsSettings;
   sourceUsage: SourceUsageSettings;
   studentFacingInstructions: string;
+  tutorAccess: TutorAccessSettings;
   themeColor: TeacherClassThemeColor;
 }) {
   assertFirestoreReady();
@@ -357,6 +363,8 @@ export async function updateTeacherClassSettings({
     sourceDefaults,
     sourceUsage,
     studentFacingInstructions: studentFacingInstructions.trim(),
+    studentChatEnabled: tutorAccess.enabled,
+    tutorAccess,
     themeColor: normalizeTeacherClassThemeColor(themeColor)
   });
 }

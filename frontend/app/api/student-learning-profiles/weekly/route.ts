@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { updateWeeklyStudentLearningProfiles } from "@/lib/student-learning-profiles-server";
 import { ConversationPersistenceError } from "@/lib/student-conversations-server";
+import { pingBetterStackHeartbeat } from "@/lib/observability";
 import { TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
@@ -13,6 +14,10 @@ export async function POST(request: Request) {
     const results = await updateWeeklyStudentLearningProfiles({
       classId: typeof data.classId === "string" ? data.classId : undefined
     });
+    pingBetterStackHeartbeat(
+      process.env.BETTER_STACK_LEARNING_PROFILE_HEARTBEAT_URL,
+      "student_learning_profiles.weekly_updated"
+    );
 
     return NextResponse.json({
       results,

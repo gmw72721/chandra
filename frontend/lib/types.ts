@@ -150,6 +150,7 @@ export type StudentRosterActivitySummary = {
   status: "active" | "inactive" | "no_activity";
   studentId: string;
   studentEmail: string;
+  chatBlocked: boolean;
   teacherNotes: string;
   totalQuestions: number;
 };
@@ -295,6 +296,7 @@ export type TutorTrace = {
 };
 
 export type TutorApiResponse = {
+  aiUsageStatus?: StudentAiUsageStatus;
   assistantMessageId?: string;
   conversationId?: string;
   message: string;
@@ -307,6 +309,14 @@ export type TutorApiResponse = {
   sources: TutorSource[];
   structuredOutput?: TutorStructuredOutput;
   retrievalConfidence: RetrievalConfidence;
+};
+
+export type StudentAiUsageStatus = {
+  blocked: boolean;
+  nearLimit: boolean;
+  resetHint: string;
+  todayPercentRemaining: number;
+  weekPercentRemaining: number;
 };
 
 export type LearningStrategyTutorMove =

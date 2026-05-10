@@ -6,6 +6,7 @@ import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
   reauthenticateWithCredential,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut,
   updateEmail,
@@ -219,7 +220,23 @@ export async function createRoleProfile({
 export async function signInWithEmail(emailOrUsername: string, password: string) {
   assertFirebaseReady();
   const email = await resolveLoginEmail(emailOrUsername);
-  return signInWithEmailAndPassword(auth!, email, password);
+
+  try {
+    return await signInWithEmailAndPassword(auth!, email, password);
+  } catch {
+    throw new Error("Invalid username/email or password.");
+  }
+}
+
+export async function requestPasswordReset(emailOrUsername: string) {
+  assertFirebaseReady();
+  const email = await resolveLoginEmail(emailOrUsername);
+
+  if (email && email.includes("@")) {
+    await sendPasswordResetEmail(auth!, email).catch(() => undefined);
+  }
+
+  return "If an account matches that email or username, Firebase will send a password reset link.";
 }
 
 export async function signOutCurrentUser() {
@@ -228,6 +245,73 @@ export async function signOutCurrentUser() {
     await safelyWriteUserPresence(auth!.currentUser, null, false);
   }
   return signOut(auth!);
+}
+
+export async function signOutAllSessions() {
+  assertFirebaseReady();
+  const currentUser = auth!.currentUser;
+
+  if (!currentUser) {
+    throw new Error("Sign in before revoking sessions.");
+  }
+
+  const token = await currentUser.getIdToken(true);
+  const response = await fetch("/api/account/sessions/revoke", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+  const data = (await response.json().catch(() => ({}))) as { error?: string };
+
+  if (!response.ok) {
+    throw new Error(data.error ?? "Session revocation failed.");
+  }
+
+  await safelyWriteUserPresence(currentUser, null, false);
+  return signOut(auth!);
+}
+
+export async function deleteCurrentAccount({
+  currentPassword,
+  uid
+}: {
+  currentPassword: string;
+  uid: string;
+}) {
+  assertFirebaseReady();
+  const currentUser = auth!.currentUser;
+
+  if (currentUser?.uid !== uid) {
+    throw new Error("Sign in before deleting your account.");
+  }
+
+  const currentEmail = String(currentUser.email ?? "").trim().toLowerCase();
+  const cleanCurrentPassword = String(currentPassword ?? "");
+
+  if (!currentEmail || !cleanCurrentPassword) {
+    throw new Error("Enter your current password before deleting your account.");
+  }
+
+  await reauthenticateWithCredential(
+    currentUser,
+    EmailAuthProvider.credential(currentEmail, cleanCurrentPassword)
+  );
+
+  const token = await currentUser.getIdToken(true);
+  const response = await fetch("/api/account/delete", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+  const data = (await response.json().catch(() => ({}))) as { deleted?: boolean; error?: string };
+
+  if (!response.ok || !data.deleted) {
+    throw new Error(data.error ?? "Account deletion failed.");
+  }
+
+  return data.deleted;
 }
 
 export function startUserPresenceHeartbeat(user: User, profile: UserProfile) {
@@ -374,11 +458,12 @@ export async function updateUserAccountSettings({
       ...(appearance ? { appearance: normalizeTeacherClassAppearance(appearance) } : {}),
       ...(typeof displayName === "string" ? { displayName } : {}),
       ...(cleanEmail ? { email: cleanEmail } : {}),
+      ...(shouldUpdateEmail || shouldUpdatePassword ? { revokeOtherSessions: true } : {}),
       ...(typeof username === "string" ? { username } : {}),
       ...(themeColor ? { themeColor: normalizeTeacherClassThemeColor(themeColor) } : {})
     })
   });
-  const data = (await response.json()) as { profile?: UserProfile; error?: string };
+  const data = (await response.json()) as { profile?: UserProfile; error?: string; sessionRevoked?: boolean };
 
   if (!response.ok || !data.profile) {
     throw new Error(data.error ?? "Account settings failed.");
@@ -437,10 +522,6 @@ async function resolveLoginEmail(emailOrUsername: string) {
     return identifier;
   }
 
-  if (identifier.includes("@")) {
-    return identifier;
-  }
-
   const response = await fetch("/api/auth/resolve-login", {
     method: "POST",
     headers: {
@@ -450,11 +531,11 @@ async function resolveLoginEmail(emailOrUsername: string) {
   });
   const data = (await response.json().catch(() => ({}))) as { email?: string; error?: string };
 
-  if (!response.ok || !data.email) {
-    throw new Error(data.error ?? "No account matches that username.");
+  if (!response.ok) {
+    throw new Error(data.error ?? "Invalid username/email or password.");
   }
 
-  return data.email;
+  return data.email || identifier;
 }
 
 async function assertUsernameIsAvailable(username: string) {
@@ -470,11 +551,11 @@ async function assertUsernameIsAvailable(username: string) {
     body: JSON.stringify({ identifier: username })
   });
 
-  if (response.status === 404) {
+  const data = (await response.json().catch(() => ({}))) as { email?: string; error?: string };
+
+  if (response.ok && "email" in data && !data.email) {
     return;
   }
-
-  const data = (await response.json().catch(() => ({}))) as { error?: string };
 
   if (response.ok) {
     throw new Error("That username is already in use.");

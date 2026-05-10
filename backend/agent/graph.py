@@ -7,11 +7,13 @@ import os
 import re
 from typing import Any
 
+import httpx
 from langgraph.graph import END, START, StateGraph
 
 from backend.agent.openrouter_client import OpenRouterClient, encode_file_as_data_url
 from backend.agent.state import PdfRagState
 from backend.agent.tools import SEARCH_PDF_PAGES_TOOL, parse_search_pdf_pages_arguments, search_pdf_pages
+from backend.internal_next import internal_next_base_url
 from backend.retrieval.pdf_page_assets import MAX_TOTAL_PAGES, fetch_pdf_page_assets_via_next
 from backend.retrieval.pdf_retriever import (
     PdfRetriever,
@@ -83,6 +85,7 @@ def build_pdf_rag_graph(
             "answer": response.get("content") or "",
             "finish_reason": response.get("finish_reason") or "",
             "stage_history": append_stage(state, "openrouter_agent"),
+            "token_usage": add_token_usage(state.get("token_usage"), response.get("usage")),
             "tool_calls": tool_calls,
         }
 
@@ -117,6 +120,7 @@ def build_pdf_rag_graph(
 
     async def openrouter_answer_with_pages(state: PdfRagState) -> dict[str, Any]:
         messages = await asyncio.to_thread(build_multimodal_final_messages, state)
+        await maybe_adjust_ai_usage_reservation(state, messages)
         response = await client.chat(
             model=state.get("model") or DEFAULT_OPENROUTER_MODEL,
             messages=messages,
@@ -148,6 +152,7 @@ def build_pdf_rag_graph(
             "answer": answer,
             "finish_reason": response.get("finish_reason") or "",
             "stage_history": append_stage(state, "openrouter_answer_with_pages"),
+            "token_usage": add_token_usage(state.get("token_usage"), response.get("usage")),
             "tool_calls": tool_calls,
         }
 
@@ -1316,6 +1321,7 @@ async def run_pdf_rag_agent(
     max_tokens: int | None = None,
     reasoning_effort: str | None = None,
     answer_policy: dict[str, Any] | None = None,
+    ai_usage_reservation: dict[str, Any] | None = None,
     source_usage: dict[str, Any] | None = None,
     student_profile_context: dict[str, Any] | None = None,
     class_id: str | None = None,
@@ -1356,6 +1362,7 @@ async def run_pdf_rag_agent(
                 "finish_reason": "",
                 "reasoning_effort": reasoning_effort,
                 "answer_policy": answer_policy,
+                "ai_usage_reservation": ai_usage_reservation or {},
                 "source_usage": source_usage,
                 "student_profile_context": student_profile_context or {},
                 "class_id": class_id,
@@ -1364,6 +1371,7 @@ async def run_pdf_rag_agent(
                 "sources": [],
                 "retrieval_confidence": "low",
                 "retrieval_diagnostics": [],
+                "token_usage": empty_token_usage(),
             },
             {"recursion_limit": 40},
         )
@@ -1381,6 +1389,7 @@ async def run_pdf_rag_agent_stream(
     max_tokens: int | None = None,
     reasoning_effort: str | None = None,
     answer_policy: dict[str, Any] | None = None,
+    ai_usage_reservation: dict[str, Any] | None = None,
     source_usage: dict[str, Any] | None = None,
     student_profile_context: dict[str, Any] | None = None,
     class_id: str | None = None,
@@ -1412,6 +1421,7 @@ async def run_pdf_rag_agent_stream(
         "finish_reason": "",
         "reasoning_effort": reasoning_effort,
         "answer_policy": answer_policy,
+        "ai_usage_reservation": ai_usage_reservation or {},
         "source_usage": source_usage,
         "student_profile_context": student_profile_context or {},
         "class_id": class_id,
@@ -1420,6 +1430,7 @@ async def run_pdf_rag_agent_stream(
         "sources": [],
         "retrieval_confidence": "low",
         "retrieval_diagnostics": [],
+        "token_usage": empty_token_usage(),
     }
 
     try:
@@ -1442,6 +1453,7 @@ async def run_pdf_rag_agent_stream(
             state["answer"] = response.get("content") or ""
             state["finish_reason"] = response.get("finish_reason") or ""
             state["stage_history"] = append_stage(state, "openrouter_agent")
+            state["token_usage"] = add_token_usage(state.get("token_usage"), response.get("usage"))
             state["tool_calls"] = new_search_tool_calls(
                 state,
                 [
@@ -1524,9 +1536,11 @@ async def run_pdf_rag_agent_stream(
                 "type": "step",
             }
 
+            final_messages = await asyncio.to_thread(build_multimodal_final_messages, state)
+            await maybe_adjust_ai_usage_reservation(state, final_messages)
             response = await client.chat(
                 model=model or DEFAULT_OPENROUTER_MODEL,
-                messages=await asyncio.to_thread(build_multimodal_final_messages, state),
+                messages=final_messages,
                 tools=[SEARCH_PDF_PAGES_TOOL],
                 tool_choice="auto",
                 temperature=state.get("temperature", 0.4),
@@ -1536,6 +1550,7 @@ async def run_pdf_rag_agent_stream(
             state["answer"] = response.get("content") or ""
             state["finish_reason"] = response.get("finish_reason") or ""
             state["stage_history"] = append_stage(state, "openrouter_answer_with_pages")
+            state["token_usage"] = add_token_usage(state.get("token_usage"), response.get("usage"))
             requested_tool_calls = [
                 tool_call
                 for tool_call in response.get("tool_calls", [])
@@ -1581,7 +1596,157 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
         "sources": sources,
         "structuredOutput": structured_tutor_output_from_answer(answer, state, sources),
         "retrievalConfidence": retrieval_confidence,
+        "tokenUsage": {
+            "actual": normalize_token_usage(state.get("token_usage")),
+        },
     }
+
+
+async def maybe_adjust_ai_usage_reservation(state: PdfRagState, final_messages: list[dict[str, Any]]) -> None:
+    reservation = state.get("ai_usage_reservation")
+
+    if not isinstance(reservation, dict):
+        return
+
+    reservation_id = str(reservation.get("id") or "").strip()
+
+    if not reservation_id:
+        return
+
+    estimated_tokens = estimate_pdf_rag_request_tokens(state, final_messages)
+    current_estimate = nonnegative_int(reservation.get("estimatedTokens") or reservation.get("estimated_tokens"))
+
+    if estimated_tokens <= current_estimate:
+        return
+
+    shared_secret = os.getenv("BACKEND_SHARED_SECRET", "").strip()
+
+    if not shared_secret:
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                f"{internal_next_base_url('AI usage adjustment')}/api/internal/ai-usage/reservations/{reservation_id}/adjust",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Chandra-Internal-Secret": shared_secret,
+                },
+                json={
+                    "estimatedTokens": estimated_tokens,
+                    "studentId": reservation.get("studentId") or reservation.get("student_id"),
+                },
+            )
+    except Exception:
+        if is_production_environment():
+            raise RuntimeError("AI usage reservation could not be adjusted before reading PDF pages.")
+
+        return
+
+    if response.status_code == 429:
+        raise RuntimeError("AI usage limit reached.")
+
+    if not response.is_success and is_production_environment():
+        raise RuntimeError("AI usage reservation could not be adjusted before reading PDF pages.")
+
+    reservation["estimatedTokens"] = estimated_tokens
+
+
+def estimate_pdf_rag_request_tokens(state: PdfRagState, final_messages: list[dict[str, Any]]) -> int:
+    actual_so_far = normalize_token_usage(state.get("token_usage"))["total_tokens"]
+    final_input_tokens = estimate_provider_messages_tokens(final_messages)
+    max_output_tokens = nonnegative_int(state.get("max_tokens")) or 1000
+
+    return max(1, actual_so_far + final_input_tokens + max_output_tokens)
+
+
+def estimate_provider_messages_tokens(messages: list[dict[str, Any]]) -> int:
+    text_characters = sum(estimate_content_text_characters(message.get("content")) for message in messages)
+    asset_tokens = sum(estimate_content_asset_tokens(message.get("content")) for message in messages)
+
+    return max(1, (text_characters + 3) // 4 + asset_tokens + 600)
+
+
+def estimate_content_text_characters(content: Any) -> int:
+    if isinstance(content, str):
+        return len(content)
+
+    if isinstance(content, list):
+        total = 0
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    total += len(str(part.get("text") or ""))
+            else:
+                total += estimate_content_text_characters(part)
+        return total
+
+    if isinstance(content, dict):
+        return sum(estimate_content_text_characters(value) for value in content.values())
+
+    return 0
+
+
+def estimate_content_asset_tokens(content: Any) -> int:
+    if isinstance(content, list):
+        total = 0
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+
+            if part.get("type") == "image_url":
+                total += 900
+            elif part.get("type") == "file":
+                total += 1200
+        return total
+
+    return 0
+
+
+def is_production_environment() -> bool:
+    return os.getenv("CHANDRA_ENV", "").strip().lower() in {"prod", "production"}
+
+
+def empty_token_usage() -> dict[str, int]:
+    return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+
+def add_token_usage(current: Any, addition: Any) -> dict[str, int]:
+    current_usage = normalize_token_usage(current)
+    next_usage = normalize_token_usage(addition)
+
+    return {
+        "input_tokens": current_usage["input_tokens"] + next_usage["input_tokens"],
+        "output_tokens": current_usage["output_tokens"] + next_usage["output_tokens"],
+        "total_tokens": current_usage["total_tokens"] + next_usage["total_tokens"],
+    }
+
+
+def normalize_token_usage(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return empty_token_usage()
+
+    input_tokens = nonnegative_int(value.get("input_tokens") or value.get("prompt_tokens"))
+    output_tokens = nonnegative_int(value.get("output_tokens") or value.get("completion_tokens"))
+    total_tokens = nonnegative_int(value.get("total_tokens"))
+
+    if total_tokens <= 0:
+        total_tokens = input_tokens + output_tokens
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def nonnegative_int(value: Any) -> int:
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return 0
+
+    return max(0, numeric)
 
 
 def structured_tutor_output_from_answer(

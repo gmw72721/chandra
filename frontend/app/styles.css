@@ -5530,6 +5530,18 @@ button.student-row[aria-pressed="true"] {
   color: #4b5968;
 }
 
+.roster-actions-cell .student-chat-access-button {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+}
+
+.roster-actions-cell .student-chat-access-button.is-paused {
+  border-color: #c55f5f;
+  background: #fff1f1;
+  color: #9f2f2f;
+}
+
 .roster-actions-cell .student-icon-button svg {
   width: 16px;
   height: 16px;
@@ -8919,6 +8931,86 @@ button.student-row[aria-pressed="true"] {
   color: #1f2937;
   font-size: 0.95rem;
   line-height: 1.5;
+}
+
+.student-ai-usage {
+  display: grid;
+  grid-row: 2;
+  gap: 8px;
+  padding: 14px 24px 0 0;
+}
+
+.student-ai-usage-meters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 180px));
+  gap: 12px;
+}
+
+.student-ai-usage-meter {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.student-ai-usage-meter > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  color: #4e5865;
+  font-size: 0.82rem;
+  line-height: 1.2;
+}
+
+.student-ai-usage-meter strong,
+.student-ai-usage-meter em {
+  overflow-wrap: anywhere;
+}
+
+.student-ai-usage-meter strong {
+  color: #1f2937;
+  font-weight: 800;
+}
+
+.student-ai-usage-meter em {
+  color: #4e5865;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.student-ai-usage-meter > div {
+  height: 8px;
+  overflow: hidden;
+  border: 1px solid #d9d2c8;
+  border-radius: 999px;
+  background: #ebe7df;
+}
+
+.student-ai-usage-meter > div > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #3f8d81, #8fbf9c);
+}
+
+.student-ai-usage.near-limit .student-ai-usage-meter > div > span {
+  background: linear-gradient(90deg, #b9891c, #d9b94e);
+}
+
+.student-ai-usage.blocked .student-ai-usage-meter > div > span {
+  background: #b9564c;
+}
+
+.student-ai-usage p {
+  margin: 0;
+  color: #7b5410;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.student-ai-usage.blocked p {
+  color: #8f2d27;
 }
 
 .student-conversation-header {
@@ -14631,8 +14723,8 @@ button.student-row[aria-pressed="true"] {
 
 .student-conversation-row[aria-pressed="true"],
 .student-workspace-shell[data-appearance] .student-conversation-row[aria-pressed="true"] {
-  border-color: transparent;
-  background: var(--row-bg);
+  border-color: var(--selected-row-border);
+  background: var(--selected-row-bg);
 }
 
 .student-conversation-icon,

@@ -14,6 +14,7 @@ import { useAuth } from "./AuthProvider";
 import { formatLearningProfileUpdateResult, StudentLearningProfileCard } from "./StudentLearningProfileCard";
 
 type StudentProfileStats = {
+  chatBlocked: boolean;
   conversationsLabel: string;
   lastActive: string;
   lastChatTopic: string;
@@ -26,6 +27,7 @@ type StudentProfileStats = {
 };
 
 const emptyStats: StudentProfileStats = {
+  chatBlocked: false,
   conversationsLabel: "0 conversations",
   lastActive: "Never",
   lastChatTopic: "No saved topic",
@@ -175,7 +177,7 @@ export function StudentProfilePage({
     return () => window.clearTimeout(syncNotesTimer);
   }, [activity?.teacherNotes, decodedStudentId]);
 
-  async function saveTeacherNotes() {
+  async function saveTeacherNotes(options: { chatBlocked?: boolean } = {}) {
     if (!user || savingNotes) {
       return;
     }
@@ -195,10 +197,10 @@ export function StudentProfilePage({
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json"
           },
-          body: JSON.stringify({ teacherNotes })
+          body: JSON.stringify({ chatBlocked: options.chatBlocked ?? stats.chatBlocked, teacherNotes })
         }
       );
-      const data = (await response.json()) as { teacherNotes?: string; error?: string };
+      const data = (await response.json()) as { chatBlocked?: boolean; teacherNotes?: string; error?: string };
 
       if (!response.ok) {
         throw new Error(data.error ?? "Student notes save failed.");
@@ -208,7 +210,9 @@ export function StudentProfilePage({
       setTeacherNotes(savedNotes);
       setRosterActivity((currentActivity) =>
         currentActivity.map((row) =>
-          row.studentEmail.trim().toLowerCase() === decodedStudentId ? { ...row, teacherNotes: savedNotes } : row
+          row.studentEmail.trim().toLowerCase() === decodedStudentId
+            ? { ...row, chatBlocked: data.chatBlocked ?? options.chatBlocked ?? stats.chatBlocked, teacherNotes: savedNotes }
+            : row
         )
       );
     } catch (caughtError) {
@@ -395,6 +399,24 @@ export function StudentProfilePage({
             <h4>Private teacher notes</h4>
             <span>Private to you</span>
           </div>
+          <label className="settings-choice-pill">
+            <input
+              checked={stats.chatBlocked}
+              type="checkbox"
+              onChange={(event) => {
+                const chatBlocked = event.target.checked;
+                setRosterActivity((currentActivity) =>
+                  currentActivity.map((row) =>
+                    row.studentEmail.trim().toLowerCase() === decodedStudentId
+                      ? { ...row, chatBlocked }
+                      : row
+                  )
+                );
+                void saveTeacherNotes({ chatBlocked });
+              }}
+            />
+            <span>{stats.chatBlocked ? "Student chat paused" : "Student chat allowed"}</span>
+          </label>
           <textarea
             aria-label={`Private teacher notes for ${displayName}`}
             maxLength={1000}
@@ -428,6 +450,7 @@ function buildStudentProfileStats(activity: StudentRosterActivitySummary | null)
   const status = activityStatusLabel(activity.status);
 
   return {
+    chatBlocked: activity.chatBlocked,
     conversationsLabel: formatConversationCount(activity.conversationCount),
     lastActive: formatConversationDate(activity.lastActiveAt) || "Never",
     lastChatTopic: activity.lastChatTopic || "No saved topic",

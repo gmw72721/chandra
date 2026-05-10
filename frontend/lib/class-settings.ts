@@ -95,11 +95,29 @@ export type ReasoningEffort = (typeof reasoningEffortOptions)[number];
 export const responseLengthOptions = ["short", "medium", "long", "extended"] as const;
 export type ResponseLength = (typeof responseLengthOptions)[number];
 
+export type AiTokenLimitSettings = {
+  perHour: number;
+  perDay: number;
+  perWeek: number;
+};
+
+export type AiRequestLimitSettings = {
+  perStudentDaily: number;
+  perClassDaily: number;
+  teacherPreviewDaily: number | null;
+};
+
 export type ClassModelSettings = {
   modelId: string;
   reasoningEffort: ReasoningEffort;
   creativity: number;
   responseLength: ResponseLength;
+  requestLimits: AiRequestLimitSettings;
+  tokenLimits: AiTokenLimitSettings;
+};
+
+export type TutorAccessSettings = {
+  enabled: boolean;
 };
 
 export const readingLevelOptions = ["simple", "standard", "advanced"] as const;
@@ -164,11 +182,29 @@ export const defaultNotificationSettings: NotificationSettings = {
   newStudentJoinedClass: true
 };
 
+export const defaultAiTokenLimitSettings: AiTokenLimitSettings = {
+  perHour: 75_000,
+  perDay: 300_000,
+  perWeek: 1_200_000
+};
+
+export const defaultAiRequestLimitSettings: AiRequestLimitSettings = {
+  perStudentDaily: 100,
+  perClassDaily: 3_000,
+  teacherPreviewDaily: 50
+};
+
 export const defaultClassModelSettings: ClassModelSettings = {
   modelId: defaultOpenRouterModelId,
   reasoningEffort: "medium",
   creativity: 35,
-  responseLength: "medium"
+  responseLength: "medium",
+  requestLimits: defaultAiRequestLimitSettings,
+  tokenLimits: defaultAiTokenLimitSettings
+};
+
+export const defaultTutorAccessSettings: TutorAccessSettings = {
+  enabled: true
 };
 
 export const defaultResponseFormatSettings: ResponseFormatSettings = {
@@ -424,7 +460,42 @@ export function normalizeClassModelSettings(value: unknown): ClassModelSettings 
       : defaultClassModelSettings.modelId,
     reasoningEffort,
     creativity: clampCreativity(source.creativity),
-    responseLength
+    responseLength,
+    requestLimits: normalizeAiRequestLimitSettings(source.requestLimits),
+    tokenLimits: normalizeAiTokenLimitSettings(source.tokenLimits)
+  };
+}
+
+export function normalizeAiRequestLimitSettings(value: unknown): AiRequestLimitSettings {
+  const source = isRecord(value) ? value : {};
+
+  return {
+    perStudentDaily: clampRequestLimit(source.perStudentDaily, defaultAiRequestLimitSettings.perStudentDaily, 1, 10_000),
+    perClassDaily: clampRequestLimit(source.perClassDaily, defaultAiRequestLimitSettings.perClassDaily, 1, 500_000),
+    teacherPreviewDaily: normalizeOptionalRequestLimit(
+      source.teacherPreviewDaily,
+      defaultAiRequestLimitSettings.teacherPreviewDaily,
+      1,
+      10_000
+    )
+  };
+}
+
+export function normalizeAiTokenLimitSettings(value: unknown): AiTokenLimitSettings {
+  const source = isRecord(value) ? value : {};
+
+  return {
+    perHour: clampTokenLimit(source.perHour, defaultAiTokenLimitSettings.perHour, 1_000, 1_000_000),
+    perDay: clampTokenLimit(source.perDay, defaultAiTokenLimitSettings.perDay, 1_000, 5_000_000),
+    perWeek: clampTokenLimit(source.perWeek, defaultAiTokenLimitSettings.perWeek, 1_000, 20_000_000)
+  };
+}
+
+export function normalizeTutorAccessSettings(value: unknown): TutorAccessSettings {
+  const source = isRecord(value) ? value : {};
+
+  return {
+    enabled: booleanWithDefault(source.enabled, true)
   };
 }
 
@@ -491,6 +562,40 @@ function clampCreativity(value: unknown) {
   }
 
   return Math.round(Math.min(100, Math.max(0, numericValue)));
+}
+
+function clampTokenLimit(value: unknown, defaultValue: number, min: number, max: number) {
+  const numericValue = typeof value === "number" ? value : Number(value);
+
+  if (!Number.isFinite(numericValue)) {
+    return defaultValue;
+  }
+
+  return Math.round(Math.min(max, Math.max(min, numericValue)));
+}
+
+function clampRequestLimit(value: unknown, defaultValue: number, min: number, max: number) {
+  const numericValue = typeof value === "number" ? value : Number(value);
+
+  if (!Number.isFinite(numericValue)) {
+    return defaultValue;
+  }
+
+  return Math.round(Math.min(max, Math.max(min, numericValue)));
+}
+
+function normalizeOptionalRequestLimit(value: unknown, defaultValue: number | null, min: number, max: number) {
+  if (value === null || value === "" || value === undefined) {
+    return defaultValue;
+  }
+
+  const numericValue = typeof value === "number" ? value : Number(value);
+
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return null;
+  }
+
+  return Math.round(Math.min(max, Math.max(min, numericValue)));
 }
 
 function booleanWithDefault(value: unknown, defaultValue: boolean) {

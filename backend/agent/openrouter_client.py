@@ -11,6 +11,8 @@ from typing import Any
 
 import httpx
 
+from backend.observability import capture_exception, log_provider_failure
+
 
 class OpenRouterClient:
     """Small async OpenRouter wrapper that is easy to replace in tests."""
@@ -72,7 +74,22 @@ class OpenRouterClient:
             payload["parallel_tool_calls"] = parallel_tool_calls
 
         response = await self._post_chat_completion(payload)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            log_provider_failure(
+                provider="openrouter",
+                provider_error_class=error.__class__.__name__,
+                provider_status=error.response.status_code,
+            )
+            await capture_exception(
+                error,
+                event="provider.openrouter_error",
+                provider="openrouter",
+                providerErrorClass=error.__class__.__name__,
+                providerStatus=error.response.status_code,
+            )
+            raise
         completion = response.json()
         choice = completion.get("choices", [{}])[0]
         message = choice.get("message") or {}
@@ -81,6 +98,7 @@ class OpenRouterClient:
             "content": message.get("content") or "",
             "finish_reason": choice.get("finish_reason"),
             "tool_calls": message.get("tool_calls") or [],
+            "usage": normalize_token_usage(completion.get("usage")),
             "raw": completion,
         }
 
@@ -97,6 +115,16 @@ class OpenRouterClient:
                 await self.aclose()
 
                 if attempt >= self.max_retries:
+                    log_provider_failure(
+                        provider="openrouter",
+                        provider_error_class=error.__class__.__name__,
+                    )
+                    await capture_exception(
+                        error,
+                        event="provider.openrouter_transport_error",
+                        provider="openrouter",
+                        providerErrorClass=error.__class__.__name__,
+                    )
                     raise RuntimeError(
                         "The model provider connection dropped while Chandra was generating the answer. "
                         "Please try again."
@@ -149,6 +177,33 @@ def model_supports_reasoning_effort(model: str) -> bool:
         or "openai/gpt-5" in normalized_model
         or "reasoning" in normalized_model
     )
+
+
+def normalize_token_usage(usage: Any) -> dict[str, int]:
+    if not isinstance(usage, dict):
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    input_tokens = nonnegative_int(usage.get("prompt_tokens") or usage.get("input_tokens"))
+    output_tokens = nonnegative_int(usage.get("completion_tokens") or usage.get("output_tokens"))
+    total_tokens = nonnegative_int(usage.get("total_tokens"))
+
+    if total_tokens <= 0:
+        total_tokens = input_tokens + output_tokens
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def nonnegative_int(value: Any) -> int:
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return 0
+
+    return max(0, numeric)
 
 
 def encode_file_as_data_url(path: str | Path, fallback_mime_type: str = "application/octet-stream") -> str:

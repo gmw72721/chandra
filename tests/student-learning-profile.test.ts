@@ -78,12 +78,12 @@ test("strategy statuses are validated", () => {
 
 test("model can provide profile change notes for teacher review", () => {
   const profileSource = readFileSync(join(repoRoot, "frontend/lib/student-learning-profiles-server.ts"), "utf8");
-  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const cardSource = readFileSync(join(repoRoot, "frontend/components/StudentLearningProfileCard.tsx"), "utf8");
 
   assert.match(profileSource, /In profileChangeNotes, briefly explain meaningful changes/);
   assert.match(profileSource, /profileChangeNotes/);
-  assert.match(teacherSource, /Model change notes/);
-  assert.match(teacherSource, /Changes in new draft/);
+  assert.match(cardSource, /Model change notes/);
+  assert.match(cardSource, /Changes in new draft/);
 });
 
 test("profile update model input includes strategy telemetry and adjacent evidence", () => {

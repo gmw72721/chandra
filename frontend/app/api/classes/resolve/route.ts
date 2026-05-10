@@ -1,7 +1,17 @@
 import { NextResponse } from "next/server";
+import { checkAbuseLockout, recordAbuseFailure, resetAbuseFailures } from "@/lib/abuse-lockout";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
+
+const classCodeLockoutPolicy = {
+  resetWindowMs: 60 * 60 * 1000,
+  lockoutSteps: [
+    { failures: 5, cooldownMs: 5 * 60 * 1000 },
+    { failures: 10, cooldownMs: 30 * 60 * 1000 },
+    { failures: 20, cooldownMs: 24 * 60 * 60 * 1000 }
+  ]
+};
 
 export async function POST(request: Request) {
   try {
@@ -12,7 +22,7 @@ export async function POST(request: Request) {
     }
 
     assertFirebaseAdminAuthReady();
-    await adminAuth!.verifyIdToken(token);
+    const decodedToken = await adminAuth!.verifyIdToken(token);
 
     const body = (await request.json()) as { classCode?: unknown };
     const classCode = normalizeClassCode(String(body.classCode ?? ""));
@@ -21,9 +31,23 @@ export async function POST(request: Request) {
       return NextResponse.json({ classId: "" });
     }
 
+    const abuseScope = {
+      actorUid: decodedToken.uid,
+      identifier: classCode,
+      namespace: "classes.resolve",
+      request,
+      route: "/api/classes/resolve"
+    };
+    const lockout = await checkAbuseLockout(abuseScope, classCodeLockoutPolicy);
+
+    if (lockout.locked) {
+      return NextResponse.json({ error: "Class code lookup failed." }, { status: 429 });
+    }
+
     const directClassSnapshot = await adminDb!.collection("classes").doc(classCode).get();
 
     if (directClassSnapshot.exists) {
+      await resetAbuseFailures(abuseScope);
       return NextResponse.json({ classId: directClassSnapshot.id });
     }
 
@@ -35,9 +59,11 @@ export async function POST(request: Request) {
     const joinedClass = joinCodeSnapshot.docs[0];
 
     if (!joinedClass) {
-      return NextResponse.json({ error: "Class code was not found." }, { status: 404 });
+      await recordAbuseFailure(abuseScope, classCodeLockoutPolicy);
+      return NextResponse.json({ error: "Class code lookup failed." }, { status: 404 });
     }
 
+    await resetAbuseFailures(abuseScope);
     return NextResponse.json({ classId: joinedClass.id });
   } catch {
     return NextResponse.json({ error: "Class code lookup failed." }, { status: 500 });

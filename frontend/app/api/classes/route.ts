@@ -11,7 +11,8 @@ import {
   defaultResponseFormatSettings,
   defaultRefusalStyle,
   defaultSourceDefaultsSettings,
-  defaultSourceUsageSettings
+  defaultSourceUsageSettings,
+  defaultTutorAccessSettings
 } from "@/lib/class-settings";
 import { defaultTeacherClassAppearance, defaultTeacherClassThemeColor } from "@/lib/class-theme";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
@@ -78,9 +79,11 @@ export async function POST(request: Request) {
       section,
       sourceDefaults: defaultSourceDefaultsSettings,
       sourceUsage: defaultSourceUsageSettings,
+      studentChatEnabled: defaultTutorAccessSettings.enabled,
       studentFacingInstructions: tutorDefaults.studentFacingInstructions,
       teacherId: decodedToken.uid,
       teacherName,
+      tutorAccess: defaultTutorAccessSettings,
       appearance: defaultTeacherClassAppearance,
       themeColor: defaultTeacherClassThemeColor
     });

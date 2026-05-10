@@ -45,6 +45,14 @@ VERTEX_EMBEDDING_MODEL=gemini-embedding-2
 VERTEX_EMBEDDING_DIMENSIONS=768
 
 LEARNING_PROFILE_UPDATE_SECRET=
+CONVERSATION_RETENTION_SECRET=
+
+BETTER_STACK_SOURCE_TOKEN=
+BETTER_STACK_INGESTING_HOST=
+BETTER_STACK_UPTIME_API_TOKEN=
+BETTER_STACK_RETENTION_HEARTBEAT_URL=
+BETTER_STACK_LEARNING_PROFILE_HEARTBEAT_URL=
+BETTER_STACK_ENV=production
 ```
 
 ## Backend
@@ -93,6 +101,11 @@ GOOGLE_CLOUD_PROJECT=
 GOOGLE_CLOUD_LOCATION=us
 VERTEX_EMBEDDING_MODEL=gemini-embedding-2
 VERTEX_EMBEDDING_DIMENSIONS=768
+
+BETTER_STACK_SOURCE_TOKEN=
+BETTER_STACK_INGESTING_HOST=
+BETTER_STACK_UPTIME_API_TOKEN=
+BETTER_STACK_ENV=production
 ```
 
 `BACKEND_SHARED_SECRET` is required. The backend returns `503` for internal LangGraph chat requests if it is missing and `403` if the request secret does not match.
@@ -116,3 +129,46 @@ firebase deploy --config firebase/firebase.json --project chandra-f6e13 --only f
 ```
 
 Create the Firestore vector index on the `chunks` collection group with `classId` ascending and `embedding` using the same dimension as `VERTEX_EMBEDDING_DIMENSIONS`.
+
+## Better Stack Observability
+
+Create a Better Stack Logs source for Chandra in Better Stack Telemetry, choose HTTP ingest, and copy its source token plus ingesting host into the runtime env. Chandra sends a single JSON event to `https://$BETTER_STACK_INGESTING_HOST` with `Authorization: Bearer $BETTER_STACK_SOURCE_TOKEN` and `Content-Type: application/json`, which matches Better Stack's HTTP ingest contract: https://betterstack.com/docs/logs/ingesting-data/http/logs/. The app also writes the same structured JSON to stdout/stderr so local development and Cloud Logging still work when Better Stack is not configured.
+
+Required Better Stack env vars:
+
+```bash
+BETTER_STACK_SOURCE_TOKEN=<logs-source-token>
+BETTER_STACK_INGESTING_HOST=<source-ingesting-host>
+BETTER_STACK_UPTIME_API_TOKEN=<uptime-api-token-used-for-dashboard-setup>
+BETTER_STACK_RETENTION_HEARTBEAT_URL=https://uptime.betterstack.com/api/v1/heartbeat/<retention-heartbeat-id>
+BETTER_STACK_LEARNING_PROFILE_HEARTBEAT_URL=https://uptime.betterstack.com/api/v1/heartbeat/<learning-profile-heartbeat-id>
+BETTER_STACK_ENV=production
+```
+
+The source token, uptime token, and heartbeat URLs are secrets. Do not expose them as `NEXT_PUBLIC_*`.
+
+Both services log `event`, `route`, `method`, `status`, `latencyMs`, `requestId`, and `userId` only after auth has safely identified a user. Provider failures include provider name, error class, status code, request id, and class/user identifiers where safe. The logger redacts fields whose names indicate auth tokens, secrets, message content, provider prompts, uploaded file contents, or private learning profile data. Better Stack submission is best-effort and never blocks or fails request handling.
+
+Health endpoints:
+
+```text
+GET /api/health      # Next.js runtime config, backend reachability, Firebase, OpenRouter, embeddings, Better Stack config
+GET /health          # FastAPI liveness
+GET /health/deep     # FastAPI Firebase Admin, Firestore, OpenRouter, Gemini embeddings, Better Stack config
+```
+
+Recommended Better Stack uptime monitors:
+
+- Frontend HTTP monitor: `https://<frontend-domain>/api/health`, alert on non-2xx or JSON `status != "ok"`.
+- Backend HTTP monitor: `https://<backend-domain>/health`, alert on non-2xx.
+- Backend deep HTTP monitor: `https://<backend-domain>/health/deep`, run less frequently, for example every 5 minutes, and alert when any dependency is `down` or `missing_config`.
+- Firebase/Firestore: use `/health/deep` `firebaseAdmin` and `firestore` dependency statuses plus Google Cloud/Firebase service alerts for Firestore errors and quota.
+- OpenRouter: use `/health/deep` `openrouter` status and OpenRouter dashboard/API-key quota alerts.
+- Embeddings: use `/health/deep` `embeddings` status and Google/Gemini API quota/error alerts.
+
+Create two Better Stack heartbeat monitors in Better Stack Uptime. You can create them in the dashboard, or with the Heartbeats API (`POST https://uptime.betterstack.com/api/v2/heartbeats`) using the uptime API token documented by Better Stack: https://betterstack.com/docs/uptime/api/create-a-hearbeat/.
+
+- `Chandra conversation retention`, period matching the retention scheduler, with URL saved as `BETTER_STACK_RETENTION_HEARTBEAT_URL`.
+- `Chandra weekly learning profiles`, period matching the weekly learning-profile scheduler, with URL saved as `BETTER_STACK_LEARNING_PROFILE_HEARTBEAT_URL`.
+
+The retention route pings the retention heartbeat only after `enforceConversationRetention()` and its audit log succeed. The weekly learning-profile route pings its heartbeat only after `updateWeeklyStudentLearningProfiles()` succeeds. Heartbeat pings are best-effort; Better Stack downtime does not fail the scheduled job.

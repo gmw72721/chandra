@@ -3,12 +3,12 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
-import { FormEvent, memo, type CSSProperties, type ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, memo, type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { apiUrl } from "@/lib/api-client";
-import { signOutCurrentUser, updateUserAccountSettings, updateUserThemePreference } from "@/lib/auth";
+import { deleteCurrentAccount, signOutAllSessions, signOutCurrentUser, updateUserAccountSettings, updateUserThemePreference } from "@/lib/auth";
 import {
   normalizeTeacherClassAppearance,
   normalizeTeacherClassThemeColor,
@@ -27,6 +27,7 @@ import {
   normalizeSourceDefaultsSettings,
   normalizeSourceUsageSettings,
   normalizeStudentFacingInstructions,
+  normalizeTutorAccessSettings,
   normalizeTutorBehavior,
   conversationRetentionOptions,
   materialSourceTypeKeys,
@@ -39,11 +40,14 @@ import {
   type AnswerPolicySettings,
   type ClassAccessRole,
   type ClassCoTeacher,
+  type AiTokenLimitSettings,
+  type AiRequestLimitSettings,
   type ClassPrivacySettings,
   type NotificationSettings,
   type ResponseFormatSettings,
   type SourceDefaultsSettings,
-  type SourceUsageSettings
+  type SourceUsageSettings,
+  type TutorAccessSettings
 } from "@/lib/class-settings";
 import {
   assistantMessageAnswerContent,
@@ -113,7 +117,7 @@ type SettingsPane =
   | "invites"
   | "account"
   | "appearance";
-type AiTutorSection = "sources" | "behavior" | "answerPolicy" | "response" | "model";
+type AiTutorSection = "sources" | "access" | "behavior" | "answerPolicy" | "response" | "model";
 type KnowledgeFilter = "All" | "Assignments" | "Textbook" | "Notes" | "Worked Examples" | "Rubrics" | "Answer Keys";
 type RosterFilter = "all" | "active" | "inactive" | "highQuestions" | "noConversations";
 type RosterDetailFocus = "activity" | "notes";
@@ -161,6 +165,7 @@ type ConversationSourceRow = {
 };
 type RosterRow = {
   activeToday: boolean;
+  chatBlocked: boolean;
   conversationsCount: number;
   conversationsLabel: string;
   hasConversations: boolean;
@@ -194,6 +199,17 @@ type RetrievalTestResult = {
   excerpt: string;
   materialId: string;
   title: string;
+};
+
+type TeacherInviteSummary = {
+  createdAt: string;
+  expiresAt: string;
+  inviteId: string;
+  revokedAt: string;
+  status: "active" | "expired" | "revoked" | "used";
+  usedAt: string;
+  usedByEmail: string;
+  usedByUid: string;
 };
 
 type MaterialDetailChunk = {
@@ -299,6 +315,7 @@ const aiTutorSections: Array<{
   label: string;
 }> = [
   { icon: <DocumentIcon />, id: "sources", label: "Sources" },
+  { icon: <ShieldIcon />, id: "access", label: "Access" },
   { icon: <ChatIcon />, id: "behavior", label: "Behavior" },
   { icon: <CheckCircleIcon />, id: "answerPolicy", label: "Answer Policy" },
   { icon: <NoteIcon />, id: "response", label: "Response" },
@@ -534,6 +551,7 @@ export function TeacherClassManager({
   const [conversationStudentFilter, setConversationStudentFilter] = useState("all");
   const [conversationTopicFilter, setConversationTopicFilter] = useState("all");
   const [checkedStudentIds, setCheckedStudentIds] = useState<string[]>([]);
+  const [chatBlockedByStudentId, setChatBlockedByStudentId] = useState<Record<string, boolean>>({});
   const [isRosterDetailOpen, setIsRosterDetailOpen] = useState(true);
   const [rosterDetailFocus, setRosterDetailFocus] = useState<RosterDetailFocus>("activity");
   const [isProfessorReviewOpen, setIsProfessorReviewOpen] = useState(false);
@@ -558,6 +576,9 @@ export function TeacherClassManager({
   const [teacherInviteUrl, setTeacherInviteUrl] = useState("");
   const [teacherInviteExpiresAt, setTeacherInviteExpiresAt] = useState("");
   const [teacherInviteCopyStatus, setTeacherInviteCopyStatus] = useState<"" | "copied" | "failed">("");
+  const [teacherInvites, setTeacherInvites] = useState<TeacherInviteSummary[]>([]);
+  const [teacherInvitesMessage, setTeacherInvitesMessage] = useState("");
+  const [revokingTeacherInviteId, setRevokingTeacherInviteId] = useState("");
   const [classInviteCopyResult, setClassInviteCopyResult] = useState<{
     classId: string;
     kind: "code" | "link";
@@ -572,6 +593,8 @@ export function TeacherClassManager({
   const [isSavingThemePreference, setIsSavingThemePreference] = useState(false);
   const [isSavingAccountSettings, setIsSavingAccountSettings] = useState(false);
   const [isCreatingTeacherInvite, setIsCreatingTeacherInvite] = useState(false);
+  const [isLoadingTeacherInvites, setIsLoadingTeacherInvites] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [isClassDialogOpen, setIsClassDialogOpen] = useState(false);
   const [isStudentDialogOpen, setIsStudentDialogOpen] = useState(false);
   const [isKnowledgeDialogOpen, setIsKnowledgeDialogOpen] = useState(false);
@@ -676,10 +699,11 @@ export function TeacherClassManager({
   const rosterRows = useMemo(
     () =>
       buildRosterRows({
+        chatBlockedByStudentId,
         studentActivityByEmail,
         students: rosterStudents
       }),
-    [rosterStudents, studentActivityByEmail]
+    [chatBlockedByStudentId, rosterStudents, studentActivityByEmail]
   );
   const filteredRosterRows = useMemo(
     () => filterRosterRows(rosterRows, rosterSearchQuery, rosterFilter),
@@ -851,6 +875,9 @@ export function TeacherClassManager({
   const selectedPrivacySettings = normalizePrivacySettings(selectedClass?.privacySettings);
   const selectedSourceDefaults = normalizeSourceDefaultsSettings(selectedClass?.sourceDefaults);
   const selectedNotificationSettings = normalizeNotificationSettings(selectedClass?.notificationSettings);
+  const selectedTutorAccess = normalizeTutorAccessSettings(selectedClass?.tutorAccess ?? {
+    enabled: selectedClass?.studentChatEnabled
+  });
   const selectedTutorBehavior = normalizeTutorBehavior(selectedClass?.behaviorTitle);
   const selectedBehaviorInstructions =
     selectedClass?.behaviorInstructions?.trim() ? selectedClass.behaviorInstructions : defaultAiTutorHiddenInstructions;
@@ -881,6 +908,7 @@ export function TeacherClassManager({
   const accountName = profile?.displayName ?? user?.displayName ?? "Teacher";
   const accountEmail = profile?.email ?? user?.email ?? "";
   const accountUsernameValue = profile?.username ?? accountEmail;
+  const accountLastSignInAt = user?.metadata.lastSignInTime ?? "";
   const accountEmailValue = accountEmailDraft ?? accountEmail;
   const selectedPrivacyStudent = useMemo(
     () => students.find((student) => student.id === selectedPrivacyStudentId) ?? null,
@@ -1440,6 +1468,7 @@ export function TeacherClassManager({
     setError("");
     setIsSavingSettings(true);
     const formData = new FormData(event.currentTarget);
+    const formValue = (name: string) => String(formData.get(name) ?? "");
 
     try {
       const answerPolicy: AnswerPolicySettings = {
@@ -1485,6 +1514,9 @@ export function TeacherClassManager({
         followUpReminders: formData.has("notificationSettings.followUpReminders"),
         newStudentJoinedClass: formData.has("notificationSettings.newStudentJoinedClass")
       });
+      const tutorAccess: TutorAccessSettings = normalizeTutorAccessSettings({
+        enabled: formData.has("tutorAccess.enabled")
+      });
 
       await updateTeacherClassSettings({
         answerPolicy,
@@ -1492,23 +1524,34 @@ export function TeacherClassManager({
         behaviorInstructions: String(formData.get("behaviorInstructions") ?? ""),
         behaviorTitle: normalizeTutorBehavior(formData.get("behaviorTitle")),
         classId: activeClassId,
-        defaultAssignmentContext: String(formData.get("defaultAssignmentContext") ?? ""),
+        defaultAssignmentContext: formValue("defaultAssignmentContext"),
         modelSettings: normalizeClassModelSettings({
-          creativity: String(formData.get("modelSettings.creativity") ?? ""),
-          modelId: String(formData.get("modelSettings.modelId") ?? ""),
-          reasoningEffort: String(formData.get("modelSettings.reasoningEffort") ?? ""),
-          responseLength: String(formData.get("modelSettings.responseLength") ?? "")
+          creativity: formValue("modelSettings.creativity"),
+          modelId: formValue("modelSettings.modelId"),
+          reasoningEffort: formValue("modelSettings.reasoningEffort"),
+          responseLength: formValue("modelSettings.responseLength"),
+          requestLimits: {
+            perClassDaily: formValue("modelSettings.requestLimits.perClassDaily"),
+            perStudentDaily: formValue("modelSettings.requestLimits.perStudentDaily"),
+            teacherPreviewDaily: formValue("modelSettings.requestLimits.teacherPreviewDaily")
+          },
+          tokenLimits: {
+            perDay: formValue("modelSettings.tokenLimits.perDay"),
+            perHour: formValue("modelSettings.tokenLimits.perHour"),
+            perWeek: formValue("modelSettings.tokenLimits.perWeek")
+          }
         }),
-        name: String(formData.get("name") ?? ""),
+        name: formValue("name"),
         notificationSettings,
-        openingMessage: String(formData.get("openingMessage") ?? ""),
+        openingMessage: formValue("openingMessage"),
         privacySettings,
-        refusalStyle: String(formData.get("refusalStyle") ?? "").trim() || defaultRefusalStyle,
+        refusalStyle: formValue("refusalStyle").trim() || defaultRefusalStyle,
         responseFormat,
-        section: String(formData.get("section") ?? ""),
+        section: formValue("section"),
         sourceDefaults,
         sourceUsage,
-        studentFacingInstructions: String(formData.get("studentFacingInstructions") ?? ""),
+        studentFacingInstructions: formValue("studentFacingInstructions"),
+        tutorAccess,
         themeColor: selectedClassThemeColor
       });
     } catch (caughtError) {
@@ -1517,6 +1560,38 @@ export function TeacherClassManager({
       setIsSavingSettings(false);
     }
   }
+
+  const loadTeacherInvites = useCallback(async () => {
+    if (!user) {
+      return;
+    }
+
+    setTeacherInvitesMessage("");
+    setIsLoadingTeacherInvites(true);
+
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch(apiUrl("/api/teacher-invites"), {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        invites?: TeacherInviteSummary[];
+      };
+
+      if (!response.ok || !Array.isArray(data.invites)) {
+        throw new Error(data.error ?? "Teacher invite list failed.");
+      }
+
+      setTeacherInvites(data.invites);
+    } catch (caughtError) {
+      setTeacherInvitesMessage(formatClassError(caughtError, "Teacher invite list failed."));
+    } finally {
+      setIsLoadingTeacherInvites(false);
+    }
+  }, [user]);
 
   async function createTeacherInviteLink() {
     if (!user) {
@@ -1547,6 +1622,7 @@ export function TeacherClassManager({
 
       setTeacherInviteUrl(data.inviteUrl);
       setTeacherInviteExpiresAt(data.expiresAt ?? "");
+      await loadTeacherInvites();
 
       try {
         await copyTextToClipboard(data.inviteUrl);
@@ -1560,6 +1636,51 @@ export function TeacherClassManager({
       setIsCreatingTeacherInvite(false);
     }
   }
+
+  async function revokeTeacherInvite(inviteId: string) {
+    if (!user) {
+      return;
+    }
+
+    setTeacherInvitesMessage("");
+    setRevokingTeacherInviteId(inviteId);
+
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch(apiUrl("/api/teacher-invites"), {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ inviteId })
+      });
+      const data = (await response.json().catch(() => ({}))) as { error?: string; revoked?: boolean };
+
+      if (!response.ok || !data.revoked) {
+        throw new Error(data.error ?? "Teacher invite revoke failed.");
+      }
+
+      setTeacherInvites((currentInvites) =>
+        currentInvites.map((invite) =>
+          invite.inviteId === inviteId ? { ...invite, revokedAt: new Date().toISOString(), status: "revoked" } : invite
+        )
+      );
+      setTeacherInvitesMessage("Teacher invite revoked.");
+    } catch (caughtError) {
+      setTeacherInvitesMessage(formatClassError(caughtError, "Teacher invite revoke failed."));
+    } finally {
+      setRevokingTeacherInviteId("");
+    }
+  }
+
+  useEffect(() => {
+    if (!user || activeSettingsPane !== "invites") {
+      return;
+    }
+
+    void Promise.resolve().then(loadTeacherInvites);
+  }, [activeSettingsPane, loadTeacherInvites, user]);
 
   async function copyTeacherInviteLink() {
     if (!teacherInviteUrl) {
@@ -1917,6 +2038,33 @@ export function TeacherClassManager({
     router.push("/auth");
   }
 
+  async function handleSignOutAllSessions() {
+    await signOutAllSessions();
+    router.push("/auth");
+  }
+
+  async function handleDeleteAccount() {
+    if (!user) {
+      return;
+    }
+
+    setError("");
+    setAccountSettingsMessage("");
+    setIsDeletingAccount(true);
+
+    try {
+      await deleteCurrentAccount({
+        currentPassword: currentAccountPassword,
+        uid: user.uid
+      });
+      router.push("/auth");
+    } catch (caughtError) {
+      setError(formatClassError(caughtError, "Account deletion failed."));
+    } finally {
+      setIsDeletingAccount(false);
+    }
+  }
+
   async function submitStudent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -1960,7 +2108,7 @@ export function TeacherClassManager({
         apiUrl(
           `/api/classes/${encodeURIComponent(activeClassId)}/students/${encodeURIComponent(
             row.studentEmail
-          )}/support`
+          )}/chat-access`
         ),
         {
           method: "PATCH",
@@ -1968,10 +2116,10 @@ export function TeacherClassManager({
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json"
           },
-          body: JSON.stringify({ teacherNotes })
+          body: JSON.stringify({ chatBlocked: row.chatBlocked, teacherNotes })
         }
       );
-      const data = (await response.json()) as { teacherNotes?: string; error?: string };
+      const data = (await response.json()) as { chatBlocked?: boolean; teacherNotes?: string; error?: string };
 
       if (!response.ok) {
         throw new Error(data.error ?? "Student notes save failed.");
@@ -1984,11 +2132,79 @@ export function TeacherClassManager({
       }));
       setRosterActivity((currentActivity) =>
         currentActivity.map((activity) =>
-          activity.studentEmail === row.studentEmail ? { ...activity, teacherNotes: savedNotes } : activity
+          activity.studentEmail === row.studentEmail
+            ? { ...activity, chatBlocked: data.chatBlocked ?? row.chatBlocked, teacherNotes: savedNotes }
+            : activity
         )
       );
     } catch (caughtError) {
       setError(formatClassError(caughtError, "Student notes save failed."));
+    } finally {
+      setSavingNotesStudentId("");
+    }
+  }
+
+  async function saveStudentChatBlocked(row: RosterRow, chatBlocked: boolean) {
+    if (!activeClassId || !user || savingNotesStudentId) {
+      return;
+    }
+
+    setChatBlockedByStudentId((current) => ({
+      ...current,
+      [row.student.id]: chatBlocked
+    }));
+    setRosterActivity((currentActivity) =>
+      currentActivity.map((activity) =>
+        activity.studentEmail === row.studentEmail ? { ...activity, chatBlocked } : activity
+      )
+    );
+    setSavingNotesStudentId(row.student.id);
+    setError("");
+
+    try {
+      const token = await getTeacherToken();
+      const response = await fetch(
+        apiUrl(
+          `/api/classes/${encodeURIComponent(activeClassId)}/students/${encodeURIComponent(
+            row.studentEmail
+          )}/support`
+        ),
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ chatBlocked })
+        }
+      );
+      const data = (await response.json()) as { chatBlocked?: boolean; error?: string };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Student chat access save failed.");
+      }
+
+      const savedBlocked = data.chatBlocked ?? chatBlocked;
+      setChatBlockedByStudentId((current) => ({
+        ...current,
+        [row.student.id]: savedBlocked
+      }));
+      setRosterActivity((currentActivity) =>
+        currentActivity.map((activity) =>
+          activity.studentEmail === row.studentEmail ? { ...activity, chatBlocked: savedBlocked } : activity
+        )
+      );
+    } catch (caughtError) {
+      setChatBlockedByStudentId((current) => ({
+        ...current,
+        [row.student.id]: row.chatBlocked
+      }));
+      setRosterActivity((currentActivity) =>
+        currentActivity.map((activity) =>
+          activity.studentEmail === row.studentEmail ? { ...activity, chatBlocked: row.chatBlocked } : activity
+        )
+      );
+      setError(formatClassError(caughtError, "Student chat access save failed."));
     } finally {
       setSavingNotesStudentId("");
     }
@@ -3232,6 +3448,19 @@ export function TeacherClassManager({
                               defaultValue={selectedStudentFacingInstructions}
                               placeholder="Show your work. Use exact values unless asked for decimals."
                             />
+
+                            <div className="settings-toggle-list">
+                              <SettingsToggle
+                                defaultChecked={selectedTutorAccess.enabled}
+                                description={
+                                  selectedTutorAccess.enabled
+                                    ? "Students can send messages. Teacher preview remains available if paused."
+                                    : "Students see that chat is paused. Teacher preview remains available."
+                                }
+                                name="tutorAccess.enabled"
+                                title={selectedTutorAccess.enabled ? "Student chat enabled" : "Student chat paused"}
+                              />
+                            </div>
                           </section>
                         </div>
 
@@ -3641,6 +3870,15 @@ export function TeacherClassManager({
                                 </option>
                               ))}
                             </select>
+
+                            <div className="ai-tutor-control-grid">
+                              <TokenLimitInputs
+                                idPrefix="settings-token-limit"
+                                labelClassName="settings-control-label"
+                                requestLimits={selectedModelSettings.requestLimits}
+                                tokenLimits={selectedModelSettings.tokenLimits}
+                              />
+                            </div>
                           </section>
                         </div>
 
@@ -3766,6 +4004,49 @@ export function TeacherClassManager({
                                 </span>
                               </div>
                             ) : null}
+                            <div className="class-invite-list" aria-live="polite">
+                              {isLoadingTeacherInvites ? (
+                                <p className="settings-empty-message">Loading teacher invites.</p>
+                              ) : teacherInvites.length ? (
+                                teacherInvites.map((invite) => (
+                                  <article className="class-invite-row" key={invite.inviteId}>
+                                    <div className="class-invite-details">
+                                      <strong>{capitalizeLabel(invite.status)}</strong>
+                                      <span>Created {formatInviteDate(invite.createdAt)}</span>
+                                    </div>
+                                    <div className="class-invite-code">
+                                      <span>Expires</span>
+                                      <code>{formatInviteDate(invite.expiresAt)}</code>
+                                    </div>
+                                    <div className="class-invite-details">
+                                      <span>
+                                        {invite.status === "used"
+                                          ? `Used by ${invite.usedByEmail || "teacher"}`
+                                          : invite.status === "revoked"
+                                            ? `Revoked ${formatInviteDate(invite.revokedAt)}`
+                                            : invite.status === "expired"
+                                              ? "Expired"
+                                              : "Unused"}
+                                      </span>
+                                    </div>
+                                    <div className="class-invite-actions">
+                                      <button
+                                        className="teacher-danger-button"
+                                        disabled={invite.status !== "active" || revokingTeacherInviteId === invite.inviteId}
+                                        type="button"
+                                        onClick={() => void revokeTeacherInvite(invite.inviteId)}
+                                      >
+                                        <TrashIcon />
+                                        {revokingTeacherInviteId === invite.inviteId ? "Revoking" : "Revoke"}
+                                      </button>
+                                    </div>
+                                  </article>
+                                ))
+                              ) : (
+                                <p className="settings-empty-message">No teacher invites yet.</p>
+                              )}
+                            </div>
+                            {teacherInvitesMessage ? <p className="settings-status-message">{teacherInvitesMessage}</p> : null}
                           </section>
 
                           <section className="settings-group" aria-labelledby="settings-class-invites">
@@ -3850,6 +4131,10 @@ export function TeacherClassManager({
                                 <div>
                                   <dt>Role</dt>
                                   <dd>Teacher</dd>
+                                </div>
+                                <div>
+                                  <dt>Last sign-in</dt>
+                                  <dd>{formatAccountActivityTime(accountLastSignInAt)}</dd>
                                 </div>
                               </dl>
                             </div>
@@ -3950,6 +4235,23 @@ export function TeacherClassManager({
                             >
                               <UserIcon />
                               {isSavingAccountSettings ? "Saving" : "Save account"}
+                            </button>
+                            <button
+                              className="teacher-action-button teacher-account-save-button"
+                              type="button"
+                              onClick={() => void handleSignOutAllSessions()}
+                            >
+                              <UserIcon />
+                              Sign out all sessions
+                            </button>
+                            <button
+                              className="teacher-danger-button teacher-account-save-button"
+                              disabled={isDeletingAccount}
+                              type="button"
+                              onClick={() => void handleDeleteAccount()}
+                            >
+                              <TrashIcon />
+                              {isDeletingAccount ? "Deleting account" : "Delete account"}
                             </button>
                             {accountSettingsMessage ? <p className="settings-status-message">{accountSettingsMessage}</p> : null}
                           </section>
@@ -4241,20 +4543,17 @@ export function TeacherClassManager({
                                         <ChatIcon />
                                       </button>
                                       <button
-                                        aria-label={`Edit private notes for ${row.student.displayName}`}
-                                        className="student-icon-button"
-                                        title="Private notes"
+                                        aria-label={`${row.chatBlocked ? "Allow" : "Pause"} chat for ${row.student.displayName}`}
+                                        className={`student-icon-button student-chat-access-button${row.chatBlocked ? " is-paused" : ""}`}
+                                        disabled={savingNotesStudentId === row.student.id}
+                                        title={row.chatBlocked ? "Allow student chat" : "Pause student chat"}
                                         type="button"
                                         onClick={(event) => {
                                           event.stopPropagation();
-                                          setSelectedStudentId(row.student.id);
-                                          setSelectedStudentClassId(activeClassId);
-                                          setIsRosterDetailOpen(true);
-                                          setRosterDetailFocus("notes");
-                                          setIsProfessorReviewOpen(false);
+                                          void saveStudentChatBlocked(row, !row.chatBlocked);
                                         }}
                                       >
-                                        <NoteIcon />
+                                        <ShieldIcon />
                                       </button>
                                       <Link
                                         aria-label={`Open profile for ${row.student.displayName}`}
@@ -4296,143 +4595,6 @@ export function TeacherClassManager({
                             </div>
                           </section>
 
-                          {selectedRosterRow ? (() => {
-                            const detailRow = selectedRosterRow;
-
-                            return (
-                            <aside hidden className="student-detail-panel" aria-label={`${detailRow.student.displayName} details`}>
-                              <div className="student-detail-heading">
-                                <div>
-                                  <h3>{detailRow.student.displayName}</h3>
-                                  <span>{detailRow.student.email}</span>
-                                </div>
-                                <button
-                                  aria-label="Close student detail"
-                                  className="student-detail-close"
-                                  type="button"
-                                  onClick={() => {
-                                    setIsRosterDetailOpen(false);
-                                  }}
-                                >
-                                  <CloseIcon />
-                                </button>
-                              </div>
-
-                              <section
-                                className={`student-detail-card student-activity-card${rosterDetailFocus === "activity" ? " is-focused" : ""}`}
-                                aria-label="Student activity"
-                              >
-                                <dl>
-                                  <div>
-                                    <dt>Last active</dt>
-                                    <dd>{detailRow.lastActive}</dd>
-                                  </div>
-                                  <div>
-                                    <dt>Questions/day</dt>
-                                    <dd>{formatStatNumber(detailRow.questionsPerDay)}</dd>
-                                  </div>
-                                  <div>
-                                    <dt>Today&apos;s activity</dt>
-                                    <dd>{formatQuestionCount(detailRow.questionsToday)}</dd>
-                                  </div>
-                                  <div>
-                                    <dt>Conversations</dt>
-                                    <dd>{detailRow.conversationsLabel}</dd>
-                                  </div>
-                                </dl>
-                              </section>
-
-                              <section className="student-detail-card">
-                                <div className="student-detail-card-heading">
-                                  <h4>Recent conversations</h4>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setIsProfessorReviewOpen(true);
-                                    }}
-                                  >
-                                    View all
-                                  </button>
-                                </div>
-                                <div className="student-recent-list">
-                                  {buildRecentConversationPreviews(detailRow).map((conversation) => (
-                                    <div className="student-recent-row" key={`${conversation.title}-${conversation.meta}`}>
-                                      <span>{conversation.title}</span>
-                                      <time>{conversation.meta}</time>
-                                    </div>
-                                  ))}
-                                </div>
-                              </section>
-
-                              <StudentLearningProfileCard
-                                canForceUpdate={canForceLearningProfileUpdate}
-                                isSavingAction={savingLearningProfileAction}
-                                statusMessage={learningProfileStatusMessage}
-                                profile={displayedStudentLearningProfile}
-                                onApprove={() => {
-                                  void saveLearningProfileAction("approve");
-                                }}
-                                onClearDraft={() => {
-                                  void saveLearningProfileAction("clearDraft");
-                                }}
-                                onDisable={() => {
-                                  void saveLearningProfileAction("disable");
-                                }}
-                                onUpdateNow={() => {
-                                  void updateLearningProfileNow();
-                                }}
-                                onForceSevenDays={() => {
-                                  void updateLearningProfileNow(true);
-                                }}
-                              />
-
-                              <section className={`student-detail-card${rosterDetailFocus === "notes" ? " is-focused" : ""}`}>
-                                <h4>Private teacher notes</h4>
-                                <textarea
-                                  aria-label={`Private teacher notes for ${detailRow.student.displayName}`}
-                                  maxLength={1000}
-                                  rows={5}
-                                  value={
-                                    teacherNotesByStudentId[detailRow.student.id] ??
-                                    detailRow.teacherNotes
-                                  }
-                                  onChange={(event) =>
-                                    setTeacherNotesByStudentId((currentNotes) => ({
-                                      ...currentNotes,
-                                      [detailRow.student.id]: event.target.value
-                                    }))
-                                  }
-                                  onBlur={() => {
-                                    void saveTeacherNotes(detailRow);
-                                  }}
-                                />
-                                <span className="student-note-count">
-                                  {(
-                                    teacherNotesByStudentId[detailRow.student.id] ??
-                                    detailRow.teacherNotes
-                                  ).length}{" "}
-                                  / 1000
-                                  {savingNotesStudentId === detailRow.student.id ? " / saving" : ""}
-                                </span>
-                              </section>
-
-                              <section className="student-detail-card">
-                                <h4>Quick actions</h4>
-                                <div className="student-quick-actions">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setIsProfessorReviewOpen(true);
-                                    }}
-                                  >
-                                    <ChatIcon />
-                                    View chats
-                                  </button>
-                                </div>
-                              </section>
-                            </aside>
-                            );
-                          })() : null}
                         </div>
                       </div>
                     )}
@@ -4619,6 +4781,32 @@ export function TeacherClassManager({
                             </div>
                           </section>
 
+                        </section>
+
+                        <section
+                          className="ai-tutor-section-panel"
+                          hidden={activeAiTutorSection !== "access"}
+                          aria-labelledby="ai-tutor-access-title"
+                        >
+                          <div className="ai-tutor-section-heading">
+                            <div>
+                              <h2 id="ai-tutor-access-title">Access</h2>
+                              <span>Pause or allow student access to Chandra for this class.</span>
+                            </div>
+                          </div>
+                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-access-card-title">
+                            <h3 id="ai-tutor-access-card-title">
+                              {selectedTutorAccess.enabled ? "Student chat is on" : "Student chat is paused"}
+                            </h3>
+                            <div className="settings-toggle-list">
+                              <SettingsToggle
+                                defaultChecked={selectedTutorAccess.enabled}
+                                description="When paused, students can read saved chats but cannot send new messages. Teacher preview still works."
+                                name="tutorAccess.enabled"
+                                title="Allow students to use AI chat"
+                              />
+                            </div>
+                          </section>
                         </section>
 
                         <section
@@ -4866,6 +5054,15 @@ export function TeacherClassManager({
                                 })
                               }
                             />
+
+                            <div className="ai-tutor-control-grid">
+                              <TokenLimitInputs
+                                idPrefix="ai-token-limit"
+                                labelClassName="ai-tutor-control-label"
+                                requestLimits={selectedModelSettings.requestLimits}
+                                tokenLimits={selectedModelSettings.tokenLimits}
+                              />
+                            </div>
                           </section>
                         </section>
 
@@ -5750,6 +5947,101 @@ function SettingsToggle({
       <input defaultChecked={defaultChecked} name={name} type="checkbox" />
       <span className="settings-toggle-switch" aria-hidden="true" />
     </label>
+  );
+}
+
+function TokenLimitInputs({
+  idPrefix,
+  labelClassName,
+  requestLimits,
+  tokenLimits
+}: {
+  idPrefix: string;
+  labelClassName: string;
+  requestLimits: AiRequestLimitSettings;
+  tokenLimits: AiTokenLimitSettings;
+}) {
+  return (
+    <>
+      <div>
+        <label className={labelClassName} htmlFor={`${idPrefix}-student-requests`}>
+          Requests per student per day
+        </label>
+        <input
+          id={`${idPrefix}-student-requests`}
+          min={1}
+          name="modelSettings.requestLimits.perStudentDaily"
+          step={1}
+          type="number"
+          defaultValue={requestLimits.perStudentDaily}
+        />
+      </div>
+      <div>
+        <label className={labelClassName} htmlFor={`${idPrefix}-class-requests`}>
+          Requests per class per day
+        </label>
+        <input
+          id={`${idPrefix}-class-requests`}
+          min={1}
+          name="modelSettings.requestLimits.perClassDaily"
+          step={1}
+          type="number"
+          defaultValue={requestLimits.perClassDaily}
+        />
+      </div>
+      <div>
+        <label className={labelClassName} htmlFor={`${idPrefix}-preview-requests`}>
+          Teacher preview requests per day
+        </label>
+        <input
+          id={`${idPrefix}-preview-requests`}
+          min={0}
+          name="modelSettings.requestLimits.teacherPreviewDaily"
+          step={1}
+          type="number"
+          defaultValue={requestLimits.teacherPreviewDaily ?? 0}
+        />
+      </div>
+      <div>
+        <label className={labelClassName} htmlFor={`${idPrefix}-hour`}>
+          Tokens per student per hour
+        </label>
+        <input
+          id={`${idPrefix}-hour`}
+          min={1000}
+          name="modelSettings.tokenLimits.perHour"
+          step={1000}
+          type="number"
+          defaultValue={tokenLimits.perHour}
+        />
+      </div>
+      <div>
+        <label className={labelClassName} htmlFor={`${idPrefix}-day`}>
+          Tokens per student per day
+        </label>
+        <input
+          id={`${idPrefix}-day`}
+          min={1000}
+          name="modelSettings.tokenLimits.perDay"
+          step={1000}
+          type="number"
+          defaultValue={tokenLimits.perDay}
+        />
+      </div>
+      <div>
+        <label className={labelClassName} htmlFor={`${idPrefix}-week`}>
+          Tokens per student per week
+        </label>
+        <input
+          id={`${idPrefix}-week`}
+          min={1000}
+          name="modelSettings.tokenLimits.perWeek"
+          step={1000}
+          type="number"
+          defaultValue={tokenLimits.perWeek}
+        />
+      </div>
+    </>
   );
 }
 
@@ -7658,9 +7950,11 @@ function isToday(value: unknown) {
 }
 
 function buildRosterRows({
+  chatBlockedByStudentId,
   studentActivityByEmail,
   students
 }: {
+  chatBlockedByStudentId: Record<string, boolean>;
   studentActivityByEmail: Map<string, StudentRosterActivitySummary>;
   students: ClassStudent[];
 }): RosterRow[] {
@@ -7681,6 +7975,7 @@ function buildRosterRows({
 
     return {
       activeToday: status === "Active",
+      chatBlocked: chatBlockedByStudentId[student.id] ?? activity?.chatBlocked ?? student.chatBlocked === true,
       conversationsCount,
       conversationsLabel: formatConversationCount(conversationsCount),
       hasConversations: conversationsCount > 0,
@@ -7778,6 +8073,38 @@ function formatConversationMeta(conversation: StudentConversationSummary) {
     `${conversation.messageCount} messages`,
     formatConversationDate(conversation.lastMessageAt)
   ].filter(Boolean).join(" / ");
+}
+
+function formatAccountActivityTime(value: string) {
+  if (!value) {
+    return "Not available";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Not available";
+  }
+
+  return date.toLocaleString();
+}
+
+function formatInviteDate(value: string) {
+  if (!value) {
+    return "Not available";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Not available";
+  }
+
+  return date.toLocaleDateString("en-US", {
+    day: "numeric",
+    month: "short",
+    year: "numeric"
+  });
 }
 
 function formatClassError(caughtError: unknown, fallback: string) {

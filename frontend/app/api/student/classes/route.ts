@@ -14,6 +14,7 @@ type StudentClassSummary = {
   name: string;
   openingMessage?: string;
   section: string;
+  studentChatEnabled: boolean;
   themeColor: string;
 };
 
@@ -119,6 +120,7 @@ async function getStudentClassSummary(classId: string): Promise<StudentClassSumm
       ? { openingMessage: String(classData.openingMessage ?? "").trim() }
       : {}),
     section: String(classData.section ?? "").trim(),
+    studentChatEnabled: classData.tutorAccess?.enabled !== false && classData.studentChatEnabled !== false,
     themeColor: normalizeTeacherClassThemeColor(classData.themeColor)
   };
 }

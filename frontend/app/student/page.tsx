@@ -9,7 +9,7 @@ import remarkMath from "remark-math";
 import { useAuth } from "@/components/AuthProvider";
 import { RequireAuth } from "@/components/RequireAuth";
 import { apiUrl } from "@/lib/api-client";
-import { signOutCurrentUser, updateStudentClass, updateUserAccountSettings, updateUserThemePreference } from "@/lib/auth";
+import { deleteCurrentAccount, signOutAllSessions, signOutCurrentUser, updateStudentClass, updateUserAccountSettings, updateUserThemePreference } from "@/lib/auth";
 import {
   defaultTeacherClassAppearance,
   defaultTeacherClassThemeColor,
@@ -29,7 +29,13 @@ import {
 } from "@/lib/chat-message-format";
 import { subscribeToClass, type TeacherClass } from "@/lib/classes";
 import { capitalizeLabel, coerceDate, formatConversationDate } from "@/lib/display-format";
-import type { ChatMessage, MessageAttachment, StudentConversationSummary, TutorApiResponse } from "@/lib/types";
+import type {
+  ChatMessage,
+  MessageAttachment,
+  StudentAiUsageStatus,
+  StudentConversationSummary,
+  TutorApiResponse
+} from "@/lib/types";
 
 type ChatProgress = {
   message: string;
@@ -63,6 +69,7 @@ type StudentVisibleClass = {
   name: string;
   openingMessage?: string;
   section: string;
+  studentChatEnabled?: boolean;
   themeColor?: TeacherClassThemeColor;
 };
 
@@ -125,12 +132,16 @@ function StudentWorkspace() {
   const [accountDisplayName, setAccountDisplayName] = useState<string | null>(null);
   const [accountUsername, setAccountUsername] = useState<string | null>(null);
   const [accountSettingsError, setAccountSettingsError] = useState("");
+  const [deleteAccountPassword, setDeleteAccountPassword] = useState("");
   const [isSavingAccountSettings, setIsSavingAccountSettings] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isClassDropdownOpen, setIsClassDropdownOpen] = useState(false);
   const [studentMainView, setStudentMainView] = useState<StudentMainView>("chat");
   const [studentClasses, setStudentClasses] = useState<StudentClassSummary[]>([]);
   const [studentClassesError, setStudentClassesError] = useState("");
+  const [aiUsageStatus, setAiUsageStatus] = useState<StudentAiUsageStatus | null>(null);
+  const [aiUsageError, setAiUsageError] = useState("");
   const [isSwitchingClass, setIsSwitchingClass] = useState(false);
   const [conversationSummaries, setConversationSummaries] = useState<StudentConversationSummary[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState("");
@@ -224,6 +235,7 @@ function StudentWorkspace() {
   const className = activeClass?.name ?? (activeCourseId ? "Saved class" : "Class needed");
   const classSection = activeClass?.section ?? (activeCourseId ? "Student chat" : "Enter your class code");
   const classSectionLabel = formatClassSectionLabel(classSection, Boolean(activeCourseId));
+  const studentChatPaused = Boolean(activeCourseId && !isTeacherPreview && activeClass?.studentChatEnabled === false);
   const compactClassLabel = formatCompactClassLabel(className);
   const visibleClassCode = activeClass?.joinCode || activeClass?.id || activeCourseId;
   const visibleConversationSummaries = useMemo(
@@ -238,15 +250,10 @@ function StudentWorkspace() {
     () => mergeStudentClasses(studentClasses, activeClass),
     [activeClass, studentClasses]
   );
-  const selectedConversation = useMemo(
-    () => visibleConversationSummaries.find((conversation) => conversation.id === activeSelectedConversationId) ?? null,
-    [activeSelectedConversationId, visibleConversationSummaries]
-  );
-  const conversationTitle = selectedConversation?.title ?? "";
-  const conversationMessageCount = selectedConversation?.messageCount ?? 0;
   const accountName = profile?.displayName ?? user?.displayName ?? "Student";
   const accountEmail = profile?.email ?? user?.email ?? "";
   const accountUsernameValue = profile?.username ?? accountEmail;
+  const accountLastSignInAt = user?.metadata.lastSignInTime ?? "";
   const { isUploadingAttachment, readyComposerAttachments } = useMemo(() => {
     const readyAttachments: ComposerAttachment[] = [];
     let hasUploadInFlight = false;
@@ -264,6 +271,8 @@ function StudentWorkspace() {
   const canSendMessage = Boolean(
     activeCourseId &&
       !isSending &&
+      !studentChatPaused &&
+      !aiUsageStatus?.blocked &&
       !isUploadingAttachment &&
       (draft.trim() || readyComposerAttachments.length)
   );
@@ -295,6 +304,35 @@ function StudentWorkspace() {
         if (!isCancelled) {
           setStudentClasses([]);
           setStudentClassesError(describeStudentClassesError(caughtError));
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeCourseId, firebaseReady, isTeacherPreview, profile?.role, user]);
+
+  useEffect(() => {
+    if (!firebaseReady || !activeCourseId || !user || profile?.role !== "student" || isTeacherPreview) {
+      setAiUsageStatus(null);
+      setAiUsageError("");
+      return;
+    }
+
+    let isCancelled = false;
+
+    user
+      .getIdToken()
+      .then((token) => fetchStudentAiUsageStatus({ classId: activeCourseId, token }))
+      .then((nextStatus) => {
+        if (!isCancelled) {
+          setAiUsageStatus(nextStatus);
+          setAiUsageError("");
+        }
+      })
+      .catch((caughtError) => {
+        if (!isCancelled) {
+          setAiUsageError(caughtError instanceof Error ? caughtError.message : "AI usage failed to load.");
         }
       });
 
@@ -591,7 +629,10 @@ function StudentWorkspace() {
       });
 
       if (!response.ok) {
-        const data = (await response.json()) as { error?: string };
+        const data = (await response.json()) as { aiUsageStatus?: StudentAiUsageStatus; error?: string };
+        if (data.aiUsageStatus) {
+          setAiUsageStatus(data.aiUsageStatus);
+        }
         throw new Error(data.error ?? "Chat request failed");
       }
 
@@ -631,6 +672,11 @@ function StudentWorkspace() {
       if (data.conversationId && data.conversationId !== activeSelectedConversationId) {
         setSelectedConversationId(data.conversationId);
         setSelectedConversationClassId(activeCourseId);
+      }
+
+      if (data.aiUsageStatus) {
+        setAiUsageStatus(data.aiUsageStatus);
+        setAiUsageError("");
       }
 
       if (!isTeacherPreview) {
@@ -760,6 +806,32 @@ function StudentWorkspace() {
   async function handleSignOut() {
     await signOutCurrentUser();
     router.push("/auth");
+  }
+
+  async function handleSignOutAllSessions() {
+    await signOutAllSessions();
+    router.push("/auth");
+  }
+
+  async function handleDeleteAccount() {
+    if (!user) {
+      return;
+    }
+
+    setAccountSettingsError("");
+    setIsDeletingAccount(true);
+
+    try {
+      await deleteCurrentAccount({
+        currentPassword: deleteAccountPassword,
+        uid: user.uid
+      });
+      router.push("/auth");
+    } catch (caughtError) {
+      setAccountSettingsError(caughtError instanceof Error ? caughtError.message : "Account deletion failed.");
+    } finally {
+      setIsDeletingAccount(false);
+    }
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -961,6 +1033,7 @@ function StudentWorkspace() {
           <StudentSettingsPanel
             accountEmail={accountEmail}
             accountDisplayName={accountDisplayName ?? accountName}
+            accountLastSignInAt={accountLastSignInAt}
             accountUsername={accountUsername ?? accountUsernameValue}
             accountSettingsError={accountSettingsError}
             activeAppearance={activeAppearance}
@@ -970,15 +1043,20 @@ function StudentWorkspace() {
             classLoadMessage={classLoadMessage}
             classes={visibleStudentClasses}
             isSavingAccountSettings={isSavingAccountSettings}
+            isDeletingAccount={isDeletingAccount}
             isSavingThemePreference={isSavingThemePreference}
             role={profile?.role ?? "student"}
             themePreferenceError={themePreferenceError}
             onAccountDisplayNameChange={setAccountDisplayName}
             onAccountUsernameChange={setAccountUsername}
+            onDeleteAccount={handleDeleteAccount}
+            onDeleteAccountPasswordChange={setDeleteAccountPassword}
             onSaveAccountSettings={saveAccountSettings}
             onSignOut={handleSignOut}
+            onSignOutAllSessions={handleSignOutAllSessions}
             onBackToChat={() => setStudentMainView("chat")}
             onUpdateThemePreference={updatePersonalThemePreference}
+            deleteAccountPassword={deleteAccountPassword}
           />
         ) : (
           <section className="student-workspace-main" aria-label="Student tutor chat">
@@ -990,15 +1068,11 @@ function StudentWorkspace() {
                 </h1>
               </div>
             </header>
-
-            {selectedConversation ? (
-              <section className="student-conversation-header" aria-label="Current conversation">
-                <div>
-                  <h2>{conversationTitle}</h2>
-                  <p>{formatMessageCount(conversationMessageCount)}</p>
-                </div>
-              </section>
+            {aiUsageStatus ? <StudentAiUsagePanel status={aiUsageStatus} /> : null}
+            {studentChatPaused ? (
+              <p className="form-error chat-error">Your teacher has paused chat for this class.</p>
             ) : null}
+            {aiUsageError ? <p className="form-error chat-error">{aiUsageError}</p> : null}
 
             {conversationMessagesError ? <p className="form-error chat-error">{conversationMessagesError}</p> : null}
             <div className="message-list student-message-list">
@@ -1053,7 +1127,15 @@ function StudentWorkspace() {
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={handleComposerKeyDown}
-                placeholder={activeCourseId ? "Ask about a problem, step, or equation..." : "Join a class to start chatting."}
+                placeholder={
+                  studentChatPaused
+                    ? "Your teacher has paused chat for this class."
+                    : aiUsageStatus?.blocked
+                    ? "AI usage is used up for now."
+                    : activeCourseId
+                      ? "Ask about a problem, step, or equation..."
+                      : "Join a class to start chatting."
+                }
                 rows={1}
               />
               <button className="student-send-button" type="submit" disabled={!canSendMessage}>
@@ -1137,8 +1219,10 @@ const StudentChatMessage = memo(function StudentChatMessage({ message }: { messa
 function StudentSettingsPanel({
   accountEmail,
   accountDisplayName,
+  accountLastSignInAt,
   accountUsername,
   accountSettingsError,
+  deleteAccountPassword,
   activeAppearance,
   activeClass,
   activeClassId,
@@ -1146,20 +1230,26 @@ function StudentSettingsPanel({
   classLoadMessage,
   classes,
   isSavingAccountSettings,
+  isDeletingAccount,
   isSavingThemePreference,
   role,
   themePreferenceError,
   onAccountDisplayNameChange,
   onAccountUsernameChange,
+  onDeleteAccount,
+  onDeleteAccountPasswordChange,
   onSaveAccountSettings,
   onSignOut,
+  onSignOutAllSessions,
   onBackToChat,
   onUpdateThemePreference
 }: {
   accountEmail: string;
   accountDisplayName: string;
+  accountLastSignInAt: string;
   accountUsername: string;
   accountSettingsError: string;
+  deleteAccountPassword: string;
   activeAppearance: TeacherClassAppearance;
   activeClass: StudentVisibleClass | null;
   activeClassId: string;
@@ -1167,13 +1257,17 @@ function StudentSettingsPanel({
   classLoadMessage: string;
   classes: StudentClassSummary[];
   isSavingAccountSettings: boolean;
+  isDeletingAccount: boolean;
   isSavingThemePreference: boolean;
   role: string;
   themePreferenceError: string;
   onAccountDisplayNameChange: (displayName: string) => void;
   onAccountUsernameChange: (username: string) => void;
+  onDeleteAccount: () => Promise<void>;
+  onDeleteAccountPasswordChange: (password: string) => void;
   onSaveAccountSettings: () => Promise<void>;
   onSignOut: () => Promise<void>;
+  onSignOutAllSessions: () => Promise<void>;
   onBackToChat: () => void;
   onUpdateThemePreference: (nextPreference: {
     appearance?: unknown;
@@ -1240,6 +1334,10 @@ function StudentSettingsPanel({
             <div>
               <dt>Role</dt>
               <dd>{capitalizeLabel(role)}</dd>
+            </div>
+            <div>
+              <dt>Last sign-in</dt>
+              <dd>{formatAccountActivityTime(accountLastSignInAt)}</dd>
             </div>
           </dl>
           {accountSettingsError ? <p className="form-error">{accountSettingsError}</p> : null}
@@ -1358,10 +1456,38 @@ function StudentSettingsPanel({
         <section className="student-settings-card student-session-card" aria-labelledby="student-session-settings">
           <div className="student-settings-card-heading">
             <h2 id="student-session-settings">Session</h2>
-            <p>Sign out of your account on this device.</p>
+            <p>Sign out of this device or revoke refresh tokens for every device.</p>
           </div>
           <button className="student-settings-danger-button" type="button" onClick={() => void onSignOut()}>
             Sign out
+          </button>
+          <button className="student-settings-danger-button" type="button" onClick={() => void onSignOutAllSessions()}>
+            Sign out all sessions
+          </button>
+        </section>
+
+        <section className="student-settings-card student-session-card" aria-labelledby="student-delete-account-settings">
+          <div className="student-settings-card-heading">
+            <h2 id="student-delete-account-settings">Delete Account</h2>
+            <p>Remove your profile and anonymize class conversation ownership.</p>
+          </div>
+          <label className="student-settings-control-label" htmlFor="student-delete-password">
+            Current password
+          </label>
+          <input
+            id="student-delete-password"
+            autoComplete="current-password"
+            type="password"
+            value={deleteAccountPassword}
+            onChange={(event) => onDeleteAccountPasswordChange(event.target.value)}
+          />
+          <button
+            className="student-settings-danger-button"
+            disabled={isDeletingAccount}
+            type="button"
+            onClick={() => void onDeleteAccount()}
+          >
+            {isDeletingAccount ? "Deleting" : "Delete account"}
           </button>
         </section>
       </div>
@@ -1487,6 +1613,41 @@ const ChatProgressMessage = memo(function ChatProgressMessage({ progress }: { pr
   );
 });
 
+const StudentAiUsagePanel = memo(function StudentAiUsagePanel({ status }: { status: StudentAiUsageStatus }) {
+  return (
+    <section
+      className={`student-ai-usage${status.nearLimit ? " near-limit" : ""}${status.blocked ? " blocked" : ""}`}
+      aria-label="AI usage remaining"
+    >
+      <div className="student-ai-usage-meters">
+        <StudentAiUsageMeter label="Today" percent={status.todayPercentRemaining} />
+        <StudentAiUsageMeter label="This week" percent={status.weekPercentRemaining} />
+      </div>
+      {status.blocked ? (
+        <p>AI usage is used up for now.</p>
+      ) : status.nearLimit ? (
+        <p>AI usage is almost used up.</p>
+      ) : null}
+    </section>
+  );
+});
+
+function StudentAiUsageMeter({ label, percent }: { label: string; percent: number }) {
+  const cleanPercent = Math.max(0, Math.min(100, Math.round(percent)));
+
+  return (
+    <div className="student-ai-usage-meter">
+      <span>
+        <strong>{label}</strong>
+        <em>{cleanPercent}% left</em>
+      </span>
+      <div aria-hidden="true">
+        <span style={{ width: `${cleanPercent}%` }} />
+      </div>
+    </div>
+  );
+}
+
 async function readChatStream(response: Response, onEvent: (event: ChatStreamEvent) => void) {
   const reader = response.body?.getReader();
 
@@ -1533,6 +1694,27 @@ async function readChatStream(response: Response, onEvent: (event: ChatStreamEve
   }
 
   return finalPayload;
+}
+
+async function fetchStudentAiUsageStatus({
+  classId,
+  token
+}: {
+  classId: string;
+  token: string;
+}) {
+  const response = await fetch(apiUrl(`/api/student/ai-usage?courseId=${encodeURIComponent(classId)}`), {
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+  const data = (await response.json()) as { aiUsageStatus?: StudentAiUsageStatus; error?: string };
+
+  if (!response.ok || !data.aiUsageStatus) {
+    throw new Error(data.error ?? "AI usage failed to load.");
+  }
+
+  return data.aiUsageStatus;
 }
 
 async function fetchStudentConversationSummaries({
@@ -1729,7 +1911,8 @@ function mergeStudentClasses(classes: StudentClassSummary[], activeClass: Studen
       id: activeClass.id,
       joinCode: activeClass.joinCode,
       name: activeClass.name,
-      section: activeClass.section
+      section: activeClass.section,
+      studentChatEnabled: activeClass.studentChatEnabled
     });
   }
 
@@ -1866,15 +2049,25 @@ function formatConversationMeta(conversation: StudentConversationSummary) {
   ].filter(Boolean).join(" / ");
 }
 
+function formatAccountActivityTime(value: string) {
+  if (!value) {
+    return "Not available";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Not available";
+  }
+
+  return date.toLocaleString();
+}
+
 function formatCompactClassLabel(className: string) {
   const trimmedName = className.trim();
   const firstLetter = trimmedName.match(/[A-Za-z]/)?.[0]?.toUpperCase() ?? "C";
   const trailingNumber = trimmedName.match(/\d{1,3}/)?.[0] ?? "";
   return `${firstLetter}${trailingNumber}`.slice(0, 4);
-}
-
-function formatMessageCount(count: number) {
-  return `${count} ${count === 1 ? "message" : "messages"}`;
 }
 
 function formatClassSectionLabel(classSection: string, hasClass: boolean) {

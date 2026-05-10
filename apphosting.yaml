@@ -121,6 +121,34 @@ env:
     secret: LEARNING_PROFILE_UPDATE_SECRET
     availability:
       - RUNTIME
+  - variable: CONVERSATION_RETENTION_SECRET
+    secret: CONVERSATION_RETENTION_SECRET
+    availability:
+      - RUNTIME
+  - variable: BETTER_STACK_SOURCE_TOKEN
+    secret: BETTER_STACK_SOURCE_TOKEN
+    availability:
+      - RUNTIME
+  - variable: BETTER_STACK_INGESTING_HOST
+    secret: BETTER_STACK_INGESTING_HOST
+    availability:
+      - RUNTIME
+  - variable: BETTER_STACK_UPTIME_API_TOKEN
+    secret: BETTER_STACK_UPTIME_API_TOKEN
+    availability:
+      - RUNTIME
+  - variable: BETTER_STACK_RETENTION_HEARTBEAT_URL
+    secret: BETTER_STACK_RETENTION_HEARTBEAT_URL
+    availability:
+      - RUNTIME
+  - variable: BETTER_STACK_LEARNING_PROFILE_HEARTBEAT_URL
+    secret: BETTER_STACK_LEARNING_PROFILE_HEARTBEAT_URL
+    availability:
+      - RUNTIME
+  - variable: BETTER_STACK_ENV
+    value: production
+    availability:
+      - RUNTIME
 
   - variable: GEMINI_API_KEY
     secret: GEMINI_API_KEY

@@ -702,6 +702,78 @@ test("student chat errors include stable codes and student-safe messages", () =>
   assert.match(source, /TUTOR_BACKEND_STREAM_FAILED/);
 });
 
+test("student AI limits are token-budget based and student-safe", () => {
+  const usageSource = readFileSync(join(repoRoot, "frontend/lib/ai-usage-limits.ts"), "utf8");
+  const settingsSource = readFileSync(join(repoRoot, "frontend/lib/class-settings.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const typesSource = readFileSync(join(repoRoot, "frontend/lib/types.ts"), "utf8");
+
+  assert.match(settingsSource, /perHour: 75_000/);
+  assert.match(settingsSource, /perDay: 300_000/);
+  assert.match(settingsSource, /perWeek: 1_200_000/);
+  assert.match(settingsSource, /tokenLimits: defaultAiTokenLimitSettings/);
+  assert.match(usageSource, /ipPerFiveMinutes: 30_000/);
+  assert.match(usageSource, /ipPerHour: 250_000/);
+  assert.match(usageSource, /estimateAiRequestTokens/);
+  assert.match(usageSource, /normalizeAiTokenUsage/);
+  assert.match(routeSource, /reserveAiTokenUsage/);
+  assert.match(routeSource, /tokenLimits: classModelSettings\?\.tokenLimits/);
+  assert.match(routeSource, /finalizeAiTokenUsage/);
+  assert.match(routeSource, /aiUsageReservation/);
+  assert.match(routeSource, /actualTokenUsageFromTutorPayload/);
+  assert.match(routeSource, /CHAT_AI_USAGE_EXHAUSTED/);
+  assert.match(studentSource, /todayPercentRemaining/);
+  assert.match(studentSource, /weekPercentRemaining/);
+  assert.match(studentSource, /% left/);
+  assert.doesNotMatch(typesSource, /tokenUsage\?:/);
+});
+
+test("student chat access controls and request quotas run before backend calls", () => {
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const authSource = readFileSync(join(repoRoot, "frontend/lib/tutor-chat-auth.ts"), "utf8");
+  const usageSource = readFileSync(join(repoRoot, "frontend/lib/ai-usage-limits.ts"), "utf8");
+  const settingsSource = readFileSync(join(repoRoot, "frontend/lib/class-settings.ts"), "utf8");
+  const backendSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
+
+  assert.match(authSource, /normalizeTutorAccessSettings/);
+  assert.match(authSource, /Your teacher has paused chat for this class/);
+  assert.match(authSource, /studentSupport/);
+  assert.match(authSource, /chatBlocked/);
+  assert.match(routeSource, /reserveAiTokenUsage\(\{[\s\S]*provider: "langgraph"[\s\S]*requestLimits: classModelSettings\?\.requestLimits/);
+  assert.match(routeSource, /const response = await fetch\(`\$\{langGraphBackendBaseUrl\(\)\}\/api\/langgraph\/chat`/);
+  assert.match(usageSource, /collection\("aiUsageRequestBuckets"\)/);
+  assert.match(usageSource, /requestCount: FieldValue\.increment\(1\)/);
+  assert.match(usageSource, /collection\("aiUsageEvents"\)/);
+  assert.match(usageSource, /modelId/);
+  assert.match(usageSource, /provider/);
+  assert.match(settingsSource, /perStudentDaily: 100/);
+  assert.match(settingsSource, /perClassDaily: 3_000/);
+  assert.match(settingsSource, /teacherPreviewDaily: 50/);
+  assert.match(backendSource, /enforce_ai_usage_reservation\(request\.aiUsageReservation\)/);
+  assert.match(backendSource, /async def chat\(request: ChatRequest[\s\S]*enforce_ai_usage_reservation\(request\.aiUsageReservation\)[\s\S]*call_openrouter/);
+});
+
+test("teacher preview is allowed when class chat is paused but still uses preview quota", () => {
+  const authSource = readFileSync(join(repoRoot, "frontend/lib/tutor-chat-auth.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+
+  assert.match(authSource, /if \(role === "teacher"\)[\s\S]*return \{ classId, \.\.\.classScope, role, uid: decodedToken\.uid \}/);
+  assert.match(routeSource, /role: scope\.role/);
+  assert.match(routeSource, /studentId: scope\.role === "student" \? scope\.uid : undefined/);
+  assert.match(studentSource, /!isTeacherPreview && activeClass\?\.studentChatEnabled === false/);
+  assert.match(studentSource, /Your teacher has paused chat for this class\./);
+});
+
+test("AI request quota day buckets reset by UTC day", () => {
+  const usageSource = readFileSync(join(repoRoot, "frontend/lib/ai-usage-limits.ts"), "utf8");
+
+  assert.match(usageSource, /function dayBucketKey\(date: Date\)/);
+  assert.match(usageSource, /date\.toISOString\(\)\.slice\(0, 10\)\.replace\(\s*\/-\/g,\s*""\s*\)/);
+  assert.match(usageSource, /export function buildAiUsageDayBucketKey/);
+});
+
 test("student chat response length settings leave room for math-heavy examples", () => {
   const source = readFileSync(join(repoRoot, "frontend/lib/class-settings.ts"), "utf8");
 

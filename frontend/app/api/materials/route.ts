@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { writeAuditLog } from "@/lib/audit-log";
 import {
   TutorKnowledgeHttpError,
   authorizeClassTeacher,
@@ -16,11 +17,25 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Choose a class before saving tutor knowledge." }, { status: 400 });
     }
 
-    const { classSnapshot, uid } = await authorizeClassTeacher(request, classId);
+    const { classSnapshot, email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
     const classData = classSnapshot.data() ?? {};
     const professorName = String(classData.teacherName ?? classData.professorName ?? "").trim();
     const jobId = String(formData.get("jobId") ?? "").trim();
     const material = await saveTutorKnowledge({ classId, formData, jobId, professorName, teacherId: uid });
+
+    await writeAuditLog({
+      actor: { email: actorEmail, uid },
+      eventType: "material.uploaded",
+      metadata: {
+        jobId,
+        title: String(formData.get("title") ?? "").trim()
+      },
+      route: "/api/materials",
+      target: {
+        classId,
+        materialId: material.id
+      }
+    });
 
     return NextResponse.json(material);
   } catch (caughtError) {

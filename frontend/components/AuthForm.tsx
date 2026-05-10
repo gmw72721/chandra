@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   createRoleProfile,
+  requestPasswordReset,
   signInWithEmail,
   signUpWithRole,
   type AccountRole
@@ -12,7 +13,7 @@ import {
 import { CLASS_CODE_LENGTH, formatClassCodeInput } from "@/lib/class-code";
 import { useAuth } from "./AuthProvider";
 
-type AuthMode = "signin" | "signup";
+type AuthMode = "signin" | "signup" | "reset";
 
 const pendingProfileStorageKey = "chandra.pendingProfile";
 
@@ -32,7 +33,7 @@ export function AuthForm() {
   const canCreateTeacher = Boolean(teacherInviteToken);
   const requestedRole = searchParams.get("role") === "teacher" && canCreateTeacher ? "teacher" : "student";
   const requestedClassId = formatClassCodeInput(searchParams.get("classId") ?? "");
-  const [mode, setMode] = useState<AuthMode>("signup");
+  const [mode, setMode] = useState<AuthMode>(searchParams.get("mode") === "reset" ? "reset" : "signup");
   const [role, setRole] = useState<AccountRole>(requestedRole);
   const [classId, setClassId] = useState(requestedClassId);
   const [displayName, setDisplayName] = useState("");
@@ -107,8 +108,11 @@ export function AuthForm() {
         });
         window.localStorage.removeItem(pendingProfileStorageKey);
         router.push(role === "teacher" ? "/teacher" : "/student");
-      } else {
+      } else if (mode === "signin") {
         await signInWithEmail(email.trim(), password);
+      } else {
+        const message = await requestPasswordReset(email.trim());
+        setError(message);
       }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Authentication failed.");
@@ -233,7 +237,13 @@ export function AuthForm() {
 
   return (
     <section className="auth-card">
-      <h1>{mode === "signup" ? "Create your Chandra account" : "Welcome back."}</h1>
+      <h1>
+        {mode === "signup"
+          ? "Create your Chandra account"
+          : mode === "reset"
+            ? "Reset your password"
+            : "Welcome back."}
+      </h1>
       {sessionError ? <p className="form-error">{sessionError}</p> : null}
 
       <div className="segmented-control" aria-label="Authentication mode">
@@ -250,6 +260,13 @@ export function AuthForm() {
           onClick={() => setMode("signin")}
         >
           Sign in
+        </button>
+        <button
+          aria-pressed={mode === "reset"}
+          type="button"
+          onClick={() => setMode("reset")}
+        >
+          Reset
         </button>
       </div>
 
@@ -310,36 +327,46 @@ export function AuthForm() {
         ) : null}
 
         <label className="field-label" htmlFor="email">
-          {mode === "signin" ? "Username or email" : "Email"}
+          {mode === "signin" || mode === "reset" ? "Username or email" : "Email"}
         </label>
         <input
           id="email"
           required
           autoCapitalize="none"
-          autoComplete={mode === "signin" ? "username" : "email"}
-          type={mode === "signin" ? "text" : "email"}
+          autoComplete={mode === "signin" || mode === "reset" ? "username" : "email"}
+          type={mode === "signin" || mode === "reset" ? "text" : "email"}
           value={email}
           onChange={(event) => setEmail(event.target.value)}
-          placeholder={mode === "signin" ? "ada or you@example.com" : "you@example.com"}
+          placeholder={mode === "signin" || mode === "reset" ? "ada or you@example.com" : "you@example.com"}
         />
 
-        <label className="field-label" htmlFor="password">
-          Password
-        </label>
-        <input
-          id="password"
-          required
-          minLength={6}
-          type="password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-          placeholder="At least 6 characters"
-        />
+        {mode !== "reset" ? (
+          <>
+            <label className="field-label" htmlFor="password">
+              Password
+            </label>
+            <input
+              id="password"
+              required
+              minLength={6}
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="At least 6 characters"
+            />
+          </>
+        ) : null}
 
         {error ? <p className="form-error">{error}</p> : null}
 
         <button className="primary-button" disabled={isSubmitting} type="submit">
-          {isSubmitting ? "Working" : mode === "signup" ? "Create account" : "Sign in"}
+          {isSubmitting
+            ? "Working"
+            : mode === "signup"
+              ? "Create account"
+              : mode === "reset"
+                ? "Send reset link"
+                : "Sign in"}
         </button>
       </form>
     </section>

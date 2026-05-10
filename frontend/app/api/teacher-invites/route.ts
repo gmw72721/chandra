@@ -1,28 +1,38 @@
 import { createHash, randomBytes } from "crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
+import { writeAuditLog } from "@/lib/audit-log";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
 
 const inviteTtlDays = 30;
 
+type AuthorizedTeacher = {
+  email: string;
+  uid: string;
+};
+
+export async function GET(request: Request) {
+  try {
+    const teacher = await authorizeTeacherInviteRequest(request, "list active invites");
+    const snapshot = await adminDb!
+      .collection("teacherInvites")
+      .where("createdByUid", "==", teacher.uid)
+      .get();
+    const invites = snapshot.docs
+      .map((inviteDoc) => inviteDocToResponse(inviteDoc.id, inviteDoc.data()))
+      .sort((firstInvite, secondInvite) => secondInvite.createdAt.localeCompare(firstInvite.createdAt));
+
+    return NextResponse.json({ invites });
+  } catch (caughtError) {
+    return teacherInviteErrorResponse(caughtError, "Teacher invite list failed.");
+  }
+}
+
 export async function POST(request: Request) {
   try {
-    const token = getBearerToken(request);
-
-    if (!token) {
-      return NextResponse.json({ error: "Sign in as a teacher to create an invite." }, { status: 401 });
-    }
-
-    assertFirebaseAdminAuthReady();
-    const decodedToken = await adminAuth!.verifyIdToken(token);
-    const profileSnapshot = await adminDb!.collection("users").doc(decodedToken.uid).get();
-    const profile = profileSnapshot.data();
-
-    if (!profileSnapshot.exists || profile?.role !== "teacher") {
-      return NextResponse.json({ error: "Use a teacher account to create an invite." }, { status: 403 });
-    }
+    const teacher = await authorizeTeacherInviteRequest(request, "create an invite");
 
     const inviteToken = randomBytes(32).toString("base64url");
     const tokenHash = hashInviteToken(inviteToken);
@@ -33,10 +43,26 @@ export async function POST(request: Request) {
 
     await adminDb!.collection("teacherInvites").doc(tokenHash).set({
       createdAt: FieldValue.serverTimestamp(),
-      createdByEmail: String(profile.email ?? decodedToken.email ?? "").trim().toLowerCase(),
-      createdByUid: decodedToken.uid,
+      createdByEmail: teacher.email,
+      createdByUid: teacher.uid,
       expiresAt: Timestamp.fromDate(expiresAtDate),
+      revokedAt: null,
       tokenHash
+    });
+
+    await writeAuditLog({
+      actor: {
+        email: teacher.email,
+        uid: teacher.uid
+      },
+      eventType: "teacher_invite.created",
+      metadata: {
+        expiresAt: expiresAtDate.toISOString()
+      },
+      route: "/api/teacher-invites",
+      target: {
+        inviteId: tokenHash
+      }
     });
 
     return NextResponse.json({
@@ -44,17 +70,89 @@ export async function POST(request: Request) {
       inviteUrl: inviteUrl.toString()
     });
   } catch (caughtError) {
-    const message = caughtError instanceof Error ? caughtError.message : "";
+    return teacherInviteErrorResponse(caughtError, "Teacher invite creation failed.");
+  }
+}
 
-    if (message.includes("Firebase Admin is not configured")) {
-      return NextResponse.json({ error: message }, { status: 500 });
+export async function DELETE(request: Request) {
+  try {
+    const teacher = await authorizeTeacherInviteRequest(request, "revoke an invite");
+    const body = (await request.json().catch(() => ({}))) as { inviteId?: unknown };
+    const inviteId = String(body.inviteId ?? "").trim();
+
+    if (!/^[a-f0-9]{64}$/i.test(inviteId)) {
+      return NextResponse.json({ error: "Choose an invite to revoke." }, { status: 400 });
     }
 
-    if (message.includes("FRONTEND_ORIGIN")) {
-      return NextResponse.json({ error: message }, { status: 500 });
+    const inviteReference = adminDb!.collection("teacherInvites").doc(inviteId);
+    const inviteSnapshot = await inviteReference.get();
+    const invite = inviteSnapshot.data();
+
+    if (!inviteSnapshot.exists || invite?.createdByUid !== teacher.uid) {
+      return NextResponse.json({ error: "Choose an invite to revoke." }, { status: 404 });
     }
 
-    return NextResponse.json({ error: "Teacher invite creation failed." }, { status: 500 });
+    if (invite?.usedAt) {
+      return NextResponse.json({ error: "Used invites cannot be revoked." }, { status: 409 });
+    }
+
+    if (!invite?.revokedAt) {
+      await inviteReference.set(
+        {
+          revokedAt: FieldValue.serverTimestamp(),
+          revokedByEmail: teacher.email,
+          revokedByUid: teacher.uid
+        },
+        { merge: true }
+      );
+    }
+
+    await writeAuditLog({
+      actor: {
+        email: teacher.email,
+        uid: teacher.uid
+      },
+      eventType: "teacher_invite.revoked",
+      route: "/api/teacher-invites",
+      target: {
+        inviteId
+      }
+    });
+
+    return NextResponse.json({ revoked: true });
+  } catch (caughtError) {
+    return teacherInviteErrorResponse(caughtError, "Teacher invite revoke failed.");
+  }
+}
+
+async function authorizeTeacherInviteRequest(request: Request, action: string): Promise<AuthorizedTeacher> {
+  const token = getBearerToken(request);
+
+  if (!token) {
+    throw new TeacherInviteRouteError(`Sign in as a teacher to ${action}.`, 401);
+  }
+
+  assertFirebaseAdminAuthReady();
+  const decodedToken = await adminAuth!.verifyIdToken(token);
+  const profileSnapshot = await adminDb!.collection("users").doc(decodedToken.uid).get();
+  const profile = profileSnapshot.data();
+
+  if (!profileSnapshot.exists || profile?.role !== "teacher") {
+    throw new TeacherInviteRouteError(`Use a teacher account to ${action}.`, 403);
+  }
+
+  return {
+    email: String(profile.email ?? decodedToken.email ?? "").trim().toLowerCase(),
+    uid: decodedToken.uid
+  };
+}
+
+class TeacherInviteRouteError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
   }
 }
 
@@ -70,6 +168,54 @@ function getBearerToken(request: Request) {
 
 function hashInviteToken(inviteToken: string) {
   return createHash("sha256").update(inviteToken).digest("hex");
+}
+
+function inviteDocToResponse(inviteId: string, invite: Record<string, unknown>) {
+  const expiresAt = invite.expiresAt instanceof Timestamp ? invite.expiresAt.toDate() : null;
+  const usedAt = invite.usedAt instanceof Timestamp ? invite.usedAt.toDate() : null;
+  const revokedAt = invite.revokedAt instanceof Timestamp ? invite.revokedAt.toDate() : null;
+  const createdAt = invite.createdAt instanceof Timestamp ? invite.createdAt.toDate() : null;
+  const now = Date.now();
+  const status = usedAt
+    ? "used"
+    : revokedAt
+      ? "revoked"
+      : expiresAt && expiresAt.getTime() <= now
+        ? "expired"
+        : "active";
+
+  return {
+    createdAt: createdAt?.toISOString() ?? "",
+    expiresAt: expiresAt?.toISOString() ?? "",
+    inviteId,
+    revokedAt: revokedAt?.toISOString() ?? "",
+    status,
+    usedAt: usedAt?.toISOString() ?? "",
+    usedByEmail: normalizeEmail(invite.usedByEmail),
+    usedByUid: String(invite.usedByUid ?? "").trim()
+  };
+}
+
+function normalizeEmail(value: unknown) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function teacherInviteErrorResponse(caughtError: unknown, fallbackMessage: string) {
+  if (caughtError instanceof TeacherInviteRouteError) {
+    return NextResponse.json({ error: caughtError.message }, { status: caughtError.status });
+  }
+
+  const message = caughtError instanceof Error ? caughtError.message : "";
+
+  if (message.includes("Firebase Admin is not configured")) {
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+
+  if (message.includes("FRONTEND_ORIGIN")) {
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+
+  return NextResponse.json({ error: fallbackMessage }, { status: 500 });
 }
 
 function publicFrontendOrigin(request: Request) {

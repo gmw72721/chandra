@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { writeAuditLog } from "@/lib/audit-log";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 import {
   normalizeTeacherClassAppearance,
@@ -7,10 +8,13 @@ import {
 
 export const runtime = "nodejs";
 
+const recentAuthMaxAgeSeconds = 5 * 60;
+
 type AccountSettingsBody = {
   appearance?: unknown;
   displayName?: unknown;
   email?: unknown;
+  revokeOtherSessions?: unknown;
   themeColor?: unknown;
   username?: unknown;
 };
@@ -82,6 +86,12 @@ export async function PATCH(request: Request) {
       await assertUsernameIsAvailable(username, decodedToken.uid);
     }
 
+    const shouldRevokeRefreshTokens = Boolean(body.revokeOtherSessions) || email !== currentEmail;
+
+    if (shouldRevokeRefreshTokens && !hasRecentAuthentication(decodedToken.auth_time)) {
+      return NextResponse.json({ error: "Reauthenticate before changing sensitive account settings." }, { status: 401 });
+    }
+
     const profileUpdates: Record<string, unknown> = {
       appearance,
       email,
@@ -98,6 +108,28 @@ export async function PATCH(request: Request) {
     }
 
     await userReference.set(profileUpdates, { merge: true });
+
+    if (shouldRevokeRefreshTokens) {
+      await adminAuth!.revokeRefreshTokens(decodedToken.uid);
+    }
+
+    await writeAuditLog({
+      actor: {
+        email: decodedToken.email,
+        uid: decodedToken.uid
+      },
+      eventType: "account.settings.updated",
+      metadata: {
+        displayNameChanged: shouldUpdateDisplayName && displayName !== currentDisplayName,
+        emailChanged: email !== currentEmail,
+        refreshTokensRevoked: shouldRevokeRefreshTokens,
+        usernameChanged: username !== currentUsername
+      },
+      route: "/api/account/settings",
+      target: {
+        uid: decodedToken.uid
+      }
+    });
 
     if (shouldUpdateDisplayName && displayName !== currentDisplayName) {
       await syncDisplayNameReferences({
@@ -117,7 +149,8 @@ export async function PATCH(request: Request) {
         themeColor,
         uid: decodedToken.uid,
         username
-      }
+      },
+      sessionRevoked: shouldRevokeRefreshTokens
     });
   } catch (caughtError) {
     if (caughtError instanceof AccountSettingsError) {
@@ -277,4 +310,10 @@ function firstString(...values: unknown[]) {
   }
 
   return "";
+}
+
+function hasRecentAuthentication(authTime: unknown) {
+  const authTimeSeconds = Number(authTime ?? 0);
+
+  return authTimeSeconds > 0 && Date.now() / 1000 - authTimeSeconds <= recentAuthMaxAgeSeconds;
 }

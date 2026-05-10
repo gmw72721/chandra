@@ -1,4 +1,5 @@
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
+import { normalizeTutorAccessSettings } from "./class-settings";
 import { resolveStudentChatClassId, StudentChatScopeError } from "./student-chat-scope";
 
 export type AuthorizedTutorChatScope = {
@@ -10,11 +11,21 @@ export type AuthorizedTutorChatScope = {
 };
 
 export class TutorChatHttpError extends Error {
+  classId?: string;
+  decision?: "class_chat_disabled" | "student_chat_blocked";
   status: number;
+  userId?: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, metadata: {
+    classId?: string;
+    decision?: "class_chat_disabled" | "student_chat_blocked";
+    userId?: string;
+  } = {}) {
     super(message);
+    this.classId = metadata.classId;
+    this.decision = metadata.decision;
     this.status = status;
+    this.userId = metadata.userId;
   }
 }
 
@@ -51,6 +62,12 @@ export async function authorizeTutorChatRequest(
       savedClassId: String(profile.classId ?? "")
     });
     const classScope = await getClassProfessorScope(classId);
+    await assertStudentChatAccess({
+      classData: classScope.classData,
+      classId,
+      profile,
+      uid: decodedToken.uid
+    });
     return { classId, ...classScope, role, uid: decodedToken.uid };
   }
 
@@ -112,9 +129,64 @@ async function getClassProfessorScope(classId: string) {
 
   return {
     allowedTeacherIds,
+    classData,
     professorId,
     professorName: String(classData.teacherName ?? classData.professorName ?? "").trim() || undefined
   };
+}
+
+async function assertStudentChatAccess({
+  classData,
+  classId,
+  profile,
+  uid
+}: {
+  classData: Record<string, unknown>;
+  classId: string;
+  profile: Record<string, unknown>;
+  uid: string;
+}) {
+  const tutorAccess = normalizeTutorAccessSettings(classData.tutorAccess ?? {
+    enabled: classData.studentChatEnabled
+  });
+
+  if (!tutorAccess.enabled) {
+    throw new TutorChatHttpError("Your teacher has paused chat for this class.", 403, {
+      classId,
+      decision: "class_chat_disabled",
+      userId: uid
+    });
+  }
+
+  const studentEmail = String(profile.email ?? "").trim().toLowerCase();
+  const supportDocumentId = encodeURIComponent(studentEmail);
+  const supportSnapshot = studentEmail
+    ? await adminDb!
+        .collection("classes")
+        .doc(classId)
+        .collection("studentSupport")
+        .doc(supportDocumentId)
+        .get()
+    : null;
+  const rosterSnapshot = studentEmail
+    ? await adminDb!
+        .collection("classes")
+        .doc(classId)
+        .collection("students")
+        .doc(supportDocumentId)
+        .get()
+    : null;
+  const chatBlocked =
+    supportSnapshot?.data()?.chatBlocked === true ||
+    rosterSnapshot?.data()?.chatBlocked === true;
+
+  if (chatBlocked) {
+    throw new TutorChatHttpError("Chat is paused for this account.", 403, {
+      classId,
+      decision: "student_chat_blocked",
+      userId: uid
+    });
+  }
 }
 
 function readCoTeacherRoles(coTeachers: unknown): Record<string, string> {

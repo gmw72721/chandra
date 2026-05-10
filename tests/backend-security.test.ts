@@ -169,10 +169,48 @@ test("Firestore class settings rules accept the current teacher settings schema"
   assert.match(rules, /"quoteSourcePassages"/);
   assert.match(rules, /sourceUsage\.quoteSourcePassages is bool/);
   assert.match(rules, /modelSettings\.responseLength in \["short", "medium", "long", "extended"\]/);
+  assert.match(rules, /validAiTokenLimits\(modelSettings\.tokenLimits\)/);
+  assert.match(rules, /tokenLimits\.perDay <= 5000000/);
   assert.match(rules, /"openingMessage"/);
   assert.match(rules, /request\.resource\.data\.openingMessage is string/);
   assert.match(rules, /"studentFacingInstructions"/);
   assert.match(rules, /request\.resource\.data\.studentFacingInstructions is string/);
+  assert.match(rules, /"studentChatEnabled"/);
+  assert.match(rules, /validTutorAccess\(request\.resource\.data\.tutorAccess\)/);
+  assert.match(rules, /"requestLimits"/);
+  assert.match(rules, /validAiRequestLimits\(modelSettings\.requestLimits\)/);
+  assert.match(rules, /requestLimits\.perStudentDaily <= 10000/);
+});
+
+test("teacher controls can pause class chat and one student without exposing content", () => {
+  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const profileSource = readFileSync(join(repoRoot, "frontend/components/StudentProfilePage.tsx"), "utf8");
+  const supportRoute = readFileSync(
+    join(repoRoot, "frontend/app/api/classes/[classId]/students/[studentId]/support/route.ts"),
+    "utf8"
+  );
+  const chatAccessRoute = readFileSync(
+    join(repoRoot, "frontend/app/api/classes/[classId]/students/[studentId]/chat-access/route.ts"),
+    "utf8"
+  );
+  const authSource = readFileSync(join(repoRoot, "frontend/lib/tutor-chat-auth.ts"), "utf8");
+  const classesSource = readFileSync(join(repoRoot, "frontend/lib/classes.ts"), "utf8");
+
+  assert.match(classesSource, /studentChatEnabled: tutorAccess\.enabled/);
+  assert.match(managerSource, /name="tutorAccess\.enabled"/);
+  assert.match(managerSource, /Student chat paused/);
+  assert.match(managerSource, /modelSettings\.requestLimits\.perStudentDaily/);
+  assert.match(managerSource, /modelSettings\.requestLimits\.perClassDaily/);
+  assert.match(managerSource, /modelSettings\.requestLimits\.teacherPreviewDaily/);
+  assert.match(managerSource, /chatBlocked: row\.chatBlocked/);
+  assert.match(managerSource, /\/chat-access/);
+  assert.match(managerSource, /AI paused/);
+  assert.match(profileSource, /chatBlocked: options\.chatBlocked \?\? stats\.chatBlocked/);
+  assert.match(supportRoute, /chatBlocked/);
+  assert.match(chatAccessRoute, /updateTeacherStudentChatAccess/);
+  assert.match(chatAccessRoute, /typeof data\.chatBlocked !== "boolean"/);
+  assert.match(authSource, /supportSnapshot\?\.data\(\)\?\.chatBlocked === true/);
+  assert.match(authSource, /rosterSnapshot\?\.data\(\)\?\.chatBlocked === true/);
 });
 
 test("Firestore class list rules match the owned and co-teacher live queries", () => {

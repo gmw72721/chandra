@@ -612,7 +612,10 @@ export async function listTeacherRosterActivity({
         const support = supportDoc.data();
         const studentEmail = String(support.studentEmail ?? decodeURIComponent(supportDoc.id)).trim().toLowerCase();
 
-        return [studentEmail, String(support.teacherNotes ?? support.notes ?? "")] as const;
+        return [studentEmail, {
+          chatBlocked: support.chatBlocked === true,
+          teacherNotes: String(support.teacherNotes ?? support.notes ?? "")
+        }] as const;
       })
       .filter(([studentEmail]) => Boolean(studentEmail))
   );
@@ -627,6 +630,7 @@ export async function listTeacherRosterActivity({
 
     const presence = presenceByEmail.get(studentEmail);
     activityByEmail.set(studentEmail, {
+      chatBlocked: supportByEmail.get(studentEmail)?.chatBlocked ?? student.chatBlocked === true,
       conversationCount: 0,
       displayName: String(student.displayName ?? "").trim() || studentEmail,
       lastActiveAt: "",
@@ -637,7 +641,7 @@ export async function listTeacherRosterActivity({
       status: "no_activity",
       studentId: studentDoc.id,
       studentEmail,
-      teacherNotes: supportByEmail.get(studentEmail) ?? "",
+      teacherNotes: supportByEmail.get(studentEmail)?.teacherNotes ?? "",
       totalQuestions: 0
     });
     if (presence?.isOnline) {
@@ -779,11 +783,13 @@ async function getStudentPresenceByEmail(classId: string, studentEmails: string[
 }
 
 export async function updateTeacherStudentSupport({
+  chatBlocked,
   classId,
   notes,
   studentEmail,
   teacherId
 }: {
+  chatBlocked?: boolean;
   classId: string;
   notes: string;
   studentEmail: string;
@@ -817,12 +823,65 @@ export async function updateTeacherStudentSupport({
     .set(
       {
         studentEmail: normalizedEmail,
+        ...(typeof chatBlocked === "boolean" ? { chatBlocked } : {}),
         teacherNotes: notes.slice(0, 1000),
         updatedAt: FieldValue.serverTimestamp(),
         updatedBy: teacherId
       },
       { merge: true }
     );
+}
+
+export async function updateTeacherStudentChatAccess({
+  chatBlocked,
+  classId,
+  studentEmail,
+  teacherId
+}: {
+  chatBlocked: boolean;
+  classId: string;
+  studentEmail: string;
+  teacherId: string;
+}) {
+  assertFirebaseAdminAuthReady();
+
+  const normalizedEmail = studentEmail.trim().toLowerCase();
+
+  if (!normalizedEmail) {
+    throw new ConversationPersistenceError("Student email is required.", 400);
+  }
+
+  const supportDocumentId = encodeURIComponent(normalizedEmail);
+  const classReference = adminDb!.collection("classes").doc(classId);
+  const rosterStudentReference = classReference.collection("students").doc(supportDocumentId);
+  const rosterStudentSnapshot = await rosterStudentReference.get();
+
+  if (!rosterStudentSnapshot.exists) {
+    throw new ConversationPersistenceError("Student is not on this class roster.", 404);
+  }
+
+  await adminDb!.runTransaction(async (transaction) => {
+    transaction.set(
+      rosterStudentReference,
+      {
+        chatBlocked,
+        updatedAt: FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+    transaction.set(
+      classReference.collection("studentSupport").doc(supportDocumentId),
+      {
+        chatBlocked,
+        studentEmail: normalizedEmail,
+        updatedAt: FieldValue.serverTimestamp(),
+        updatedBy: teacherId
+      },
+      { merge: true }
+    );
+  });
+
+  return { chatBlocked };
 }
 
 export async function listTeacherConversationMessages({

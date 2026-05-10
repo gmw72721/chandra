@@ -7,18 +7,35 @@ import os
 import re
 import json
 import traceback
+import time
 from functools import lru_cache
 from heapq import nlargest
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from .material_visibility import is_student_visible_ready_material
+from .observability import (
+    better_stack_logging_status,
+    capture_exception,
+    clear_current_class_id,
+    clear_current_user_id,
+    configure_logging,
+    current_request_id,
+    log_provider_failure,
+    log_request,
+    reset_request_id,
+    safe_request_id,
+    set_current_class_id,
+    set_current_user_id,
+    set_request_id,
+)
 from .sample_data import COURSES, DOCUMENTS, TUTOR_POLICIES
 
 LOCAL_CORS_ORIGINS = [
@@ -67,6 +84,7 @@ MAX_EXTRACTED_TEXT_CHARS = 250000
 UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 
 app = FastAPI(title="Chandra API")
+configure_logging()
 _LANGGRAPH_OPENROUTER_CLIENT: Any | None = None
 _LEGACY_OPENROUTER_HTTP_CLIENT: httpx.AsyncClient | None = None
 
@@ -84,6 +102,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def observe_http_requests(request: Request, call_next: Any):
+    request_id = safe_request_id(request.headers.get("x-request-id")) or safe_request_id(
+        request.headers.get("x-cloud-trace-context", "").split("/")[0]
+    )
+    request_token = set_request_id(request_id)
+    clear_current_class_id()
+    clear_current_user_id()
+    started_at = time.perf_counter()
+    status_code = 500
+
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-Id"] = current_request_id()
+        return response
+    except Exception as error:
+        await capture_exception(
+            error,
+            event="fastapi.unhandled",
+            method=request.method,
+            route=request.url.path,
+        )
+        raise
+    finally:
+        log_request(
+            route=request.url.path,
+            method=request.method,
+            status=status_code,
+            latency_ms=(time.perf_counter() - started_at) * 1000,
+        )
+        clear_current_class_id()
+        clear_current_user_id()
+        reset_request_id(request_token)
 
 
 @app.on_event("shutdown")
@@ -133,6 +187,7 @@ class LangGraphChatRequest(BaseModel):
     maxTokens: Optional[int] = Field(default=None, ge=1, le=MAX_MODEL_RESPONSE_TOKENS)
     reasoningEffort: Optional[str] = Field(default=None, max_length=20)
     answerPolicy: Optional[dict[str, Any]] = None
+    aiUsageReservation: Optional[dict[str, Any]] = None
     sourceUsage: Optional[dict[str, Any]] = None
     studentLearningProfileContext: Optional[dict[str, Any]] = None
     messages: list[dict[str, Any]] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES_PER_REQUEST)
@@ -140,7 +195,127 @@ class LangGraphChatRequest(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    return {"requestId": current_request_id(), "status": "ok"}
+
+
+@app.get("/health/deep")
+async def deep_health() -> JSONResponse:
+    dependencies = {
+        "betterStackLogging": await bounded_health_check(check_better_stack_logging_health),
+        "firebaseAdmin": await bounded_health_check(check_firebase_admin_health),
+        "firestore": await bounded_health_check(check_firestore_health),
+        "openrouter": await bounded_health_check(check_openrouter_health),
+        "embeddings": await bounded_health_check(check_embedding_health),
+    }
+    status = overall_health_status(dependencies)
+
+    return JSONResponse(
+        {
+            "dependencies": dependencies,
+            "requestId": current_request_id(),
+            "service": "chandra-backend",
+            "status": status,
+        },
+        status_code=200 if status == "ok" else 503,
+    )
+
+
+async def bounded_health_check(check: Any, timeout_seconds: float = 1.8) -> dict[str, Any]:
+    try:
+        return await asyncio.wait_for(check(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        return {"status": "down", "detail": "Health check timed out."}
+    except Exception as error:
+        await capture_exception(error, event="health.dependency_failed")
+        return {"status": "down", "detail": error.__class__.__name__}
+
+
+async def check_firebase_admin_health() -> dict[str, Any]:
+    await asyncio.to_thread(firebase_admin_clients)
     return {"status": "ok"}
+
+
+async def check_better_stack_logging_health() -> dict[str, Any]:
+    status = better_stack_logging_status()
+
+    if status["status"] != "ok":
+        return {
+            "status": "missing_config",
+            "detail": "BETTER_STACK_SOURCE_TOKEN or BETTER_STACK_INGESTING_HOST is not configured.",
+        }
+
+    return {"status": "ok", "environment": status["environment"]}
+
+
+async def check_firestore_health() -> dict[str, Any]:
+    def read_firestore() -> None:
+        firebase_db().collection("_health").limit(1).get(timeout=1.0)
+
+    await asyncio.to_thread(read_firestore)
+    return {"status": "ok"}
+
+
+async def check_openrouter_health() -> dict[str, Any]:
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+
+    if not api_key:
+        return {"status": "missing_config", "detail": "OPENROUTER_API_KEY is not configured."}
+
+    async with httpx.AsyncClient(timeout=1.5) as client:
+        response = await client.get(
+            f"{base_url}/models",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "HTTP-Referer": openrouter_http_referer(),
+                "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Chandra"),
+            },
+        )
+
+    return {
+        "status": "ok" if response.is_success else "down",
+        "statusCode": response.status_code,
+    }
+
+
+async def check_embedding_health() -> dict[str, Any]:
+    api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+    model = os.getenv("VERTEX_EMBEDDING_MODEL") or "gemini-embedding-2"
+    dimensions = int(os.getenv("VERTEX_EMBEDDING_DIMENSIONS") or "768")
+
+    if not api_key:
+        return {"status": "missing_config", "detail": "GEMINI_API_KEY is not configured."}
+
+    async with httpx.AsyncClient(timeout=1.5) as client:
+        response = await client.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent",
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+            json={
+                "content": {"parts": [{"text": "health check"}]},
+                "outputDimensionality": dimensions,
+                "taskType": "RETRIEVAL_QUERY",
+            },
+        )
+
+    return {
+        "status": "ok" if response.is_success else "down",
+        "statusCode": response.status_code,
+    }
+
+
+def overall_health_status(dependencies: dict[str, dict[str, Any]]) -> str:
+    statuses = {dependency.get("status") for dependency in dependencies.values()}
+
+    if "down" in statuses or "missing_config" in statuses:
+        return "down"
+
+    if "degraded" in statuses:
+        return "degraded"
+
+    return "ok"
 
 
 def authorize_internal_backend_request(x_chandra_internal_secret: Optional[str]) -> None:
@@ -162,11 +337,13 @@ async def langgraph_chat(
     x_chandra_internal_secret: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     authorize_internal_backend_request(x_chandra_internal_secret)
+    set_current_class_id(request.classId)
     validate_message_payload_size(
         request.messages,
         max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
         max_total_message_chars=MAX_PROVIDER_TOTAL_MESSAGE_CHARS,
     )
+    enforce_ai_usage_reservation(request.aiUsageReservation)
 
     try:
         from backend.agent.graph import run_pdf_rag_agent
@@ -176,20 +353,27 @@ async def langgraph_chat(
             detail="LangGraph tutor support is not installed. Run `pip install -r backend/requirements.txt`.",
         ) from error
 
-    return await run_pdf_rag_agent(
-        class_id=request.classId,
-        messages=request.messages,
-        model=request.modelId,
-        temperature=request.temperature,
-        max_tokens=request.maxTokens,
-        reasoning_effort=request.reasoningEffort,
-        answer_policy=request.answerPolicy,
-        source_usage=request.sourceUsage,
-        student_profile_context=request.studentLearningProfileContext,
-        professor_id=request.professorId,
-        professor_name=request.professorName,
-        openrouter_client=shared_langgraph_openrouter_client(),
-    )
+    try:
+        return await run_pdf_rag_agent(
+            class_id=request.classId,
+            messages=request.messages,
+            model=request.modelId,
+            temperature=request.temperature,
+            max_tokens=request.maxTokens,
+            reasoning_effort=request.reasoningEffort,
+            answer_policy=request.answerPolicy,
+            ai_usage_reservation=request.aiUsageReservation,
+            source_usage=request.sourceUsage,
+            student_profile_context=request.studentLearningProfileContext,
+            professor_id=request.professorId,
+            professor_name=request.professorName,
+            openrouter_client=shared_langgraph_openrouter_client(),
+        )
+    except RuntimeError as error:
+        if "AI usage limit reached" in str(error):
+            raise HTTPException(status_code=429, detail="AI usage limit reached.") from error
+
+        raise
 
 
 @app.post("/api/langgraph/chat/stream")
@@ -198,11 +382,13 @@ async def langgraph_chat_stream(
     x_chandra_internal_secret: Optional[str] = Header(default=None),
 ) -> StreamingResponse:
     authorize_internal_backend_request(x_chandra_internal_secret)
+    set_current_class_id(request.classId)
     validate_message_payload_size(
         request.messages,
         max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
         max_total_message_chars=MAX_PROVIDER_TOTAL_MESSAGE_CHARS,
     )
+    enforce_ai_usage_reservation(request.aiUsageReservation)
 
     try:
         from backend.agent.graph import run_pdf_rag_agent_stream
@@ -222,6 +408,7 @@ async def langgraph_chat_stream(
                 max_tokens=request.maxTokens,
                 reasoning_effort=request.reasoningEffort,
                 answer_policy=request.answerPolicy,
+                ai_usage_reservation=request.aiUsageReservation,
                 source_usage=request.sourceUsage,
                 student_profile_context=request.studentLearningProfileContext,
                 professor_id=request.professorId,
@@ -230,6 +417,7 @@ async def langgraph_chat_stream(
             ):
                 yield json.dumps(event) + "\n"
         except Exception as error:
+            await capture_exception(error, event="langgraph.stream_error")
             traceback.print_exc()
             yield json.dumps(
                 {
@@ -251,6 +439,22 @@ def describe_stream_error(error: Exception) -> str:
         return message
 
     return f"{error.__class__.__name__}: the tutor service crashed while processing this request. Check the FastAPI terminal for the traceback."
+
+
+def enforce_ai_usage_reservation(ai_usage_reservation: Optional[dict[str, Any]]) -> None:
+    reservation = ai_usage_reservation or {}
+    reservation_id = str(reservation.get("id") or "").strip()
+    estimated_tokens = nonnegative_int(reservation.get("estimatedTokens"))
+
+    if not reservation_id or estimated_tokens <= 0:
+        raise HTTPException(status_code=429, detail="AI usage reservation required.")
+
+
+def nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def shared_langgraph_openrouter_client() -> Any:
@@ -296,7 +500,9 @@ async def extract_material(
 async def chat(request: ChatRequest, authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
     validate_message_payload_size(request.messages)
     scope = authorize_tutor_chat_request(request, authorization)
+    enforce_ai_usage_reservation(request.aiUsageReservation)
     course_id = scope["classId"]
+    set_current_class_id(course_id)
     latest_student_message = next(
         (message for message in reversed(request.messages) if message.role == "student"),
         None,
@@ -344,7 +550,8 @@ def authorize_tutor_chat_request(request: ChatRequest, authorization: Optional[s
         if not class_id:
             raise HTTPException(status_code=403, detail="Your student profile needs a class before using the tutor.")
 
-        assert_class_exists(class_id)
+        class_data = get_existing_class(class_id)
+        assert_student_chat_access(class_id, class_data, profile, decoded_token["uid"])
         return {"classId": class_id, "role": "student", "uid": decoded_token["uid"]}
 
     if role == "teacher":
@@ -401,6 +608,58 @@ def assert_class_exists(class_id: str) -> None:
         )
 
 
+def get_existing_class(class_id: str) -> dict[str, Any]:
+    class_snapshot = firebase_db().collection("classes").document(class_id).get()
+
+    if not class_snapshot.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Your saved class was not found. Ask your teacher for the current class code.",
+        )
+
+    return class_snapshot.to_dict() or {}
+
+
+def assert_student_chat_access(class_id: str, class_data: dict[str, Any], profile: dict[str, Any], uid: str) -> None:
+    tutor_access = class_data.get("tutorAccess")
+    tutor_access_enabled = True
+
+    if isinstance(tutor_access, dict):
+        tutor_access_enabled = tutor_access.get("enabled") is not False
+    elif class_data.get("studentChatEnabled") is False:
+        tutor_access_enabled = False
+
+    if not tutor_access_enabled:
+        raise HTTPException(status_code=403, detail="Your teacher has paused chat for this class.")
+
+    student_email = str(profile.get("email") or "").strip().lower()
+    if not student_email:
+        return
+
+    support_doc_id = quote(student_email, safe="")
+    support_snapshot = (
+        firebase_db()
+        .collection("classes")
+        .document(class_id)
+        .collection("studentSupport")
+        .document(support_doc_id)
+        .get()
+    )
+    roster_snapshot = (
+        firebase_db()
+        .collection("classes")
+        .document(class_id)
+        .collection("students")
+        .document(support_doc_id)
+        .get()
+    )
+    support_data = support_snapshot.to_dict() or {}
+    roster_data = roster_snapshot.to_dict() or {}
+
+    if support_data.get("chatBlocked") is True or roster_data.get("chatBlocked") is True:
+        raise HTTPException(status_code=403, detail="Chat is paused for this account.")
+
+
 def verify_firebase_token(authorization: Optional[str]) -> dict[str, Any]:
     token = bearer_token(authorization)
 
@@ -409,7 +668,9 @@ def verify_firebase_token(authorization: Optional[str]) -> dict[str, Any]:
 
     try:
         firebase_auth, _ = firebase_admin_clients()
-        return firebase_auth.verify_id_token(token)
+        decoded_token = firebase_auth.verify_id_token(token)
+        set_current_user_id(str(decoded_token.get("uid") or ""))
+        return decoded_token
     except HTTPException:
         raise
     except Exception as error:
@@ -1136,7 +1397,23 @@ async def call_openrouter(model_id: Optional[str], system_prompt: str, messages:
         headers=headers,
     )
 
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        log_provider_failure(
+            provider="openrouter",
+            provider_error_class=error.__class__.__name__,
+            provider_status=error.response.status_code,
+        )
+        await capture_exception(
+            error,
+            event="provider.openrouter_error",
+            provider="openrouter",
+            providerErrorClass=error.__class__.__name__,
+            providerStatus=error.response.status_code,
+        )
+        raise
+
     data = response.json()
     return data["choices"][0]["message"]["content"] or "I could not generate a response."
 

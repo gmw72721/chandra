@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { writeAuditLog } from "@/lib/audit-log";
 import {
   TutorKnowledgeHttpError,
   authorizeClassTeacher,
@@ -44,7 +45,7 @@ export async function PATCH(
       return NextResponse.json({ error: "Choose a class before updating tutor knowledge." }, { status: 400 });
     }
 
-    await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
     const material = await updateTutorKnowledgeSettings({
       classId,
       materialId,
@@ -53,6 +54,22 @@ export async function PATCH(
         priority: body.priority,
         requireCitations: body.requireCitations,
         teacherOnly: body.teacherOnly
+      }
+    });
+
+    await writeAuditLog({
+      actor: { email: actorEmail, uid },
+      eventType: "material.visibility.updated",
+      metadata: {
+        activeForStudents: body.activeForStudents,
+        priority: body.priority,
+        requireCitations: body.requireCitations,
+        teacherOnly: body.teacherOnly
+      },
+      route: "/api/materials/[materialId]",
+      target: {
+        classId,
+        materialId
       }
     });
 
@@ -74,8 +91,18 @@ export async function DELETE(
       return NextResponse.json({ error: "Choose a class before deleting tutor knowledge." }, { status: 400 });
     }
 
-    await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
     await deleteTutorKnowledge({ classId, materialId });
+
+    await writeAuditLog({
+      actor: { email: actorEmail, uid },
+      eventType: "material.deleted",
+      route: "/api/materials/[materialId]",
+      target: {
+        classId,
+        materialId
+      }
+    });
 
     return NextResponse.json({ ok: true });
   } catch (caughtError) {

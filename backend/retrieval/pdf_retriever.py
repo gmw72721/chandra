@@ -11,6 +11,8 @@ from typing import Any, Protocol
 
 import httpx
 
+from backend.observability import capture_exception, log_provider_failure
+
 SECTION_RELATED_TOP_K = 8
 VISIBLE_MATERIAL_DOC_CACHE_SIZE = 32
 _GEMINI_EMBEDDING_CLIENT: httpx.AsyncClient | None = None
@@ -179,8 +181,18 @@ class GeminiPdfRetriever:
                     },
                 )
                 break
-            except (httpx.TransportError, httpx.TimeoutException):
+            except (httpx.TransportError, httpx.TimeoutException) as error:
                 if attempt == 2:
+                    log_provider_failure(
+                        provider="gemini-embeddings",
+                        provider_error_class=error.__class__.__name__,
+                    )
+                    await capture_exception(
+                        error,
+                        event="provider.embedding_transport_error",
+                        provider="gemini-embeddings",
+                        providerErrorClass=error.__class__.__name__,
+                    )
                     return []
 
                 await asyncio.sleep(0.35 * (attempt + 1))
@@ -188,7 +200,22 @@ class GeminiPdfRetriever:
         if result is None:
             return []
 
-        result.raise_for_status()
+        try:
+            result.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            log_provider_failure(
+                provider="gemini-embeddings",
+                provider_error_class=error.__class__.__name__,
+                provider_status=error.response.status_code,
+            )
+            await capture_exception(
+                error,
+                event="provider.embedding_error",
+                provider="gemini-embeddings",
+                providerErrorClass=error.__class__.__name__,
+                providerStatus=error.response.status_code,
+            )
+            raise
         payload = result.json()
 
         values = payload.get("embedding", {}).get("values") or []

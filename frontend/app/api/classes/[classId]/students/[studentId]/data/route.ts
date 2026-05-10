@@ -1,5 +1,6 @@
 import { type DocumentReference } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
+import { writeAuditLog } from "@/lib/audit-log";
 import { adminDb } from "@/lib/firebase-admin";
 import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
@@ -16,10 +17,20 @@ export async function GET(
 ) {
   try {
     const { classId, studentId } = await params;
-    await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
     const exportData = await buildStudentClassDataExport({ classId, encodedStudentId: studentId });
     const studentEmail = "email" in exportData.student ? String(exportData.student.email ?? "") : "";
     const fileName = `${classId}-${studentEmail || studentId}-export.json`.replace(/[^a-zA-Z0-9._-]/g, "-");
+
+    await writeAuditLog({
+      actor: { email: actorEmail, uid },
+      eventType: "student_data.exported",
+      route: "/api/classes/[classId]/students/[studentId]/data",
+      target: {
+        classId,
+        studentId
+      }
+    });
 
     return new Response(JSON.stringify(exportData, null, 2), {
       headers: {
@@ -38,7 +49,7 @@ export async function DELETE(
 ) {
   try {
     const { classId, studentId } = await params;
-    await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
     const body = (await request.json().catch(() => ({}))) as { confirm?: unknown };
 
     if (body.confirm !== "DELETE_STUDENT_CLASS_DATA") {
@@ -46,6 +57,17 @@ export async function DELETE(
     }
 
     const deleted = await deleteStudentClassData({ classId, encodedStudentId: studentId });
+
+    await writeAuditLog({
+      actor: { email: actorEmail, uid },
+      eventType: "student_data.deleted",
+      metadata: deleted,
+      route: "/api/classes/[classId]/students/[studentId]/data",
+      target: {
+        classId,
+        studentId
+      }
+    });
 
     return NextResponse.json({ deleted });
   } catch (caughtError) {

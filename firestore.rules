@@ -194,7 +194,9 @@ service cloud.firestore {
           "responseFormat",
           "sourceDefaults",
           "sourceUsage",
+          "studentChatEnabled",
           "studentFacingInstructions",
+          "tutorAccess",
           "themeColor",
           "createdAt"
         ])
@@ -220,7 +222,9 @@ service cloud.firestore {
         && validResponseFormat(request.resource.data.responseFormat)
         && validSourceDefaults(request.resource.data.sourceDefaults)
         && validSourceUsage(request.resource.data.sourceUsage)
+        && request.resource.data.studentChatEnabled is bool
         && request.resource.data.studentFacingInstructions is string
+        && validTutorAccess(request.resource.data.tutorAccess)
         && validThemeColor(request.resource.data.themeColor)
         && request.resource.data.createdAt == request.time;
     }
@@ -245,7 +249,9 @@ service cloud.firestore {
             "responseFormat",
             "sourceUsage",
             "sourceDefaults",
+            "studentChatEnabled",
             "studentFacingInstructions",
+            "tutorAccess",
             "themeColor"
           ])
         && request.resource.data.teacherId == resource.data.teacherId
@@ -275,7 +281,9 @@ service cloud.firestore {
           "responseFormat",
           "sourceDefaults",
           "sourceUsage",
+          "studentChatEnabled",
           "studentFacingInstructions",
+          "tutorAccess",
           "themeColor"
         ])
         && request.resource.data.name is string
@@ -296,7 +304,9 @@ service cloud.firestore {
         && validResponseFormat(request.resource.data.responseFormat)
         && validSourceDefaults(request.resource.data.sourceDefaults)
         && validSourceUsage(request.resource.data.sourceUsage)
+        && request.resource.data.studentChatEnabled is bool
         && request.resource.data.studentFacingInstructions is string
+        && validTutorAccess(request.resource.data.tutorAccess)
         && validThemeColor(request.resource.data.themeColor);
     }
 
@@ -421,7 +431,9 @@ service cloud.firestore {
           "modelId",
           "reasoningEffort",
           "creativity",
-          "responseLength"
+          "responseLength",
+          "requestLimits",
+          "tokenLimits"
         ])
         && modelSettings.modelId is string
         && modelSettings.modelId.size() > 0
@@ -431,7 +443,54 @@ service cloud.firestore {
         && modelSettings.creativity >= 0
         && modelSettings.creativity <= 100
         && modelSettings.responseLength is string
-        && modelSettings.responseLength in ["short", "medium", "long", "extended"];
+        && modelSettings.responseLength in ["short", "medium", "long", "extended"]
+        && validAiRequestLimits(modelSettings.requestLimits)
+        && validAiTokenLimits(modelSettings.tokenLimits);
+    }
+
+    function validAiRequestLimits(requestLimits) {
+      return requestLimits is map
+        && requestLimits.keys().hasOnly([
+          "perStudentDaily",
+          "perClassDaily",
+          "teacherPreviewDaily"
+        ])
+        && requestLimits.perStudentDaily is number
+        && requestLimits.perStudentDaily >= 1
+        && requestLimits.perStudentDaily <= 10000
+        && requestLimits.perClassDaily is number
+        && requestLimits.perClassDaily >= 1
+        && requestLimits.perClassDaily <= 500000
+        && (requestLimits.teacherPreviewDaily == null
+          || (
+            requestLimits.teacherPreviewDaily is number
+            && requestLimits.teacherPreviewDaily >= 1
+            && requestLimits.teacherPreviewDaily <= 10000
+          ));
+    }
+
+    function validAiTokenLimits(tokenLimits) {
+      return tokenLimits is map
+        && tokenLimits.keys().hasOnly([
+          "perHour",
+          "perDay",
+          "perWeek"
+        ])
+        && tokenLimits.perHour is number
+        && tokenLimits.perHour >= 1000
+        && tokenLimits.perHour <= 1000000
+        && tokenLimits.perDay is number
+        && tokenLimits.perDay >= 1000
+        && tokenLimits.perDay <= 5000000
+        && tokenLimits.perWeek is number
+        && tokenLimits.perWeek >= 1000
+        && tokenLimits.perWeek <= 20000000;
+    }
+
+    function validTutorAccess(tutorAccess) {
+      return tutorAccess is map
+        && tutorAccess.keys().hasOnly(["enabled"])
+        && tutorAccess.enabled is bool;
     }
 
     function validResponseFormat(responseFormat) {
@@ -543,6 +602,22 @@ service cloud.firestore {
     }
 
     match /teacherInvites/{inviteId} {
+      allow read, write: if false;
+    }
+
+    match /auditLogs/{auditLogId} {
+      allow read, write: if false;
+    }
+
+    match /securityEvents/{securityEventId} {
+      allow read, write: if false;
+    }
+
+    match /rateLimits/{rateLimitId} {
+      allow read, write: if false;
+    }
+
+    match /abuseLockouts/{abuseLockoutId} {
       allow read, write: if false;
     }
 
