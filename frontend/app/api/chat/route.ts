@@ -85,6 +85,20 @@ const chatRequestSchema = z.object({
       langGraphTrace: z
         .object({
           finishReason: z.string().optional(),
+          inputTokenBreakdown: z
+            .array(
+              z.object({
+                characters: z.number().optional(),
+                detail: z.string().optional(),
+                estimatedTokens: z.number(),
+                id: z.string(),
+                kind: z.string(),
+                label: z.string(),
+                purpose: z.string().optional(),
+                stage: z.string().optional()
+              })
+            )
+            .optional(),
           modelCallUsage: z
             .array(
               z.object({
@@ -963,6 +977,7 @@ function buildTutorDebugInfo({
   );
   const toolCallCount = nonnegativeDebugInteger(trace?.toolCallCount);
   const searchQueryCount = Array.isArray(trace?.searchQueries) ? trace.searchQueries.length : 0;
+  const inputTokenBreakdown = normalizeInputTokenBreakdown(trace?.inputTokenBreakdown);
   const estimatedOutputTokens = nonnegativeDebugInteger(preparedRequest.backendRequest.maxTokens);
   const estimatedTotalTokens = nonnegativeDebugInteger(preparedRequest.aiUsageReservation?.estimatedTokens);
   const estimatedInputTokens = Math.max(0, estimatedTotalTokens - estimatedOutputTokens);
@@ -978,6 +993,7 @@ function buildTutorDebugInfo({
       totalTokens: estimatedTotalTokens
     },
     finishReason: typeof trace?.finishReason === "string" ? trace.finishReason : undefined,
+    inputTokenBreakdown,
     modelCallUsage,
     modelId: preparedRequest.backendRequest.modelId,
     provider: "langgraph",
@@ -990,6 +1006,26 @@ function buildTutorDebugInfo({
     toolCallCount,
     totalRequestCount: 1 + providerRequestCount + toolCallCount
   };
+}
+
+function normalizeInputTokenBreakdown(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item, index) => ({
+      characters: nonnegativeDebugInteger(item.characters),
+      detail: typeof item.detail === "string" ? item.detail : "",
+      estimatedTokens: nonnegativeDebugInteger(item.estimatedTokens ?? item.estimated_tokens),
+      id: String(item.id ?? `input-section-${index + 1}`),
+      kind: String(item.kind ?? "unknown"),
+      label: String(item.label ?? `Input section ${index + 1}`),
+      purpose: item.purpose ? String(item.purpose) : undefined,
+      stage: item.stage ? String(item.stage) : undefined
+    }))
+    .filter((item) => item.estimatedTokens > 0);
 }
 
 function normalizeModelCallUsage(value: unknown): TutorModelCallUsage[] {

@@ -260,6 +260,7 @@ export type TeacherConversationReviewSummary = {
 
 export type TutorTrace = {
   finishReason?: string;
+  inputTokenBreakdown?: TutorInputTokenSection[];
   searchQueries: string[];
   selectedPages: Array<{
     citationLabel?: string;
@@ -273,6 +274,17 @@ export type TutorTrace = {
   }>;
   stages: string[];
   toolCallCount: number;
+};
+
+export type TutorInputTokenSection = {
+  characters?: number;
+  detail?: string;
+  estimatedTokens: number;
+  id: string;
+  kind: string;
+  label: string;
+  purpose?: string;
+  stage?: string;
 };
 
 export type TutorApiResponse = {

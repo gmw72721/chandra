@@ -326,6 +326,7 @@ export type TeacherConversationReviewSummary = {
 
 export type TutorTrace = {
   finishReason?: string;
+  inputTokenBreakdown?: TutorInputTokenSection[];
   modelCallUsage?: TutorModelCallUsage[];
   searchQueries: string[];
   selectedPages: Array<{
@@ -377,9 +378,21 @@ export type TutorModelCallUsage = {
   totalTokens: number;
 };
 
+export type TutorInputTokenSection = {
+  characters?: number;
+  detail?: string;
+  estimatedTokens: number;
+  id: string;
+  kind: string;
+  label: string;
+  purpose?: string;
+  stage?: string;
+};
+
 export type TutorDebugInfo = {
   actualTokens: TutorDebugTokens;
   backendRequestCount: number;
+  inputTokenBreakdown?: TutorInputTokenSection[];
   modelCallUsage?: TutorModelCallUsage[];
   durationMs: number;
   estimatedTokens: TutorDebugTokens;

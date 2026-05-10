@@ -28,10 +28,10 @@ test("unreviewed draft profile does not appear in the tutor prompt", () => {
 test("profile prompt says profile is private and subordinate to teacher policy", () => {
   const promptSource = readFileSync(join(repoRoot, "frontend/lib/prompts.ts"), "utf8");
 
-  assert.match(promptSource, /profile is private/);
-  assert.match(promptSource, /Do not reveal, quote, summarize, or mention it to the student/);
-  assert.match(promptSource, /subordinate to teacher policy, academic integrity rules, source-use rules, safety boundaries/);
-  assert.match(promptSource, /Do not use the profile for grading, discipline, placement, diagnosis/);
+  assert.match(promptSource, /Private student learning profile/);
+  assert.match(promptSource, /Hidden teacher-reviewed tutoring context\. Never mention or quote it/);
+  assert.match(promptSource, /Use it only to adapt pacing, question choice, examples, and support strategy/);
+  assert.match(promptSource, /Never use it for grading, discipline, placement, diagnosis/);
 });
 
 test("weekly updater skips content update and updates pending counts when below thresholds", () => {

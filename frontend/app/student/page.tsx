@@ -37,7 +37,8 @@ import type {
   StudentFeedbackKind,
   StudentFeedbackPromptReason,
   StudentFeedbackRating,
-  TutorApiResponse
+  TutorApiResponse,
+  TutorInputTokenSection
 } from "@/lib/types";
 
 type ChatProgress = {
@@ -1511,6 +1512,12 @@ const StudentChatMessage = memo(function StudentChatMessage({
 
 function MessageDebugDetails({ message }: { message: ChatMessage }) {
   const debug = buildMessageDebugDisplay(message);
+  const [selectedInputSectionId, setSelectedInputSectionId] = useState(
+    debug.inputTokenBreakdown[0]?.id ?? ""
+  );
+  const selectedInputSection =
+    debug.inputTokenBreakdown.find((section) => section.id === selectedInputSectionId) ??
+    debug.inputTokenBreakdown[0];
 
   return (
     <details className="message-debug-details">
@@ -1546,6 +1553,37 @@ function MessageDebugDetails({ message }: { message: ChatMessage }) {
             ))}
           </div>
         ) : null}
+        {debug.inputTokenBreakdown.length ? (
+          <div className="message-debug-input-breakdown" aria-label="Estimated input token breakdown">
+            <div className="message-debug-section-heading">
+              <strong>Input token sections</strong>
+              <span>{formatInteger(debug.inputBreakdownTotal)} estimated tokens</span>
+            </div>
+            <label>
+              <span>Inspect section</span>
+              <select
+                value={selectedInputSection?.id ?? ""}
+                onChange={(event) => setSelectedInputSectionId(event.target.value)}
+              >
+                {debug.inputTokenBreakdown.map((section) => (
+                  <option key={section.id} value={section.id}>
+                    {formatInteger(section.estimatedTokens)} · {section.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {selectedInputSection ? (
+              <div className="message-debug-selected-section">
+                <strong>{selectedInputSection.label}</strong>
+                <span>Estimated input tokens: {formatInteger(selectedInputSection.estimatedTokens)}</span>
+                <span>Characters: {formatInteger(selectedInputSection.characters ?? 0)}</span>
+                <span>Stage: {selectedInputSection.stage || "not recorded"}</span>
+                <span>Kind: {selectedInputSection.kind || "not recorded"}</span>
+                {selectedInputSection.detail ? <p>{selectedInputSection.detail}</p> : null}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </details>
   );
@@ -1560,6 +1598,10 @@ function buildMessageDebugDisplay(message: ChatMessage) {
     const displayTokens = actualTokens?.totalTokens || estimatedMessageTokens;
     const requestCount = debugInfo?.totalRequestCount ?? inferMessageRequestCount(message);
     const modelCallUsage = debugInfo?.modelCallUsage ?? message.langGraphTrace?.modelCallUsage ?? [];
+    const inputTokenBreakdown = sortInputTokenBreakdown(
+      debugInfo?.inputTokenBreakdown ?? message.langGraphTrace?.inputTokenBreakdown ?? []
+    );
+    const inputBreakdownTotal = inputTokenBreakdown.reduce((total, section) => total + section.estimatedTokens, 0);
     const rows = [
       { label: "Actual input tokens", value: formatInteger(actualTokens?.inputTokens ?? 0) },
       { label: "Actual reasoning tokens", value: formatInteger(actualTokens?.reasoningTokens ?? 0) },
@@ -1571,6 +1613,8 @@ function buildMessageDebugDisplay(message: ChatMessage) {
       { label: "Tool calls", value: formatInteger(debugInfo?.toolCallCount ?? message.langGraphTrace?.toolCallCount ?? 0) },
       { label: "Search queries", value: formatInteger(debugInfo?.searchQueryCount ?? message.langGraphTrace?.searchQueries?.length ?? 0) },
       { label: "Selected pages", value: formatInteger(debugInfo?.selectedPageCount ?? message.langGraphTrace?.selectedPages?.length ?? 0) },
+      { label: "Input breakdown sections", value: formatInteger(inputTokenBreakdown.length) },
+      { label: "Input breakdown estimate", value: formatInteger(inputBreakdownTotal) },
       { label: "Estimated total tokens", value: formatInteger(debugInfo?.estimatedTokens.totalTokens ?? estimatedMessageTokens) },
       { label: "Duration", value: debugInfo ? formatDuration(debugInfo.durationMs) : "Not recorded" },
       { label: "Model", value: debugInfo?.modelId || "Not recorded" },
@@ -1579,6 +1623,8 @@ function buildMessageDebugDisplay(message: ChatMessage) {
     ];
 
     return {
+      inputBreakdownTotal,
+      inputTokenBreakdown,
       modelCallUsage,
       rows,
       stages: debugInfo?.stages ?? message.langGraphTrace?.stages ?? [],
@@ -1587,6 +1633,8 @@ function buildMessageDebugDisplay(message: ChatMessage) {
   }
 
   return {
+    inputBreakdownTotal: 0,
+    inputTokenBreakdown: [],
     modelCallUsage: [],
     rows: [
       { label: "Message tokens", value: formatInteger(estimatedMessageTokens) },
@@ -1602,6 +1650,18 @@ function buildMessageDebugDisplay(message: ChatMessage) {
 function estimateMessageDisplayTokens(message: ChatMessage) {
   const attachmentTokens = (message.attachments?.length ?? 0) * 375;
   return Math.max(1, Math.ceil(message.content.length / 4) + attachmentTokens);
+}
+
+function sortInputTokenBreakdown(sections: TutorInputTokenSection[]) {
+  return [...sections].sort((first, second) => {
+    const tokenDifference = second.estimatedTokens - first.estimatedTokens;
+
+    if (tokenDifference !== 0) {
+      return tokenDifference;
+    }
+
+    return first.label.localeCompare(second.label);
+  });
 }
 
 function inferMessageRequestCount(message: ChatMessage) {

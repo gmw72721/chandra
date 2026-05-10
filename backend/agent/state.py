@@ -35,6 +35,7 @@ class PdfRagState(TypedDict):
     sources: NotRequired[list[dict[str, Any]]]
     token_usage: NotRequired[dict[str, int]]
     token_usage_by_call: NotRequired[list[dict[str, Any]]]
+    input_token_breakdown: NotRequired[list[dict[str, Any]]]
     class_id: NotRequired[str]
     conversation_id: NotRequired[str]
     latest_student_message_id: NotRequired[str]

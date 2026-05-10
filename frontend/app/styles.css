@@ -9537,6 +9537,73 @@ button.student-row[aria-pressed="true"] {
   overflow-wrap: anywhere;
 }
 
+.message-debug-input-breakdown {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--row-hover-bg);
+  padding: 8px;
+}
+
+.message-debug-section-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-primary);
+  font-size: 0.74rem;
+}
+
+.message-debug-section-heading span {
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.message-debug-input-breakdown label {
+  display: grid;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.message-debug-input-breakdown select {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: var(--card-bg-strong);
+  color: var(--text-primary);
+  padding: 6px 8px;
+  font-size: 0.72rem;
+}
+
+.message-debug-selected-section {
+  display: grid;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.message-debug-selected-section strong {
+  color: var(--text-primary);
+  font-size: 0.74rem;
+}
+
+.message-debug-selected-section span,
+.message-debug-selected-section p {
+  overflow-wrap: anywhere;
+}
+
+.message-debug-selected-section p {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+}
+
 .assistant-message-bubble,
 .student-message-bubble {
   border: 1px solid #ded8ce;
