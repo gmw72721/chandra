@@ -707,9 +707,12 @@ test("student chat does not surface raw backend fetch failures", () => {
 
 test("student chat errors include stable codes and student-safe messages", () => {
   const source = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const auditSource = readFileSync(join(repoRoot, "frontend/lib/audit-log.ts"), "utf8");
 
   assert.match(source, /errorCode: chatError\.code/);
   assert.match(source, /Code: \$\{error\.code\}/);
+  assert.match(source, /writeChatErrorReference\(\{/);
+  assert.match(auditSource, /collection\("chatErrorReferences"\)/);
   assert.match(source, /CHAT_SIGN_IN_REQUIRED/);
   assert.match(source, /CHAT_CLASS_NOT_FOUND/);
   assert.match(source, /CHAT_CONVERSATION_NOT_FOUND/);

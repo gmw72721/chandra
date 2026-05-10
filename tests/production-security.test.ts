@@ -145,8 +145,10 @@ test("audit and security logs are server-owned and unreadable from Firestore cli
 
   assert.match(auditSource, /collection\("auditLogs"\)\.add/);
   assert.match(auditSource, /collection\("securityEvents"\)\.add/);
+  assert.match(auditSource, /collection\("chatErrorReferences"\)\.doc\(normalizeReferenceId\(errorId\)\)\.set/);
   assert.match(rules, /match \/auditLogs\/\{auditLogId\}[\s\S]*allow read, write: if false/);
   assert.match(rules, /match \/securityEvents\/\{securityEventId\}[\s\S]*allow read, write: if false/);
+  assert.match(rules, /match \/chatErrorReferences\/\{errorId\}[\s\S]*allow read, write: if false/);
   assert.match(rules, /match \/rateLimits\/\{rateLimitId\}[\s\S]*allow read, write: if false/);
   assert.match(inviteRoute, /teacher_invite\.created/);
   assert.match(coTeacherRoute, /class\.co_teacher\.(added|updated|removed)/);

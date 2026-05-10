@@ -37,7 +37,7 @@ import {
 } from "@/lib/observability";
 import { buildTutorSystemPrompt, getTeacherClassTutorConfig, toProviderMessages } from "@/lib/prompts";
 import { maxStudentAttachmentsPerMessage } from "@/lib/student-attachments-server";
-import { writeAuditLog } from "@/lib/audit-log";
+import { writeAuditLog, writeChatErrorReference } from "@/lib/audit-log";
 import { getActiveStudentLearningProfileTutorContext } from "@/lib/student-learning-profiles-server";
 import {
   ConversationPersistenceError,
@@ -206,7 +206,9 @@ export async function POST(request: Request) {
     const chatError = reportStudentChatError({
       caughtError,
       code: classifyUnexpectedChatError(caughtError),
-      requestId
+      phase: "request",
+      requestId,
+      userId
     });
     response = NextResponse.json(studentChatErrorPayload(chatError), { status: 500 });
   }
@@ -233,6 +235,7 @@ async function handlePost(request: Request, requestId: string, setUserId: (userI
       const chatError = reportStudentChatError({
         caughtError: requestBody.caughtError,
         code: "CHAT_REQUEST_INVALID",
+        phase: "request",
         requestId
       });
       return NextResponse.json(studentChatErrorPayload(chatError), { status: 400 });
@@ -244,6 +247,7 @@ async function handlePost(request: Request, requestId: string, setUserId: (userI
       const chatError = reportStudentChatError({
         caughtError: parsed.error,
         code: "CHAT_REQUEST_INVALID",
+        phase: "request",
         requestId
       });
       return NextResponse.json(studentChatErrorPayload(chatError), { status: 400 });
@@ -270,8 +274,13 @@ async function handlePost(request: Request, requestId: string, setUserId: (userI
       const chatError = reportStudentChatError({
         backendDetail: detail,
         backendStatus: response.status,
+        classId: preparedRequest.scope.classId,
         code: classifyBackendResponseError(response.status, detail),
-        requestId
+        conversationId: preparedRequest.persistence?.conversationId,
+        phase: "response",
+        requestId,
+        userId: preparedRequest.scope.uid,
+        userRole: preparedRequest.scope.role
       });
       return NextResponse.json(studentChatErrorPayload(chatError), { status: response.status });
     }
@@ -329,7 +338,12 @@ async function handlePost(request: Request, requestId: string, setUserId: (userI
       const chatError = reportStudentChatError({
         caughtError,
         code: "CHAT_AI_USAGE_EXHAUSTED",
-        requestId
+        classId: preparedRequest?.scope.classId,
+        conversationId: preparedRequest?.persistence?.conversationId,
+        phase: "response",
+        requestId,
+        userId: preparedRequest?.scope.uid,
+        userRole: preparedRequest?.scope.role
       });
       return NextResponse.json(
         {
@@ -352,7 +366,11 @@ async function handlePost(request: Request, requestId: string, setUserId: (userI
       const chatError = reportStudentChatError({
         caughtError,
         code: classifyTutorChatHttpError(caughtError),
-        requestId
+        classId: preparedRequest?.scope.classId ?? caughtError.classId,
+        conversationId: preparedRequest?.persistence?.conversationId,
+        phase: "request",
+        requestId,
+        userId: preparedRequest?.scope.uid ?? caughtError.userId
       });
       return NextResponse.json(studentChatErrorPayload(chatError), { status: caughtError.status });
     }
@@ -361,7 +379,12 @@ async function handlePost(request: Request, requestId: string, setUserId: (userI
       const chatError = reportStudentChatError({
         caughtError,
         code: classifyConversationPersistenceError(caughtError),
-        requestId
+        classId: preparedRequest?.scope.classId,
+        conversationId: preparedRequest?.persistence?.conversationId,
+        phase: "response",
+        requestId,
+        userId: preparedRequest?.scope.uid,
+        userRole: preparedRequest?.scope.role
       });
       return NextResponse.json(studentChatErrorPayload(chatError), { status: caughtError.status });
     }
@@ -369,7 +392,12 @@ async function handlePost(request: Request, requestId: string, setUserId: (userI
     const chatError = reportStudentChatError({
       caughtError,
       code: classifyUnexpectedChatError(caughtError),
-      requestId
+      classId: preparedRequest?.scope.classId,
+      conversationId: preparedRequest?.persistence?.conversationId,
+      phase: "response",
+      requestId,
+      userId: preparedRequest?.scope.uid,
+      userRole: preparedRequest?.scope.role
     });
     return NextResponse.json(studentChatErrorPayload(chatError), { status: 500 });
   }
@@ -658,8 +686,13 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
           const chatError = reportStudentChatError({
             backendDetail: detail,
             backendStatus: response.status,
+            classId: preparedRequest.scope.classId,
             code: classifyBackendResponseError(response.status, detail),
-            requestId
+            conversationId: preparedRequest.persistence?.conversationId,
+            phase: "stream",
+            requestId,
+            userId: preparedRequest.scope.uid,
+            userRole: preparedRequest.scope.role
           });
           send({
             errorCode: chatError.code,
@@ -676,7 +709,12 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
         if (!reader) {
           const chatError = reportStudentChatError({
             code: "TUTOR_BACKEND_STREAM_MISSING",
-            requestId
+            classId: preparedRequest.scope.classId,
+            conversationId: preparedRequest.persistence?.conversationId,
+            phase: "stream",
+            requestId,
+            userId: preparedRequest.scope.uid,
+            userRole: preparedRequest.scope.role
           });
           send({
             errorCode: chatError.code,
@@ -752,7 +790,12 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
               const chatError = reportStudentChatError({
                 backendDetail,
                 code: classifyBackendStreamError(backendDetail),
-                requestId
+                classId: preparedRequest.scope.classId,
+                conversationId: preparedRequest.persistence?.conversationId,
+                phase: "stream",
+                requestId,
+                userId: preparedRequest.scope.uid,
+                userRole: preparedRequest.scope.role
               });
               send({
                 errorCode: chatError.code,
@@ -771,7 +814,12 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
         const chatError = reportStudentChatError({
           caughtError,
           code: classifyUnexpectedChatError(caughtError),
-          requestId
+          classId: preparedRequest.scope.classId,
+          conversationId: preparedRequest.persistence?.conversationId,
+          phase: "stream",
+          requestId,
+          userId: preparedRequest.scope.uid,
+          userRole: preparedRequest.scope.role
         });
         send({
           errorCode: chatError.code,
@@ -848,15 +896,25 @@ type ReportedStudentChatError = {
 function reportStudentChatError({
   backendDetail,
   backendStatus,
+  classId,
   caughtError,
   code,
-  requestId
+  conversationId,
+  phase,
+  requestId,
+  userId,
+  userRole
 }: {
   backendDetail?: string;
   backendStatus?: number;
+  classId?: string;
   caughtError?: unknown;
   code: StudentChatErrorCode;
+  conversationId?: string;
+  phase?: "request" | "response" | "stream";
   requestId?: string;
+  userId?: string;
+  userRole?: string;
 }): ReportedStudentChatError {
   const errorId = randomUUID().slice(0, 8).toUpperCase();
   const studentMessage = studentMessageForChatError(code);
@@ -882,12 +940,33 @@ function reportStudentChatError({
     backendBaseUrl: langGraphBackendBaseUrlForLog(),
     backendDetail,
     backendStatus,
+    classId,
     code,
+    conversationId,
     errorId,
     message: errorMessageForLog(caughtError),
+    phase,
     requestId,
     ...providerMetadata
   }));
+
+  void writeChatErrorReference({
+    backendDetail,
+    backendStatus,
+    classId,
+    code,
+    conversationId,
+    errorId,
+    message: errorMessageForLog(caughtError),
+    phase,
+    provider: providerMetadata.provider,
+    providerErrorClass: providerMetadata.providerErrorClass,
+    providerStatus: providerMetadata.providerStatus,
+    requestId,
+    route: "/api/chat",
+    userId,
+    userRole
+  });
 
   return {
     code,
@@ -1477,11 +1556,16 @@ async function saveAssistantMessageWithoutBlockingTutorResponse({
   } catch (caughtError) {
     reportStudentChatError({
       caughtError,
+      classId: scope.classId,
       code:
         caughtError instanceof ConversationPersistenceError
           ? classifyConversationPersistenceError(caughtError)
           : "CHAT_CONVERSATION_ID_INVALID",
-      requestId
+      conversationId,
+      phase: "response",
+      requestId,
+      userId: scope.uid,
+      userRole: scope.role
     });
   }
 }

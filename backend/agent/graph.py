@@ -2662,17 +2662,35 @@ async def maybe_adjust_ai_usage_reservation(state: PdfRagState, final_messages: 
                     "studentId": reservation.get("studentId") or reservation.get("student_id"),
                 },
             )
-    except Exception:
-        if is_production_environment():
-            raise RuntimeError("AI usage reservation could not be adjusted before reading PDF pages.")
-
+    except Exception as error:
+        logger.warning(
+            "ai_usage_reservation_adjustment_failed",
+            extra={
+                "event_type": "ai_usage_reservation_adjustment_failed",
+                "conversation_id": state.get("conversation_id"),
+                "student_id": state.get("student_id"),
+                "reservation_id": reservation_id,
+                "error": str(error),
+            },
+        )
         return
 
     if response.status_code == 429:
         raise RuntimeError("AI usage limit reached.")
 
-    if not response.is_success and is_production_environment():
-        raise RuntimeError("AI usage reservation could not be adjusted before reading PDF pages.")
+    if not response.is_success:
+        logger.warning(
+            "ai_usage_reservation_adjustment_rejected",
+            extra={
+                "event_type": "ai_usage_reservation_adjustment_rejected",
+                "conversation_id": state.get("conversation_id"),
+                "student_id": state.get("student_id"),
+                "reservation_id": reservation_id,
+                "status_code": response.status_code,
+                "response_text": response.text[:500],
+            },
+        )
+        return
 
     reservation["estimatedTokens"] = estimated_tokens
 

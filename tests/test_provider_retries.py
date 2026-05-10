@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from backend.agent.openrouter_client import OpenRouterClient, normalize_token_usage
+from backend.agent.graph import maybe_adjust_ai_usage_reservation
 from backend.agent.tools import search_pdf_pages
 from backend.retrieval.pdf_retriever import GeminiPdfRetriever, build_query_features, exact_results_from_pdf_text
 
@@ -90,6 +91,92 @@ async def test_openrouter_client_retries_ssl_errors_with_fresh_clients(monkeypat
     assert response["content"] == "Recovered after retry."
     assert len(attempts) == 2
     assert closed_clients == 1
+
+
+@pytest.mark.asyncio
+async def test_pdf_reservation_adjustment_failure_does_not_abort_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> "FailingAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            raise httpx.ConnectError("frontend internal route unreachable")
+
+    monkeypatch.setenv("CHANDRA_ENV", "production")
+    monkeypatch.setenv("BACKEND_SHARED_SECRET", "test-secret")
+    monkeypatch.setattr("backend.agent.graph.httpx.AsyncClient", FailingAsyncClient)
+    monkeypatch.setattr("backend.agent.graph.internal_next_base_url", lambda _context: "https://frontend.example")
+
+    state = {
+        "ai_usage_reservation": {
+            "estimatedTokens": 100,
+            "id": "reservation-1",
+            "studentId": "student-1",
+        },
+        "class_id": "class-1",
+        "conversation_id": "conversation-1",
+        "max_tokens": 800,
+        "messages": [],
+        "student_id": "student-1",
+        "token_usage": {"total_tokens": 50},
+    }
+
+    await maybe_adjust_ai_usage_reservation(state, [{"content": "x" * 4000, "role": "user"}])
+
+    assert state["ai_usage_reservation"]["estimatedTokens"] == 100
+
+
+@pytest.mark.asyncio
+async def test_pdf_reservation_adjustment_429_still_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class LimitResponse:
+        status_code = 429
+        is_success = False
+        text = '{"error":"AI usage limit reached."}'
+
+    class LimitAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> "LimitAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, *_args: object, **_kwargs: object) -> LimitResponse:
+            return LimitResponse()
+
+    monkeypatch.setenv("CHANDRA_ENV", "production")
+    monkeypatch.setenv("BACKEND_SHARED_SECRET", "test-secret")
+    monkeypatch.setattr("backend.agent.graph.httpx.AsyncClient", LimitAsyncClient)
+    monkeypatch.setattr("backend.agent.graph.internal_next_base_url", lambda _context: "https://frontend.example")
+
+    state = {
+        "ai_usage_reservation": {
+            "estimatedTokens": 100,
+            "id": "reservation-1",
+            "studentId": "student-1",
+        },
+        "class_id": "class-1",
+        "conversation_id": "conversation-1",
+        "max_tokens": 800,
+        "messages": [],
+        "student_id": "student-1",
+        "token_usage": {"total_tokens": 50},
+    }
+
+    with pytest.raises(RuntimeError, match="AI usage limit reached."):
+        await maybe_adjust_ai_usage_reservation(state, [{"content": "x" * 4000, "role": "user"}])
 
 
 @pytest.mark.asyncio

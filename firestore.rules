@@ -613,6 +613,10 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /chatErrorReferences/{errorId} {
+      allow read, write: if false;
+    }
+
     match /rateLimits/{rateLimitId} {
       allow read, write: if false;
     }
