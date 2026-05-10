@@ -2591,6 +2591,11 @@ export function TeacherClassManager({
       );
       const token = await getTeacherToken();
       if (materialFile) {
+        await createMaterialUploadSession({
+          classId: activeClassId,
+          materialId,
+          token
+        });
         const storagePath = await uploadMaterialFileToStorage({
           classId: activeClassId,
           file: materialFile,
@@ -8559,6 +8564,30 @@ function uploadMaterialFileToStorage({
       }
     );
   });
+}
+
+async function createMaterialUploadSession({
+  classId,
+  materialId,
+  token
+}: {
+  classId: string;
+  materialId: string;
+  token: string;
+}) {
+  const response = await fetch(apiUrl("/api/materials/upload-session"), {
+    body: JSON.stringify({ classId, materialId }),
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    method: "POST"
+  });
+  const data = (await response.json().catch(() => ({}))) as { error?: string };
+
+  if (!response.ok) {
+    throw new Error(data.error ?? "Tutor knowledge upload session failed.");
+  }
 }
 
 async function copyTextToClipboard(text: string) {

@@ -23,8 +23,19 @@ service firebase.storage {
         );
     }
 
+    function uploadSession(classId, materialId) {
+      return firestore.get(/databases/(default)/documents/classes/$(classId)/materialUploadSessions/$(materialId));
+    }
+
+    function hasUploadSession(classId, materialId) {
+      return isSignedIn()
+        && uploadSession(classId, materialId).data.teacherId == request.auth.uid
+        && uploadSession(classId, materialId).data.expiresAt > request.time;
+    }
+
     match /classes/{classId}/materials/{materialId}/original/{fileName=**} {
-      allow read, write: if isClassTeacher(classId);
+      allow read: if isClassTeacher(classId) || hasUploadSession(classId, materialId);
+      allow write: if isClassTeacher(classId) || hasUploadSession(classId, materialId);
     }
   }
 }
