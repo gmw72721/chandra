@@ -689,6 +689,7 @@ async function tokenLimitsWithActiveAllowance({
   }
 
   return {
+    perHour: applyAllowancePercent(limits.perHour, allowancePercent),
     perDay: applyAllowancePercent(limits.perDay, allowancePercent),
     perWeek: applyAllowancePercent(limits.perWeek, allowancePercent)
   };

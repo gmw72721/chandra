@@ -96,6 +96,7 @@ export const responseLengthOptions = ["short", "medium", "long", "extended"] as 
 export type ResponseLength = (typeof responseLengthOptions)[number];
 
 export type AiTokenLimitSettings = {
+  perHour: number;
   perDay: number;
   perWeek: number;
 };
@@ -182,6 +183,7 @@ export const defaultNotificationSettings: NotificationSettings = {
 };
 
 export const defaultAiTokenLimitSettings: AiTokenLimitSettings = {
+  perHour: 50_000,
   perDay: 300_000,
   perWeek: 1_200_000
 };
@@ -483,6 +485,7 @@ export function normalizeAiTokenLimitSettings(value: unknown): AiTokenLimitSetti
   const source = isRecord(value) ? value : {};
 
   return {
+    perHour: clampTokenLimit(source.perHour, defaultAiTokenLimitSettings.perHour, 1_000, 1_000_000),
     perDay: clampTokenLimit(source.perDay, defaultAiTokenLimitSettings.perDay, 1_000, 5_000_000),
     perWeek: clampTokenLimit(source.perWeek, defaultAiTokenLimitSettings.perWeek, 1_000, 20_000_000)
   };

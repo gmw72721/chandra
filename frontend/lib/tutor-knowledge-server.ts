@@ -252,13 +252,30 @@ export async function saveTutorKnowledge({
     percent: 15,
     step: "upload_received"
   });
-  const storedSource = storagePath
-    ? await readUploadedStorageSource({
-        classId,
-        materialId: materialRef.id,
-        storagePath
-      })
-    : null;
+  let storedSource: Awaited<ReturnType<typeof readUploadedStorageSource>> | null = null;
+  let fileMetadata = {};
+
+  try {
+    storedSource = storagePath
+      ? await readUploadedStorageSource({
+          classId,
+          materialId: materialRef.id,
+          storagePath
+        })
+      : null;
+    fileMetadata = storedSource?.metadata
+      ?? (file ? await uploadTutorKnowledgeFile({ classId, file, materialId: materialRef.id, updateProgress }) : {})
+      ?? {};
+  } catch (caughtError) {
+    await updateProgress({
+      detail: "The original source file could not be saved to Firebase Storage.",
+      error: caughtError instanceof Error ? caughtError.message : String(caughtError),
+      percent: 100,
+      step: "failed"
+    });
+    throw caughtError;
+  }
+
   const sourceFile = file ?? storedSource?.file ?? null;
   const ingestion = await buildTutorKnowledgeIngestion({
     docId: materialRef.id,
@@ -270,24 +287,9 @@ export async function saveTutorKnowledge({
   });
   const searchableText = ingestion.searchableText;
   const chunks = ingestion.chunks;
-  let fileMetadata = {};
 
   if (!searchableText && !chunks.length) {
     throw new TutorKnowledgeHttpError("No tutor knowledge text was found. This source may be private, scanned, or unsupported.", 400);
-  }
-
-  try {
-    fileMetadata = storedSource?.metadata
-      ?? (file ? await uploadTutorKnowledgeFile({ classId, file, materialId: materialRef.id }) : {})
-      ?? {};
-  } catch (caughtError) {
-    await updateProgress({
-      detail: "Tutor knowledge processing failed before it was ready.",
-      error: caughtError instanceof Error ? caughtError.message : String(caughtError),
-      percent: 100,
-      step: "failed"
-    });
-    throw caughtError;
   }
 
   const materialType = materialTypeForKind(kind);
@@ -351,7 +353,7 @@ export async function saveTutorKnowledge({
       onEmbeddingProgress: async ({ completed, total }) => {
         await updateProgress({
           completedChunks: completed,
-          detail: `Calling Gemini embeddings for chunk ${completed} of ${total}.`,
+          detail: `Preparing source section ${completed} of ${total}.`,
           percent: Math.min(90, 50 + Math.round((completed / Math.max(total, 1)) * 40)),
           step: "embedding_chunks",
           totalChunks: total
@@ -364,7 +366,7 @@ export async function saveTutorKnowledge({
 
     await updateProgress({
       completedChunks: chunks.length,
-      detail: "Saving vectors, source metadata, and class visibility.",
+      detail: "Saving this source to the class.",
       percent: 95,
       step: "saving_to_class",
       totalChunks: chunks.length
@@ -376,7 +378,7 @@ export async function saveTutorKnowledge({
     });
     await updateProgress({
       completedChunks: chunks.length,
-      detail: "Tutor knowledge is ready for students in this class.",
+      detail: "Source is ready for students.",
       percent: 100,
       step: "ready",
       totalChunks: chunks.length
@@ -396,7 +398,7 @@ export async function saveTutorKnowledge({
       await materialRef.update(buildEmbeddingFailureMaterialMetadata(caughtError));
       await updateProgress({
         completedChunks: 0,
-        detail: "Gemini embeddings failed. The source was not saved for student use.",
+        detail: "Source preparation failed. The source was not saved for student use.",
         error: caughtError.cause instanceof Error ? caughtError.cause.message : caughtError.message,
         percent: 100,
         step: "failed",
@@ -441,13 +443,21 @@ export async function deleteTutorKnowledge({
   }
 
   const filePath = String(materialSnapshot.data()?.filePath ?? "");
+  const [chunksSnapshot, jobsSnapshot] = await Promise.all([
+    materialRef.collection("chunks").get(),
+    adminDb!
+      .collection("classes")
+      .doc(classId)
+      .collection("materialJobs")
+      .where("materialId", "==", materialId)
+      .get()
+  ]);
 
-  if (filePath) {
-    await adminStorage!.bucket().file(filePath).delete({ ignoreNotFound: true });
-  }
-
-  const chunksSnapshot = await materialRef.collection("chunks").get();
-  await deleteDocumentsInBatches(chunksSnapshot.docs.map((chunkDoc) => chunkDoc.ref));
+  await deleteMaterialStorageFiles({ classId, filePath, materialId });
+  await deleteDocumentsInBatches([
+    ...chunksSnapshot.docs.map((chunkDoc) => chunkDoc.ref),
+    ...jobsSnapshot.docs.map((jobDoc) => jobDoc.ref)
+  ]);
   await materialRef.delete();
 }
 
@@ -636,12 +646,19 @@ export async function reprocessTutorKnowledge({
 async function uploadTutorKnowledgeFile({
   classId,
   file,
-  materialId
+  materialId,
+  updateProgress
 }: {
   classId: string;
   file: File;
   materialId: string;
+  updateProgress?: (progress: MaterialJobProgressUpdate) => Promise<void>;
 }) {
+  await updateProgress?.({
+    detail: "Saving the original source file to Firebase Storage.",
+    percent: 20,
+    step: "upload_received"
+  });
   const buffer = Buffer.from(await file.arrayBuffer());
   const safeFileName = sanitizeFileName(file.name);
   const filePath = `classes/${classId}/materials/${materialId}/original/${safeFileName}`;
@@ -683,6 +700,29 @@ async function uploadTutorKnowledgeFile({
     fileSize: file.size,
     sourceKind: "file"
   };
+}
+
+async function deleteMaterialStorageFiles({
+  classId,
+  filePath,
+  materialId
+}: {
+  classId: string;
+  filePath: string;
+  materialId: string;
+}) {
+  const bucket = adminStorage!.bucket();
+  const materialStoragePrefix = `classes/${classId}/materials/${materialId}/`;
+  const [files] = await bucket.getFiles({ prefix: materialStoragePrefix });
+  const filePaths = new Set(files.map((file) => file.name));
+
+  if (filePath) {
+    filePaths.add(filePath);
+  }
+
+  await Promise.all(
+    Array.from(filePaths).map((path) => bucket.file(path).delete({ ignoreNotFound: true }))
+  );
 }
 
 function defaultSourceSettingsForKind(kind: string): TutorKnowledgeSourceSettings {

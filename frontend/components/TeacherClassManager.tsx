@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import { FormEvent, memo, type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -70,7 +69,6 @@ import {
   type TeacherClass
 } from "@/lib/classes";
 import { capitalizeLabel, coerceDate, formatConversationDate } from "@/lib/display-format";
-import { storage } from "@/lib/firebase";
 import { defaultModelOptions } from "@/lib/model-options";
 import {
   formatBytes,
@@ -103,6 +101,9 @@ type MaterialUploadProgress = {
   step: "prepare" | "upload" | "read" | "chunk" | "embed" | "save" | "complete";
   uploadPercent: number;
 };
+type MaterialUploadDisplayStep = "upload" | "read" | "prepare" | "ready";
+
+const materialUploadDisplaySteps: MaterialUploadDisplayStep[] = ["upload", "read", "prepare", "ready"];
 
 type TeacherTab = "overview" | "roster" | "settings" | "knowledge" | "conversations";
 type SettingsPane =
@@ -1572,6 +1573,7 @@ export function TeacherClassManager({
             teacherPreviewDaily: formValue("modelSettings.requestLimits.teacherPreviewDaily")
           },
           tokenLimits: {
+            perHour: formValue("modelSettings.tokenLimits.perHour"),
             perDay: formValue("modelSettings.tokenLimits.perDay"),
             perWeek: formValue("modelSettings.tokenLimits.perWeek")
           }
@@ -2569,18 +2571,7 @@ export function TeacherClassManager({
 
     try {
       const jobId = createMaterialJobId();
-      const storageUpload = materialFile
-        ? await uploadTutorKnowledgeFileToStorage({
-            classId: activeClassId,
-            file: materialFile,
-            materialId: jobId,
-            onProgress: setMaterialUploadProgress
-          })
-        : null;
-      const formData = buildTutorKnowledgeFormData(activeClassId, {
-        materialId: storageUpload ? jobId : undefined,
-        storagePath: storageUpload?.storagePath
-      });
+      const formData = buildTutorKnowledgeFormData(activeClassId);
       formData.append("jobId", jobId);
       unsubscribeJob = subscribeToMaterialJob(
         activeClassId,
@@ -2660,13 +2651,7 @@ export function TeacherClassManager({
     }
   }
 
-  function buildTutorKnowledgeFormData(
-    classId: string,
-    storageUpload?: {
-      materialId?: string;
-      storagePath?: string;
-    }
-  ) {
+  function buildTutorKnowledgeFormData(classId: string) {
     if (!materialFile && !materialSourceUrl.trim() && !materialText.trim()) {
       throw new Error("Add a supported file, paste a URL, or paste tutor knowledge text before previewing.");
     }
@@ -2678,10 +2663,7 @@ export function TeacherClassManager({
     formData.append("text", materialText);
     formData.append("sourceUrl", materialSourceUrl.trim());
 
-    if (storageUpload?.materialId && storageUpload.storagePath) {
-      formData.append("materialId", storageUpload.materialId);
-      formData.append("storagePath", storageUpload.storagePath);
-    } else if (materialFile) {
+    if (materialFile) {
       validateTutorKnowledgeFile(materialFile);
       formData.append("file", materialFile);
     }
@@ -6122,12 +6104,12 @@ export function TeacherClassManager({
                     <span style={{ width: `${materialUploadProgress.percent}%` }} />
                   </div>
                   <ol className="upload-progress-steps">
-                    {(["prepare", "upload", "read", "chunk", "embed", "save"] as const).map((step) => (
+                    {materialUploadDisplaySteps.map((step) => (
                       <li
-                        className={uploadStepStatus(step, materialUploadProgress.step)}
+                        className={uploadDisplayStepStatus(step, materialUploadProgress.step)}
                         key={step}
                       >
-                        <span>{uploadStepLabel(step)}</span>
+                        <span>{uploadDisplayStepLabel(step)}</span>
                         {step === "upload" ? (
                           <small>{materialUploadProgress.uploadPercent}%</small>
                         ) : null}
@@ -6147,7 +6129,7 @@ export function TeacherClassManager({
                   Cancel
                 </button>
                 <button
-                  className="primary-button compact"
+                  className="primary-button teacher-primary-button compact"
                   disabled={!hasTutorKnowledgeSource || isSavingMaterial}
                   type="submit"
                 >
@@ -6235,6 +6217,19 @@ function TokenLimitInputs({
           step={1}
           type="number"
           defaultValue={requestLimits.teacherPreviewDaily ?? 0}
+        />
+      </div>
+      <div>
+        <label className={labelClassName} htmlFor={`${idPrefix}-hour`}>
+          Tokens per student per hour
+        </label>
+        <input
+          id={`${idPrefix}-hour`}
+          min={1000}
+          name="modelSettings.tokenLimits.perHour"
+          step={1000}
+          type="number"
+          defaultValue={tokenLimits.perHour}
         />
       </div>
       <div>
@@ -8526,7 +8521,11 @@ function materialJobToUploadProgress(progress: MaterialJobProgress): MaterialUpl
 }
 
 function materialJobStepToUploadStep(step: MaterialJobProgress["step"]): MaterialUploadProgress["step"] {
-  if (step === "upload_received" || step === "reading_file") {
+  if (step === "upload_received") {
+    return "upload";
+  }
+
+  if (step === "reading_file") {
     return "read";
   }
 
@@ -8546,7 +8545,7 @@ function materialJobStepToUploadStep(step: MaterialJobProgress["step"]): Materia
 }
 
 function postTutorKnowledgeForm<TResponse = { error?: string }>({
-  completionDetail = "Tutor knowledge is saved and ready for students in this class.",
+  completionDetail = "Source is saved and ready for students.",
   formData,
   label,
   onProgress,
@@ -8573,7 +8572,7 @@ function postTutorKnowledgeForm<TResponse = { error?: string }>({
     };
 
     onProgress({
-      detail: "Preparing the upload request.",
+      detail: "Starting the upload.",
       percent: 2,
       step: "prepare",
       uploadPercent: 0
@@ -8587,7 +8586,7 @@ function postTutorKnowledgeForm<TResponse = { error?: string }>({
       const uploadPercent = Math.min(100, Math.round((event.loaded / event.total) * 100));
 
       onProgress({
-        detail: `${label}: ${formatBytes(event.loaded)} of ${formatBytes(event.total)} sent.`,
+        detail: `${label}: ${formatBytes(event.loaded)} of ${formatBytes(event.total)} uploaded.`,
         percent: useBackendProgress
           ? Math.min(12, 2 + Math.round(uploadPercent * 0.1))
           : Math.min(67, 8 + Math.round(uploadPercent * 0.58)),
@@ -8599,8 +8598,8 @@ function postTutorKnowledgeForm<TResponse = { error?: string }>({
     request.upload.onload = () => {
       onProgress({
         detail: useBackendProgress
-          ? "Upload complete. Waiting for Chandra to report server-side progress."
-          : "Upload complete. Reading the file so Chandra can prepare it for this class.",
+          ? "Upload complete. Chandra is preparing this source."
+          : "Upload complete. Chandra is reading this source.",
         percent: useBackendProgress ? 12 : processingPercent,
         step: useBackendProgress ? "upload" : "read",
         uploadPercent: 100
@@ -8665,86 +8664,6 @@ function parseJsonResponse(responseText: string) {
   }
 }
 
-function uploadTutorKnowledgeFileToStorage({
-  classId,
-  file,
-  materialId,
-  onProgress
-}: {
-  classId: string;
-  file: File;
-  materialId: string;
-  onProgress: (progress: MaterialUploadProgress | null) => void;
-}) {
-  if (!storage) {
-    throw new Error("Firebase Storage is not configured for direct tutor knowledge upload.");
-  }
-
-  validateTutorKnowledgeFile(file);
-  const safeFileName = sanitizeStorageFileName(file.name);
-  const storagePath = `classes/${classId}/materials/${materialId}/original/${safeFileName}`;
-  const uploadTask = uploadBytesResumable(storageRef(storage, storagePath), file, {
-    contentType: file.type || contentTypeFromFileName(file.name)
-  });
-
-  onProgress({
-    detail: "Uploading the original file directly to Firebase Storage.",
-    percent: 2,
-    step: "upload",
-    uploadPercent: 0
-  });
-
-  return new Promise<{ storagePath: string }>((resolve, reject) => {
-    uploadTask.on(
-      "state_changed",
-      (snapshot) => {
-        const uploadPercent = Math.round((snapshot.bytesTransferred / Math.max(snapshot.totalBytes, 1)) * 100);
-
-        onProgress({
-          detail: `Uploading source: ${formatBytes(snapshot.bytesTransferred)} of ${formatBytes(snapshot.totalBytes)} sent.`,
-          percent: Math.min(12, 2 + Math.round(uploadPercent * 0.1)),
-          step: "upload",
-          uploadPercent
-        });
-      },
-      (caughtError) => {
-        reject(new Error(caughtError instanceof Error ? caughtError.message : "Firebase Storage upload failed."));
-      },
-      () => {
-        onProgress({
-          detail: "Upload complete. Waiting for Chandra to process the stored source.",
-          percent: 12,
-          step: "upload",
-          uploadPercent: 100
-        });
-        resolve({ storagePath });
-      }
-    );
-  });
-}
-
-function sanitizeStorageFileName(fileName: string) {
-  return fileName.replace(/[^a-zA-Z0-9._-]/g, "_") || "tutor-knowledge-file";
-}
-
-function contentTypeFromFileName(fileName: string) {
-  const extension = fileName.toLowerCase().match(/\.[^.]+$/)?.[0] ?? "";
-
-  if (extension === ".pdf") {
-    return "application/pdf";
-  }
-
-  if (extension === ".md") {
-    return "text/markdown";
-  }
-
-  if (extension === ".csv") {
-    return "text/csv";
-  }
-
-  return "text/plain";
-}
-
 function readResponseError(data: unknown) {
   if (data && typeof data === "object" && "error" in data && typeof data.error === "string") {
     return data.error;
@@ -8755,57 +8674,81 @@ function readResponseError(data: unknown) {
 
 function uploadStepLabel(step: MaterialUploadProgress["step"]) {
   if (step === "prepare") {
-    return "Preparing";
+    return "Starting";
   }
 
   if (step === "upload") {
-    return "Upload file";
+    return "Uploading";
   }
 
   if (step === "read") {
-    return "Read file";
+    return "Reading";
   }
 
   if (step === "chunk") {
-    return "Build tutor pages";
+    return "Preparing";
   }
 
   if (step === "embed") {
-    return "Gemini embeddings";
+    return "Preparing";
   }
 
   if (step === "save") {
-    return "Save to class";
+    return "Saving";
   }
 
-  return "Complete";
+  return "Source ready";
 }
 
-function uploadStepStatus(
-  step: Exclude<MaterialUploadProgress["step"], "complete">,
+function uploadDisplayStepLabel(step: MaterialUploadDisplayStep) {
+  if (step === "upload") {
+    return "Upload source";
+  }
+
+  if (step === "read") {
+    return "Read source";
+  }
+
+  if (step === "prepare") {
+    return "Prepare for tutor";
+  }
+
+  return "Ready";
+}
+
+function uploadDisplayStepStatus(
+  step: MaterialUploadDisplayStep,
   currentStep: MaterialUploadProgress["step"]
 ) {
-  const stepOrder: MaterialUploadProgress["step"][] = [
-    "prepare",
-    "upload",
-    "read",
-    "chunk",
-    "embed",
-    "save",
-    "complete"
-  ];
+  const stepOrder = materialUploadDisplaySteps;
   const stepIndex = stepOrder.indexOf(step);
-  const currentStepIndex = stepOrder.indexOf(currentStep);
+  const currentDisplayStepIndex = stepOrder.indexOf(uploadDisplayStepFromProgressStep(currentStep));
 
-  if (stepIndex < currentStepIndex || currentStep === "complete") {
+  if (stepIndex < currentDisplayStepIndex || currentStep === "complete") {
     return "done";
   }
 
-  if (stepIndex === currentStepIndex) {
+  if (stepIndex === currentDisplayStepIndex) {
     return "active";
   }
 
   return "";
+}
+
+function uploadDisplayStepFromProgressStep(step: MaterialUploadProgress["step"]): MaterialUploadDisplayStep {
+  if (step === "prepare" || step === "upload") {
+    return "upload";
+  }
+
+  if (step === "read") {
+    return "read";
+  }
+
+  if (step === "complete") {
+    return "ready";
+  }
+
+  return "prepare";
 }
 
 function progressStepFromPercent(percent: number): MaterialUploadProgress["step"] {
@@ -8826,22 +8769,22 @@ function progressStepFromPercent(percent: number): MaterialUploadProgress["step"
 
 function uploadStepDetail(step: MaterialUploadProgress["step"]) {
   if (step === "read") {
-    return "Reading the PDF/text and extracting usable class material.";
+    return "Reading the source and finding usable class material.";
   }
 
   if (step === "chunk") {
-    return "Splitting the material into focused tutor knowledge pages.";
+    return "Organizing the source into tutor-ready sections.";
   }
 
   if (step === "embed") {
-    return "Calling the Gemini embedding API so students can search this source semantically.";
+    return "Preparing the source so students can get grounded help from it.";
   }
 
   if (step === "save") {
-    return "Saving metadata, vectors, and source details to this professor's class.";
+    return "Saving the source to this class.";
   }
 
-  return "Working on the tutor knowledge upload.";
+  return "Working on this source.";
 }
 
 function isAbortError(error: unknown) {

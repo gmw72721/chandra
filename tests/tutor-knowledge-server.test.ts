@@ -103,14 +103,39 @@ test("new material uploads inherit class source defaults", () => {
   assert.match(classCreateRoute, /sourceDefaults: defaultSourceDefaultsSettings/);
 });
 
-test("tutor knowledge supports direct Storage upload and guarded URL ingestion", () => {
+test("tutor knowledge uploads original files through the server Storage bucket", () => {
   const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
   const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
-  assert.match(componentSource, /uploadBytesResumable/);
-  assert.match(componentSource, /storagePath/);
+  assert.match(componentSource, /formData\.append\("file", materialFile\)/);
+  assert.doesNotMatch(componentSource, /uploadBytesResumable/);
+  assert.match(source, /uploadTutorKnowledgeFile\(\{ classId, file, materialId: materialRef\.id, updateProgress \}\)/);
+  assert.match(source, /Saving the original source file to Firebase Storage/);
+  assert.match(source, /adminStorage!\.bucket\(\)\.file\(filePath\)/);
+  assert.match(source, /storageFile\.save\(buffer/);
+  assert.match(source, /const filePath = `classes\/\$\{classId\}\/materials\/\$\{materialId\}\/original\/\$\{safeFileName\}`/);
+  assert.match(source, /sourceKind: "file"/);
+});
+
+test("deleting tutor knowledge removes source files, chunks, embeddings, jobs, and material", () => {
+  const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/materials/[materialId]/route.ts"), "utf8");
+
+  assert.match(routeSource, /await deleteTutorKnowledge\(\{ classId, materialId \}\)/);
+  assert.match(source, /deleteMaterialStorageFiles\(\{ classId, filePath, materialId \}\)/);
+  assert.match(source, /bucket\.getFiles\(\{ prefix: materialStoragePrefix \}\)/);
+  assert.match(source, /materialRef\.collection\("chunks"\)\.get\(\)/);
+  assert.match(source, /collection\("materialJobs"\)[\s\S]*where\("materialId", "==", materialId\)/);
+  assert.match(source, /deleteDocumentsInBatches\(\[[\s\S]*chunksSnapshot\.docs[\s\S]*jobsSnapshot\.docs/s);
+  assert.match(source, /await materialRef\.delete\(\)/);
+  assert.match(source, /embedding: FieldValue\.vector\(embedding\.values\)/);
+});
+
+test("tutor knowledge supports guarded URL ingestion", () => {
+  const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
+  const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+
   assert.match(componentSource, /Paste URL/);
-  assert.match(source, /readUploadedStorageSource/);
   assert.match(source, /extractChunksFromUrl/);
   assert.match(source, /downloadTutorKnowledgeUrl/);
   assert.match(source, /validatePublicTutorKnowledgeUrl/);
