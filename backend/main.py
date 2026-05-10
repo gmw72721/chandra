@@ -1311,7 +1311,7 @@ def source_usage_lines(source_usage: dict[str, Any]) -> list[str]:
         ),
         *(
             [
-                "- When a student asks to see, pull up, read, copy, quote, recite, identify, locate, or restate a specific problem, exercise, question, passage, or page from selected uploaded class material, or only supplies a specific problem/exercise/page/title reference without asking for solving help, quote the relevant passage exactly from the visible text with source/page context, then explain or paraphrase only if helpful. For problem-statement lookup, give the problem text but do not solve it or ask for an attempt first. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words."
+                "- When a student asks to see, pull up, read, copy, quote, recite, identify, locate, or restate a specific problem, exercise, question, passage, or page from selected uploaded class material, or only supplies a specific problem/exercise/page/title reference without asking for solving help, quote the relevant passage exactly from the visible text with source/page context, then explain or paraphrase only if helpful. For problem-statement lookup, give only the problem text in the Problem section; do not include location/source context, offers, hints, or commentary in that section, and do not solve it or ask for an attempt first. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words."
             ]
             if source_usage["quoteSourcePassages"]
             else ["- Include at most one short quote of 20 words or fewer from source material when useful, then paraphrase the idea."]

@@ -922,12 +922,12 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
         f"{final_unclear_source_instruction(source_usage)}",
         "Use printed_page_start as the document page number. page_start and page_end are internal render indexes only.",
         "For task-location answers, use a concise shape like `That item is Problem/Question N in Section X, on printed page P of Title.`",
-        "For exercise/question/task lookup by number, exercise, page, or title, put the found exercise/question/task statement in a separate `Problem:` section, quote the full visible statement with source/page context, then stop with a brief offer to help them start. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. Do not repeat the same problem text again in the unlabeled main reply.",
+        "For exercise/question/task lookup by number, exercise, page, or title, put the found exercise/question/task statement in a separate `Problem:` section and quote the full visible problem statement exactly, then stop with a brief offer to help them start. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. When returning the problem, only return the problem directly in that section; do not include location/source context, offers, hints, or commentary inside `Problem:`. Do not repeat the same problem text again in the unlabeled main reply.",
         "Do not restate long task text the student already supplied unless needed for clarity.",
         (
             "Structured section labels: when useful, write sections in this order: `Problem:`, `Hint:`, `Why this works:`, "
             "`Formula:`, `Example:`, `Check your work:`. Use `Problem:` only for the found academic exercise/question/task "
-            "statement the student is working on, not for an issue/error. If you use `Problem:`, put the problem statement only there and keep any main reply to a short follow-up offer. Use `Hint:` for a small nudge, `Why this works:` "
+            "statement the student is working on, not for an issue/error. If you use `Problem:`, put only the problem statement there and keep location/source context or any main reply to a short follow-up offer outside that section. Use `Hint:` for a small nudge, `Why this works:` "
             "for concept reasoning, `Formula:` for a reusable rule, `Example:` only for a similar different problem, and "
             "`Check your work:` only when responding to a student attempt. Do not write `Answer:`, `Question:`, `Next step:`, "
             "`Your next step:`, `Source:`, or `Sources:`; end with one unlabeled direct question when helpful."
@@ -1142,7 +1142,7 @@ def final_citation_instruction(source_usage: dict[str, bool]) -> str:
         return (
             "When you give solving help or method teaching, or handle passage lookup, use the selected textbook/readings/examples pages directly. "
             f"If the student asks to see, pull up, read, copy, quote, recite, identify, locate, or restate a specific problem, exercise, question, passage, or page from selected class material, or only supplies a specific problem/exercise/page/title reference without asking for solving help, quote the relevant passage exactly from the visible text {citation_phrase}, then explain or paraphrase only if helpful. "
-            "For problem-statement lookup, give the problem text but do not solve it or ask for an attempt first. "
+            "For problem-statement lookup, give only the problem text in the Problem section; do not include location/source context, offers, hints, or commentary in that section, and do not solve it or ask for an attempt first. "
             "Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words."
         )
 

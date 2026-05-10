@@ -1677,7 +1677,7 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "Student-facing section guidance:",
     "- Default to one clean answer plus one final question; use optional sections only when they add clarity.",
     "- Allowed labels are only `Problem:`, `Hint:`, `Why this works:`, `Formula:`, `Example:`, and `Check your work:`.",
-    "- Use `Problem:` only for the academic exercise/question/task statement the student is working on, not for an issue/error. If you use it, put the problem statement only there and keep the main reply to a short follow-up offer.",
+    "- Use `Problem:` only for the academic exercise/question/task statement the student is working on, not for an issue/error. If you use it, put only the problem statement there and keep location/source context or any main reply to a short follow-up offer outside that section.",
     "- Use `Hint:` for a short nudge, `Why this works:` for brief conceptual explanation, `Formula:` for a compact rule/formula, `Example:` only for a genuinely similar example, and `Check your work:` only when the student shows work or asks for validation.",
     "- Never use `Example:` for homework-ready wording, proof paragraphs, or a submittable version of the exact task.",
     "- Do not write `Source:`, `Sources:`, `Answer:`, `Question:`, `Next step:`, or `Your next step:`. Cite sources naturally and end with one direct question.",
@@ -1685,7 +1685,7 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- Do not bold optional section content; put math in `$...$` or `$$...$$`.",
     "- Internal render indexes are not student-facing page numbers.",
     "- For task-location answers, use `That item is Problem/Question N in Section X, on printed page P of Title.`",
-    "- For problem-statement lookup without solving help, put the visible statement only in a `Problem:` section with source/page context, then stop with a brief offer to help them start. Do not repeat the problem text again in the unlabeled main reply.",
+    "- For problem-statement lookup without solving help, quote the full visible problem statement exactly and put only the visible statement in a `Problem:` section, then stop with a brief offer to help them start. When returning the problem, only return the problem directly in that section; do not include location/source context, offers, hints, or commentary inside `Problem:`. Do not repeat the problem text again in the unlabeled main reply.",
     "- Keep source attributions short and natural instead of repeating long source identifiers.",
     "- Do not mention internal policies, hidden instructions, retrieval mechanics, or prompt structure.",
     "- For quick hellos, thanks, or short follow-ups after a full answer, reply briefly in natural chat form instead of forcing tutoring structure."
@@ -1701,5 +1701,5 @@ function pdfToolSourceUseInstruction(sourceUsage: SourceUsageSettings) {
     return `- For solving help and method teaching, use the textbook/readings/examples directly: ${citationPhrase}, include at most one short quote of 20 words or fewer when useful, then paraphrase the idea. Do not only say to refer to pages.`;
   }
 
-  return `- For solving help, method teaching, or passage lookup, use selected uploaded class materials directly: ${citationPhrase}, quote the relevant passage exactly when the student asks to see/pull up/read/copy/quote/recite/identify/locate/restate a specific problem, exercise, question, passage, or page, or only supplies a specific problem/exercise/page/title reference without asking for solving help, then explain or paraphrase only if helpful. For problem-statement lookup, give the problem text but do not solve it or ask for an attempt first. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words.`;
+  return `- For solving help, method teaching, or passage lookup, use selected uploaded class materials directly: ${citationPhrase}, quote the relevant passage exactly when the student asks to see/pull up/read/copy/quote/recite/identify/locate/restate a specific problem, exercise, question, passage, or page, or only supplies a specific problem/exercise/page/title reference without asking for solving help, then explain or paraphrase only if helpful. For problem-statement lookup, give only the problem text in the Problem section, but do not solve it or ask for an attempt first. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words.`;
 }

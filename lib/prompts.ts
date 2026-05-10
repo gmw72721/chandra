@@ -361,7 +361,7 @@ function sourceQuoteInstruction(sourceUsage: SourceUsageSettings) {
     return "- When using textbook/readings/examples, include at most one short quote of 20 words or fewer when useful, then paraphrase the idea.";
   }
 
-  return "- For solving help or method teaching: Do not only point the student to pages. When a student asks to pull up, read, or quote a specific passage from selected uploaded class material, quote the relevant passage exactly with source/page context, then explain or paraphrase it. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words.";
+  return "- For solving help or method teaching: Do not only point the student to pages. When a student asks to pull up, read, or quote a specific passage from selected uploaded class material, quote the relevant passage exactly with source/page context, then explain or paraphrase it. For problem-statement lookup, give only the problem text in the Problem section; do not include location/source context, offers, hints, or commentary in that section. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words.";
 }
 
 function buildResponseFormatInstructions(responseFormat: ResponseFormatSettings) {

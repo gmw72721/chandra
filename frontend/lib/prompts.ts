@@ -362,7 +362,7 @@ function sourceQuoteInstruction(sourceUsage: SourceUsageSettings) {
     return "- When using textbook/readings/examples, include at most one short quote of 20 words or fewer when useful, then paraphrase the idea.";
   }
 
-  return "- For problem or passage lookup from selected class material, quote the visible text exactly with source/page context, then explain or paraphrase only if helpful. For problem-statement lookup, give the text but do not solve it or ask for an attempt first. Do not invent missing words.";
+  return "- For problem or passage lookup from selected class material, quote the visible text exactly with source/page context, then explain or paraphrase only if helpful. For problem-statement lookup, give only the problem text in the Problem section; do not include location/source context, offers, hints, or commentary in that section, and do not solve it or ask for an attempt first. Do not invent missing words.";
 }
 
 function buildResponseFormatInstructions(responseFormat: ResponseFormatSettings) {

@@ -763,6 +763,7 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
                 "When printed_page_start is present, use it as the document page number because it was read from the selected PDF page. "
                 "page_start/page_end are only internal render indexes. "
                 "For task-location answers, use a concise shape like: `That item is Problem/Question N in Section X, on printed page P of Title.` "
+                "When returning a found problem statement, put only the problem text in the `Problem:` section; do not include location/source context, offers, hints, or commentary inside `Problem:`. "
                 "Do not restate long task text the student already supplied unless needed for clarity; use at most one math block when math is involved. "
                 "Use optional labels only when they match the student's intent: `Hint:` for stuck/start requests, "
                 "`Why this works:` for concept/why requests, `Formula:` for formula requests, `Example:` only for similar examples, "
@@ -857,6 +858,7 @@ def final_citation_instruction(source_usage: dict[str, bool]) -> str:
         return (
             "When you give solving help or method teaching, or handle passage lookup, use the selected textbook/readings/examples pages directly. "
             f"If the student asks to pull up, read, or quote a specific selected class-material passage, quote the relevant passage exactly {citation_phrase}, then explain or paraphrase it. "
+            "For problem-statement lookup, give only the problem text in the Problem section; do not include location/source context, offers, hints, or commentary in that section. "
             "Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words."
         )
 
