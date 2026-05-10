@@ -3007,7 +3007,7 @@ export function TeacherClassManager({
     }
 
     if (action.action === "openStudentView") {
-      window.location.assign(selectedClass ? `/student?classId=${selectedClass.id}&preview=teacher` : "/student");
+      window.location.assign(selectedClass ? `/teacher/student-view?classId=${selectedClass.id}` : "/teacher");
     }
   }
 
@@ -3047,7 +3047,7 @@ export function TeacherClassManager({
     { icon: <BookOpenIcon />, id: "knowledge", label: "Tutor" },
     { icon: <ChatIcon />, id: "conversations", label: "Conversations" },
     {
-      href: selectedClass ? `/student?classId=${selectedClass.id}&preview=teacher` : "/student",
+      href: selectedClass ? `/teacher/student-view?classId=${selectedClass.id}` : "/teacher",
       icon: <MonitorIcon />,
       id: "studentView",
       label: "Student View"
@@ -3347,7 +3347,7 @@ export function TeacherClassManager({
                         </button>
                         <Link
                           className="overview-student-view-action"
-                          href={`/student?classId=${selectedClass.id}&preview=teacher`}
+                          href={`/teacher/student-view?classId=${selectedClass.id}`}
                         >
                           <UserIcon />
                           Student view

@@ -58,6 +58,12 @@ export async function GET(request: Request) {
       }
     }
 
+    const uidRosterClassIds = await getRosterClassIdsByUid(decodedToken.uid);
+
+    for (const classId of uidRosterClassIds) {
+      classIds.add(classId);
+    }
+
     const classResults = await Promise.all(Array.from(classIds).map((classId) => getStudentClassSummary(classId)));
     const classes = classResults
       .filter((teacherClass): teacherClass is StudentClassSummary => teacherClass !== null)
@@ -98,6 +104,29 @@ async function getRosterClassIdsByEmail(email: string) {
     return classIds;
   } catch (caughtError) {
     console.warn("Student roster class lookup failed; falling back to profile class ids.", caughtError);
+    return new Set<string>();
+  }
+}
+
+async function getRosterClassIdsByUid(uid: string) {
+  try {
+    const rosterSnapshot = await adminDb!
+      .collectionGroup("students")
+      .where("uid", "==", uid)
+      .get();
+    const classIds = new Set<string>();
+
+    for (const rosterDoc of rosterSnapshot.docs) {
+      const classReference = rosterDoc.ref.parent.parent;
+
+      if (classReference) {
+        classIds.add(classReference.id);
+      }
+    }
+
+    return classIds;
+  } catch (caughtError) {
+    console.warn("Student roster uid lookup failed; falling back to profile class ids.", caughtError);
     return new Set<string>();
   }
 }

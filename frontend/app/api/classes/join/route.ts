@@ -131,7 +131,8 @@ async function updateStudentEnrollment({
     batch.set(adminDb!.collection("classes").doc(nextClassId).collection("students").doc(rosterStudentId), {
       addedAt: FieldValue.serverTimestamp(),
       displayName,
-      email
+      email,
+      uid
     });
   }
 

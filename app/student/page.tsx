@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, Suspense, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -74,7 +74,8 @@ export default function StudentPage() {
   );
 }
 
-function StudentWorkspace() {
+export function StudentWorkspace() {
+  const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
   const { firebaseReady, profile, user } = useAuth();
@@ -93,7 +94,7 @@ function StudentWorkspace() {
   const [conversationSummaries, setConversationSummaries] = useState<StudentConversationSummary[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState("");
   const [selectedConversationClassId, setSelectedConversationClassId] = useState("");
-  const isTeacherPreview = searchParams.get("preview") === "teacher";
+  const isTeacherPreview = pathname.startsWith("/teacher/student-view");
   const queryClassId = searchParams.get("classId");
   const activeCourseId = isTeacherPreview ? queryClassId ?? "" : profile?.classId ?? "";
   const classLoadMessage = classLoadError?.classId === activeCourseId ? classLoadError.message : "";
@@ -105,7 +106,33 @@ function StudentWorkspace() {
   );
 
   useEffect(() => {
-    if (!firebaseReady || !activeCourseId) {
+    if (!firebaseReady || !profile) {
+      return;
+    }
+
+    if (!isTeacherPreview && queryClassId) {
+      router.replace("/student");
+      return;
+    }
+
+    if (profile.role === "teacher" && !isTeacherPreview) {
+      router.replace("/teacher");
+      return;
+    }
+
+    if (profile.role === "student" && isTeacherPreview) {
+      router.replace("/student");
+      return;
+    }
+
+    if (profile.role === "teacher" && isTeacherPreview && !queryClassId) {
+      router.replace("/teacher");
+    }
+  }, [firebaseReady, isTeacherPreview, profile, queryClassId, router]);
+
+  useEffect(() => {
+    if (!firebaseReady || !activeCourseId || !isTeacherPreview) {
+      setSavedClass(null);
       return () => {};
     }
 
@@ -127,7 +154,7 @@ function StudentWorkspace() {
         );
       }
     );
-  }, [activeCourseId, firebaseReady]);
+  }, [activeCourseId, firebaseReady, isTeacherPreview]);
 
   useEffect(() => {
     if (!firebaseReady || !activeCourseId || !user || profile?.role !== "student" || isTeacherPreview) {
