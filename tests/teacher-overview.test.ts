@@ -53,6 +53,22 @@ test("teacher overview review queue excludes reviewed conversations even when so
   assert.doesNotMatch(buildReviewQueueRowsSource, /conversation\.topic\.toLowerCase\(\)\.includes\("off-topic"\)\s*\)/);
 });
 
+test("teacher overview keeps unresolved student feedback in the review queue", () => {
+  const serverSource = source();
+  const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const conversationServerSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
+
+  assert.match(conversationServerSource, /getTeacherFeedbackByConversationId\(classId\)/);
+  assert.match(conversationServerSource, /feedbackSummary: summarizeFeedback\(feedback\)/);
+  assert.match(serverSource, /conversation\.feedbackSummary\.openCount > 0/);
+  assert.match(serverSource, /Student feedback needs review/);
+  assert.match(serverSource, /Read the student note with transcript context/);
+  assert.match(componentSource, /id: "feedback", label: "Feedback"/);
+  assert.match(componentSource, /saveStudentFeedbackReview/);
+  assert.match(componentSource, /Teacher-only feedback note/);
+  assert.match(componentSource, /feedbackSummary\.openCount > 0/);
+});
+
 test("teacher overview uses timezone-aware day keys", () => {
   const serverSource = source();
   const conversationSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");

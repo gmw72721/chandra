@@ -227,12 +227,13 @@ function buildReviewQueueRows(
     }));
 }
 
-function conversationNeedsTeacherReview(conversation: Pick<TeacherConversationReviewSummary, "reviewStatus">) {
+function conversationNeedsTeacherReview(conversation: Pick<TeacherConversationReviewSummary, "feedbackSummary" | "reviewStatus">) {
   return (
     conversation.reviewStatus === "new" ||
     conversation.reviewStatus === "needs_follow_up" ||
     conversation.reviewStatus === "misunderstanding_spotted" ||
-    conversation.reviewStatus === "ai_answer_needs_review"
+    conversation.reviewStatus === "ai_answer_needs_review" ||
+    conversation.feedbackSummary.openCount > 0
   );
 }
 
@@ -1060,6 +1061,10 @@ function formatReviewQueueStatus(conversation: TeacherConversationReviewSummary)
 }
 
 function reviewQueueIssue(conversation: TeacherConversationReviewSummary) {
+  if (conversation.feedbackSummary.openCount > 0) {
+    return "Student feedback needs review";
+  }
+
   if (conversation.sourceAudit.lowSourceConfidence || conversation.learningSignals.lowConfidenceMessageCount > 0) {
     return "Check source accuracy";
   }
@@ -1088,6 +1093,10 @@ function reviewQueueIssue(conversation: TeacherConversationReviewSummary) {
 }
 
 function reviewQueueSourceLabel(conversation: TeacherConversationReviewSummary) {
+  if (conversation.feedbackSummary.openCount > 0) {
+    return `${conversation.feedbackSummary.openCount} open feedback ${conversation.feedbackSummary.openCount === 1 ? "item" : "items"}`;
+  }
+
   const sourceCount = conversation.sourceAudit.sourceCount;
 
   if (sourceCount <= 0) {
@@ -1102,6 +1111,10 @@ function reviewQueueSourceLabel(conversation: TeacherConversationReviewSummary) 
 }
 
 function reviewQueueSuggestedAction(conversation: TeacherConversationReviewSummary) {
+  if (conversation.feedbackSummary.openCount > 0) {
+    return "Read the student note with transcript context.";
+  }
+
   if (
     conversation.sourceAudit.lowSourceConfidence ||
     conversation.learningSignals.lowConfidenceMessageCount > 0 ||
@@ -1122,6 +1135,10 @@ function reviewQueueSuggestedAction(conversation: TeacherConversationReviewSumma
 }
 
 function reviewQueueTone(conversation: TeacherConversationReviewSummary): TeacherOverviewStatusTone {
+  if (conversation.feedbackSummary.openCount > 0) {
+    return "note";
+  }
+
   if (conversation.reviewStatus === "needs_follow_up" || conversation.reviewStatus === "misunderstanding_spotted") {
     return "follow-up";
   }

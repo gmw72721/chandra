@@ -670,6 +670,15 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      match /studentFeedback/{feedbackId} {
+        allow read: if isTargetClassTeacher(classId)
+          || (
+            isStudentInClass(classId)
+            && resource.data.studentId == request.auth.uid
+          );
+        allow write: if false;
+      }
+
       match /conversations/{conversationId} {
         allow get, list: if isTargetClassTeacher(classId)
           || (

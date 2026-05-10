@@ -2,7 +2,3 @@
 
 !backend/
 !backend/**
-!agent/
-!agent/**
-!retrieval/
-!retrieval/**

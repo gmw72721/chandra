@@ -6,6 +6,7 @@ import {
 } from "./learning-strategy-telemetry";
 import type { AuthorizedTutorChatScope } from "./tutor-chat-auth";
 import { associateStudentMessageAttachments } from "./student-attachments-server";
+import { getTeacherFeedbackByConversationId, summarizeFeedback } from "./student-feedback-server";
 import { normalizeStructuredTutorOutput } from "./tutor-response";
 import type {
   ChatMessage,
@@ -13,6 +14,7 @@ import type {
   MessageAttachment,
   RetrievalConfidence,
   StudentConversationSummary,
+  StudentFeedbackSummary,
   StudentRosterActivitySummary,
   TeacherConversationLearningSignalSummary,
   TeacherConversationReview,
@@ -310,9 +312,10 @@ export async function listTeacherClassConversations({
   assertFirebaseAdminAuthReady();
 
   const classReference = adminDb!.collection("classes").doc(classId);
-  const [conversationsSnapshot, reviewsSnapshot] = await Promise.all([
+  const [conversationsSnapshot, reviewsSnapshot, feedbackByConversationId] = await Promise.all([
     classReference.collection("conversations").get(),
-    classReference.collection("conversationReviews").get()
+    classReference.collection("conversationReviews").get(),
+    getTeacherFeedbackByConversationId(classId)
   ]);
   const reviewsByConversationId = new Map(
     reviewsSnapshot.docs.map((reviewDoc) => [reviewDoc.id, reviewDocToTeacherReview(reviewDoc.id, reviewDoc.data())])
@@ -332,10 +335,13 @@ export async function listTeacherClassConversations({
         conversationId: conversationDoc.id,
         teacherId: String(conversation.teacherId ?? "")
       });
+      const feedback = feedbackByConversationId.get(conversationDoc.id) ?? [];
 
       return {
         classId: String(conversation.classId ?? classId),
         conversationId: conversationDoc.id,
+        feedback,
+        feedbackSummary: summarizeFeedback(feedback),
         id: conversationDoc.id,
         lastMessageAt: serializeFirestoreValue(conversation.lastMessageAt),
         latestRetrievalConfidence: sourceAudit.latestRetrievalConfidence,

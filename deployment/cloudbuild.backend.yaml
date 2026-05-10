@@ -13,12 +13,16 @@ steps:
       - docker pull ${_CACHE_IMAGE} || true
 
   - name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
     args:
       - build
       - -f
       - backend/Dockerfile
       - --cache-from
       - ${_CACHE_IMAGE}
+      - --build-arg
+      - BUILDKIT_INLINE_CACHE=1
       - -t
       - ${_IMAGE}
       - -t

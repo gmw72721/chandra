@@ -274,6 +274,15 @@ test("Firestore student material reads honor source visibility", () => {
   assert.match(rules, /isStudentInClass\(classId\) && isStudentVisibleMaterialDocument\(classId, materialId\)/);
 });
 
+test("Firestore student feedback is read-scoped and server-written", () => {
+  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+
+  assert.match(rules, /match \/studentFeedback\/\{feedbackId\}/);
+  assert.match(rules, /allow read: if isTargetClassTeacher\(classId\)/);
+  assert.match(rules, /isStudentInClass\(classId\)\s*&& resource\.data\.studentId == request\.auth\.uid/);
+  assert.match(rules, /match \/studentFeedback\/\{feedbackId\} \{[\s\S]*allow write: if false;/);
+});
+
 test("students load sanitized class summaries instead of full class policy documents", () => {
   const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");

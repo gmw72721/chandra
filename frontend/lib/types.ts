@@ -219,6 +219,49 @@ export type ConversationReviewStatus =
   | "good_learning_moment"
   | "ai_answer_needs_review";
 
+export type StudentFeedbackKind = "general" | "prompted" | "usage_request";
+
+export type StudentFeedbackPromptReason =
+  | "assistant_count"
+  | "confusion_signal"
+  | "low_confidence"
+  | "source_heavy";
+
+export type StudentFeedbackRating = "helpful" | "not_helpful" | "confusing" | "incorrect" | "other";
+
+export type StudentFeedbackStatus = "new" | "reviewed" | "resolved";
+
+export type StudentFeedback = {
+  id: string;
+  classId: string;
+  conversationId: string;
+  messageId?: string | null;
+  studentId: string;
+  studentEmail: string;
+  studentName: string;
+  kind: StudentFeedbackKind;
+  promptReason?: StudentFeedbackPromptReason;
+  rating?: StudentFeedbackRating;
+  comment: string;
+  status: StudentFeedbackStatus;
+  teacherNote?: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+  reviewedAt?: unknown;
+  resolvedAt?: unknown;
+  reviewedBy?: string | null;
+  usageAllowanceDayBucket?: string;
+  usageAllowancePercent?: number;
+};
+
+export type StudentFeedbackSummary = {
+  totalCount: number;
+  openCount: number;
+  latestCreatedAt: unknown;
+  latestRating?: StudentFeedbackRating;
+  latestStatus?: StudentFeedbackStatus;
+};
+
 export type TeacherConversationReview = {
   conversationId: string;
   classId: string;
@@ -271,6 +314,8 @@ export type TeacherConversationReviewSummary = {
   lastMessageAt: unknown;
   topic: string;
   modelId: string;
+  feedback: StudentFeedback[];
+  feedbackSummary: StudentFeedbackSummary;
   learningSignals: TeacherConversationLearningSignalSummary;
   sourceAudit: TeacherConversationSourceAuditSummary;
   latestRetrievalConfidence?: RetrievalConfidence;

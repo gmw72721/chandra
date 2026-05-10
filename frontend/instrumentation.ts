@@ -1,15 +1,17 @@
 import { captureException } from "./lib/observability";
 
 export async function register() {
-  if (process.env.NEXT_RUNTIME !== "nodejs") {
+  const nodeProcess = globalThis.process as typeof process | undefined;
+
+  if (nodeProcess?.env.NEXT_RUNTIME !== "nodejs" || typeof nodeProcess.on !== "function") {
     return;
   }
 
-  process.on("unhandledRejection", (reason) => {
+  nodeProcess.on("unhandledRejection", (reason) => {
     void captureException(reason, { event: "server.unhandled_rejection" });
   });
 
-  process.on("uncaughtException", (error) => {
+  nodeProcess.on("uncaughtException", (error) => {
     void captureException(error, { event: "server.uncaught_exception" });
   });
 }

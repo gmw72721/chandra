@@ -1,5 +1,5 @@
 import { type DocumentReference, type QueryDocumentSnapshot } from "firebase-admin/firestore";
-import { adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
+import { adminDb, adminStorage, assertFirebaseAdminAuthReady } from "./firebase-admin";
 import {
   conversationRetentionCutoffDate,
   isConversationExpiredForRetention
@@ -13,6 +13,8 @@ export {
 
 export type ConversationRetentionResult = {
   classesChecked: number;
+  attachmentsDeleted: number;
+  attachmentFilesDeleted: number;
   conversationsDeleted: number;
   messagesDeleted: number;
 };
@@ -22,6 +24,8 @@ export async function enforceConversationRetention(): Promise<ConversationRetent
 
   const classesSnapshot = await adminDb!.collection("classes").get();
   const result: ConversationRetentionResult = {
+    attachmentsDeleted: 0,
+    attachmentFilesDeleted: 0,
     classesChecked: 0,
     conversationsDeleted: 0,
     messagesDeleted: 0
@@ -47,9 +51,11 @@ export async function enforceConversationRetention(): Promise<ConversationRetent
     });
 
     for (const conversationDoc of expiredConversationDocs) {
-      const deletedMessages = await deleteConversationDocument(conversationDoc);
+      const deletedConversationData = await deleteConversationDocument(conversationDoc);
       result.conversationsDeleted += 1;
-      result.messagesDeleted += deletedMessages;
+      result.attachmentsDeleted += deletedConversationData.attachments;
+      result.attachmentFilesDeleted += deletedConversationData.attachmentFiles;
+      result.messagesDeleted += deletedConversationData.messages;
     }
   }
 
@@ -61,13 +67,36 @@ async function deleteConversationDocument(conversationDoc: QueryDocumentSnapshot
     conversationDoc.ref.collection("messages").get(),
     conversationDoc.ref.collection("attachments").get()
   ]);
+  const attachmentFiles = await deleteAttachmentStorageFiles(attachmentsSnapshot.docs);
+
   await deleteDocumentsInBatches([
     ...messagesSnapshot.docs.map((messageDoc) => messageDoc.ref),
     ...attachmentsSnapshot.docs.map((attachmentDoc) => attachmentDoc.ref),
     conversationDoc.ref
   ]);
 
-  return messagesSnapshot.size;
+  return {
+    attachments: attachmentsSnapshot.size,
+    attachmentFiles,
+    messages: messagesSnapshot.size
+  };
+}
+
+async function deleteAttachmentStorageFiles(attachmentDocs: QueryDocumentSnapshot[]) {
+  if (!adminStorage) {
+    return 0;
+  }
+
+  const bucket = adminStorage.bucket();
+  const storageKeys = Array.from(new Set(attachmentDocs.map((attachmentDoc) =>
+    String(attachmentDoc.data()?.storageKey ?? "").trim()
+  ).filter(Boolean)));
+
+  await Promise.all(storageKeys.map((storageKey) =>
+    bucket.file(storageKey).delete({ ignoreNotFound: true })
+  ));
+
+  return storageKeys.length;
 }
 
 async function deleteDocumentsInBatches(references: DocumentReference[]) {

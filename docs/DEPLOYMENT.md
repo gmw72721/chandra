@@ -72,7 +72,7 @@ Deploy the backend to Cloud Run:
 bash scripts/deploy-backend-cloudrun.sh
 ```
 
-The Cloud Run deploy script defaults to the routine fast path: it uploads only backend build inputs and reuses the previous `:latest` image as the Docker layer cache. For a first deploy, or after changing backend secrets or service permissions, run:
+The Cloud Run deploy script defaults to the routine fast path: it uploads only `backend/`, reuses the previous `:latest` image as the Docker layer cache, and deploys the revision image while the new cache tag is pushed in parallel. For a first deploy, or after changing backend secrets or service permissions, run:
 
 ```bash
 PROVISION_INFRA=1 SYNC_SECRETS=1 bash scripts/deploy-backend-cloudrun.sh

@@ -164,7 +164,12 @@ export async function reserveAiTokenUsage({
   const cleanEstimate = Math.max(1, Math.ceil(estimatedTokens));
   const cleanEstimatedInputTokens = Math.max(0, Math.ceil(estimatedInputTokens ?? cleanEstimate));
   const cleanEstimatedOutputTokens = Math.max(0, Math.ceil(estimatedOutputTokens ?? 0));
-  const limits = normalizeAiTokenLimitSettings(tokenLimits);
+  const limits = await tokenLimitsWithActiveAllowance({
+    classId,
+    now,
+    studentId: quotaUserId,
+    tokenLimits
+  });
   const specs = role === "student" && quotaUserId
     ? tokenBucketSpecs({ classId, ipAddress, now, studentId: quotaUserId, tokenLimits: limits })
     : [];
@@ -480,11 +485,17 @@ export async function getStudentAiUsageStatus(
 ): Promise<StudentAiUsageStatus> {
   assertFirebaseAdminAuthReady();
 
-  const limits = normalizeAiTokenLimitSettings(tokenLimits);
+  const now = new Date();
+  const limits = await tokenLimitsWithActiveAllowance({
+    classId,
+    now,
+    studentId,
+    tokenLimits
+  });
   const specs = tokenBucketSpecs({
     classId,
     ipAddress: "",
-    now: new Date(),
+    now,
     studentId,
     tokenLimits: limits
   }).filter((spec) => spec.scope === "student" && (spec.period === "day" || spec.period === "week"));
@@ -495,6 +506,46 @@ export async function getStudentAiUsageStatus(
   }));
 
   return studentStatusFromBuckets(buckets, 0);
+}
+
+export async function grantStudentAiUsageAllowance({
+  classId,
+  feedbackId,
+  percent,
+  studentId,
+  teacherId
+}: {
+  classId: string;
+  feedbackId?: string;
+  percent: number;
+  studentId: string;
+  teacherId: string;
+}) {
+  assertFirebaseAdminAuthReady();
+
+  const now = new Date();
+  const cleanPercent = normalizeAllowancePercent(percent);
+  const dayBucket = dayBucketKey(now);
+  const allowanceReference = aiUsageAllowanceReference(classId, studentId, dayBucket);
+
+  await allowanceReference.set(
+    compactFirestoreData({
+      classId,
+      createdAt: FieldValue.serverTimestamp(),
+      dayBucket,
+      feedbackId: feedbackId || undefined,
+      percent: cleanPercent,
+      studentId,
+      teacherId,
+      updatedAt: FieldValue.serverTimestamp()
+    }),
+    { merge: true }
+  );
+
+  return {
+    dayBucket,
+    percent: cleanPercent
+  };
 }
 
 export function normalizeAiTokenUsage(value: unknown): AiTokenUsage {
@@ -606,6 +657,46 @@ function percentRemaining(limit: number, usedTokens: number) {
   }
 
   return Math.max(0, Math.min(100, Math.round(((limit - usedTokens) / limit) * 100)));
+}
+
+async function tokenLimitsWithActiveAllowance({
+  classId,
+  now,
+  studentId,
+  tokenLimits
+}: {
+  classId?: string;
+  now: Date;
+  studentId: string;
+  tokenLimits?: Partial<AiTokenLimitSettings> | null;
+}): Promise<AiTokenLimitSettings> {
+  const limits = normalizeAiTokenLimitSettings(tokenLimits);
+
+  if (!classId || !studentId) {
+    return limits;
+  }
+
+  const allowancePercent = await activeAiUsageAllowancePercent(classId, studentId, now);
+
+  if (allowancePercent <= 0) {
+    return limits;
+  }
+
+  return {
+    perDay: applyAllowancePercent(limits.perDay, allowancePercent),
+    perHour: applyAllowancePercent(limits.perHour, allowancePercent),
+    perWeek: applyAllowancePercent(limits.perWeek, allowancePercent)
+  };
+}
+
+async function activeAiUsageAllowancePercent(classId: string, studentId: string, now: Date) {
+  const snapshot = await aiUsageAllowanceReference(classId, studentId, dayBucketKey(now)).get();
+
+  return normalizeAllowancePercent(snapshot.data()?.percent ?? 0);
+}
+
+function applyAllowancePercent(limit: number, percent: number) {
+  return Math.max(1, Math.floor(limit * (1 + percent / 100)));
 }
 
 function tokenBucketSpecs({
@@ -752,6 +843,10 @@ function bucketSpec({
   };
 }
 
+function aiUsageAllowanceReference(classId: string, studentId: string, dayBucket: string) {
+  return adminDb!.collection("aiUsageAllowances").doc(stableHash(`${classId}:${studentId}:${dayBucket}`));
+}
+
 function requestQuotaBucketFromSnapshot(spec: RequestQuotaSpec, data: Record<string, unknown>): RequestQuotaSnapshot {
   return {
     ...spec,
@@ -820,6 +915,16 @@ function stableHash(value: string) {
 function nonnegativeInteger(value: unknown) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : 0;
+}
+
+function normalizeAllowancePercent(value: unknown) {
+  const numeric = Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(500, Math.round(numeric)));
 }
 
 function compactFirestoreData<T extends Record<string, unknown>>(data: T) {

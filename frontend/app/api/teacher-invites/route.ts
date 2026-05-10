@@ -16,12 +16,13 @@ type AuthorizedTeacher = {
 export async function GET(request: Request) {
   try {
     const teacher = await authorizeTeacherInviteRequest(request, "list active invites");
+    const frontendOrigin = publicFrontendOrigin(request);
     const snapshot = await adminDb!
       .collection("teacherInvites")
       .where("createdByUid", "==", teacher.uid)
       .get();
     const invites = snapshot.docs
-      .map((inviteDoc) => inviteDocToResponse(inviteDoc.id, inviteDoc.data()))
+      .map((inviteDoc) => inviteDocToResponse(inviteDoc.id, inviteDoc.data(), frontendOrigin))
       .sort((firstInvite, secondInvite) => secondInvite.createdAt.localeCompare(firstInvite.createdAt));
 
     return NextResponse.json({ invites });
@@ -37,9 +38,7 @@ export async function POST(request: Request) {
     const inviteToken = randomBytes(32).toString("base64url");
     const tokenHash = hashInviteToken(inviteToken);
     const expiresAtDate = new Date(Date.now() + inviteTtlDays * 24 * 60 * 60 * 1000);
-    const inviteUrl = new URL("/auth", publicFrontendOrigin(request));
-    inviteUrl.searchParams.set("role", "teacher");
-    inviteUrl.searchParams.set("teacherInvite", inviteToken);
+    const inviteUrl = buildTeacherInviteUrl(publicFrontendOrigin(request), inviteToken);
 
     await adminDb!.collection("teacherInvites").doc(tokenHash).set({
       createdAt: FieldValue.serverTimestamp(),
@@ -67,7 +66,8 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       expiresAt: expiresAtDate.toISOString(),
-      inviteUrl: inviteUrl.toString()
+      inviteId: tokenHash,
+      inviteUrl
     });
   } catch (caughtError) {
     return teacherInviteErrorResponse(caughtError, "Teacher invite creation failed.");
@@ -170,7 +170,7 @@ function hashInviteToken(inviteToken: string) {
   return createHash("sha256").update(inviteToken).digest("hex");
 }
 
-function inviteDocToResponse(inviteId: string, invite: Record<string, unknown>) {
+function inviteDocToResponse(inviteId: string, invite: Record<string, unknown>, frontendOrigin: string) {
   const expiresAt = invite.expiresAt instanceof Timestamp ? invite.expiresAt.toDate() : null;
   const usedAt = invite.usedAt instanceof Timestamp ? invite.usedAt.toDate() : null;
   const revokedAt = invite.revokedAt instanceof Timestamp ? invite.revokedAt.toDate() : null;
@@ -188,6 +188,7 @@ function inviteDocToResponse(inviteId: string, invite: Record<string, unknown>) 
     createdAt: createdAt?.toISOString() ?? "",
     expiresAt: expiresAt?.toISOString() ?? "",
     inviteId,
+    inviteUrl: status === "active" ? buildTeacherInviteUrl(frontendOrigin, inviteId) : "",
     revokedAt: revokedAt?.toISOString() ?? "",
     status,
     usedAt: usedAt?.toISOString() ?? "",
@@ -232,4 +233,12 @@ function publicFrontendOrigin(request: Request) {
   }
 
   return requestOrigin;
+}
+
+function buildTeacherInviteUrl(frontendOrigin: string, inviteToken: string) {
+  const inviteUrl = new URL("/auth", frontendOrigin);
+  inviteUrl.searchParams.set("role", "teacher");
+  inviteUrl.searchParams.set("teacherInvite", inviteToken);
+
+  return inviteUrl.toString();
 }

@@ -41,6 +41,7 @@ export function AuthForm() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isRepairingProfileRef = useRef(false);
   const { firebaseReady, isLoading, profile, profileError, sessionError, user } = useAuth();
@@ -85,6 +86,7 @@ export function AuthForm() {
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
+    setNotice("");
     setIsSubmitting(true);
 
     try {
@@ -112,13 +114,19 @@ export function AuthForm() {
         await signInWithEmail(email.trim(), password);
       } else {
         const message = await requestPasswordReset(email.trim());
-        setError(message);
+        setNotice(message);
       }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Authentication failed.");
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  function chooseMode(nextMode: AuthMode) {
+    setMode(nextMode);
+    setError("");
+    setNotice("");
   }
 
   if (!firebaseReady) {
@@ -250,23 +258,16 @@ export function AuthForm() {
         <button
           aria-pressed={mode === "signup"}
           type="button"
-          onClick={() => setMode("signup")}
+          onClick={() => chooseMode("signup")}
         >
           Sign up
         </button>
         <button
           aria-pressed={mode === "signin"}
           type="button"
-          onClick={() => setMode("signin")}
+          onClick={() => chooseMode("signin")}
         >
           Sign in
-        </button>
-        <button
-          aria-pressed={mode === "reset"}
-          type="button"
-          onClick={() => setMode("reset")}
-        >
-          Reset
         </button>
       </div>
 
@@ -357,7 +358,26 @@ export function AuthForm() {
           </>
         ) : null}
 
+        {mode === "signin" ? (
+          <div className="auth-inline-action">
+            <span>Forgot your password?</span>
+            <button type="button" onClick={() => chooseMode("reset")}>
+              Reset it
+            </button>
+          </div>
+        ) : null}
+
+        {mode === "reset" ? (
+          <div className="auth-inline-action">
+            <span>Know your password?</span>
+            <button type="button" onClick={() => chooseMode("signin")}>
+              Sign in
+            </button>
+          </div>
+        ) : null}
+
         {error ? <p className="form-error">{error}</p> : null}
+        {notice ? <p className="form-notice">{notice}</p> : null}
 
         <button className="primary-button" disabled={isSubmitting} type="submit">
           {isSubmitting

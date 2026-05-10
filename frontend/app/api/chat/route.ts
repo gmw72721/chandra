@@ -883,6 +883,10 @@ function studentChatErrorPayload(error: ReportedStudentChatError) {
 }
 
 function studentChatErrorMessage(error: ReportedStudentChatError) {
+  if (error.code === "CHAT_AI_USAGE_EXHAUSTED") {
+    return error.studentMessage;
+  }
+
   return `${error.studentMessage} Code: ${error.code}. Reference: ${error.errorId}.`;
 }
 
@@ -921,7 +925,7 @@ function studentMessageForChatError(code: StudentChatErrorCode) {
     case "CHAT_REQUEST_INVALID":
       return "I could not send that message. Refresh the page and try again.";
     case "CHAT_AI_USAGE_EXHAUSTED":
-      return "You are out of AI usage for now. Try again when your usage refreshes.";
+      return "Sorry, you have used your daily or weekly Chandra limit today. Ask your professor to allow more usage for today.";
     case "TUTOR_BACKEND_REQUEST_TOO_LARGE":
       return "This chat is too large to send. Start a new chat and try again.";
     case "TUTOR_BACKEND_UNREACHABLE":

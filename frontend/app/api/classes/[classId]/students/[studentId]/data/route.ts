@@ -1,7 +1,7 @@
-import { type DocumentReference } from "firebase-admin/firestore";
+import { type DocumentReference, type QueryDocumentSnapshot } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
-import { adminDb } from "@/lib/firebase-admin";
+import { adminDb, adminStorage } from "@/lib/firebase-admin";
 import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
@@ -82,30 +82,27 @@ async function buildStudentClassDataExport({
   classId: string;
   encodedStudentId: string;
 }) {
-  const studentEmail = decodeURIComponent(encodedStudentId).trim().toLowerCase();
   const classRef = adminDb!.collection("classes").doc(classId);
-  const rosterRef = classRef.collection("students").doc(encodeURIComponent(studentEmail));
-  const [classSnapshot, rosterSnapshot, supportSnapshot, profileSnapshot, conversationsSnapshot] = await Promise.all([
+  const identity = await resolveStudentClassIdentity({ classId, encodedStudentId });
+  const [classSnapshot, rosterDocs, supportDocs, profileDocs, conversationsSnapshot] = await Promise.all([
     classRef.get(),
-    rosterRef.get(),
-    classRef.collection("studentSupport").doc(encodeURIComponent(studentEmail)).get(),
-    classRef.collection("studentLearningProfiles").doc(encodeURIComponent(studentEmail)).get(),
-    classRef.collection("conversations").where("studentEmail", "==", studentEmail).get()
+    getStudentRosterDocs({ classId, identity }),
+    getStudentScopedDocs({ classId, collectionName: "studentSupport", identity }),
+    getStudentScopedDocs({ classId, collectionName: "studentLearningProfiles", identity }),
+    getStudentConversationDocs({ classId, identity })
   ]);
-  const roster = rosterSnapshot.data() ?? {};
-  const studentUid = String(roster.uid ?? roster.studentId ?? "");
-  const studentIdConversationSnapshot = studentUid
-    ? await classRef.collection("conversations").where("studentId", "==", studentUid).get()
-    : null;
-  const conversationDocs = dedupeDocs([
-    ...conversationsSnapshot.docs,
-    ...(studentIdConversationSnapshot?.docs ?? [])
-  ]);
+  const rosterSnapshot = rosterDocs[0] ?? null;
+  const roster = rosterSnapshot?.data() ?? {};
   const conversations = await Promise.all(
-    conversationDocs.map(async (conversationDoc) => {
-      const messagesSnapshot = await conversationDoc.ref.collection("messages").orderBy("createdAt").get().catch(() =>
-        conversationDoc.ref.collection("messages").get()
-      );
+    conversationsSnapshot.map(async (conversationDoc) => {
+      const [messagesSnapshot, attachmentsSnapshot] = await Promise.all([
+        conversationDoc.ref.collection("messages").orderBy("createdAt").get().catch(() =>
+          conversationDoc.ref.collection("messages").get()
+        ),
+        conversationDoc.ref.collection("attachments").orderBy("createdAt").get().catch(() =>
+          conversationDoc.ref.collection("attachments").get()
+        )
+      ]);
 
       return {
         id: conversationDoc.id,
@@ -113,6 +110,10 @@ async function buildStudentClassDataExport({
         messages: messagesSnapshot.docs.map((messageDoc) => ({
           id: messageDoc.id,
           ...serializeFirestoreData(messageDoc.data())
+        })),
+        attachments: attachmentsSnapshot.docs.map((attachmentDoc) => ({
+          id: attachmentDoc.id,
+          ...serializeFirestoreData(attachmentDoc.data())
         }))
       };
     })
@@ -126,16 +127,18 @@ async function buildStudentClassDataExport({
       section: String(classSnapshot.data()?.section ?? "")
     },
     student: {
-      id: rosterSnapshot.id,
+      id: rosterSnapshot?.id ?? identity.requestedId,
       ...serializeFirestoreData(roster)
     },
     conversations,
-    learningProfile: profileSnapshot.exists
-      ? { id: profileSnapshot.id, ...serializeFirestoreData(profileSnapshot.data() ?? {}) }
-      : null,
-    supportNotes: supportSnapshot.exists
-      ? { id: supportSnapshot.id, ...serializeFirestoreData(supportSnapshot.data() ?? {}) }
-      : null
+    learningProfiles: profileDocs.map((profileDoc) => ({
+      id: profileDoc.id,
+      ...serializeFirestoreData(profileDoc.data() ?? {})
+    })),
+    supportNotes: supportDocs.map((supportDoc) => ({
+      id: supportDoc.id,
+      ...serializeFirestoreData(supportDoc.data() ?? {})
+    }))
   };
 }
 
@@ -146,42 +149,293 @@ async function deleteStudentClassData({
   classId: string;
   encodedStudentId: string;
 }) {
-  const studentEmail = decodeURIComponent(encodedStudentId).trim().toLowerCase();
-  const classRef = adminDb!.collection("classes").doc(classId);
-  const rosterRef = classRef.collection("students").doc(encodeURIComponent(studentEmail));
-  const rosterSnapshot = await rosterRef.get();
-  const roster = rosterSnapshot.data() ?? {};
-  const studentUid = String(roster.uid ?? roster.studentId ?? "");
-  const emailConversationsSnapshot = await classRef.collection("conversations").where("studentEmail", "==", studentEmail).get();
-  const uidConversationsSnapshot = studentUid
-    ? await classRef.collection("conversations").where("studentId", "==", studentUid).get()
-    : null;
-  const conversationDocs = dedupeDocs([
-    ...emailConversationsSnapshot.docs,
-    ...(uidConversationsSnapshot?.docs ?? [])
+  const identity = await resolveStudentClassIdentity({ classId, encodedStudentId });
+  const conversationDocs = await getStudentConversationDocs({ classId, identity });
+
+  collectConversationIdentity(identity, conversationDocs);
+
+  const [rosterDocs, profileDocs, supportDocs, aiUsageReservationDocs, aiUsageEventDocs] = await Promise.all([
+    getStudentRosterDocs({ classId, identity }),
+    getStudentScopedDocs({ classId, collectionName: "studentLearningProfiles", identity }),
+    getStudentScopedDocs({ classId, collectionName: "studentSupport", identity }),
+    getAiUsageDocs({ classId, collectionName: "aiUsageReservations", identity, studentField: "studentId" }),
+    getAiUsageDocs({ classId, collectionName: "aiUsageEvents", identity, studentField: "userId" })
   ]);
   let messageCount = 0;
+  let attachmentCount = 0;
+  let attachmentFileCount = 0;
 
   for (const conversationDoc of conversationDocs) {
-    const messageSnapshot = await conversationDoc.ref.collection("messages").get();
-    messageCount += messageSnapshot.size;
-    await deleteDocumentsInBatches(messageSnapshot.docs.map((messageDoc) => messageDoc.ref));
+    const deletedConversationData = await deleteConversationDocument(conversationDoc);
+    messageCount += deletedConversationData.messages;
+    attachmentCount += deletedConversationData.attachments;
+    attachmentFileCount += deletedConversationData.attachmentFiles;
   }
 
   await deleteDocumentsInBatches([
-    ...conversationDocs.map((conversationDoc) => conversationDoc.ref),
-    classRef.collection("studentLearningProfiles").doc(encodeURIComponent(studentEmail)),
-    classRef.collection("studentSupport").doc(encodeURIComponent(studentEmail)),
-    rosterRef
+    ...profileDocs.map((profileDoc) => profileDoc.ref),
+    ...supportDocs.map((supportDoc) => supportDoc.ref),
+    ...rosterDocs.map((rosterDoc) => rosterDoc.ref),
+    ...aiUsageReservationDocs.map((usageDoc) => usageDoc.ref),
+    ...aiUsageEventDocs.map((usageDoc) => usageDoc.ref)
   ]);
 
   return {
     conversations: conversationDocs.length,
     messages: messageCount,
-    profile: 1,
-    roster: rosterSnapshot.exists ? 1 : 0,
-    supportNotes: 1
+    attachments: attachmentCount,
+    attachmentFiles: attachmentFileCount,
+    profiles: profileDocs.length,
+    roster: rosterDocs.length,
+    supportNotes: supportDocs.length,
+    aiUsageEvents: aiUsageEventDocs.length,
+    aiUsageReservations: aiUsageReservationDocs.length
   };
+}
+
+type StudentClassIdentity = {
+  requestedId: string;
+  emails: Set<string>;
+  uids: Set<string>;
+};
+
+async function resolveStudentClassIdentity({
+  classId,
+  encodedStudentId
+}: {
+  classId: string;
+  encodedStudentId: string;
+}): Promise<StudentClassIdentity> {
+  const requestedId = decodeURIComponent(encodedStudentId).trim();
+  const identity: StudentClassIdentity = {
+    requestedId,
+    emails: new Set(),
+    uids: new Set()
+  };
+  addStudentIdentifier(identity, requestedId);
+
+  await collectUserIdentity(identity);
+  collectRosterIdentity(identity, await getStudentRosterDocs({ classId, identity }));
+  await collectUserIdentity(identity);
+
+  return identity;
+}
+
+function addStudentIdentifier(identity: StudentClassIdentity, value: unknown) {
+  const cleanValue = String(value ?? "").trim();
+
+  if (!cleanValue) {
+    return;
+  }
+
+  if (cleanValue.includes("@")) {
+    identity.emails.add(cleanValue.toLowerCase());
+    return;
+  }
+
+  identity.uids.add(cleanValue);
+}
+
+async function collectUserIdentity(identity: StudentClassIdentity) {
+  const uidCandidates = Array.from(identity.uids);
+  const emailCandidates = Array.from(identity.emails);
+
+  for (const uid of uidCandidates) {
+    const userSnapshot = await adminDb!.collection("users").doc(uid).get();
+
+    if (!userSnapshot.exists) {
+      continue;
+    }
+
+    const user = userSnapshot.data() ?? {};
+    identity.uids.add(userSnapshot.id);
+    addStudentIdentifier(identity, user.email);
+    addStudentIdentifier(identity, user.uid);
+  }
+
+  for (const email of emailCandidates) {
+    const usersSnapshot = await adminDb!.collection("users").where("email", "==", email).get();
+
+    usersSnapshot.docs.forEach((userDoc) => {
+      const user = userDoc.data() ?? {};
+      identity.uids.add(userDoc.id);
+      addStudentIdentifier(identity, user.email);
+      addStudentIdentifier(identity, user.uid);
+    });
+  }
+}
+
+function collectRosterIdentity(identity: StudentClassIdentity, rosterDocs: QueryDocumentSnapshot[]) {
+  rosterDocs.forEach((rosterDoc) => {
+    const roster = rosterDoc.data() ?? {};
+
+    addStudentIdentifier(identity, decodeURIComponent(rosterDoc.id));
+    addStudentIdentifier(identity, roster.email);
+    addStudentIdentifier(identity, roster.uid);
+    addStudentIdentifier(identity, roster.studentId);
+  });
+}
+
+function collectConversationIdentity(identity: StudentClassIdentity, conversationDocs: QueryDocumentSnapshot[]) {
+  conversationDocs.forEach((conversationDoc) => {
+    const conversation = conversationDoc.data() ?? {};
+
+    addStudentIdentifier(identity, conversation.studentEmail);
+    addStudentIdentifier(identity, conversation.studentId);
+  });
+}
+
+async function getStudentRosterDocs({
+  classId,
+  identity
+}: {
+  classId: string;
+  identity: StudentClassIdentity;
+}) {
+  const studentsRef = adminDb!.collection("classes").doc(classId).collection("students");
+  const rosterDocs: QueryDocumentSnapshot[] = [];
+  const directIds = new Set([
+    ...Array.from(identity.emails).map((email) => encodeURIComponent(email)),
+    ...Array.from(identity.uids).map((uid) => encodeURIComponent(uid))
+  ]);
+
+  for (const directId of directIds) {
+    const snapshot = await studentsRef.doc(directId).get();
+
+    if (snapshot.exists) {
+      rosterDocs.push(snapshot as QueryDocumentSnapshot);
+    }
+  }
+
+  for (const email of identity.emails) {
+    rosterDocs.push(...(await studentsRef.where("email", "==", email).get()).docs);
+  }
+
+  for (const uid of identity.uids) {
+    rosterDocs.push(...(await studentsRef.where("uid", "==", uid).get()).docs);
+    rosterDocs.push(...(await studentsRef.where("studentId", "==", uid).get()).docs);
+  }
+
+  return dedupeDocs(rosterDocs);
+}
+
+async function getStudentScopedDocs({
+  classId,
+  collectionName,
+  identity
+}: {
+  classId: string;
+  collectionName: "studentLearningProfiles" | "studentSupport";
+  identity: StudentClassIdentity;
+}) {
+  const collectionRef = adminDb!.collection("classes").doc(classId).collection(collectionName);
+  const docs: QueryDocumentSnapshot[] = [];
+  const directIds = new Set([
+    ...Array.from(identity.emails).map((email) => encodeURIComponent(email)),
+    ...Array.from(identity.uids).map((uid) => encodeURIComponent(uid))
+  ]);
+
+  for (const directId of directIds) {
+    const snapshot = await collectionRef.doc(directId).get();
+
+    if (snapshot.exists) {
+      docs.push(snapshot as QueryDocumentSnapshot);
+    }
+  }
+
+  for (const email of identity.emails) {
+    docs.push(...(await collectionRef.where("studentEmail", "==", email).get()).docs);
+  }
+
+  for (const uid of identity.uids) {
+    docs.push(...(await collectionRef.where("studentId", "==", uid).get()).docs);
+  }
+
+  return dedupeDocs(docs);
+}
+
+async function getStudentConversationDocs({
+  classId,
+  identity
+}: {
+  classId: string;
+  identity: StudentClassIdentity;
+}) {
+  const conversationsRef = adminDb!.collection("classes").doc(classId).collection("conversations");
+  const docs: QueryDocumentSnapshot[] = [];
+
+  for (const email of identity.emails) {
+    docs.push(...(await conversationsRef.where("studentEmail", "==", email).get()).docs);
+  }
+
+  for (const uid of identity.uids) {
+    docs.push(...(await conversationsRef.where("studentId", "==", uid).get()).docs);
+  }
+
+  return dedupeDocs(docs);
+}
+
+async function getAiUsageDocs({
+  classId,
+  collectionName,
+  identity,
+  studentField
+}: {
+  classId: string;
+  collectionName: "aiUsageEvents" | "aiUsageReservations";
+  identity: StudentClassIdentity;
+  studentField: "studentId" | "userId";
+}) {
+  const docs: QueryDocumentSnapshot[] = [];
+
+  for (const uid of identity.uids) {
+    docs.push(
+      ...(await adminDb!
+        .collection(collectionName)
+        .where("classId", "==", classId)
+        .where(studentField, "==", uid)
+        .get()).docs
+    );
+  }
+
+  return dedupeDocs(docs);
+}
+
+async function deleteConversationDocument(conversationDoc: QueryDocumentSnapshot) {
+  const [messagesSnapshot, attachmentsSnapshot] = await Promise.all([
+    conversationDoc.ref.collection("messages").get(),
+    conversationDoc.ref.collection("attachments").get()
+  ]);
+  const attachmentFiles = await deleteAttachmentStorageFiles(attachmentsSnapshot.docs);
+
+  await deleteDocumentsInBatches([
+    ...messagesSnapshot.docs.map((messageDoc) => messageDoc.ref),
+    ...attachmentsSnapshot.docs.map((attachmentDoc) => attachmentDoc.ref),
+    conversationDoc.ref
+  ]);
+
+  return {
+    attachments: attachmentsSnapshot.size,
+    attachmentFiles,
+    messages: messagesSnapshot.size
+  };
+}
+
+async function deleteAttachmentStorageFiles(attachmentDocs: QueryDocumentSnapshot[]) {
+  if (!adminStorage) {
+    return 0;
+  }
+
+  const bucket = adminStorage.bucket();
+  const storageKeys = Array.from(new Set(attachmentDocs.map((attachmentDoc) =>
+    String(attachmentDoc.data()?.storageKey ?? "").trim()
+  ).filter(Boolean)));
+
+  await Promise.all(storageKeys.map((storageKey) =>
+    bucket.file(storageKey).delete({ ignoreNotFound: true })
+  ));
+
+  return storageKeys.length;
 }
 
 async function deleteDocumentsInBatches(references: DocumentReference[]) {

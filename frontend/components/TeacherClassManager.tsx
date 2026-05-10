@@ -83,6 +83,9 @@ import type {
   ChatMessage,
   ConversationReviewStatus,
   StudentConversationSummary,
+  StudentFeedback,
+  StudentFeedbackStatus,
+  StudentFeedbackSummary,
   StudentLearningProfileDocument,
   StudentRosterActivitySummary,
   TeacherClassOverview,
@@ -130,6 +133,7 @@ type ConversationFilter =
   | "needsFollowUp"
   | "offTopic"
   | "lowConfidence"
+  | "feedback"
   | "reviewed";
 type RosterConversationPreview = {
   id: string;
@@ -139,6 +143,8 @@ type RosterConversationPreview = {
   title: string;
 };
 type ConversationReviewRow = {
+  feedback: StudentFeedback[];
+  feedbackSummary: StudentFeedbackSummary;
   id: string;
   lastMessageAt: unknown;
   lastMessageLabel: string;
@@ -201,12 +207,16 @@ type RetrievalTestResult = {
   title: string;
 };
 
+type TeacherInviteStatus = "active" | "expired" | "revoked" | "used";
+type TeacherInviteFilter = "all" | TeacherInviteStatus;
+
 type TeacherInviteSummary = {
   createdAt: string;
   expiresAt: string;
   inviteId: string;
+  inviteUrl: string;
   revokedAt: string;
-  status: "active" | "expired" | "revoked" | "used";
+  status: TeacherInviteStatus;
   usedAt: string;
   usedByEmail: string;
   usedByUid: string;
@@ -275,7 +285,7 @@ const settingsPanes: Array<{
     description: "Teacher invite links",
     icon: <LinkIcon />,
     id: "invites",
-    label: "Invites"
+    label: "Teacher Invites"
   },
   {
     description: "Name and login",
@@ -469,6 +479,20 @@ const conversationStatusLabels: Record<ConversationReviewStatus, string> = {
   new: "New",
   reviewed: "Reviewed"
 };
+const teacherInviteFilterOptions: Array<{ id: TeacherInviteFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "active", label: "Active" },
+  { id: "used", label: "Used" },
+  { id: "expired", label: "Expired" },
+  { id: "revoked", label: "Revoked" }
+];
+const teacherInviteEmptyMessages: Record<TeacherInviteFilter, string> = {
+  active: "No active invite links.",
+  all: "No teacher invites yet.",
+  expired: "No expired invites.",
+  revoked: "No revoked invites.",
+  used: "No used invites yet."
+};
 
 export function TeacherClassManager({
   studentProfileRoute
@@ -557,8 +581,11 @@ export function TeacherClassManager({
   const [isProfessorReviewOpen, setIsProfessorReviewOpen] = useState(false);
   const [teacherNotesByStudentId, setTeacherNotesByStudentId] = useState<Record<string, string>>({});
   const [conversationNotesById, setConversationNotesById] = useState<Record<string, string>>({});
+  const [feedbackTeacherNotesById, setFeedbackTeacherNotesById] = useState<Record<string, string>>({});
+  const [feedbackUsageAllowanceById, setFeedbackUsageAllowanceById] = useState<Record<string, string>>({});
   const [savingNotesStudentId, setSavingNotesStudentId] = useState("");
   const [savingReviewConversationId, setSavingReviewConversationId] = useState("");
+  const [savingFeedbackId, setSavingFeedbackId] = useState("");
   const [reviewSaveMessage, setReviewSaveMessage] = useState("");
   const [highlightedNoteConversationId, setHighlightedNoteConversationId] = useState("");
   const [expandedSourceConversationId, setExpandedSourceConversationId] = useState("");
@@ -573,10 +600,12 @@ export function TeacherClassManager({
   const [fileInputKey, setFileInputKey] = useState(0);
   const [error, setError] = useState("");
   const [conversationError, setConversationError] = useState("");
-  const [teacherInviteUrl, setTeacherInviteUrl] = useState("");
-  const [teacherInviteExpiresAt, setTeacherInviteExpiresAt] = useState("");
-  const [teacherInviteCopyStatus, setTeacherInviteCopyStatus] = useState<"" | "copied" | "failed">("");
   const [teacherInvites, setTeacherInvites] = useState<TeacherInviteSummary[]>([]);
+  const [teacherInviteFilter, setTeacherInviteFilter] = useState<TeacherInviteFilter>("all");
+  const [teacherInviteCopyResult, setTeacherInviteCopyResult] = useState<{
+    inviteId: string;
+    status: "copied" | "failed";
+  } | null>(null);
   const [teacherInvitesMessage, setTeacherInvitesMessage] = useState("");
   const [revokingTeacherInviteId, setRevokingTeacherInviteId] = useState("");
   const [classInviteCopyResult, setClassInviteCopyResult] = useState<{
@@ -604,6 +633,14 @@ export function TeacherClassManager({
   const [materialDetailError, setMaterialDetailError] = useState("");
   const [deletingMaterialId, setDeletingMaterialId] = useState("");
   const isLoadingClasses = Boolean(user && loadedTeacherId !== user.uid);
+  const filteredTeacherInvites = useMemo(
+    () =>
+      teacherInviteFilter === "all"
+        ? teacherInvites
+        : teacherInvites.filter((invite) => invite.status === teacherInviteFilter),
+    [teacherInviteFilter, teacherInvites]
+  );
+  const teacherInviteEmptyMessage = teacherInviteEmptyMessages[teacherInviteFilter];
 
   useEffect(() => {
     if (!user) {
@@ -1599,7 +1636,7 @@ export function TeacherClassManager({
     }
 
     setError("");
-    setTeacherInviteCopyStatus("");
+    setTeacherInviteCopyResult(null);
     setIsCreatingTeacherInvite(true);
 
     try {
@@ -1613,22 +1650,22 @@ export function TeacherClassManager({
       const data = (await response.json()) as {
         error?: string;
         expiresAt?: string;
+        inviteId?: string;
         inviteUrl?: string;
       };
 
-      if (!response.ok || !data.inviteUrl) {
+      if (!response.ok || !data.inviteId || !data.inviteUrl) {
         throw new Error(data.error ?? "Teacher invite creation failed.");
       }
 
-      setTeacherInviteUrl(data.inviteUrl);
-      setTeacherInviteExpiresAt(data.expiresAt ?? "");
+      setTeacherInviteFilter("active");
       await loadTeacherInvites();
 
       try {
         await copyTextToClipboard(data.inviteUrl);
-        setTeacherInviteCopyStatus("copied");
+        setTeacherInviteCopyResult({ inviteId: data.inviteId, status: "copied" });
       } catch {
-        setTeacherInviteCopyStatus("failed");
+        setTeacherInviteCopyResult({ inviteId: data.inviteId, status: "failed" });
       }
     } catch (caughtError) {
       setError(formatClassError(caughtError, "Teacher invite creation failed."));
@@ -1663,7 +1700,9 @@ export function TeacherClassManager({
 
       setTeacherInvites((currentInvites) =>
         currentInvites.map((invite) =>
-          invite.inviteId === inviteId ? { ...invite, revokedAt: new Date().toISOString(), status: "revoked" } : invite
+          invite.inviteId === inviteId
+            ? { ...invite, inviteUrl: "", revokedAt: new Date().toISOString(), status: "revoked" }
+            : invite
         )
       );
       setTeacherInvitesMessage("Teacher invite revoked.");
@@ -1682,16 +1721,29 @@ export function TeacherClassManager({
     void Promise.resolve().then(loadTeacherInvites);
   }, [activeSettingsPane, loadTeacherInvites, user]);
 
-  async function copyTeacherInviteLink() {
-    if (!teacherInviteUrl) {
+  useEffect(() => {
+    if (!teacherInviteCopyResult) {
       return;
     }
 
+    const timeoutId = window.setTimeout(() => {
+      setTeacherInviteCopyResult(null);
+    }, 1800);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [teacherInviteCopyResult]);
+
+  async function copyTeacherInviteLink(invite: TeacherInviteSummary) {
+    const inviteUrl = invite.inviteUrl || buildTeacherInviteUrl(invite.inviteId);
+
+    setTeacherInvitesMessage("");
+    setTeacherInviteCopyResult(null);
+
     try {
-      await copyTextToClipboard(teacherInviteUrl);
-      setTeacherInviteCopyStatus("copied");
+      await copyTextToClipboard(inviteUrl);
+      setTeacherInviteCopyResult({ inviteId: invite.inviteId, status: "copied" });
     } catch {
-      setTeacherInviteCopyStatus("failed");
+      setTeacherInviteCopyResult({ inviteId: invite.inviteId, status: "failed" });
     }
   }
 
@@ -1711,12 +1763,14 @@ export function TeacherClassManager({
     }
   }
 
-  async function resetSelectedClassInviteCode() {
-    if (!activeClassId || !user) {
+  async function resetClassInviteCode(teacherClass: TeacherClass) {
+    if (!teacherClass.id || !user) {
       return;
     }
 
-    const confirmed = window.confirm("Reset the student class invite code? Existing student invite links using the old code will stop working.");
+    const confirmed = window.confirm(
+      `Reset the student class invite code for ${teacherClass.name}? Existing student invite links using the old code will stop working.`
+    );
 
     if (!confirmed) {
       return;
@@ -1724,11 +1778,11 @@ export function TeacherClassManager({
 
     setError("");
     setClassAccessMessage("");
-    setSavingClassAccessAction("reset-code");
+    setSavingClassAccessAction(`reset-code:${teacherClass.id}`);
 
     try {
       const token = await user.getIdToken();
-      const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/invite-code`), {
+      const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(teacherClass.id)}/invite-code`), {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`
@@ -1740,7 +1794,7 @@ export function TeacherClassManager({
         throw new Error(data.error ?? "Class invite code reset failed.");
       }
 
-      setClassAccessMessage(`Class invite code reset to ${data.joinCode}.`);
+      setClassAccessMessage(`${teacherClass.name} invite code reset to ${data.joinCode}.`);
     } catch (caughtError) {
       setError(formatClassError(caughtError, "Class invite code reset failed."));
     } finally {
@@ -1906,7 +1960,7 @@ export function TeacherClassManager({
       return;
     }
 
-    const confirmed = window.confirm(`Delete class data for ${student.displayName || student.email}? This removes the roster row, conversations, messages, learning profile, and support notes for this class.`);
+    const confirmed = window.confirm(`Delete all class data for ${student.displayName || student.email}? This removes the roster row, conversations, messages, attachments, learning profiles, support notes, and class usage records for this student.`);
 
     if (!confirmed) {
       return;
@@ -2301,6 +2355,101 @@ export function TeacherClassManager({
       setError(formatClassError(caughtError, "Conversation review save failed."));
     } finally {
       setSavingReviewConversationId("");
+    }
+  }
+
+  async function saveStudentFeedbackReview(feedback: StudentFeedback, status: StudentFeedbackStatus) {
+    if (!activeClassId || !user || savingFeedbackId) {
+      return;
+    }
+
+    const teacherNote = feedbackTeacherNotesById[feedback.id] ?? feedback.teacherNote ?? "";
+    const rawUsageAllowancePercent = Number(
+      feedbackUsageAllowanceById[feedback.id] ?? feedback.usageAllowancePercent ?? 25
+    );
+    const usageAllowancePercent =
+      feedback.kind === "usage_request"
+        ? Number.isFinite(rawUsageAllowancePercent) && rawUsageAllowancePercent > 0
+          ? rawUsageAllowancePercent
+          : 25
+        : undefined;
+
+    setSavingFeedbackId(feedback.id);
+    setReviewSaveMessage(
+      feedback.kind === "usage_request" && status === "resolved"
+        ? "Approving usage request..."
+        : status === "resolved"
+          ? "Resolving feedback..."
+          : "Marking feedback reviewed..."
+    );
+    setError("");
+
+    try {
+      const token = await getTeacherToken();
+      const response = await fetch(
+        apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/feedback/${encodeURIComponent(feedback.id)}`),
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            status,
+            teacherNote,
+            usageAllowancePercent
+          })
+        }
+      );
+      const data = (await response.json()) as {
+        error?: string;
+        feedback?: StudentFeedback;
+      };
+
+      if (!response.ok || !data.feedback) {
+        throw new Error(data.error ?? "Feedback update failed.");
+      }
+
+      const savedFeedback = data.feedback;
+      setClassConversations((currentConversations) =>
+        currentConversations.map((conversation) => {
+          if (conversation.id !== savedFeedback.conversationId) {
+            return conversation;
+          }
+
+          const feedback = conversation.feedback.map((item) =>
+            item.id === savedFeedback.id ? savedFeedback : item
+          );
+
+          return {
+            ...conversation,
+            feedback,
+            feedbackSummary: summarizeStudentFeedback(feedback)
+          };
+        })
+      );
+      setFeedbackTeacherNotesById((currentNotes) => ({
+        ...currentNotes,
+        [savedFeedback.id]: savedFeedback.teacherNote ?? ""
+      }));
+      setFeedbackUsageAllowanceById((currentAllowances) => ({
+        ...currentAllowances,
+        [savedFeedback.id]: String(savedFeedback.usageAllowancePercent || usageAllowancePercent || 25)
+      }));
+      setClassOverview(null);
+      setClassConversationMetrics(null);
+      setReviewSaveMessage(
+        savedFeedback.kind === "usage_request" && savedFeedback.usageAllowancePercent
+          ? `Usage request approved: +${savedFeedback.usageAllowancePercent}% today`
+          : status === "resolved"
+            ? "Feedback resolved"
+            : "Feedback reviewed"
+      );
+    } catch (caughtError) {
+      setReviewSaveMessage("");
+      setError(formatClassError(caughtError, "Feedback update failed."));
+    } finally {
+      setSavingFeedbackId("");
     }
   }
 
@@ -2914,6 +3063,7 @@ export function TeacherClassManager({
   }> = [
     { count: conversationMetrics.unreviewed, icon: <StrugglingTopicsIcon />, id: "all", label: "Needs Review" },
     { count: conversationMetrics.followUp, icon: <FlagIcon />, id: "needsFollowUp", label: "Follow-Ups" },
+    { count: conversationReviewRows.reduce((sum, row) => sum + row.feedbackSummary.openCount, 0), icon: <ChatIcon />, id: "feedback", label: "Feedback" },
     { icon: <CheckCircleIcon />, id: "reviewed", label: "Reviewed" },
     { icon: <UserGroupIcon />, id: "students", label: "Students" }
   ];
@@ -3466,29 +3616,80 @@ export function TeacherClassManager({
 
                         <div className="settings-pane" hidden={activeSettingsPane !== "classAccess"}>
                           <section className="settings-group settings-class-access-card" aria-labelledby="settings-class-access">
-                            <h3 id="settings-class-access">Class Access</h3>
-                            <p>Manage the student invite code and teacher access for this class.</p>
-                            <div className="class-invite-row">
-                              <div className="class-invite-details">
-                                <strong>{selectedClass.name}</strong>
-                                <span>{formatSectionLabel(selectedClass.section)}</span>
-                              </div>
-                              <div className="class-invite-code" aria-label={`${selectedClass.name} class code`}>
-                                <span>Class code</span>
-                                <code>{selectedClass.joinCode?.trim() || selectedClass.id}</code>
-                              </div>
-                              <div className="class-invite-actions">
-                                <button
-                                  className="teacher-action-button"
-                                  disabled={savingClassAccessAction === "reset-code"}
-                                  type="button"
-                                  onClick={() => void resetSelectedClassInviteCode()}
-                                >
-                                  <RefreshIcon />
-                                  {savingClassAccessAction === "reset-code" ? "Resetting" : "Reset class invite code"}
-                                </button>
-                              </div>
+                            <h3 id="settings-class-access">Student Invites</h3>
+                            <p>Share a class code or student invite link for any class you teach.</p>
+                            <div className="class-invite-list">
+                              {classes.map((teacherClass) => {
+                                const classCode = teacherClass.joinCode?.trim() || teacherClass.id;
+                                const isSelectedInviteClass = teacherClass.id === activeClassId;
+                                const isResettingInviteCode = savingClassAccessAction === `reset-code:${teacherClass.id}`;
+                                const codeCopyStatus =
+                                  classInviteCopyResult?.classId === teacherClass.id &&
+                                  classInviteCopyResult.kind === "code"
+                                    ? classInviteCopyResult.status
+                                    : "";
+                                const linkCopyStatus =
+                                  classInviteCopyResult?.classId === teacherClass.id &&
+                                  classInviteCopyResult.kind === "link"
+                                    ? classInviteCopyResult.status
+                                    : "";
+
+                                return (
+                                  <article
+                                    className="class-invite-row"
+                                    data-current={isSelectedInviteClass ? "true" : undefined}
+                                    key={teacherClass.id}
+                                  >
+                                    <div className="class-invite-details">
+                                      <strong>{teacherClass.name}</strong>
+                                      <span>{formatSectionLabel(teacherClass.section)}</span>
+                                    </div>
+                                    <div className="class-invite-share">
+                                      <div className="class-invite-code" aria-label={`${teacherClass.name} class code`}>
+                                        <span>Class code</span>
+                                        <code>{classCode}</code>
+                                      </div>
+                                      <div className="class-invite-actions">
+                                        <button
+                                          className="teacher-action-button"
+                                          type="button"
+                                          onClick={() => void copyClassInvite(teacherClass, "code")}
+                                        >
+                                          <CopyIcon />
+                                          {codeCopyStatus === "copied"
+                                            ? "Copied"
+                                            : codeCopyStatus === "failed"
+                                              ? "Copy failed"
+                                              : "Copy code"}
+                                        </button>
+                                        <button
+                                          className="teacher-action-button"
+                                          type="button"
+                                          onClick={() => void copyClassInvite(teacherClass, "link")}
+                                        >
+                                          <LinkIcon />
+                                          {linkCopyStatus === "copied"
+                                            ? "Copied"
+                                            : linkCopyStatus === "failed"
+                                              ? "Copy failed"
+                                              : "Copy link"}
+                                        </button>
+                                        <button
+                                          className="teacher-action-button"
+                                          disabled={isResettingInviteCode}
+                                          type="button"
+                                          onClick={() => void resetClassInviteCode(teacherClass)}
+                                        >
+                                          <RefreshIcon />
+                                          {isResettingInviteCode ? "Resetting" : "Reset code"}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </article>
+                                );
+                              })}
                             </div>
+                            {classAccessMessage ? <p className="settings-status-message">{classAccessMessage}</p> : null}
                           </section>
 
                           <section className="settings-group settings-co-teachers-card" aria-labelledby="settings-co-teachers">
@@ -3548,14 +3749,13 @@ export function TeacherClassManager({
                                 />
                               ))}
                             </div>
-                            {classAccessMessage ? <p className="settings-status-message">{classAccessMessage}</p> : null}
                           </section>
                         </div>
 
                         <div className="settings-pane" hidden={activeSettingsPane !== "privacy"}>
                           <section className="settings-group" aria-labelledby="settings-privacy">
                             <h3 id="settings-privacy">Conversation Retention</h3>
-                            <p>Saved as a class policy for retention jobs. Existing conversations are not deleted until a server-side job or explicit delete action runs.</p>
+                            <p>Saved as a class policy. Conversations older than the selected window are deleted when the protected server retention job runs; choosing a shorter window does not delete existing conversations immediately.</p>
                             <label className="settings-control-label" htmlFor="conversation-retention">
                               Retention policy
                             </label>
@@ -3574,7 +3774,7 @@ export function TeacherClassManager({
 
                           <section className="settings-group" aria-labelledby="settings-student-data">
                             <h3 id="settings-student-data">Student Data</h3>
-                            <p>Search for a student, select the matching record, then export or delete that student&apos;s class data.</p>
+                            <p>Search for a student, select the matching record, then export or permanently delete all class-scoped data stored for that student.</p>
                             <label className="settings-search-field" htmlFor="privacy-student-search">
                               <SearchIcon />
                               <input
@@ -3969,145 +4169,86 @@ export function TeacherClassManager({
                               <button
                                 className="teacher-action-button"
                                 disabled={isCreatingTeacherInvite}
+                                title="Create a one-use teacher invite link"
                                 type="button"
                                 onClick={createTeacherInviteLink}
                               >
                                 <LinkIcon />
                                 {isCreatingTeacherInvite ? "Creating" : "Create teacher invite"}
                               </button>
-                              <button
-                                className="teacher-action-button"
-                                disabled={!teacherInviteUrl}
-                                type="button"
-                                onClick={copyTeacherInviteLink}
-                              >
-                                <LinkIcon />
-                                {teacherInviteCopyStatus === "copied"
-                                  ? "Copied"
-                                  : teacherInviteCopyStatus === "failed"
-                                    ? "Copy failed"
-                                    : "Copy link"}
-                              </button>
                             </div>
-                            {teacherInviteUrl ? (
-                              <div className="teacher-invite-url-box">
-                                <input aria-label="Teacher invite URL" readOnly value={teacherInviteUrl} />
-                                <span>
-                                  Expires{" "}
-                                  {teacherInviteExpiresAt
-                                    ? new Date(teacherInviteExpiresAt).toLocaleDateString("en-US", {
-                                        month: "short",
-                                        day: "numeric",
-                                        year: "numeric"
-                                      })
-                                    : "in 30 days"}
-                                </span>
-                              </div>
-                            ) : null}
-                            <div className="class-invite-list" aria-live="polite">
+                            <div className="teacher-invite-filter" aria-label="Filter teacher invites by status">
+                              {teacherInviteFilterOptions.map((filterOption) => (
+                                <button
+                                  aria-pressed={teacherInviteFilter === filterOption.id}
+                                  key={filterOption.id}
+                                  title={`Show ${filterOption.label.toLowerCase()} teacher invites`}
+                                  type="button"
+                                  onClick={() => setTeacherInviteFilter(filterOption.id)}
+                                >
+                                  {filterOption.label}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="teacher-invite-list" aria-live="polite">
                               {isLoadingTeacherInvites ? (
                                 <p className="settings-empty-message">Loading teacher invites.</p>
-                              ) : teacherInvites.length ? (
-                                teacherInvites.map((invite) => (
-                                  <article className="class-invite-row" key={invite.inviteId}>
-                                    <div className="class-invite-details">
-                                      <strong>{capitalizeLabel(invite.status)}</strong>
-                                      <span>Created {formatInviteDate(invite.createdAt)}</span>
-                                    </div>
-                                    <div className="class-invite-code">
-                                      <span>Expires</span>
-                                      <code>{formatInviteDate(invite.expiresAt)}</code>
-                                    </div>
-                                    <div className="class-invite-details">
-                                      <span>
-                                        {invite.status === "used"
-                                          ? `Used by ${invite.usedByEmail || "teacher"}`
-                                          : invite.status === "revoked"
-                                            ? `Revoked ${formatInviteDate(invite.revokedAt)}`
-                                            : invite.status === "expired"
-                                              ? "Expired"
-                                              : "Unused"}
-                                      </span>
-                                    </div>
-                                    <div className="class-invite-actions">
-                                      <button
-                                        className="teacher-danger-button"
-                                        disabled={invite.status !== "active" || revokingTeacherInviteId === invite.inviteId}
-                                        type="button"
-                                        onClick={() => void revokeTeacherInvite(invite.inviteId)}
-                                      >
-                                        <TrashIcon />
-                                        {revokingTeacherInviteId === invite.inviteId ? "Revoking" : "Revoke"}
-                                      </button>
-                                    </div>
-                                  </article>
-                                ))
+                              ) : filteredTeacherInvites.length ? (
+                                filteredTeacherInvites.map((invite) => {
+                                  const copyStatus =
+                                    teacherInviteCopyResult?.inviteId === invite.inviteId
+                                      ? teacherInviteCopyResult.status
+                                      : "";
+                                  const detailText = teacherInviteDetailText(invite);
+                                  const isActiveInvite = invite.status === "active";
+
+                                  return (
+                                    <article
+                                      className="teacher-invite-row"
+                                      data-status={invite.status}
+                                      key={invite.inviteId}
+                                    >
+                                      <div className="teacher-invite-row-main">
+                                        <span className="teacher-invite-status-badge">{teacherInviteStatusLabel(invite)}</span>
+                                        <span>Created {formatInviteDate(invite.createdAt)}</span>
+                                        {detailText ? <strong>{detailText}</strong> : null}
+                                        <span>{teacherInviteDateText(invite)}</span>
+                                      </div>
+                                      {isActiveInvite ? (
+                                        <div className="teacher-invite-row-actions">
+                                          <button
+                                            className="teacher-action-button"
+                                            title="Copy this teacher invite link"
+                                            type="button"
+                                            onClick={() => void copyTeacherInviteLink(invite)}
+                                          >
+                                            <CopyIcon />
+                                            {copyStatus === "copied"
+                                              ? "Copied"
+                                              : copyStatus === "failed"
+                                                ? "Copy failed"
+                                                : "Copy link"}
+                                          </button>
+                                          <button
+                                            className="teacher-danger-button"
+                                            disabled={revokingTeacherInviteId === invite.inviteId}
+                                            title="Revoke this teacher invite link"
+                                            type="button"
+                                            onClick={() => void revokeTeacherInvite(invite.inviteId)}
+                                          >
+                                            <TrashIcon />
+                                            {revokingTeacherInviteId === invite.inviteId ? "Revoking" : "Revoke"}
+                                          </button>
+                                        </div>
+                                      ) : null}
+                                    </article>
+                                  );
+                                })
                               ) : (
-                                <p className="settings-empty-message">No teacher invites yet.</p>
+                                <p className="settings-empty-message">{teacherInviteEmptyMessage}</p>
                               )}
                             </div>
                             {teacherInvitesMessage ? <p className="settings-status-message">{teacherInvitesMessage}</p> : null}
-                          </section>
-
-                          <section className="settings-group" aria-labelledby="settings-class-invites">
-                            <h3 id="settings-class-invites">Class Invites</h3>
-                            <p>Share a class code or student invite link for any class you teach.</p>
-                            <div className="class-invite-list">
-                              {classes.map((teacherClass) => {
-                                const classCode = teacherClass.joinCode?.trim() || teacherClass.id;
-                                const codeCopyStatus =
-                                  classInviteCopyResult?.classId === teacherClass.id &&
-                                  classInviteCopyResult.kind === "code"
-                                    ? classInviteCopyResult.status
-                                    : "";
-                                const linkCopyStatus =
-                                  classInviteCopyResult?.classId === teacherClass.id &&
-                                  classInviteCopyResult.kind === "link"
-                                    ? classInviteCopyResult.status
-                                    : "";
-
-                                return (
-                                  <article className="class-invite-row" key={teacherClass.id}>
-                                    <div className="class-invite-details">
-                                      <strong>{teacherClass.name}</strong>
-                                      <span>{formatSectionLabel(teacherClass.section)}</span>
-                                    </div>
-                                    <div className="class-invite-share">
-                                      <div className="class-invite-code" aria-label={`${teacherClass.name} class code`}>
-                                        <span>Class code</span>
-                                        <code>{classCode}</code>
-                                      </div>
-                                      <div className="class-invite-actions">
-                                        <button
-                                          className="teacher-action-button"
-                                          type="button"
-                                          onClick={() => void copyClassInvite(teacherClass, "code")}
-                                        >
-                                          <CopyIcon />
-                                          {codeCopyStatus === "copied"
-                                            ? "Copied"
-                                            : codeCopyStatus === "failed"
-                                              ? "Copy failed"
-                                              : "Copy code"}
-                                        </button>
-                                        <button
-                                          className="teacher-action-button"
-                                          type="button"
-                                          onClick={() => void copyClassInvite(teacherClass, "link")}
-                                        >
-                                          <LinkIcon />
-                                          {linkCopyStatus === "copied"
-                                            ? "Copied"
-                                            : linkCopyStatus === "failed"
-                                              ? "Copy failed"
-                                              : "Copy link"}
-                                        </button>
-                                      </div>
-                                    </div>
-                                  </article>
-                                );
-                              })}
-                            </div>
                           </section>
                         </div>
 
@@ -4546,7 +4687,7 @@ export function TeacherClassManager({
                                         aria-label={`${row.chatBlocked ? "Allow" : "Pause"} chat for ${row.student.displayName}`}
                                         className={`student-icon-button student-chat-access-button${row.chatBlocked ? " is-paused" : ""}`}
                                         disabled={savingNotesStudentId === row.student.id}
-                                        title={row.chatBlocked ? "Allow student chat" : "Pause student chat"}
+                                        title={row.chatBlocked ? "AI paused for student" : "Pause student chat"}
                                         type="button"
                                         onClick={(event) => {
                                           event.stopPropagation();
@@ -5120,6 +5261,11 @@ export function TeacherClassManager({
                                 <span className={`conversation-status-pill ${conversationStatusClass(conversation.status)}`}>
                                   {formatConversationStatus(conversation.status)}
                                 </span>
+                                {conversation.feedbackSummary.openCount > 0 ? (
+                                  <span className="conversation-status-pill feedback">
+                                    {conversation.feedbackSummary.openCount} feedback
+                                  </span>
+                                ) : null}
                               </span>
                               <span className="conversation-inbox-meta">
                                 <span>
@@ -5220,6 +5366,97 @@ export function TeacherClassManager({
                       </section>
 
                       <aside className="conversation-review-side" aria-label="Teacher review and metadata">
+                        <section className="review-side-panel" aria-labelledby="student-feedback-title">
+                          <div className="conversation-panel-heading">
+                            <h3 id="student-feedback-title">Student Feedback</h3>
+                            <span>
+                              {selectedConversationReviewRow
+                                ? `${selectedConversationReviewRow.feedbackSummary.openCount} open`
+                                : "Select a conversation"}
+                            </span>
+                          </div>
+                          {selectedConversationReviewRow?.feedback.length ? (
+                            <div className="student-feedback-list">
+                              {selectedConversationReviewRow.feedback.map((feedback) => (
+                                <article className="student-feedback-card" key={feedback.id}>
+                                  <div className="student-feedback-card-heading">
+                                    <strong>
+                                      {feedback.kind === "usage_request"
+                                        ? formatStudentFeedbackKind(feedback.kind)
+                                        : formatStudentFeedbackRating(feedback.rating)}
+                                    </strong>
+                                    <span className={`conversation-status-pill feedback-${feedback.status}`}>
+                                      {formatStudentFeedbackStatus(feedback.status)}
+                                    </span>
+                                  </div>
+                                  <p>{feedback.comment}</p>
+                                  <div className="student-feedback-meta">
+                                    <span>{formatConversationDate(feedback.createdAt) || "No date"}</span>
+                                    {feedback.messageId ? <span>Message {feedback.messageId.slice(0, 8)}</span> : null}
+                                    {feedback.promptReason ? <span>{formatStudentFeedbackPromptReason(feedback.promptReason)}</span> : null}
+                                    {feedback.usageAllowancePercent ? <span>+{feedback.usageAllowancePercent}% approved</span> : null}
+                                  </div>
+                                  {feedback.kind === "usage_request" && feedback.status !== "resolved" ? (
+                                    <label className="student-feedback-usage-allowance">
+                                      <span>Extra usage today</span>
+                                      <input
+                                        max={500}
+                                        min={1}
+                                        step={1}
+                                        type="number"
+                                        value={feedbackUsageAllowanceById[feedback.id] ?? "25"}
+                                        onChange={(event) =>
+                                          setFeedbackUsageAllowanceById((currentAllowances) => ({
+                                            ...currentAllowances,
+                                            [feedback.id]: event.target.value
+                                          }))
+                                        }
+                                      />
+                                      <em>%</em>
+                                    </label>
+                                  ) : null}
+                                  <label className="sr-only" htmlFor={`feedback-teacher-note-${feedback.id}`}>
+                                    Teacher-only note
+                                  </label>
+                                  <textarea
+                                    id={`feedback-teacher-note-${feedback.id}`}
+                                    maxLength={1000}
+                                    placeholder="Teacher-only feedback note..."
+                                    rows={2}
+                                    value={feedbackTeacherNotesById[feedback.id] ?? feedback.teacherNote ?? ""}
+                                    onChange={(event) =>
+                                      setFeedbackTeacherNotesById((currentNotes) => ({
+                                        ...currentNotes,
+                                        [feedback.id]: event.target.value
+                                      }))
+                                    }
+                                  />
+                                  <div className="student-feedback-actions">
+                                    <button
+                                      disabled={savingFeedbackId === feedback.id || feedback.status === "reviewed"}
+                                      type="button"
+                                      onClick={() => void saveStudentFeedbackReview(feedback, "reviewed")}
+                                    >
+                                      Reviewed
+                                    </button>
+                                    <button
+                                      disabled={savingFeedbackId === feedback.id || feedback.status === "resolved"}
+                                      type="button"
+                                      onClick={() => void saveStudentFeedbackReview(feedback, "resolved")}
+                                    >
+                                      {feedback.kind === "usage_request" ? "Approve usage" : "Resolve"}
+                                    </button>
+                                  </div>
+                                </article>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="review-panel-empty-copy">
+                              Student feedback for the selected conversation will appear here.
+                            </p>
+                          )}
+                        </section>
+
                         <section className="review-side-panel" aria-labelledby="teacher-review-actions-title">
                           <div className="conversation-panel-heading">
                             <h3 id="teacher-review-actions-title">Teacher Review Actions</h3>
@@ -7498,6 +7735,8 @@ function buildConversationReviewRows(
   return classConversations
     .filter((conversation) => conversation.classId === activeClassId)
     .map((conversation) => ({
+      feedback: conversation.feedback ?? [],
+      feedbackSummary: conversation.feedbackSummary ?? emptyStudentFeedbackSummary(),
       id: conversation.id,
       lastMessageAt: conversation.lastMessageAt,
       lastMessageLabel: formatConversationDate(conversation.lastMessageAt) || "No messages",
@@ -7624,15 +7863,42 @@ function conversationMatchesFilter({
     return row.sourceAudit.lowSourceConfidence;
   }
 
+  if (filter === "feedback") {
+    return row.feedbackSummary.openCount > 0;
+  }
+
   return true;
 }
 
-function conversationNeedsTeacherReview(row: Pick<ConversationReviewRow, "status">) {
-  return conversationReviewRequiredStatuses.has(row.status);
+function conversationNeedsTeacherReview(row: Pick<ConversationReviewRow, "feedbackSummary" | "status">) {
+  return conversationReviewRequiredStatuses.has(row.status) || row.feedbackSummary.openCount > 0;
 }
 
-function conversationIsReviewed(row: Pick<ConversationReviewRow, "status">) {
-  return reviewedConversationStatuses.has(row.status);
+function conversationIsReviewed(row: Pick<ConversationReviewRow, "feedbackSummary" | "status">) {
+  return reviewedConversationStatuses.has(row.status) && row.feedbackSummary.openCount === 0;
+}
+
+function emptyStudentFeedbackSummary(): StudentFeedbackSummary {
+  return {
+    latestCreatedAt: "",
+    openCount: 0,
+    totalCount: 0
+  };
+}
+
+function summarizeStudentFeedback(feedback: StudentFeedback[]): StudentFeedbackSummary {
+  const sortedFeedback = [...feedback].sort(
+    (first, second) => (coerceDate(second.createdAt)?.getTime() ?? 0) - (coerceDate(first.createdAt)?.getTime() ?? 0)
+  );
+  const latestFeedback = sortedFeedback[0];
+
+  return {
+    latestCreatedAt: latestFeedback?.createdAt ?? "",
+    latestRating: latestFeedback?.rating,
+    latestStatus: latestFeedback?.status,
+    openCount: feedback.filter((item) => item.status !== "resolved").length,
+    totalCount: feedback.length
+  };
 }
 
 function buildConversationMetrics(rows: ConversationReviewRow[], rosterRows: RosterRow[]) {
@@ -7645,7 +7911,7 @@ function buildConversationMetrics(rows: ConversationReviewRow[], rosterRows: Ros
 
       currentMetrics.followUp += Number(row.status === "needs_follow_up" || row.status === "misunderstanding_spotted");
       currentMetrics.lowConfidence += Number(row.sourceAudit.lowSourceConfidence);
-      currentMetrics.unreviewed += Number(row.status === "new");
+      currentMetrics.unreviewed += Number(row.status === "new" || row.feedbackSummary.openCount > 0);
       return currentMetrics;
     },
     { followUp: 0, lowConfidence: 0, unreviewed: 0 }
@@ -7874,6 +8140,70 @@ function conversationStatusClass(status: ConversationReviewStatus) {
 
 function formatConversationStatus(status: ConversationReviewStatus) {
   return conversationStatusLabels[status];
+}
+
+function formatStudentFeedbackRating(rating: StudentFeedback["rating"]) {
+  if (rating === "not_helpful") {
+    return "Not helpful";
+  }
+
+  if (rating === "confusing") {
+    return "Confusing";
+  }
+
+  if (rating === "incorrect") {
+    return "Incorrect";
+  }
+
+  if (rating === "helpful") {
+    return "Helpful";
+  }
+
+  return "Feedback";
+}
+
+function formatStudentFeedbackKind(kind: StudentFeedback["kind"]) {
+  if (kind === "usage_request") {
+    return "Usage request";
+  }
+
+  if (kind === "prompted") {
+    return "Prompted feedback";
+  }
+
+  return "Student feedback";
+}
+
+function formatStudentFeedbackStatus(status: StudentFeedback["status"]) {
+  if (status === "resolved") {
+    return "Resolved";
+  }
+
+  if (status === "reviewed") {
+    return "Reviewed";
+  }
+
+  return "New";
+}
+
+function formatStudentFeedbackPromptReason(reason: StudentFeedback["promptReason"]) {
+  if (reason === "assistant_count") {
+    return "After several replies";
+  }
+
+  if (reason === "confusion_signal") {
+    return "Confusion signal";
+  }
+
+  if (reason === "low_confidence") {
+    return "Low confidence";
+  }
+
+  if (reason === "source_heavy") {
+    return "Source-heavy";
+  }
+
+  return "Student opened feedback";
 }
 
 function formatRetrievalConfidenceLabel(confidence: TeacherConversationReviewSummary["latestRetrievalConfidence"]) {
@@ -8107,6 +8437,38 @@ function formatInviteDate(value: string) {
   });
 }
 
+function teacherInviteStatusLabel(invite: TeacherInviteSummary) {
+  return invite.status === "used" ? "Used" : capitalizeLabel(invite.status);
+}
+
+function teacherInviteDetailText(invite: TeacherInviteSummary) {
+  if (invite.status === "used") {
+    return `Used by ${invite.usedByEmail || "teacher"}`;
+  }
+
+  if (invite.status === "active") {
+    return "Unused";
+  }
+
+  return "";
+}
+
+function teacherInviteDateText(invite: TeacherInviteSummary) {
+  if (invite.status === "used") {
+    return invite.usedAt ? `Accepted ${formatInviteDate(invite.usedAt)}` : `Expires ${formatInviteDate(invite.expiresAt)}`;
+  }
+
+  if (invite.status === "revoked") {
+    return `Revoked ${formatInviteDate(invite.revokedAt)}`;
+  }
+
+  if (invite.status === "expired") {
+    return `Expired ${formatInviteDate(invite.expiresAt)}`;
+  }
+
+  return `Expires ${formatInviteDate(invite.expiresAt)}`;
+}
+
 function formatClassError(caughtError: unknown, fallback: string) {
   const message = caughtError instanceof Error ? caughtError.message : fallback;
 
@@ -8157,6 +8519,14 @@ function buildClassInviteUrl(classCode: string) {
   const inviteUrl = new URL("/auth", window.location.origin);
   inviteUrl.searchParams.set("role", "student");
   inviteUrl.searchParams.set("classId", classCode);
+
+  return inviteUrl.toString();
+}
+
+function buildTeacherInviteUrl(inviteId: string) {
+  const inviteUrl = new URL("/auth", window.location.origin);
+  inviteUrl.searchParams.set("role", "teacher");
+  inviteUrl.searchParams.set("teacherInvite", inviteId);
 
   return inviteUrl.toString();
 }

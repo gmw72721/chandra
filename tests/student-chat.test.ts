@@ -884,3 +884,43 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(promptSource, /search textbook\/readings\/examples so the explanation can use the class wording/);
   assert.match(promptSource, /previously cited source context/);
 });
+
+test("student feedback is submitted through server routes and kept separate from teacher private notes", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const feedbackServerSource = readFileSync(join(repoRoot, "frontend/lib/student-feedback-server.ts"), "utf8");
+  const studentFeedbackRoute = readFileSync(join(repoRoot, "frontend/app/api/student/feedback/route.ts"), "utf8");
+  const teacherFeedbackRoute = readFileSync(
+    join(repoRoot, "frontend/app/api/classes/[classId]/feedback/[feedbackId]/route.ts"),
+    "utf8"
+  );
+
+  assert.match(studentSource, /student-feedback-button/);
+  assert.match(studentSource, /StudentFeedbackModal/);
+  assert.match(studentSource, /buildFeedbackPromptCandidate/);
+  assert.match(studentSource, /!response\.ok/);
+  assert.match(studentFeedbackRoute, /authorizeStudentFeedbackRequest/);
+  assert.match(feedbackServerSource, /authorizeStudentFeedbackRequest/);
+  assert.doesNotMatch(feedbackServerSource, /assertStudentChatAccess/);
+  assert.match(studentFeedbackRoute, /createStudentFeedback/);
+  assert.match(teacherFeedbackRoute, /authorizeClassTeacher/);
+  assert.match(teacherFeedbackRoute, /updateTeacherStudentFeedback/);
+  assert.match(feedbackServerSource, /collection\("studentFeedback"\)/);
+  assert.match(feedbackServerSource, /conversationId/);
+  assert.match(feedbackServerSource, /messageId/);
+  assert.match(feedbackServerSource, /teacherNote/);
+  assert.match(feedbackServerSource, /checkFirestoreRateLimit/);
+  assert.doesNotMatch(feedbackServerSource, /conversationReviews/);
+  assert.doesNotMatch(feedbackServerSource, /privateNote/);
+});
+
+test("student feedback prompt avoids nagging while covering learning signals", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+
+  assert.match(studentSource, /assistantReplyCount >= 4/);
+  assert.match(studentSource, /confusionSignalPattern/);
+  assert.match(studentSource, /retrievalConfidence === "low"/);
+  assert.match(studentSource, /sources\?\.length \?\? 0\) >= 3/);
+  assert.match(studentSource, /feedbackPromptShownToday/);
+  assert.match(studentSource, /studentFeedbackPrompt:\$\{classId\}:\$\{conversationId\}/);
+  assert.match(studentSource, /finally \{\s*setIsSending\(false\);\s*setChatProgress\(null\);/s);
+});

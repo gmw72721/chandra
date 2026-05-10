@@ -159,11 +159,10 @@ Recommended backend trigger included-file filters:
 
 ```text
 backend/**
-agent/**
-retrieval/**
 cloudbuild.backend.deploy.yaml
 .dockerignore
 .gcloudignore
+.gcloudignore.backend
 ```
 
 ## Firebase Setup

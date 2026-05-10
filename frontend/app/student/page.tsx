@@ -34,6 +34,9 @@ import type {
   MessageAttachment,
   StudentAiUsageStatus,
   StudentConversationSummary,
+  StudentFeedbackKind,
+  StudentFeedbackPromptReason,
+  StudentFeedbackRating,
   TutorApiResponse
 } from "@/lib/types";
 
@@ -88,10 +91,21 @@ const maxComposerAttachments = 3;
 const allowedComposerAttachmentExtensions = [".pdf"];
 const allowedComposerAttachmentAccept = ".pdf,application/pdf";
 const maxComposerPdfBytes = 25 * 1024 * 1024;
+const aiUsageLimitMessage =
+  "Sorry, you have used your daily or weekly Chandra limit today. Ask your professor to allow more usage for today.";
+const aiUsageIncreaseRequestComment =
+  "Usage increase request: I used my daily or weekly Chandra limit today and would like my professor to allow more usage for today.";
 
 const welcomeMessageId = "welcome";
 
 type StudentMainView = "chat" | "settings";
+type FeedbackModalState = {
+  conversationId?: string;
+  defaultComment: string;
+  kind: "general" | "prompted";
+  messageId?: string | null;
+  promptReason?: StudentFeedbackPromptReason;
+};
 
 export default function StudentPage() {
   return (
@@ -146,6 +160,13 @@ function StudentWorkspace() {
   const [conversationSummaries, setConversationSummaries] = useState<StudentConversationSummary[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState("");
   const [selectedConversationClassId, setSelectedConversationClassId] = useState("");
+  const [feedbackModal, setFeedbackModal] = useState<FeedbackModalState | null>(null);
+  const [feedbackRating, setFeedbackRating] = useState<StudentFeedbackRating>("helpful");
+  const [feedbackComment, setFeedbackComment] = useState("");
+  const [feedbackMessage, setFeedbackMessage] = useState("");
+  const [isSendingFeedback, setIsSendingFeedback] = useState(false);
+  const [usageIncreaseRequestMessage, setUsageIncreaseRequestMessage] = useState("");
+  const [isRequestingUsageIncrease, setIsRequestingUsageIncrease] = useState(false);
   const isTeacherPreview = searchParams.get("preview") === "teacher";
   const queryClassId = searchParams.get("classId");
   const activeCourseId = isTeacherPreview ? queryClassId ?? "" : profile?.classId ?? "";
@@ -240,9 +261,9 @@ function StudentWorkspace() {
   const visibleClassCode = activeClass?.joinCode || activeClass?.id || activeCourseId;
   const visibleConversationSummaries = useMemo(
     () =>
-      conversationSummaries.filter(
-        (conversation) => conversation.classId === activeCourseId && conversation.studentId === user?.uid
-      ),
+      conversationSummaries
+        .filter((conversation) => conversation.classId === activeCourseId && conversation.studentId === user?.uid)
+        .sort(compareConversationSummariesByRecentActivity),
     [activeCourseId, conversationSummaries, user?.uid]
   );
   const activeSelectedConversationId = selectedConversationClassId === activeCourseId ? selectedConversationId : "";
@@ -580,6 +601,116 @@ function StudentWorkspace() {
     }
   }
 
+  function openFeedbackModal(nextFeedback: FeedbackModalState = { defaultComment: "", kind: "general" }) {
+    if (nextFeedback.kind === "prompted" && nextFeedback.conversationId) {
+      markFeedbackPromptShown(activeCourseId, nextFeedback.conversationId);
+    }
+    setFeedbackModal(nextFeedback);
+    setFeedbackRating("helpful");
+    setFeedbackComment(nextFeedback.defaultComment);
+    setFeedbackMessage("");
+  }
+
+  async function submitFeedback(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!user || !activeCourseId || !feedbackModal || isSendingFeedback) {
+      return;
+    }
+
+    const comment = feedbackComment.trim();
+
+    if (!comment) {
+      setFeedbackMessage("Add a short note before sending feedback.");
+      return;
+    }
+
+    setIsSendingFeedback(true);
+    setFeedbackMessage("");
+
+    try {
+      const token = await user.getIdToken();
+      let conversationId = feedbackModal.conversationId || activeSelectedConversationId;
+
+      if (!conversationId) {
+        const conversation = await createStudentConversationForAttachment({
+          classId: activeCourseId,
+          token
+        });
+        conversationId = conversation.id;
+        setSelectedConversationId(conversation.id);
+        setSelectedConversationClassId(activeCourseId);
+      }
+
+      await sendStudentFeedback({
+        classId: activeCourseId,
+        comment,
+        conversationId,
+        kind: feedbackModal.kind,
+        messageId: feedbackModal.messageId ?? undefined,
+        promptReason: feedbackModal.promptReason,
+        rating: feedbackRating,
+        token
+      });
+
+      markFeedbackPromptShown(activeCourseId, conversationId);
+      if (!isTeacherPreview) {
+        setConversationSummaries(await fetchStudentConversationSummaries({ classId: activeCourseId, token }));
+      }
+      setFeedbackModal(null);
+      setFeedbackComment("");
+      setFeedbackMessage("Feedback sent.");
+    } catch (caughtError) {
+      setFeedbackMessage(caughtError instanceof Error ? caughtError.message : "Feedback failed to send.");
+    } finally {
+      setIsSendingFeedback(false);
+    }
+  }
+
+  async function requestUsageIncrease() {
+    if (!user || !activeCourseId || isTeacherPreview || isRequestingUsageIncrease) {
+      return;
+    }
+
+    setIsRequestingUsageIncrease(true);
+    setUsageIncreaseRequestMessage("");
+
+    try {
+      const token = await user.getIdToken();
+      let conversationId = activeSelectedConversationId;
+
+      if (!conversationId) {
+        const conversation = await createStudentConversationForAttachment({
+          classId: activeCourseId,
+          token
+        });
+        conversationId = conversation.id;
+        setSelectedConversationId(conversation.id);
+        setSelectedConversationClassId(activeCourseId);
+      }
+
+      await sendStudentFeedback({
+        classId: activeCourseId,
+        comment: aiUsageIncreaseRequestComment,
+        conversationId,
+        kind: "usage_request",
+        rating: "other",
+        token
+      });
+
+      if (!isTeacherPreview) {
+        setConversationSummaries(await fetchStudentConversationSummaries({ classId: activeCourseId, token }));
+      }
+      setUsageIncreaseRequestMessage("Request sent to your professor.");
+    } catch (caughtError) {
+      setUsageIncreaseRequestMessage(
+        caughtError instanceof Error ? caughtError.message : "Usage request failed to send."
+      );
+    } finally {
+      setIsRequestingUsageIncrease(false);
+    }
+  }
+
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
@@ -610,6 +741,7 @@ function StudentWorkspace() {
       message: "Getting ready.",
       searches: []
     });
+    let pendingFeedbackPrompt: FeedbackModalState | null = null;
 
     try {
       const token = await user.getIdToken();
@@ -688,18 +820,24 @@ function StudentWorkspace() {
         }
       }
 
-      setMessages((current) => [
-        ...current,
-        {
-          id: data.assistantMessageId ?? crypto.randomUUID(),
-          role: "assistant",
-          content: data.message ?? data.content ?? "I could not generate a response.",
-          createdAt: new Date().toISOString(),
-          langGraphTrace: data.langGraphTrace,
-          sources: data.sources ?? [],
-          structuredOutput: data.structuredOutput
-        }
-      ]);
+      const assistantMessage: ChatMessage = {
+        id: data.assistantMessageId ?? crypto.randomUUID(),
+        role: "assistant",
+        content: data.message ?? data.content ?? "I could not generate a response.",
+        createdAt: new Date().toISOString(),
+        langGraphTrace: data.langGraphTrace,
+        retrievalConfidence: data.retrievalConfidence,
+        sources: data.sources ?? [],
+        structuredOutput: data.structuredOutput
+      };
+
+      setMessages((current) => [...current, assistantMessage]);
+      pendingFeedbackPrompt = buildFeedbackPromptCandidate({
+        assistantMessage,
+        classId: activeCourseId,
+        conversationId: data.conversationId ?? activeSelectedConversationId,
+        messages: nextMessages
+      });
     } catch (caughtError) {
       const message =
         caughtError instanceof Error
@@ -717,6 +855,9 @@ function StudentWorkspace() {
     } finally {
       setIsSending(false);
       setChatProgress(null);
+      if (pendingFeedbackPrompt) {
+        openFeedbackModal(pendingFeedbackPrompt);
+      }
     }
   }
 
@@ -936,37 +1077,41 @@ function StudentWorkspace() {
                     </svg>
                   </button>
                 </div>
-                {conversationLoadError ? <p className="form-error">{conversationLoadError}</p> : null}
-                <div className="student-conversation-list">
-                  {visibleConversationSummaries.map((conversation) => (
-                    <button
-                      aria-pressed={conversation.id === activeSelectedConversationId}
-                      className="student-conversation-row"
-                      key={conversation.id}
-                      type="button"
-                  onClick={() => {
-                    setStudentMainView("chat");
-                    clearComposerAttachments();
-                    setSelectedConversationId(conversation.id);
-                    setSelectedConversationClassId(activeCourseId);
-                  }}
-                    >
-                      <span className="student-conversation-icon" aria-hidden="true" />
-                      <span className="student-conversation-copy">
-                        <strong>{conversation.title}</strong>
-                        <span>{formatConversationMeta(conversation)}</span>
-                      </span>
-                      <span className="student-row-menu" aria-hidden="true">
-                        <span />
-                        <span />
-                        <span />
-                      </span>
-                    </button>
-                  ))}
-                  {!visibleConversationSummaries.length && !conversationLoadError ? (
-                    <p className="sidebar-note">No saved conversations.</p>
-                  ) : null}
-                </div>
+                {!isSidebarCollapsed ? (
+                  <>
+                    {conversationLoadError ? <p className="form-error">{conversationLoadError}</p> : null}
+                    <div className="student-conversation-list">
+                      {visibleConversationSummaries.map((conversation) => (
+                        <button
+                          aria-pressed={conversation.id === activeSelectedConversationId}
+                          className="student-conversation-row"
+                          key={conversation.id}
+                          type="button"
+                          onClick={() => {
+                            setStudentMainView("chat");
+                            clearComposerAttachments();
+                            setSelectedConversationId(conversation.id);
+                            setSelectedConversationClassId(activeCourseId);
+                          }}
+                        >
+                          <span className="student-conversation-icon" aria-hidden="true" />
+                          <span className="student-conversation-copy">
+                            <strong>{conversation.title}</strong>
+                            <span>{formatConversationMeta(conversation)}</span>
+                          </span>
+                          <span className="student-row-menu" aria-hidden="true">
+                            <span />
+                            <span />
+                            <span />
+                          </span>
+                        </button>
+                      ))}
+                      {!visibleConversationSummaries.length && !conversationLoadError ? (
+                        <p className="sidebar-note">No saved conversations.</p>
+                      ) : null}
+                    </div>
+                  </>
+                ) : null}
               </section>
             ) : null}
           </div>
@@ -1061,14 +1206,31 @@ function StudentWorkspace() {
         ) : (
           <section className="student-workspace-main" aria-label="Student tutor chat">
             <header className="student-main-header">
-              <div>
+              <div className="student-main-title">
                 <h1>
                   <span>{className}</span>
                   {classSectionLabel ? <span>{classSectionLabel}</span> : null}
                 </h1>
               </div>
+              <div className="student-main-header-actions">
+                {aiUsageStatus ? (
+                  <StudentAiUsagePanel
+                    isRequestingMoreUsage={isRequestingUsageIncrease}
+                    requestMessage={usageIncreaseRequestMessage}
+                    status={aiUsageStatus}
+                    onRequestMoreUsage={isTeacherPreview ? undefined : requestUsageIncrease}
+                  />
+                ) : null}
+                <button
+                  className="student-feedback-button"
+                  disabled={!activeCourseId || isTeacherPreview}
+                  type="button"
+                  onClick={() => openFeedbackModal()}
+                >
+                  Feedback
+                </button>
+              </div>
             </header>
-            {aiUsageStatus ? <StudentAiUsagePanel status={aiUsageStatus} /> : null}
             {studentChatPaused ? (
               <p className="form-error chat-error">Your teacher has paused chat for this class.</p>
             ) : null}
@@ -1131,7 +1293,7 @@ function StudentWorkspace() {
                   studentChatPaused
                     ? "Your teacher has paused chat for this class."
                     : aiUsageStatus?.blocked
-                    ? "AI usage is used up for now."
+                    ? "Ask your professor for more Chandra usage today."
                     : activeCourseId
                       ? "Ask about a problem, step, or equation..."
                       : "Join a class to start chatting."
@@ -1144,6 +1306,22 @@ function StudentWorkspace() {
             </form>
           </section>
         )}
+        {feedbackModal ? (
+          <StudentFeedbackModal
+            comment={feedbackComment}
+            isSending={isSendingFeedback}
+            message={feedbackMessage}
+            rating={feedbackRating}
+            onClose={() => {
+              if (!isSendingFeedback) {
+                setFeedbackModal(null);
+              }
+            }}
+            onCommentChange={setFeedbackComment}
+            onRatingChange={setFeedbackRating}
+            onSubmit={submitFeedback}
+          />
+        ) : null}
       </section>
     </RequireAuth>
   );
@@ -1158,6 +1336,79 @@ function resizeStudentComposerTextarea(textarea: HTMLTextAreaElement | null) {
   const nextHeight = Math.min(textarea.scrollHeight, studentComposerTextareaMaxHeight);
   textarea.style.height = `${nextHeight}px`;
   textarea.style.overflowY = textarea.scrollHeight > studentComposerTextareaMaxHeight ? "auto" : "hidden";
+}
+
+function StudentFeedbackModal({
+  comment,
+  isSending,
+  message,
+  rating,
+  onClose,
+  onCommentChange,
+  onRatingChange,
+  onSubmit
+}: {
+  comment: string;
+  isSending: boolean;
+  message: string;
+  rating: StudentFeedbackRating;
+  onClose: () => void;
+  onCommentChange: (comment: string) => void;
+  onRatingChange: (rating: StudentFeedbackRating) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const ratingOptions: Array<{ label: string; value: StudentFeedbackRating }> = [
+    { label: "Helpful", value: "helpful" },
+    { label: "Not helpful", value: "not_helpful" },
+    { label: "Confusing", value: "confusing" },
+    { label: "Incorrect", value: "incorrect" },
+    { label: "Other", value: "other" }
+  ];
+
+  return (
+    <div className="student-feedback-modal-backdrop" role="presentation">
+      <form className="student-feedback-modal" aria-label="Send feedback about Chandra" onSubmit={onSubmit}>
+        <div className="student-feedback-modal-heading">
+          <h2>Feedback about Chandra</h2>
+          <button aria-label="Close feedback" disabled={isSending} type="button" onClick={onClose}>
+            x
+          </button>
+        </div>
+        <div className="student-feedback-rating-grid" role="radiogroup" aria-label="Feedback rating">
+          {ratingOptions.map((option) => (
+            <button
+              aria-pressed={rating === option.value}
+              key={option.value}
+              type="button"
+              onClick={() => onRatingChange(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <label className="sr-only" htmlFor="student-feedback-comment">
+          Feedback note
+        </label>
+        <textarea
+          id="student-feedback-comment"
+          maxLength={1000}
+          placeholder="What should your teacher know about this Chandra response?"
+          rows={4}
+          value={comment}
+          onChange={(event) => onCommentChange(event.target.value)}
+        />
+        {message ? <p className="student-feedback-message">{message}</p> : null}
+        <div className="student-feedback-modal-actions">
+          <button disabled={isSending} type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="student-feedback-submit" disabled={isSending || !comment.trim()} type="submit">
+            {isSending ? "Sending" : "Send feedback"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
 }
 
 const StudentChatMessage = memo(function StudentChatMessage({ message }: { message: ChatMessage }) {
@@ -1369,30 +1620,28 @@ function StudentSettingsPanel({
           </div>
         </section>
 
-        <section className="student-settings-card" aria-labelledby="student-theme-settings">
+        <section className="student-settings-card student-theme-settings-card" aria-labelledby="student-theme-settings">
           <div className="student-settings-card-heading">
             <h2 id="student-theme-settings">Theme</h2>
             <p>Choose how Chandra looks for you.</p>
           </div>
           <div className="student-settings-control-row">
             <span className="student-settings-control-label">Appearance</span>
-            <div className="student-settings-pill-group" role="radiogroup" aria-label="Appearance">
-              {(["light", "dark"] as const).map((appearance) => (
-                <button
-                  aria-pressed={activeAppearance === appearance}
-                  className="student-settings-pill"
-                  disabled={isSavingThemePreference}
-                  key={appearance}
-                  type="button"
-                  onClick={() => void onUpdateThemePreference({ appearance })}
-                >
-                  <StudentSettingsAppearanceIcon appearance={appearance} />
-                  <span>{capitalizeLabel(appearance)}</span>
-                </button>
-              ))}
-              <button className="student-settings-pill" disabled type="button" aria-pressed={false}>
-                <StudentSettingsSystemIcon />
-                <span>System</span>
+            <div className="student-settings-pill-group compact" role="radiogroup" aria-label="Appearance">
+              <button
+                aria-label={`Switch to ${activeAppearance === "dark" ? "light" : "dark"} mode`}
+                aria-pressed={activeAppearance === "dark"}
+                className="student-settings-pill"
+                disabled={isSavingThemePreference}
+                type="button"
+                onClick={() =>
+                  void onUpdateThemePreference({
+                    appearance: activeAppearance === "dark" ? "light" : "dark"
+                  })
+                }
+              >
+                <StudentSettingsAppearanceIcon appearance={activeAppearance} />
+                <span>{activeAppearance === "dark" ? "Dark mode" : "Light mode"}</span>
               </button>
             </div>
           </div>
@@ -1417,7 +1666,7 @@ function StudentSettingsPanel({
           {themePreferenceError ? <p className="form-error">{themePreferenceError}</p> : null}
         </section>
 
-        <section className="student-settings-card" aria-labelledby="student-class-membership-settings">
+        <section className="student-settings-card student-membership-settings-card" aria-labelledby="student-class-membership-settings">
           <div className="student-settings-card-heading">
             <h2 id="student-class-membership-settings">Class Memberships</h2>
             <p>Manage the classes you are enrolled in.</p>
@@ -1453,42 +1702,46 @@ function StudentSettingsPanel({
           </div>
         </section>
 
-        <section className="student-settings-card student-session-card" aria-labelledby="student-session-settings">
+        <section className="student-settings-card student-session-card student-danger-zone-card" aria-labelledby="student-session-settings">
           <div className="student-settings-card-heading">
             <h2 id="student-session-settings">Session</h2>
             <p>Sign out of this device or revoke refresh tokens for every device.</p>
           </div>
-          <button className="student-settings-danger-button" type="button" onClick={() => void onSignOut()}>
-            Sign out
-          </button>
-          <button className="student-settings-danger-button" type="button" onClick={() => void onSignOutAllSessions()}>
-            Sign out all sessions
-          </button>
+          <div className="student-session-actions">
+            <button className="student-settings-danger-button" type="button" onClick={() => void onSignOut()}>
+              Sign out
+            </button>
+            <button className="student-settings-danger-button wide" type="button" onClick={() => void onSignOutAllSessions()}>
+              Sign out all sessions
+            </button>
+          </div>
         </section>
 
-        <section className="student-settings-card student-session-card" aria-labelledby="student-delete-account-settings">
+        <section className="student-settings-card student-delete-account-card student-danger-zone-card" aria-labelledby="student-delete-account-settings">
           <div className="student-settings-card-heading">
             <h2 id="student-delete-account-settings">Delete Account</h2>
             <p>Remove your profile and anonymize class conversation ownership.</p>
           </div>
-          <label className="student-settings-control-label" htmlFor="student-delete-password">
-            Current password
-          </label>
-          <input
-            id="student-delete-password"
-            autoComplete="current-password"
-            type="password"
-            value={deleteAccountPassword}
-            onChange={(event) => onDeleteAccountPasswordChange(event.target.value)}
-          />
-          <button
-            className="student-settings-danger-button"
-            disabled={isDeletingAccount}
-            type="button"
-            onClick={() => void onDeleteAccount()}
-          >
-            {isDeletingAccount ? "Deleting" : "Delete account"}
-          </button>
+          <div className="student-delete-account-controls">
+            <label className="student-settings-control-label" htmlFor="student-delete-password">
+              Current password
+            </label>
+            <input
+              id="student-delete-password"
+              autoComplete="current-password"
+              type="password"
+              value={deleteAccountPassword}
+              onChange={(event) => onDeleteAccountPasswordChange(event.target.value)}
+            />
+            <button
+              className="student-settings-danger-button"
+              disabled={isDeletingAccount}
+              type="button"
+              onClick={() => void onDeleteAccount()}
+            >
+              {isDeletingAccount ? "Deleting" : "Delete account"}
+            </button>
+          </div>
         </section>
       </div>
     </section>
@@ -1508,15 +1761,6 @@ function StudentSettingsAppearanceIcon({ appearance }: { appearance: TeacherClas
     <svg className="student-settings-pill-icon" aria-hidden="true" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="4" />
       <path d="M12 2.7v2.1M12 19.2v2.1M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2.7 12h2.1M19.2 12h2.1M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5" />
-    </svg>
-  );
-}
-
-function StudentSettingsSystemIcon() {
-  return (
-    <svg className="student-settings-pill-icon" aria-hidden="true" viewBox="0 0 24 24">
-      <path d="M5 5.5h14v10H5z" />
-      <path d="M9 19h6M12 15.5V19" />
     </svg>
   );
 }
@@ -1613,7 +1857,17 @@ const ChatProgressMessage = memo(function ChatProgressMessage({ progress }: { pr
   );
 });
 
-const StudentAiUsagePanel = memo(function StudentAiUsagePanel({ status }: { status: StudentAiUsageStatus }) {
+const StudentAiUsagePanel = memo(function StudentAiUsagePanel({
+  isRequestingMoreUsage,
+  onRequestMoreUsage,
+  requestMessage,
+  status
+}: {
+  isRequestingMoreUsage: boolean;
+  onRequestMoreUsage?: () => void;
+  requestMessage: string;
+  status: StudentAiUsageStatus;
+}) {
   return (
     <section
       className={`student-ai-usage${status.nearLimit ? " near-limit" : ""}${status.blocked ? " blocked" : ""}`}
@@ -1621,10 +1875,18 @@ const StudentAiUsagePanel = memo(function StudentAiUsagePanel({ status }: { stat
     >
       <div className="student-ai-usage-meters">
         <StudentAiUsageMeter label="Today" percent={status.todayPercentRemaining} />
-        <StudentAiUsageMeter label="This week" percent={status.weekPercentRemaining} />
+        <StudentAiUsageMeter label="Week" percent={status.weekPercentRemaining} />
       </div>
       {status.blocked ? (
-        <p>AI usage is used up for now.</p>
+        <div className="student-ai-usage-request">
+          <p>{aiUsageLimitMessage}</p>
+          {onRequestMoreUsage ? (
+            <button type="button" disabled={isRequestingMoreUsage} onClick={onRequestMoreUsage}>
+              {isRequestingMoreUsage ? "Sending request" : "Ask professor for more usage today"}
+            </button>
+          ) : null}
+          {requestMessage ? <span>{requestMessage}</span> : null}
+        </div>
       ) : status.nearLimit ? (
         <p>AI usage is almost used up.</p>
       ) : null}
@@ -1638,13 +1900,35 @@ function StudentAiUsageMeter({ label, percent }: { label: string; percent: numbe
   return (
     <div className="student-ai-usage-meter">
       <span>
-        <strong>{label}</strong>
+        <strong>
+          <UsageMeterIcon label={label} />
+          {label}
+        </strong>
         <em>{cleanPercent}% left</em>
       </span>
       <div aria-hidden="true">
         <span style={{ width: `${cleanPercent}%` }} />
       </div>
     </div>
+  );
+}
+
+function UsageMeterIcon({ label }: { label: string }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      {label === "Today" ? (
+        <>
+          <path d="M7 3.5v3M17 3.5v3" />
+          <path d="M4.5 8.5h15" />
+          <path d="M6.5 5.5h11A2.5 2.5 0 0 1 20 8v10a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 18V8a2.5 2.5 0 0 1 2.5-2.5Z" />
+        </>
+      ) : (
+        <>
+          <path d="M4 17 9 12l4 4 7-9" />
+          <path d="M16 7h4v4" />
+        </>
+      )}
+    </svg>
   );
 }
 
@@ -1800,6 +2084,124 @@ async function createStudentConversationForAttachment({
   }
 
   return data.conversation;
+}
+
+async function sendStudentFeedback({
+  classId,
+  comment,
+  conversationId,
+  kind,
+  messageId,
+  promptReason,
+  rating,
+  token
+}: {
+  classId: string;
+  comment: string;
+  conversationId: string;
+  kind: StudentFeedbackKind;
+  messageId?: string;
+  promptReason?: StudentFeedbackPromptReason;
+  rating: StudentFeedbackRating;
+  token: string;
+}) {
+  const response = await fetch(apiUrl("/api/student/feedback"), {
+    body: JSON.stringify({
+      comment,
+      conversationId,
+      courseId: classId,
+      kind,
+      messageId,
+      promptReason,
+      rating
+    }),
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    method: "POST"
+  });
+  const data = (await response.json()) as { error?: string };
+
+  if (!response.ok) {
+    throw new Error(data.error ?? "Feedback failed to send.");
+  }
+}
+
+function buildFeedbackPromptCandidate({
+  assistantMessage,
+  classId,
+  conversationId,
+  messages
+}: {
+  assistantMessage: ChatMessage;
+  classId: string;
+  conversationId?: string;
+  messages: ChatMessage[];
+}): FeedbackModalState | null {
+  if (!conversationId || feedbackPromptShownToday(classId, conversationId)) {
+    return null;
+  }
+
+  const assistantReplyCount =
+    messages.filter((message) => message.role === "assistant").length + Number(assistantMessage.role === "assistant");
+  const latestStudentMessage = [...messages].reverse().find((message) => message.role === "student");
+  const promptReason =
+    confusionSignalPattern.test(latestStudentMessage?.content ?? "")
+      ? "confusion_signal"
+      : assistantMessage.retrievalConfidence === "low"
+        ? "low_confidence"
+        : (assistantMessage.sources?.length ?? 0) >= 3
+          ? "source_heavy"
+          : assistantReplyCount >= 4
+            ? "assistant_count"
+            : null;
+
+  if (!promptReason) {
+    return null;
+  }
+
+  return {
+    conversationId,
+    defaultComment: "",
+    kind: "prompted",
+    messageId: assistantMessage.id,
+    promptReason
+  };
+}
+
+const confusionSignalPattern = /\b(confused|confusing|stuck|wrong|doesn'?t make sense|lost|not helpful|i don'?t get|i do not get)\b/i;
+
+function feedbackPromptShownToday(classId: string, conversationId: string) {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return window.localStorage.getItem(feedbackPromptStorageKey(classId, conversationId)) === todayFeedbackPromptKey();
+  } catch {
+    return false;
+  }
+}
+
+function markFeedbackPromptShown(classId: string, conversationId: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(feedbackPromptStorageKey(classId, conversationId), todayFeedbackPromptKey());
+  } catch {
+    return;
+  }
+}
+
+function feedbackPromptStorageKey(classId: string, conversationId: string) {
+  return `studentFeedbackPrompt:${classId}:${conversationId}`;
+}
+
+function todayFeedbackPromptKey() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 function uploadHomeworkAttachmentWithProgress({
@@ -2047,6 +2449,21 @@ function formatConversationMeta(conversation: StudentConversationSummary) {
     `${conversation.messageCount} messages`,
     formatConversationDate(conversation.lastMessageAt)
   ].filter(Boolean).join(" / ");
+}
+
+function compareConversationSummariesByRecentActivity(
+  firstConversation: StudentConversationSummary,
+  secondConversation: StudentConversationSummary
+) {
+  return conversationActivityMillis(secondConversation) - conversationActivityMillis(firstConversation);
+}
+
+function conversationActivityMillis(conversation: StudentConversationSummary) {
+  return Math.max(
+    coerceDate(conversation.lastMessageAt)?.getTime() ?? 0,
+    coerceDate(conversation.updatedAt)?.getTime() ?? 0,
+    coerceDate(conversation.createdAt)?.getTime() ?? 0
+  );
 }
 
 function formatAccountActivityTime(value: string) {

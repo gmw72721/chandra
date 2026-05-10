@@ -75,6 +75,8 @@ test("teacher invites are hash-only, single-use, listable, revocable, and audite
   assert.match(inviteRoute, /collection\("teacherInvites"\)\.doc\(tokenHash\)\.set/);
   assert.match(inviteRoute, /export async function GET/);
   assert.match(inviteRoute, /export async function DELETE/);
+  assert.match(inviteRoute, /inviteUrl: status === "active"/);
+  assert.match(signupRoute, /resolveInviteDocumentId/);
   assert.match(inviteRoute, /revokedAt: FieldValue\.serverTimestamp/);
   assert.match(inviteRoute, /teacher_invite\.created/);
   assert.match(inviteRoute, /teacher_invite\.revoked/);
@@ -84,6 +86,8 @@ test("teacher invites are hash-only, single-use, listable, revocable, and audite
   assert.doesNotMatch(inviteRoute, /inviteToken,\s*$/m);
   assert.match(teacherSource, /loadTeacherInvites/);
   assert.match(teacherSource, /revokeTeacherInvite/);
+  assert.match(teacherSource, /teacherInviteFilterOptions/);
+  assert.match(teacherSource, /copyTeacherInviteLink\(invite/);
   assert.match(teacherSource, /Used by/);
 });
 

@@ -45,7 +45,7 @@ export async function POST(request: Request) {
     const decodedToken = await adminAuth!.verifyIdToken(token);
     const body = (await request.json().catch(() => ({}))) as TeacherSignupBody;
     const inviteToken = String(body.inviteToken ?? "").trim();
-    const inviteTokenHash = inviteToken ? hashInviteToken(inviteToken) : "missing";
+    const inviteTokenHash = resolveInviteDocumentId(inviteToken);
     const abuseScope = {
       actorUid: decodedToken.uid,
       identifier: `${inviteTokenHash}:${String(decodedToken.email ?? "").trim().toLowerCase()}`,
@@ -200,6 +200,14 @@ function isValidBootstrapTeacherInviteToken(inviteToken: string) {
 
 function hashInviteToken(inviteToken: string) {
   return createHash("sha256").update(inviteToken).digest("hex");
+}
+
+function resolveInviteDocumentId(inviteToken: string) {
+  if (!inviteToken) {
+    return "missing";
+  }
+
+  return /^[a-f0-9]{64}$/i.test(inviteToken) ? inviteToken.toLowerCase() : hashInviteToken(inviteToken);
 }
 
 function firstString(...values: unknown[]) {
