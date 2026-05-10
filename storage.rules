@@ -11,6 +11,7 @@ service firebase.storage {
     }
 
     function isClassTeacher(classId) {
+      // Teachers and editable co-teachers can manage class material uploads.
       return isSignedIn()
         && (
           classDoc(classId).data.teacherId == request.auth.uid
