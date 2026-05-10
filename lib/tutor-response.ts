@@ -65,7 +65,7 @@ export function normalizeStructuredTutorOutput(
   const explicitLegacyAnswer = optionalStringValue(record.answer);
   const rawAnswer = normalizeWrappedReferenceNumbers(explicitSectionAnswer ?? explicitLegacyAnswer ?? fallbackAnswer);
   const problem = stringValue(sectionsRecord.problem);
-  const hint = stringValue(sectionsRecord.hint);
+  const rawHint = stringValue(sectionsRecord.hint);
   const explanation = stringValue(sectionsRecord.explanation);
   const formula = stringValue(sectionsRecord.formula);
   const example = stringValue(sectionsRecord.example);
@@ -74,12 +74,13 @@ export function normalizeStructuredTutorOutput(
   const rawNextStep = normalizeWrappedReferenceNumbers(
     stringValue(sectionsRecord.nextStep) || stringValue(record.nextQuestion)
   );
-  const { answer, nextStep } = repairSplitReferenceNextStep(rawAnswer, rawNextStep);
+  const repaired = repairSplitReferenceNextStep(rawAnswer, rawNextStep);
+  const { hint, nextStep } = repairHintLabeledNextStep(rawHint, repaired.nextStep);
   const sectionOrder = normalizeSectionOrder(record.sectionOrder ?? sectionsRecord.sectionOrder);
 
   return {
     sections: {
-      answer,
+      answer: repaired.answer,
       ...(problem ? { problem } : {}),
       ...(hint ? { hint } : {}),
       ...(explanation ? { explanation } : {}),
@@ -143,6 +144,21 @@ function repairSplitReferenceNextStep(answer: string, nextStep: string) {
   const separator = answer.endsWith(".") ? "" : ".";
   return {
     answer: `${answer}${separator}${nextStep}`,
+    nextStep: ""
+  };
+}
+
+function repairHintLabeledNextStep(hint: string, nextStep: string) {
+  const hintMatch = nextStep.match(/^(?:\*\*)?hint(?:\*\*)?\s*:\s*(.+)$/is);
+
+  if (!hintMatch) {
+    return { hint, nextStep };
+  }
+
+  const nextStepHint = hintMatch[1].trim();
+
+  return {
+    hint: [hint, nextStepHint].filter(Boolean).join("\n\n"),
     nextStep: ""
   };
 }

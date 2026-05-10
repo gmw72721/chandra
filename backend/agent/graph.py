@@ -928,9 +928,9 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
             "Structured section labels: when useful, choose the order that best supports this specific reply instead of following "
             "a fixed template. Use `Problem:` only for the found academic exercise/question/task statement the student is working on, "
             "not for an issue/error. If you use `Problem:`, put only the problem statement there; never put offers, hints, next steps, "
-            "attempt requests, source context, or commentary inside that section. Use `Hint:` for one short nudge, usually one sentence, "
+            "attempt requests, source context, or commentary inside that section. Use `Hint:` for one short nudge or leading question, usually one sentence, "
             "not definitions, citations, offers, or multiple ideas. Use `Why this works:` for concept reasoning, but do not end it with "
-            "offers or workflow prompts; put those in the final direct question/next action. Use `Formula:` only for the formula/rule statement with no commentary, `Example:` only for a similar "
+            "offers or workflow prompts; put those in the final direct question/next action. Keep the final direct question/next action to a concrete request or action, not a hint-style leading question. Use `Formula:` only for the formula/rule statement with no commentary, `Example:` only for a similar "
             "different problem, and `Check your work:` only when responding to a student attempt. Do not write `Answer:`, `Question:`, "
             "`Next step:`, `Your next step:`, `Source:`, or `Sources:`; end with one unlabeled direct question when helpful."
         ),
