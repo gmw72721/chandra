@@ -33,5 +33,6 @@ jobs:
             exit 1
           fi
           printf '%s' "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > "$RUNNER_TEMP/firebase-service-account.json"
+          node -e "const fs = require('fs'); const key = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/firebase-service-account.json', 'utf8')); console.log('Deploying with service account:', key.client_email || 'unknown');"
           export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/firebase-service-account.json"
           npx --yes --package firebase-tools@latest firebase deploy --non-interactive --only firestore:rules,firestore:indexes,storage --project chandra-f6e13
