@@ -69,6 +69,188 @@ const maxTutorKnowledgeUrlRedirects = 4;
 
 export { TutorKnowledgeHttpError } from "./tutor-knowledge-errors";
 
+class PdfJsDomMatrix {
+  a = 1;
+  b = 0;
+  c = 0;
+  d = 1;
+  e = 0;
+  f = 0;
+  is2D = true;
+
+  constructor(init?: string | number[] | Float32Array | Float64Array | PdfJsDomMatrix) {
+    if (!init || typeof init === "string") {
+      return;
+    }
+
+    const values = Array.from(init instanceof PdfJsDomMatrix ? init.toFloat64Array() : init);
+    if (values.length === 6) {
+      [this.a, this.b, this.c, this.d, this.e, this.f] = values;
+    } else if (values.length >= 16) {
+      this.a = values[0] ?? 1;
+      this.b = values[1] ?? 0;
+      this.c = values[4] ?? 0;
+      this.d = values[5] ?? 1;
+      this.e = values[12] ?? 0;
+      this.f = values[13] ?? 0;
+    }
+  }
+
+  get m11() {
+    return this.a;
+  }
+
+  set m11(value: number) {
+    this.a = value;
+  }
+
+  get m12() {
+    return this.b;
+  }
+
+  set m12(value: number) {
+    this.b = value;
+  }
+
+  get m21() {
+    return this.c;
+  }
+
+  set m21(value: number) {
+    this.c = value;
+  }
+
+  get m22() {
+    return this.d;
+  }
+
+  set m22(value: number) {
+    this.d = value;
+  }
+
+  get m41() {
+    return this.e;
+  }
+
+  set m41(value: number) {
+    this.e = value;
+  }
+
+  get m42() {
+    return this.f;
+  }
+
+  set m42(value: number) {
+    this.f = value;
+  }
+
+  multiply(other?: PdfJsDomMatrix | number[]) {
+    return new PdfJsDomMatrix(this).multiplySelf(other);
+  }
+
+  multiplySelf(other?: PdfJsDomMatrix | number[]) {
+    const matrix = new PdfJsDomMatrix(other);
+    const a = this.a * matrix.a + this.c * matrix.b;
+    const b = this.b * matrix.a + this.d * matrix.b;
+    const c = this.a * matrix.c + this.c * matrix.d;
+    const d = this.b * matrix.c + this.d * matrix.d;
+    const e = this.a * matrix.e + this.c * matrix.f + this.e;
+    const f = this.b * matrix.e + this.d * matrix.f + this.f;
+
+    this.a = a;
+    this.b = b;
+    this.c = c;
+    this.d = d;
+    this.e = e;
+    this.f = f;
+
+    return this;
+  }
+
+  preMultiplySelf(other?: PdfJsDomMatrix | number[]) {
+    const matrix = new PdfJsDomMatrix(other);
+    return this.setMatrixValue(matrix.multiply(this).toFloat64Array());
+  }
+
+  translate(tx = 0, ty = 0) {
+    return this.multiply(new PdfJsDomMatrix([1, 0, 0, 1, tx, ty]));
+  }
+
+  translateSelf(tx = 0, ty = 0) {
+    return this.multiplySelf([1, 0, 0, 1, tx, ty]);
+  }
+
+  scale(scaleX = 1, scaleY = scaleX) {
+    return this.multiply(new PdfJsDomMatrix([scaleX, 0, 0, scaleY, 0, 0]));
+  }
+
+  scaleSelf(scaleX = 1, scaleY = scaleX) {
+    return this.multiplySelf([scaleX, 0, 0, scaleY, 0, 0]);
+  }
+
+  inverse() {
+    return new PdfJsDomMatrix(this).invertSelf();
+  }
+
+  invertSelf() {
+    const determinant = this.a * this.d - this.b * this.c;
+    if (!determinant) {
+      this.a = Number.NaN;
+      this.b = Number.NaN;
+      this.c = Number.NaN;
+      this.d = Number.NaN;
+      this.e = Number.NaN;
+      this.f = Number.NaN;
+      return this;
+    }
+
+    const a = this.d / determinant;
+    const b = -this.b / determinant;
+    const c = -this.c / determinant;
+    const d = this.a / determinant;
+    const e = (this.c * this.f - this.d * this.e) / determinant;
+    const f = (this.b * this.e - this.a * this.f) / determinant;
+
+    this.a = a;
+    this.b = b;
+    this.c = c;
+    this.d = d;
+    this.e = e;
+    this.f = f;
+
+    return this;
+  }
+
+  setMatrixValue(transformList?: string | number[] | Float32Array | Float64Array) {
+    const matrix = new PdfJsDomMatrix(transformList);
+    this.a = matrix.a;
+    this.b = matrix.b;
+    this.c = matrix.c;
+    this.d = matrix.d;
+    this.e = matrix.e;
+    this.f = matrix.f;
+    return this;
+  }
+
+  toFloat32Array() {
+    return Float32Array.from(this.toFloat64Array());
+  }
+
+  toFloat64Array() {
+    return [this.a, this.b, 0, 0, this.c, this.d, 0, 0, 0, 0, 1, 0, this.e, this.f, 0, 1];
+  }
+
+  toString() {
+    return `matrix(${this.a}, ${this.b}, ${this.c}, ${this.d}, ${this.e}, ${this.f})`;
+  }
+}
+
+function ensurePdfJsDomGlobals() {
+  const globalWithPdfJsDom = globalThis as Record<string, unknown>;
+
+  globalWithPdfJsDom.DOMMatrix ??= PdfJsDomMatrix;
+}
+
 export function validateTutorKnowledgeFile(file: File) {
   validateFile(file);
 }
@@ -1212,6 +1394,7 @@ async function extractPdfPages(buffer: Buffer): Promise<TutorKnowledgePage[]> {
 }
 
 async function extractPdfTextPages(buffer: Buffer, options: { lineEnforce: boolean }) {
+  ensurePdfJsDomGlobals();
   const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: buffer });
 
@@ -1236,6 +1419,7 @@ async function extractPdfTextPages(buffer: Buffer, options: { lineEnforce: boole
 }
 
 async function extractPdfPageInfo(buffer: Buffer) {
+  ensurePdfJsDomGlobals();
   const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: buffer });
 
