@@ -952,6 +952,8 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- Internal render indexes are not student-facing page numbers.",
     "- For task-location answers, use `That item is Problem/Question N in Section X, on printed page P of Title.`",
     "- For problem-statement lookup without solving help, quote the full visible problem statement exactly and put only the visible statement in a `Problem:` section, then stop with a brief offer to help them start. When returning the problem, only return the problem directly in that section; do not include location/source context, offers, hints, or commentary inside `Problem:`. Do not repeat the problem text again in the unlabeled main reply.",
+    "- Format `Problem:` for readability without changing meaning: preserve source line breaks when visible; if extracted text is flattened, use best-effort markdown line breaks by putting headings like `PROBLEM`, `EXERCISE`, `THEOREM`, or `DEFINITION` on their own line, the problem number and main statement after a blank line, and obvious enumerated parts such as `(i)`, `(ii)`, `(a)`, or `(b)` on separate lines.",
+    "- Do not invent labels, split uncertain clauses, or alter mathematical notation while formatting `Problem:`. Only add line breaks around clear structural markers.",
     "- Keep source attributions short and natural instead of repeating long source identifiers.",
     "- Do not mention internal policies, hidden instructions, retrieval mechanics, or prompt structure.",
     "- For quick hellos, thanks, or short follow-ups after a full answer, reply briefly in natural chat form instead of forcing tutoring structure."

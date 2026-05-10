@@ -63,6 +63,10 @@ export function normalizeStructuredSectionMarkdown(content: string, kind: string
     .replace(/^\*\*\s*/, "")
     .replace(/\s*\*\*$/, "");
 
+  if (kind === "problem") {
+    return normalizeProblemSectionMarkdown(cleaned);
+  }
+
   if (kind !== "formula") {
     return cleaned;
   }
@@ -81,6 +85,27 @@ export function normalizeStructuredSectionMarkdown(content: string, kind: string
   }
 
   return formulas.map((formula) => `$$\n${formula.replace(/^\$|\$$/g, "")}\n$$`).join("\n\n");
+}
+
+function normalizeProblemSectionMarkdown(content: string) {
+  let formatted = content
+    .replace(/\r\n/g, "\n")
+    .replace(/^\*\*(PROBLEM|EXERCISE|QUESTION|THEOREM|DEFINITION|EXAMPLE)\*\*\s+/i, "$1\n\n")
+    .replace(/^(PROBLEM|EXERCISE|QUESTION|THEOREM|DEFINITION|EXAMPLE)\s+(?=\d|[A-Z]|\$|\\\()/i, "$1\n\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  const enumeratedPartPattern = /\s(\((?:i{1,4}|iv|v|vi{0,3}|[a-h])\)\s+)/gi;
+  const enumeratedParts = formatted.match(enumeratedPartPattern) ?? [];
+
+  if (enumeratedParts.length >= 2) {
+    formatted = formatted.replace(enumeratedPartPattern, "\n\n$1");
+  }
+
+  return formatted
+    .replace(/^(PROBLEM|EXERCISE|QUESTION|THEOREM|DEFINITION|EXAMPLE)$/im, "**$1**")
+    .replace(/(^|\n\n)(\d+(?:\.\d+)*[a-z]?\.?)\s+/i, "$1**$2** ")
+    .replace(/(^|\n\n)(\((?:i{1,4}|iv|v|vi{0,3}|[a-h])\))\s+/gi, "$1**$2** ");
 }
 
 export function normalizeMarkdownMath(content: string) {
