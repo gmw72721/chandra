@@ -1112,7 +1112,7 @@ def build_core_tutor_instructions(
         "Tutoring method:",
         *tutor_behavior_lines(policy_title),
         *answer_policy_lines(answer_policy),
-        "- When the attempt-first rule is satisfied or not applicable, give the smallest useful hint before giving a larger explanation.",
+        "- When the attempt-first rule is satisfied or not applicable, ask a targeted question or give a small nudge that helps the student identify their own next move. Never state the next move for the exact task.",
         "- When a student gives a calculation, answer, or conclusion, verify it before affirming it. If it is incorrect, point out the first wrong step or value and continue from the corrected idea.",
         "",
         "Academic integrity boundaries:",
@@ -1245,8 +1245,8 @@ def answer_policy_lines(answer_policy: dict[str, bool]) -> list[str]:
                 "- If a student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, first ask what they have tried or where they are stuck.",
                 "- In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example.",
                 "- Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task.",
-                "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. For proof or derivation tasks, a similar example must use a different claim or different numbers so it does not prove the assigned statement.",
-                "- If a student asks how a source, example, prior exercise, hint, rubric, rule, method, or instructor note connects to their exact assigned task, treat that as solving help for the exact task. Give only one high-level orientation or one targeted question; do not map the whole route, enumerate all required pieces, provide a response structure, fill in task content, or give a sequence of steps.",
+                "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. A similar example must use meaningfully different facts, data, prompt details, or requirements so it does not complete any part of the assigned response.",
+                "- If a student asks how a source, example, prior exercise, hint, rubric, rule, method, or instructor note gives, supports, covers, applies to, or connects to a part, half, subquestion, requirement, or step of their exact assigned task, treat that as solving help for the exact task. Ask one targeted question or explain a prerequisite concept without applying it to the exact task. Do not state what this gives them, what it proves, which part it completes, what to write next, or any task-specific claim, response structure, content, setup, checklist, or sequence.",
                 "- A follow-up like 'I still need help', 'yes', 'tell me more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution.",
                 "- For the student's exact task, do not reveal a full solution, final answer, final artifact, final expression, final code, thesis, outline, or a chain of multiple intermediate steps before the student has shown work. If one small scaffold is allowed, stop there and ask the student to do the next piece.",
             ]
@@ -1428,7 +1428,7 @@ def create_demo_tutor_response(question: str, retrieval_hits: list[dict[str, Any
     return (
         "Let's slow the problem down into one move.\n\n"
         "What is the first thing the question is asking you to find or transform? "
-        "If you paste the exact task, I will help you choose the next step without jumping straight to the answer."
+        "If you paste the exact task, I will help you reason toward what to try without jumping straight to the answer."
         f"{source_line}"
     )
 

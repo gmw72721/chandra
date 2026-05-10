@@ -1752,8 +1752,10 @@ def test_final_answer_instruction_is_strict(tmp_path: Path) -> None:
     assert "Source-backed help does not override the attempt-first rule" in instruction
     assert "first ask what they have tried or where they are stuck" in instruction
     assert "do not provide task-specific starting points" in instruction
-    assert "how a source, example, prior exercise, hint, rubric, rule, method, or instructor note connects" in instruction
-    assert "do not map the whole route, enumerate all required pieces, provide a response structure, fill in task content, or give a sequence of steps" in instruction
+    assert "how a source, example, prior exercise, hint, rubric, rule, method, or instructor note gives, supports, covers, applies to, or connects" in instruction
+    assert "part, half, subquestion, requirement, or step of their exact assigned task" in instruction
+    assert "Ask one targeted question or explain a prerequisite concept without applying it to the exact task" in instruction
+    assert "Do not state what this gives them, what it proves, which part it completes, what to write next" in instruction
     assert "explain like I am 5' is not a student attempt" in instruction
     assert "do not reveal a full solution, final answer, final artifact" in instruction
     assert "a page that only locates the task or lists practice items is not enough" in instruction

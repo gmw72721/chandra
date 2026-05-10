@@ -688,7 +688,7 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
               }
 
               send({
-                message: "Writing a helpful next step from the pages I found.",
+                message: "Writing a helpful response from the pages I found.",
                 stage: "writing_answer",
                 type: "step"
               });
@@ -1399,15 +1399,15 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- Source-backed help does not override the attempt-first rule. If the student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, use retrieval to orient yourself, then first ask what they have tried or where they are stuck.",
     "- In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example.",
     "- Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task.",
-    "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. For proof or derivation tasks, a similar example must use a different claim or different numbers so it does not prove the assigned statement.",
-    "- If a student asks how a source, example, prior exercise, hint, rubric, rule, method, or instructor note connects to their exact assigned task, treat that as solving help for the exact task. Give only one high-level orientation or one targeted question; do not map the whole route, enumerate all required pieces, provide a response structure, fill in task content, or give a sequence of steps.",
+    "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. A similar example must use meaningfully different facts, data, prompt details, or requirements so it does not complete any part of the assigned response.",
+    "- If a student asks how a source, example, prior exercise, hint, rubric, rule, method, or instructor note gives, supports, covers, applies to, or connects to a part, half, subquestion, requirement, or step of their exact assigned task, treat that as solving help for the exact task. Ask one targeted question or explain a prerequisite concept without applying it to the exact task. Do not state what this gives them, what it proves, which part it completes, what to write next, or any task-specific claim, response structure, content, setup, checklist, or sequence.",
     "- A follow-up like 'I still need help', 'yes', 'tell me more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution.",
     "- For the student's exact task, do not reveal a full solution, final answer, final artifact, final expression, final code, thesis, outline, or a chain of multiple intermediate steps before the student has shown work. If one small scaffold is allowed, stop there and ask the student to do the next piece.",
     "- For textbook section or chapter help, answer from the selected pages for that section. If the selected pages do not match the requested section/chapter, search again before answering.",
     "- If selected pages only locate the task but do not include textbook/readings/examples that explain the method or concept, search again instead of giving solving help.",
     ...citationRules,
     "- When a student gives a calculation, answer, or conclusion, verify it before affirming it. If it is incorrect, point out the first wrong step or value and continue from the corrected idea.",
-    "- When the attempt-first rule is satisfied or not applicable, help the student find the next move with a targeted question or small hint. Do not state the next move outright or solve the whole problem immediately.",
+    "- When the attempt-first rule is satisfied or not applicable, help the student identify their own next move with a targeted question or small nudge. Do not state the next move outright or solve the task immediately.",
     "",
     "Student-facing section guidance:",
     "- Keep most replies as one clean answer plus one final next-step question. Use fewer sections whenever the answer is clear without them.",
