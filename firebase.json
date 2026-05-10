@@ -20,7 +20,6 @@
         ".playwright-cli",
         ".playwright-mcp",
         "app",
-        "components",
         "lib",
         "backend",
         "agent",
