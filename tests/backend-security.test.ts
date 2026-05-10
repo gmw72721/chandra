@@ -183,7 +183,7 @@ test("Firestore class settings rules accept the current teacher settings schema"
 });
 
 test("teacher controls can pause class chat and one student without exposing content", () => {
-  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const managerSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const profileSource = readFileSync(join(repoRoot, "frontend/components/StudentProfilePage.tsx"), "utf8");
   const supportRoute = readFileSync(
     join(repoRoot, "frontend/app/api/classes/[classId]/students/[studentId]/support/route.ts"),

@@ -68,7 +68,7 @@ test("class join and teacher invite signup use server-side lockouts with generic
 test("teacher invites are hash-only, single-use, listable, revocable, and audited", () => {
   const inviteRoute = readFileSync(join(repoRoot, "frontend/app/api/teacher-invites/route.ts"), "utf8");
   const signupRoute = readFileSync(join(repoRoot, "frontend/app/api/teacher-signup/route.ts"), "utf8");
-  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(inviteRoute, /randomBytes\(32\)\.toString\("base64url"\)/);
   assert.match(inviteRoute, /hashInviteToken\(inviteToken\)/);
@@ -94,7 +94,7 @@ test("teacher invites are hash-only, single-use, listable, revocable, and audite
 test("account deletion requires fresh auth and protects owned teacher classes", () => {
   const deleteRoute = readFileSync(join(repoRoot, "frontend/app/api/account/delete/route.ts"), "utf8");
   const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
-  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
 
   assert.match(deleteRoute, /hasRecentAuthentication\(decodedToken\.auth_time\)/);
@@ -116,7 +116,7 @@ test("session revocation exists and account changes can revoke refresh tokens", 
   const revokeRoute = readFileSync(join(repoRoot, "frontend/app/api/account/sessions/revoke/route.ts"), "utf8");
   const accountRoute = readFileSync(join(repoRoot, "frontend/app/api/account/settings/route.ts"), "utf8");
   const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
-  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
 
   assert.match(revokeRoute, /adminAuth!\.revokeRefreshTokens\(decodedToken\.uid\)/);

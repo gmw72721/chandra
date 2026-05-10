@@ -173,7 +173,7 @@ test("student view does not pin teacher assignment guidance above chat", () => {
 
 test("student opening message is class-specific and professor editable", () => {
   const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
-  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const managerSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/classes/route.ts"), "utf8");
 
   assert.match(source, /buildInitialStudentMessages\(activeClass\)/);
@@ -185,7 +185,7 @@ test("student opening message is class-specific and professor editable", () => {
 });
 
 test("student-facing class instructions are explicit settings and tutor prompt context", () => {
-  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const managerSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const promptSource = readFileSync(join(repoRoot, "frontend/lib/prompts.ts"), "utf8");
   const classesSource = readFileSync(join(repoRoot, "frontend/lib/classes.ts"), "utf8");
 
@@ -236,7 +236,7 @@ test("conversation titles use topic labels from the first prompt", () => {
 });
 
 test("teacher roster can open a student's saved conversations", () => {
-  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const conversationRouteSource = readFileSync(
     join(repoRoot, "frontend/app/api/classes/[classId]/students/[studentId]/conversations/route.ts"),
     "utf8"
@@ -260,7 +260,7 @@ test("teacher roster can open a student's saved conversations", () => {
 });
 
 test("teacher class conversations endpoint loads the review inbox", () => {
-  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/conversations/route.ts"), "utf8");
   const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
 
@@ -282,7 +282,7 @@ test("teacher conversation review PATCH stores teacher-only metadata", () => {
     "utf8"
   );
   const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
-  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
   assert.match(routeSource, /privateNote: String\(data\.privateNote \?\? ""\)\.slice\(0, 1000\)/);
@@ -318,7 +318,7 @@ test("teacher transcript messages include retrieval confidence", () => {
 });
 
 test("teacher transcript uses student chat markdown formatting and readable source labels", () => {
-  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const messageFormatSource = readFileSync(join(repoRoot, "frontend/lib/chat-message-format.ts"), "utf8");
   const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
@@ -334,7 +334,7 @@ test("teacher transcript uses student chat markdown formatting and readable sour
 });
 
 test("teacher roster active status uses Firebase presence and combines activity columns", () => {
-  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
   const serverSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
   const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");

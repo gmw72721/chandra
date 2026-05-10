@@ -103,15 +103,15 @@ test("new material uploads inherit class source defaults", () => {
   assert.match(classCreateRoute, /sourceDefaults: defaultSourceDefaultsSettings/);
 });
 
-test("tutor knowledge uploads original files directly to Storage before server processing", () => {
+test("tutor knowledge uploads original files through the server route", () => {
   const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
-  const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const componentSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const rulesSource = readFileSync(join(repoRoot, "storage.rules"), "utf8");
 
-  assert.match(componentSource, /uploadBytesResumable/);
-  assert.match(componentSource, /formData\.append\("storagePath", storagePath\)/);
-  assert.match(componentSource, /formData\.append\("storageBucket", firebaseConfig\.storageBucket \?\? ""\)/);
-  assert.doesNotMatch(componentSource, /formData\.append\("file", materialFile\)/);
+  assert.doesNotMatch(componentSource, /uploadBytesResumable/);
+  assert.doesNotMatch(componentSource, /formData\.append\("storagePath", storagePath\)/);
+  assert.doesNotMatch(componentSource, /formData\.append\("storageBucket", firebaseConfig\.storageBucket \?\? ""\)/);
+  assert.match(componentSource, /formData\.append\("file", materialFile\)/);
   assert.match(source, /formData\.get\("storagePath"\)/);
   assert.match(source, /formData\.get\("storageBucket"\)/);
   assert.match(source, /resolveTutorKnowledgeStorageBucket\(storageBucket\)/);
@@ -144,7 +144,7 @@ test("deleting tutor knowledge removes source files, chunks, embeddings, jobs, a
 
 test("tutor knowledge supports guarded URL ingestion", () => {
   const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
-  const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const componentSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(componentSource, /Paste URL/);
   assert.match(source, /extractChunksFromUrl/);

@@ -24,7 +24,7 @@ test("student-entered six-letter class codes normalize to uppercase", () => {
 });
 
 test("teacher workspace keeps join codes available without rendering top-page invite controls", () => {
-  const source = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const source = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(source, /selectedClass\.joinCode/);
   assert.match(source, /ensureClassJoinCode\(selectedClass\.id\)/);
@@ -68,7 +68,7 @@ test("student class joins are additive and keep enrolled class ids", () => {
 });
 
 test("teacher roster sync backfills students who already saved the classId", () => {
-  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const managerSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
   const syncSource = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/roster/sync/route.ts"), "utf8");
 
   assert.match(managerSource, /\/api\/classes\/\$\{encodeURIComponent\(activeClassId\)\}\/roster\/sync/);
