@@ -18,7 +18,7 @@ import {
   teacherClassThemeColorOptions
 } from "@/lib/class-theme";
 import { subscribeToClass, type TeacherClass } from "@/lib/classes";
-import type { ChatMessage, StudentConversationSummary, TutorApiResponse } from "@/lib/types";
+import type { ChatMessage, StudentConversationSummary, TutorApiResponse, TutorStructuredSectionKey } from "@/lib/types";
 
 type ChatProgress = {
   message: string;
@@ -582,10 +582,7 @@ export function StudentWorkspace() {
                   </div>
                 ) : (
                   (() => {
-                    const answerContent = assistantMessageAnswerContent(message);
-                    const structuredSections = assistantStructuredSections(message);
-                    const problemSection = structuredSections.find((section) => section.kind === "problem");
-                    const remainingStructuredSections = structuredSections.filter((section) => section.kind !== "problem");
+                    const messageBlocks = assistantMessageBlocks(message);
 
                     return (
                       <>
@@ -594,31 +591,22 @@ export function StudentWorkspace() {
                         </span>
                         <div className="assistant-message-stack">
                           <div className="message-meta">Chandra</div>
-                          {problemSection ? (
-                            <div className={`assistant-structured-section ${problemSection.kind}`} key={problemSection.kind}>
-                              <strong>{problemSection.label}</strong>
-                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                                {normalizeMarkdownMath(
-                                  normalizeStructuredSectionMarkdown(problemSection.content, problemSection.kind)
-                                )}
-                              </ReactMarkdown>
-                            </div>
-                          ) : null}
-                          {answerContent ? (
-                            <div className="assistant-message-bubble">
-                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                                {normalizeMarkdownMath(answerContent)}
-                              </ReactMarkdown>
-                            </div>
-                          ) : null}
-                          {remainingStructuredSections.map((section) => (
-                            <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
-                              <strong>{section.label}</strong>
-                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                                {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(section.content, section.kind))}
-                              </ReactMarkdown>
-                            </div>
-                          ))}
+                          {messageBlocks.map((block) =>
+                            block.kind === "answer" ? (
+                              <div className="assistant-message-bubble" key={block.kind}>
+                                <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                                  {normalizeMarkdownMath(block.content)}
+                                </ReactMarkdown>
+                              </div>
+                            ) : (
+                              <div className={`assistant-structured-section ${block.kind}`} key={block.kind}>
+                                <strong>{block.label}</strong>
+                                <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                                  {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(block.content, block.kind))}
+                                </ReactMarkdown>
+                              </div>
+                            )
+                          )}
                           {message.sources?.length ? (
                             <div className="message-sources" aria-label="Sources used">
                               <strong>Sources:</strong>
@@ -857,31 +845,54 @@ function normalizeSearchQuery(query: string) {
   return query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-function assistantMessageAnswerContent(message: ChatMessage) {
-  return message.structuredOutput ? message.structuredOutput.sections.answer : message.content;
-}
+type AssistantStructuredSection = { content: string; kind: string; label: string };
+type AssistantMessageBlock = { content: string; kind: "answer"; label?: undefined } | AssistantStructuredSection;
+const fallbackSectionOrder: TutorStructuredSectionKey[] = [
+  "problem",
+  "answer",
+  "hint",
+  "explanation",
+  "formula",
+  "example",
+  "checkWork",
+  "sourceNote",
+  "nextStep"
+];
 
-function assistantStructuredSections(message: ChatMessage) {
-  const sections = message.structuredOutput?.sections;
-
-  if (!sections) {
-    return [];
+function assistantMessageBlocks(message: ChatMessage): AssistantMessageBlock[] {
+  if (!message.structuredOutput) {
+    return message.content ? [{ content: message.content, kind: "answer" }] : [];
   }
 
-  return [
-    { content: sections.problem, kind: "problem", label: "Problem" },
-    { content: sections.hint, kind: "hint", label: "Hint" },
-    { content: sections.explanation, kind: "explanation", label: "Why this works" },
-    { content: sections.formula, kind: "formula", label: "Formula" },
-    { content: sections.example, kind: "example", label: "Similar example" },
-    { content: sections.checkWork, kind: "check-work", label: "Check your work" },
-    {
-      content: message.sources?.length || isGenericSourceNote(sections.sourceNote) ? undefined : sections.sourceNote,
-      kind: "source-note",
-      label: "Source"
-    },
-    { content: sections.nextStep, kind: "next-step", label: "Your next step" }
-  ].filter((section): section is { content: string; kind: string; label: string } => Boolean(section.content));
+  const sections = message.structuredOutput.sections;
+  const sectionMap: Record<TutorStructuredSectionKey, AssistantMessageBlock | undefined> = {
+    answer: sections.answer ? { content: sections.answer, kind: "answer" } : undefined,
+    problem: sections.problem ? { content: sections.problem, kind: "problem", label: "Problem" } : undefined,
+    hint: sections.hint ? { content: sections.hint, kind: "hint", label: "Hint" } : undefined,
+    explanation: sections.explanation ? { content: sections.explanation, kind: "explanation", label: "Why this works" } : undefined,
+    formula: sections.formula ? { content: sections.formula, kind: "formula", label: "Formula" } : undefined,
+    example: sections.example ? { content: sections.example, kind: "example", label: "Similar example" } : undefined,
+    checkWork: sections.checkWork ? { content: sections.checkWork, kind: "check-work", label: "Check your work" } : undefined,
+    sourceNote:
+      !message.sources?.length && !isGenericSourceNote(sections.sourceNote)
+        ? { content: sections.sourceNote ?? "", kind: "source-note", label: "Source" }
+        : undefined,
+    nextStep: sections.nextStep ? { content: sections.nextStep, kind: "next-step", label: "Your next step" } : undefined
+  };
+  const requestedOrder = message.structuredOutput.sectionOrder?.length
+    ? message.structuredOutput.sectionOrder
+    : fallbackSectionOrder;
+  const seen = new Set<TutorStructuredSectionKey>();
+  const orderedKeys = [...requestedOrder, ...fallbackSectionOrder].filter((key) => {
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return Boolean(sectionMap[key]);
+  });
+
+  return orderedKeys.map((key) => sectionMap[key]).filter((block): block is AssistantMessageBlock => Boolean(block));
 }
 
 function isGenericSourceNote(note: string | undefined) {
@@ -898,28 +909,50 @@ function normalizeStructuredSectionMarkdown(content: string, kind: string) {
     return normalizeProblemSectionMarkdown(cleaned);
   }
 
-  if (kind !== "formula") {
-    return cleaned;
+  if (kind === "formula") {
+    return normalizeFormulaSectionMarkdown(cleaned);
   }
 
-  if (/^\$\$[\s\S]*\$\$$/.test(cleaned) || /^\\\[/.test(cleaned)) {
-    return cleaned;
+  return cleaned;
+}
+
+function normalizeFormulaSectionMarkdown(content: string) {
+  if (/^\$\$[\s\S]*\$\$$/.test(content) || /^\\\[/.test(content)) {
+    return content;
   }
 
-  if (!isMathOnlyFormulaSection(cleaned)) {
-    return cleaned;
+  const splitFormula = splitFormulaCommentary(content);
+
+  if (!isMathOnlyFormulaSection(splitFormula.formula)) {
+    return content;
   }
 
-  const formulas = cleaned
+  const formulas = splitFormula.formula
     .split(/\s*,\s*(?=(?:P|E|M|A|\\mu|μ|\$?\\?mu)\b)/)
     .map((formula) => formula.trim())
     .filter(Boolean);
 
   if (formulas.length <= 1) {
-    return `$$\n${cleaned.replace(/^\$|\$$/g, "")}\n$$`;
+    return [`$$\n${splitFormula.formula.replace(/^\$|\$$/g, "")}\n$$`, splitFormula.commentary].filter(Boolean).join("\n\n");
   }
 
-  return formulas.map((formula) => `$$\n${formula.replace(/^\$|\$$/g, "")}\n$$`).join("\n\n");
+  return [
+    formulas.map((formula) => `$$\n${formula.replace(/^\$|\$$/g, "")}\n$$`).join("\n\n"),
+    splitFormula.commentary
+  ].filter(Boolean).join("\n\n");
+}
+
+function splitFormulaCommentary(content: string) {
+  const commentaryMatch = content.match(/\s+(That|This|These|It)\s+.+$/);
+
+  if (!commentaryMatch?.index) {
+    return { formula: content, commentary: "" };
+  }
+
+  return {
+    formula: content.slice(0, commentaryMatch.index).trim(),
+    commentary: content.slice(commentaryMatch.index).trim()
+  };
 }
 
 function isMathOnlyFormulaSection(content: string) {

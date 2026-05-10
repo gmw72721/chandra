@@ -155,6 +155,21 @@ const chatRequestSchema = z.object({
               sourceNote: z.string().optional(),
               nextStep: z.string().optional()
             }),
+            sectionOrder: z
+              .array(
+                z.enum([
+                  "answer",
+                  "problem",
+                  "hint",
+                  "explanation",
+                  "formula",
+                  "example",
+                  "checkWork",
+                  "sourceNote",
+                  "nextStep"
+                ])
+              )
+              .optional(),
             metadata: z.object({
               hintLevel: z.enum(tutorHintLevels),
               sourceConfidence: z.enum(["high", "medium", "low"]),
@@ -1678,23 +1693,25 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "Student-facing section guidance:",
     "- Default to one clean answer plus useful optional sections when they improve scanability or learning.",
     "- Do not fill every section. Leave unused structured fields empty; each section should support the answer because that format is genuinely helpful for this turn.",
+    "- You may reorganize content into the section where it belongs instead of preserving the order or grouping from your draft. Put formulas in `Formula:`, conceptual commentary in `Why this works:`, examples in `Example:`, and the student's immediate action in `nextStep`.",
+    "- Choose the student-facing order of the answer and sections. When returning structured output, include `sectionOrder` with the keys in the order they should render, such as [`answer`, `hint`, `formula`, `example`, `nextStep`]. Include only keys that have content.",
     "- If content does not fit a section's narrow purpose, keep it in the main answer instead of forcing it into a labeled section.",
     "- Do not duplicate the same idea in both the main answer and a labeled section.",
     "- Allowed labels are only `Problem:`, `Hint:`, `Why this works:`, `Formula:`, `Example:`, and `Check your work:`.",
-    "- Use `Problem:` only for the academic exercise/question/task statement the student is working on, not for an issue/error. If you use it, put only the problem statement there and keep location/source context or any main reply to a short follow-up offer outside that section.",
-    "- Use `Hint:` for one small nudge when the student needs a push. Keep it short, direct, and not a solution step chain; do not put formulas, citations, or multiple bullet-like ideas in `Hint:`.",
-    "- Use `Why this works:` for calm conceptual explanation. Prefer 1-2 short paragraphs or a few compact bullets when it clarifies the reasoning.",
-    "- Use `Formula:` only when there is one main rule, theorem, identity, or equation worth isolating. Put only the formula or formulas there, not citations or explanatory prose. If you need to explain where a formula comes from, put that in the main answer or `Why this works:` instead.",
+    "- Use `Problem:` only for the academic exercise/question/task statement the student is working on, not for an issue/error. If you use it, put only the problem statement there. Never put prompts like `send me your work`, `what have you tried`, offers, hints, next steps, source context, or commentary inside `Problem:`.",
+    "- Use `Hint:` for one small nudge when the student needs a push. Keep it short, direct, and usually one sentence. Do not put formulas, citations, definitions, commentary, offers, or multiple bullet-like ideas in `Hint:`.",
+    "- Use `Why this works:` for calm conceptual explanation. Prefer 1-2 short paragraphs or a few compact bullets when it clarifies the reasoning. Do not end `Why this works:` with offers, workflow prompts, or `If you want...`; put those in `nextStep`.",
+    "- Use `Formula:` only when there is one main rule, theorem, identity, or equation worth isolating. Put only the formula/rule statement there. Do not append commentary such as `this is the key idea`, citations, source notes, strategy advice, or explanatory prose. Move that surrounding text to the main answer or `Why this works:`. The rendered Formula block should contain only the formula.",
     "- Use `Example:` when giving or discussing a genuinely similar example. Make the example visibly different from the student's exact task; when useful, separate it into `Setup:` and `Move:` lines.",
     "- Use `Check your work:` only when the student has shown work or asks for validation. Make it evaluative and concise, using short lines such as `Looks right:`, `First issue:`, `What to fix:`, or `Try again with:` when they fit.",
-    "- Use `nextStep` metadata/section for the student's most immediate action. Keep it one clear action, not a full explanation.",
+    "- Use `nextStep` metadata/section for the student's most immediate action. Keep it one clear action, not a full explanation. Put offers or workflow prompts like `If you want...`, `Send me...`, `Pick one...`, or `Try...` here instead of in `Hint:` or `Why this works:`.",
     "- Never use `Example:` for homework-ready wording, proof paragraphs, or a submittable version of the exact task.",
     "- Do not write `Source:`, `Sources:`, `Answer:`, `Question:`, `Next step:`, or `Your next step:`. Cite sources naturally and end with one direct question.",
     "- Do not force labels into greetings, clarifications, refusals, or already-clear replies. For substantive tutoring replies, freely use helpful labeled sections; 1-2 is often enough, and 3-4 is fine when the student asks for multiple kinds of help or the reply naturally has a problem, hint, formula, example, explanation, or next action.",
     "- Do not bold optional section content; put math in `$...$` or `$$...$$`.",
     "- Internal render indexes are not student-facing page numbers.",
     "- For task-location answers, use `That item is Problem/Question N in Section X, on printed page P of Title.`",
-    "- For source-text lookup without solving help, quote the requested visible source item exactly. For problem/exercise/prompt lookup, put only the visible task statement in a `Problem:` section, then stop with a brief offer to help them start. When returning task text, only return the task directly in that section; do not include location/source context, offers, hints, or commentary inside `Problem:`. Do not repeat the task text again in the unlabeled main reply.",
+    "- For source-text lookup without solving help, quote the requested visible source item exactly. For problem/exercise/prompt lookup, put only the visible task statement in a `Problem:` section, then put any brief offer, attempt request, or next action outside `Problem:` in `answer` or `nextStep`. When returning task text, only return the task directly in that section; do not include location/source context, offers, hints, next steps, attempt requests, or commentary inside `Problem:`. Do not repeat the task text again in the unlabeled main reply.",
     "- Format `Problem:` for readability without changing meaning: preserve source line breaks when visible; if extracted text is flattened, use best-effort markdown line breaks by putting headings like `PROBLEM`, `EXERCISE`, `THEOREM`, or `DEFINITION` on their own line, the problem number and main statement after a blank line, and obvious enumerated parts such as `(i)`, `(ii)`, `(a)`, or `(b)` on separate lines.",
     "- Do not invent labels, split uncertain clauses, or alter mathematical notation while formatting `Problem:`. Only add line breaks around clear structural markers.",
     "- Keep source attributions short and natural instead of repeating long source identifiers.",

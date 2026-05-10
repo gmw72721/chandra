@@ -156,6 +156,17 @@ export type TutorStructuredSections = {
   nextStep?: string;
 };
 
+export type TutorStructuredSectionKey =
+  | "answer"
+  | "problem"
+  | "hint"
+  | "explanation"
+  | "formula"
+  | "example"
+  | "checkWork"
+  | "sourceNote"
+  | "nextStep";
+
 export type TutorStructuredMetadata = {
   hintLevel: "none" | "small_hint" | "guided_step" | "worked_example" | "refusal";
   sourceConfidence: "high" | "medium" | "low";
@@ -181,6 +192,7 @@ export type TutorStructuredMetadata = {
 
 export type TutorStructuredOutput = {
   sections: TutorStructuredSections;
+  sectionOrder?: TutorStructuredSectionKey[];
   metadata: TutorStructuredMetadata;
 };
 

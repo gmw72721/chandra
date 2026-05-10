@@ -21,6 +21,17 @@ export const tutorModes = [
   "clarification",
   "off_topic_redirect"
 ] as const;
+const tutorStructuredSectionKeys = [
+  "answer",
+  "problem",
+  "hint",
+  "explanation",
+  "formula",
+  "example",
+  "checkWork",
+  "sourceNote",
+  "nextStep"
+] as const;
 
 export function normalizeTutorResponse(payload: Partial<TutorApiResponse>): TutorApiResponse {
   const message = String(payload.message ?? payload.content ?? "");
@@ -64,6 +75,7 @@ export function normalizeStructuredTutorOutput(
     stringValue(sectionsRecord.nextStep) || stringValue(record.nextQuestion)
   );
   const { answer, nextStep } = repairSplitReferenceNextStep(rawAnswer, rawNextStep);
+  const sectionOrder = normalizeSectionOrder(record.sectionOrder ?? sectionsRecord.sectionOrder);
 
   return {
     sections: {
@@ -77,6 +89,7 @@ export function normalizeStructuredTutorOutput(
       ...(sourceNote ? { sourceNote } : {}),
       ...(nextStep ? { nextStep } : {})
     },
+    ...(sectionOrder.length ? { sectionOrder } : {}),
     metadata: {
       hintLevel: includesString(tutorHintLevels, metadataRecord.hintLevel) ? metadataRecord.hintLevel : "guided_step",
       sourceConfidence: normalizeRetrievalConfidence(metadataRecord.sourceConfidence),
@@ -86,6 +99,16 @@ export function normalizeStructuredTutorOutput(
       mode: includesString(tutorModes, metadataRecord.mode) ? metadataRecord.mode : "guided_problem_solving"
     }
   };
+}
+
+function normalizeSectionOrder(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is (typeof tutorStructuredSectionKeys)[number] =>
+    includesString(tutorStructuredSectionKeys, item)
+  );
 }
 
 function normalizeRetrievalConfidence(value: unknown): RetrievalConfidence {

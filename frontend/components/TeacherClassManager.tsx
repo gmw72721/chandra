@@ -50,8 +50,7 @@ import {
   type TutorAccessSettings
 } from "@/lib/class-settings";
 import {
-  assistantMessageAnswerContent,
-  assistantStructuredSections,
+  assistantMessageBlocks,
   condensedSourceLabels,
   normalizeMarkdownMath,
   normalizeStructuredSectionMarkdown
@@ -7121,8 +7120,7 @@ const TeacherTranscriptMessage = memo(function TeacherTranscriptMessage({
     );
   }
 
-  const answerContent = assistantMessageAnswerContent(message);
-  const structuredSections = assistantStructuredSections(message);
+  const messageBlocks = assistantMessageBlocks(message);
   const sourceLabels = message.sources?.length ? condensedSourceLabels(message.sources) : [];
 
   return (
@@ -7132,21 +7130,22 @@ const TeacherTranscriptMessage = memo(function TeacherTranscriptMessage({
       </span>
       <div className="assistant-message-stack teacher-transcript-stack">
         <div className="message-meta">Chandra</div>
-        {answerContent ? (
-          <div className="assistant-message-bubble teacher-transcript-bubble">
-            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-              {normalizeMarkdownMath(answerContent)}
-            </ReactMarkdown>
-          </div>
-        ) : null}
-        {structuredSections.map((section) => (
-          <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
-            <strong>{section.label}</strong>
-            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-              {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(section.content, section.kind))}
-            </ReactMarkdown>
-          </div>
-        ))}
+        {messageBlocks.map((block) =>
+          block.kind === "answer" ? (
+            <div className="assistant-message-bubble teacher-transcript-bubble" key={block.kind}>
+              <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                {normalizeMarkdownMath(block.content)}
+              </ReactMarkdown>
+            </div>
+          ) : (
+            <div className={`assistant-structured-section ${block.kind}`} key={block.kind}>
+              <strong>{block.label}</strong>
+              <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(block.content, block.kind))}
+              </ReactMarkdown>
+            </div>
+          )
+        )}
         {sourceLabels.length ? (
           <div className="message-sources teacher-transcript-sources" aria-label="Sources used">
             <strong>Sources:</strong>

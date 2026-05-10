@@ -1,4 +1,4 @@
-import type { ChatMessage } from "@/lib/types";
+import type { ChatMessage, TutorStructuredSectionKey } from "@/lib/types";
 
 export type AssistantStructuredSection = {
   content: string;
@@ -6,33 +6,65 @@ export type AssistantStructuredSection = {
   label: string;
 };
 
+export type AssistantMessageBlock =
+  | { content: string; kind: "answer"; label?: undefined }
+  | AssistantStructuredSection;
+
 type MessageSource = NonNullable<ChatMessage["sources"]>[number];
+const fallbackSectionOrder: TutorStructuredSectionKey[] = [
+  "problem",
+  "answer",
+  "hint",
+  "explanation",
+  "formula",
+  "example",
+  "checkWork",
+  "sourceNote",
+  "nextStep"
+];
 
 export function assistantMessageAnswerContent(message: ChatMessage) {
   return message.structuredOutput ? message.structuredOutput.sections.answer : message.content;
 }
 
-export function assistantStructuredSections(message: ChatMessage): AssistantStructuredSection[] {
-  const sections = message.structuredOutput?.sections;
-
-  if (!sections) {
-    return [];
+export function assistantMessageBlocks(message: ChatMessage): AssistantMessageBlock[] {
+  if (!message.structuredOutput) {
+    return message.content ? [{ content: message.content, kind: "answer" }] : [];
   }
 
-  return [
-    { content: sections.problem, kind: "problem", label: "Problem" },
-    { content: sections.hint, kind: "hint", label: "Hint" },
-    { content: sections.explanation, kind: "explanation", label: "Why this works" },
-    { content: sections.formula, kind: "formula", label: "Formula" },
-    { content: sections.example, kind: "example", label: "Similar example" },
-    { content: sections.checkWork, kind: "check-work", label: "Check your work" },
-    {
-      content: message.sources?.length || isGenericSourceNote(sections.sourceNote) ? undefined : sections.sourceNote,
-      kind: "source-note",
-      label: "Source"
-    },
-    { content: sections.nextStep, kind: "next-step", label: "Your next step" }
-  ].filter((section): section is AssistantStructuredSection => Boolean(section.content));
+  const sections = message.structuredOutput.sections;
+  const sectionMap: Record<TutorStructuredSectionKey, AssistantMessageBlock | undefined> = {
+    answer: sections.answer ? { content: sections.answer, kind: "answer" } : undefined,
+    problem: sections.problem ? { content: sections.problem, kind: "problem", label: "Problem" } : undefined,
+    hint: sections.hint ? { content: sections.hint, kind: "hint", label: "Hint" } : undefined,
+    explanation: sections.explanation ? { content: sections.explanation, kind: "explanation", label: "Why this works" } : undefined,
+    formula: sections.formula ? { content: sections.formula, kind: "formula", label: "Formula" } : undefined,
+    example: sections.example ? { content: sections.example, kind: "example", label: "Similar example" } : undefined,
+    checkWork: sections.checkWork ? { content: sections.checkWork, kind: "check-work", label: "Check your work" } : undefined,
+    sourceNote:
+      !message.sources?.length && !isGenericSourceNote(sections.sourceNote)
+        ? { content: sections.sourceNote ?? "", kind: "source-note", label: "Source" }
+        : undefined,
+    nextStep: sections.nextStep ? { content: sections.nextStep, kind: "next-step", label: "Your next step" } : undefined
+  };
+  const requestedOrder = message.structuredOutput.sectionOrder?.length
+    ? message.structuredOutput.sectionOrder
+    : fallbackSectionOrder;
+  const seen = new Set<TutorStructuredSectionKey>();
+  const orderedKeys = [...requestedOrder, ...fallbackSectionOrder].filter((key) => {
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return Boolean(sectionMap[key]);
+  });
+
+  return orderedKeys.map((key) => sectionMap[key]).filter((block): block is AssistantMessageBlock => Boolean(block));
+}
+
+export function assistantStructuredSections(message: ChatMessage): AssistantStructuredSection[] {
+  return assistantMessageBlocks(message).filter((block): block is AssistantStructuredSection => block.kind !== "answer");
 }
 
 export function condensedSourceLabels(sources: NonNullable<ChatMessage["sources"]>) {
@@ -67,28 +99,47 @@ export function normalizeStructuredSectionMarkdown(content: string, kind: string
     return normalizeProblemSectionMarkdown(cleaned);
   }
 
-  if (kind !== "formula") {
-    return cleaned;
+  if (kind === "formula") {
+    return normalizeFormulaSectionMarkdown(cleaned);
   }
 
-  if (/^\$\$[\s\S]*\$\$$/.test(cleaned) || /^\\\[/.test(cleaned)) {
-    return cleaned;
+  return cleaned;
+}
+
+function normalizeFormulaSectionMarkdown(content: string) {
+  if (/^\$\$[\s\S]*\$\$$/.test(content) || /^\\\[/.test(content)) {
+    return content;
   }
 
-  if (!isMathOnlyFormulaSection(cleaned)) {
-    return cleaned;
+  const splitFormula = splitFormulaCommentary(content);
+
+  if (!isMathOnlyFormulaSection(splitFormula.formula)) {
+    return content;
   }
 
-  const formulas = cleaned
+  const formulas = splitFormula.formula
     .split(/\s*,\s*(?=(?:P|E|M|A|\\mu|μ|\$?\\?mu)\b)/)
     .map((formula) => formula.trim())
     .filter(Boolean);
 
   if (formulas.length <= 1) {
-    return `$$\n${cleaned.replace(/^\$|\$$/g, "")}\n$$`;
+    return `$$\n${splitFormula.formula.replace(/^\$|\$$/g, "")}\n$$`;
   }
 
   return formulas.map((formula) => `$$\n${formula.replace(/^\$|\$$/g, "")}\n$$`).join("\n\n");
+}
+
+function splitFormulaCommentary(content: string) {
+  const commentaryMatch = content.match(/\s+(That|This|These|It)\s+.+$/);
+
+  if (!commentaryMatch?.index) {
+    return { formula: content, commentary: "" };
+  }
+
+  return {
+    formula: content.slice(0, commentaryMatch.index).trim(),
+    commentary: content.slice(commentaryMatch.index).trim()
+  };
 }
 
 function isMathOnlyFormulaSection(content: string) {

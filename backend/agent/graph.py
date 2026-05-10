@@ -922,18 +922,20 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
         f"{final_unclear_source_instruction(source_usage)}",
         "Use printed_page_start as the document page number. page_start and page_end are internal render indexes only.",
         "For task-location answers, use a concise shape like `That item is Problem/Question N in Section X, on printed page P of Title.`",
-        "For exercise/question/task lookup by number, exercise, page, or title, put the found exercise/question/task statement in a separate `Problem:` section and quote the full visible problem statement exactly, then stop with a brief offer to help them start. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. When returning the problem, only return the problem directly in that section; do not include location/source context, offers, hints, or commentary inside `Problem:`. Do not repeat the same problem text again in the unlabeled main reply.",
+        "For exercise/question/task lookup by number, exercise, page, or title, put the found exercise/question/task statement in a separate `Problem:` section and quote the full visible problem statement exactly. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. When returning the problem, only return the problem directly in that section; do not include location/source context, offers, hints, next steps, attempt requests, or commentary inside `Problem:`. Put any brief offer or attempt request outside `Problem:` in the main answer or final direct question. Do not repeat the same problem text again in the unlabeled main reply.",
         "Do not restate long task text the student already supplied unless needed for clarity.",
         (
-            "Structured section labels: when useful, write sections in this order: `Problem:`, `Hint:`, `Why this works:`, "
-            "`Formula:`, `Example:`, `Check your work:`. Use `Problem:` only for the found academic exercise/question/task "
-            "statement the student is working on, not for an issue/error. If you use `Problem:`, put only the problem statement there and keep location/source context or any main reply to a short follow-up offer outside that section. Use `Hint:` for a small nudge, `Why this works:` "
-            "for concept reasoning, `Formula:` for a reusable rule, `Example:` only for a similar different problem, and "
-            "`Check your work:` only when responding to a student attempt. Do not write `Answer:`, `Question:`, `Next step:`, "
-            "`Your next step:`, `Source:`, or `Sources:`; end with one unlabeled direct question when helpful."
+            "Structured section labels: when useful, choose the order that best supports this specific reply instead of following "
+            "a fixed template. Use `Problem:` only for the found academic exercise/question/task statement the student is working on, "
+            "not for an issue/error. If you use `Problem:`, put only the problem statement there; never put offers, hints, next steps, "
+            "attempt requests, source context, or commentary inside that section. Use `Hint:` for one short nudge, usually one sentence, "
+            "not definitions, citations, offers, or multiple ideas. Use `Why this works:` for concept reasoning, but do not end it with "
+            "offers or workflow prompts; put those in the final direct question/next action. Use `Formula:` only for the formula/rule statement with no commentary, `Example:` only for a similar "
+            "different problem, and `Check your work:` only when responding to a student attempt. Do not write `Answer:`, `Question:`, "
+            "`Next step:`, `Your next step:`, `Source:`, or `Sources:`; end with one unlabeled direct question when helpful."
         ),
         "For simple greetings or check-ins, reply naturally in one short chat message and ask what course problem or concept the student wants to work on.",
-        "Usually use no more than two optional labeled sections, then end with one direct question.",
+        "Use optional labeled sections freely when they improve scanability or learning; 1-2 is often enough, and 3-4 is fine when the reply naturally has multiple useful parts.",
         "Use `$...$` or `$$...$$`; do not use `\\(...\\)`, `\\[...\\]`, or plain bracketed math.",
         "Do not use unrelated pages or outside knowledge.",
         (
@@ -3513,6 +3515,7 @@ def structured_tutor_output_from_answer(
         "your next step",
         "question",
     ]
+    parsed_section_order = extract_structured_section_order(structured_answer, optional_section_labels)
     section_answer = remove_labeled_sections(structured_answer, optional_section_labels)
     if problem:
         problem, problem_followup = split_problem_section_followup(problem)
@@ -3545,9 +3548,15 @@ def structured_tutor_output_from_answer(
 
     if next_question:
         sections["nextStep"] = next_question
+    section_order = normalized_structured_section_order(
+        parsed_section_order,
+        sections,
+        include_answer_first=bool(section_answer),
+    )
 
     return {
         "sections": sections,
+        **({"sectionOrder": section_order} if section_order else {}),
         "metadata": {
             "hintLevel": hint_level,
             "sourceConfidence": source_confidence,
@@ -3747,6 +3756,57 @@ def remove_labeled_sections(answer: str, labels: list[str]) -> str:
     ).strip()
 
 
+def extract_structured_section_order(answer: str, labels: list[str]) -> list[str]:
+    label_to_key = {
+        "problem": "problem",
+        "hint": "hint",
+        "small hint": "hint",
+        "why this works": "explanation",
+        "explanation": "explanation",
+        "formula": "formula",
+        "formulas": "formula",
+        "example": "example",
+        "similar example": "example",
+        "check your work": "checkWork",
+        "check work": "checkWork",
+        "next step": "nextStep",
+        "your next step": "nextStep",
+        "question": "nextStep",
+    }
+    label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
+    matches = re.finditer(rf"(?im)^\s*(?:\*\*)?({label_pattern})(?:\*\*)?\s*:", answer)
+    ordered_keys: list[str] = []
+
+    for match in matches:
+        section_key = label_to_key.get(match.group(1).strip().lower())
+        if section_key and section_key not in ordered_keys:
+            ordered_keys.append(section_key)
+
+    return ordered_keys
+
+
+def normalized_structured_section_order(
+    parsed_order: list[str],
+    sections: dict[str, str],
+    *,
+    include_answer_first: bool,
+) -> list[str]:
+    fallback_order = [section_name for section_name, _ in STRUCTURED_SECTION_ORDER]
+    ordered_keys = [
+        *(["answer"] if include_answer_first and sections.get("answer") else []),
+        *parsed_order,
+        *fallback_order,
+    ]
+    section_order: list[str] = []
+
+    for section_key in ordered_keys:
+        if section_key in section_order or not sections.get(section_key):
+            continue
+        section_order.append(section_key)
+
+    return section_order
+
+
 def clean_labeled_section_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", text).replace("**", "").strip()
     if re.search(r"(\\|=|<|>|\^|_)", cleaned):
@@ -3756,7 +3816,7 @@ def clean_labeled_section_text(text: str) -> str:
 
 def split_problem_section_followup(problem: str) -> tuple[str, str]:
     match = re.search(
-        r"\s+(If you want,?\s+.+|I can help you\s+.+|Want to\s+.+)$",
+        r"\s+(If you want,?\s+.+|I can help you\s+.+|Want to\s+.+|Send me\s+.+|Show me\s+.+|What have you\s+.+|Where do you\s+.+)$",
         problem,
         flags=re.IGNORECASE,
     )
