@@ -24,7 +24,7 @@ export function assistantStructuredSections(message: ChatMessage): AssistantStru
     { content: sections.hint, kind: "hint", label: "Hint" },
     { content: sections.explanation, kind: "explanation", label: "Why this works" },
     { content: sections.formula, kind: "formula", label: "Formula" },
-    { content: sections.example, kind: "example", label: "Example" },
+    { content: sections.example, kind: "example", label: "Similar example" },
     { content: sections.checkWork, kind: "check-work", label: "Check your work" },
     {
       content: message.sources?.length || isGenericSourceNote(sections.sourceNote) ? undefined : sections.sourceNote,
@@ -75,6 +75,10 @@ export function normalizeStructuredSectionMarkdown(content: string, kind: string
     return cleaned;
   }
 
+  if (!isMathOnlyFormulaSection(cleaned)) {
+    return cleaned;
+  }
+
   const formulas = cleaned
     .split(/\s*,\s*(?=(?:P|E|M|A|\\mu|μ|\$?\\?mu)\b)/)
     .map((formula) => formula.trim())
@@ -85,6 +89,18 @@ export function normalizeStructuredSectionMarkdown(content: string, kind: string
   }
 
   return formulas.map((formula) => `$$\n${formula.replace(/^\$|\$$/g, "")}\n$$`).join("\n\n");
+}
+
+function isMathOnlyFormulaSection(content: string) {
+  const withoutMath = content
+    .replace(/\$\$[\s\S]*?\$\$/g, " ")
+    .replace(/\$[^$]+\$/g, " ")
+    .replace(/\\[a-zA-Z]+/g, " ")
+    .replace(/[=+\-*/^_{}()[\],.:;|<>≤≥∈∩∪]/g, " ")
+    .replace(/\d+/g, " ");
+  const proseWords = withoutMath.match(/[A-Za-z]{3,}/g) ?? [];
+
+  return proseWords.length <= 1 && !/^[-*]\s/.test(content.trim());
 }
 
 function normalizeProblemSectionMarkdown(content: string) {

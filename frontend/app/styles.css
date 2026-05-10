@@ -10695,8 +10695,13 @@ button.student-row[aria-pressed="true"] {
 }
 
 .assistant-structured-section.hint {
-  --section-accent: #c69220;
-  --section-bg: rgba(255, 248, 218, 0.92);
+  --section-accent: #c18b1c;
+  --section-bg: rgba(255, 249, 229, 0.96);
+  --section-border: rgba(193, 139, 28, 0.24);
+  max-width: min(520px, 100%);
+  padding: 9px 13px;
+  color: #57421b;
+  font-size: 0.89rem;
 }
 
 .assistant-structured-section.problem {
@@ -10714,28 +10719,51 @@ button.student-row[aria-pressed="true"] {
 }
 
 .assistant-structured-section.explanation {
-  --section-accent: #6d8f86;
-  --section-bg: rgba(240, 248, 245, 0.9);
+  --section-accent: #5d9084;
+  --section-bg: rgba(241, 249, 247, 0.94);
+  --section-border: rgba(93, 144, 132, 0.22);
+  max-width: min(660px, 100%);
+  line-height: 1.58;
 }
 
 .assistant-structured-section.formula {
-  --section-accent: #747f8c;
-  --section-bg: rgba(246, 248, 250, 0.94);
+  --section-accent: #6d7480;
+  --section-bg: rgba(247, 248, 250, 0.98);
+  --section-border: rgba(109, 116, 128, 0.22);
+  min-width: min(360px, 100%);
+  max-width: min(680px, 100%);
+  border-left-width: 0;
+  border-top: 2px solid var(--section-accent);
+  border-bottom: 2px solid rgba(109, 116, 128, 0.14);
+  padding: 13px 18px;
+  text-align: center;
 }
 
 .assistant-structured-section.example {
-  --section-accent: #6f9fc8;
-  --section-bg: rgba(238, 247, 253, 0.92);
+  --section-accent: #4f94c8;
+  --section-bg: rgba(239, 248, 255, 0.96);
+  --section-border: rgba(79, 148, 200, 0.22);
+  max-width: min(650px, 100%);
+  color: #263f52;
 }
 
 .assistant-structured-section.check-work {
-  --section-accent: #9a7355;
-  --section-bg: rgba(250, 244, 239, 0.92);
+  --section-accent: #b37943;
+  --section-bg: rgba(255, 247, 240, 0.96);
+  --section-border: rgba(179, 121, 67, 0.24);
+  max-width: min(620px, 100%);
+  color: #51351f;
 }
 
 .assistant-structured-section.next-step {
-  --section-accent: #4f9c8f;
-  --section-bg: rgba(236, 249, 246, 0.94);
+  --section-accent: #1f8f82;
+  --section-bg: rgba(231, 248, 245, 0.98);
+  --section-border: rgba(31, 143, 130, 0.26);
+  max-width: min(560px, 100%);
+  border-left-width: 5px;
+  box-shadow: 0 8px 22px rgba(31, 143, 130, 0.1);
+  color: #163f3c;
+  font-weight: 600;
 }
 
 .assistant-structured-section.source-note {
@@ -10745,11 +10773,15 @@ button.student-row[aria-pressed="true"] {
 
 .assistant-structured-section > strong {
   display: block;
-  margin-bottom: 4px;
+  width: fit-content;
+  margin-bottom: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.58);
+  padding: 2px 7px;
   color: #344054;
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -10759,6 +10791,38 @@ button.student-row[aria-pressed="true"] {
 
 .assistant-structured-section p + p {
   margin-top: 0.65rem;
+}
+
+.assistant-structured-section ul,
+.assistant-structured-section ol {
+  margin: 0.45rem 0 0;
+  padding-left: 1.15rem;
+}
+
+.assistant-structured-section li + li {
+  margin-top: 0.28rem;
+}
+
+.assistant-structured-section.hint p {
+  font-style: italic;
+}
+
+.assistant-structured-section.formula p {
+  margin: 0 auto;
+}
+
+.assistant-structured-section.formula .katex-display {
+  margin: 0.25rem 0;
+}
+
+.assistant-structured-section.formula .katex {
+  color: #27313d;
+  font-size: 1.12em;
+}
+
+.assistant-structured-section.example p strong:first-child,
+.assistant-structured-section.check-work p strong:first-child {
+  color: var(--section-accent);
 }
 
 .assistant-structured-section.problem p + p {
@@ -10936,25 +11000,25 @@ button.student-row[aria-pressed="true"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-  color: #5f6874;
-  font-size: 0.9rem;
+  gap: 5px;
+  margin-top: 7px;
+  color: #7b8490;
+  font-size: 0.78rem;
 }
 
 .student-workspace-main .message-sources strong {
-  color: #5f6874;
+  color: #7b8490;
   font-weight: 500;
 }
 
 .student-workspace-main .message-sources span {
-  border: 1px solid var(--theme-primary-ring);
-  border-radius: 8px;
-  background: var(--theme-primary-soft);
-  color: #344a4a;
-  padding: 4px 12px;
-  font-size: 0.86rem;
-  font-weight: 500;
+  border: 1px solid rgba(102, 119, 139, 0.18);
+  border-radius: 999px;
+  background: rgba(248, 250, 252, 0.82);
+  color: #66717f;
+  padding: 2px 8px;
+  font-size: 0.74rem;
+  font-weight: 600;
 }
 
 .student-workspace-main .progress-message {

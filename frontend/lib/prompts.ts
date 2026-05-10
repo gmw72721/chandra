@@ -273,10 +273,10 @@ function buildAnswerPolicyInstructions(answerPolicy: AnswerPolicySettings) {
   return [
     ...(answerPolicy.requireStudentAttemptFirst
       ? [
-          "- Require a shown attempt before substantial help on graded-looking work, except for source lookup.",
-          "- If the student only wants the wording or location of a specific problem, page, or passage, treat it as source lookup: provide the visible text when allowed, without solving it or requiring an attempt.",
+          "- Require a shown attempt before substantial help on graded-looking work, except for source-text lookup.",
+          "- If the student only wants the wording or location of a specific source item, treat it as source-text lookup: provide the visible text when allowed, without solving it or requiring an attempt. Source items include problems, exercises, questions, prompts, passages, lemmas, theorems, definitions, propositions, corollaries, examples, rubrics, tables, captions, and pages.",
           "- If the student wants help on an exact assignment without showing work, ask what they tried or where they are stuck.",
-          "- Before an attempt, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, next steps, or submission-ready wording unless the student explicitly asks for concept explanation or source lookup.",
+          "- Before an attempt, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, next steps, or submission-ready wording unless the student explicitly asks for concept explanation or source-text lookup.",
           "- Requests for full proofs, homework-ready wording, sentence starters, outlines, fill-in-the-blank solutions, or `what can I say` count as requests for the student's final artifact.",
           "- Follow-ups like `I still need help`, `yes`, `tell me more`, or `explain like I am 5` are not attempts; keep help conceptual or use a clearly different similar example.",
           "- Do not complete the student's exact task or give multiple intermediate solution steps before the student shows work."
@@ -362,7 +362,7 @@ function sourceQuoteInstruction(sourceUsage: SourceUsageSettings) {
     return "- When using textbook/readings/examples, include at most one short quote of 20 words or fewer when useful, then paraphrase the idea.";
   }
 
-  return "- For problem or passage lookup from selected class material, quote the visible text exactly with source/page context, then explain or paraphrase only if helpful. For problem-statement lookup, give only the problem text in the Problem section; do not include location/source context, offers, hints, or commentary in that section, and do not solve it or ask for an attempt first. Preserve visible line breaks when available; if the extracted problem text is flattened, add best-effort markdown line breaks only around clear structure such as headings, problem numbers, and enumerated parts. Do not invent missing words.";
+  return "- For source-text lookup from selected class material, quote the requested visible text exactly with source/page context, then explain or paraphrase only if helpful. Source-text lookup includes requests to see, read, copy, quote, restate, identify, locate, or ask what a specific problem, exercise, question, prompt, passage, lemma, theorem, definition, proposition, corollary, example, rubric, table, caption, or page says. For source-text lookup, the lookup exception wins over attempt-first and direct-answer restrictions as long as you only provide the visible source wording and do not solve, prove, apply, or complete the task. For problem/exercise/prompt lookup, give only the visible task text in the Problem section; do not include location/source context, offers, hints, or commentary in that section, and do not solve it or ask for an attempt first. Preserve visible line breaks when available; if the extracted text is flattened, add best-effort markdown line breaks only around clear structure such as headings, item numbers, and enumerated parts. Do not invent missing words.";
 }
 
 function buildResponseFormatInstructions(responseFormat: ResponseFormatSettings) {
