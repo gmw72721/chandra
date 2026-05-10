@@ -80,6 +80,21 @@ test("teacher preview accepts co-teachers and does not load student-only history
   assert.match(fastApiSource, /co_teacher\.get\("role"\) in \{"owner", "co-teacher"\}/);
 });
 
+test("teacher preview debug mode is gated to teachers and stripped from student responses", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const telemetrySource = readFileSync(join(repoRoot, "frontend/lib/learning-strategy-telemetry.ts"), "utf8");
+
+  assert.match(studentSource, /isTeacherPreview \? \([\s\S]*student-debug-settings-card/);
+  assert.match(studentSource, /debugEnabled=\{isTeacherPreview && isTeacherDebugMode\}/);
+  assert.match(studentSource, /MessageDebugDetails/);
+  assert.match(routeSource, /preparedRequest\.scope\.role !== "teacher"/);
+  assert.match(routeSource, /debugInfo: buildTutorDebugInfo/);
+  assert.match(routeSource, /actualTokens/);
+  assert.match(routeSource, /totalRequestCount/);
+  assert.match(telemetrySource, /delete studentSafeResponse\.debugInfo/);
+});
+
 test("student chat persists and resumes class-scoped conversations", () => {
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
@@ -823,6 +838,7 @@ test("student learning profile context is sent privately to backend", () => {
 test("pdf tool prompt uses textbook readings for solving help", () => {
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
   const promptSource = readFileSync(join(repoRoot, "frontend/lib/prompts.ts"), "utf8");
+  const graphSource = readFileSync(join(repoRoot, "backend/agent/graph.py"), "utf8");
 
   assert.match(routeSource, /search the assignment\/problem PDF first/);
   assert.match(routeSource, /Do not search textbook\/readings unless no task-source match is found/);
@@ -889,15 +905,12 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(promptSource, /similar textbook\/readings\/example task/);
   assert.match(promptSource, /Only help with this class/);
   assert.match(promptSource, /Do not write unrelated code/);
-  assert.match(promptSource, /search the assignment\/problem PDF first/);
-  assert.match(promptSource, /concrete assignment or problem the student asks about, including fully pasted questions or prompts/);
-  assert.match(promptSource, /Check whether it appears in uploaded problem PDFs/);
-  assert.match(promptSource, /search generically with textbook\/reading/);
-  assert.match(promptSource, /from any indexed textbook\/reading/);
-  assert.match(promptSource, /Do not only point the student to pages/);
-  assert.match(promptSource, /method teaching/);
-  assert.match(promptSource, /search textbook\/readings\/examples so the explanation can use the class wording/);
-  assert.match(promptSource, /previously cited source context/);
+  assert.match(graphSource, /PDF retrieval router/);
+  assert.match(graphSource, /worksheet, assignment, textbook/);
+  assert.match(graphSource, /bare numbered references like `problem 2\.14`/);
+  assert.match(graphSource, /follow-ups to prior source-backed answers/);
+  assert.match(graphSource, /Answer directly only for greetings/);
+  assert.match(graphSource, /ROUTER_REASONING_EFFORT = "low"/);
 });
 
 test("student feedback is submitted through server routes and kept separate from teacher private notes", () => {

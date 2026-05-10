@@ -23,6 +23,7 @@ const attachmentReserveTokens = 1_500;
 export type AiTokenUsage = {
   inputTokens: number;
   outputTokens: number;
+  reasoningTokens?: number;
   totalTokens: number;
 };
 
@@ -554,18 +555,20 @@ export async function grantStudentAiUsageAllowance({
 
 export function normalizeAiTokenUsage(value: unknown): AiTokenUsage {
   if (!value || typeof value !== "object") {
-    return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    return { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 };
   }
 
   const record = value as Record<string, unknown>;
   const inputTokens = nonnegativeInteger(record.inputTokens ?? record.input_tokens ?? record.prompt_tokens);
   const outputTokens = nonnegativeInteger(record.outputTokens ?? record.output_tokens ?? record.completion_tokens);
+  const reasoningTokens = nonnegativeInteger(record.reasoningTokens ?? record.reasoning_tokens);
   const explicitTotal = nonnegativeInteger(record.totalTokens ?? record.total_tokens);
-  const totalTokens = explicitTotal || inputTokens + outputTokens;
+  const totalTokens = explicitTotal || inputTokens + outputTokens + reasoningTokens;
 
   return {
     inputTokens,
     outputTokens,
+    reasoningTokens,
     totalTokens
   };
 }

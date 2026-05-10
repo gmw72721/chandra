@@ -80,6 +80,7 @@ export type ChatMessage = {
   content: string;
   attachments?: MessageAttachment[];
   createdAt: string;
+  debugInfo?: TutorDebugInfo;
   langGraphTrace?: TutorTrace;
   learningStrategyTelemetry?: LearningStrategyTelemetry;
   retrievalConfidence?: RetrievalConfidence;
@@ -325,6 +326,7 @@ export type TeacherConversationReviewSummary = {
 
 export type TutorTrace = {
   finishReason?: string;
+  modelCallUsage?: TutorModelCallUsage[];
   searchQueries: string[];
   selectedPages: Array<{
     citationLabel?: string;
@@ -344,6 +346,7 @@ export type TutorApiResponse = {
   aiUsageStatus?: StudentAiUsageStatus;
   assistantMessageId?: string;
   conversationId?: string;
+  debugInfo?: TutorDebugInfo;
   message: string;
   content: string;
   hintLevel?: string;
@@ -354,6 +357,43 @@ export type TutorApiResponse = {
   sources: TutorSource[];
   structuredOutput?: TutorStructuredOutput;
   retrievalConfidence: RetrievalConfidence;
+};
+
+export type TutorDebugTokens = {
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens?: number;
+  totalTokens: number;
+};
+
+export type TutorModelCallUsage = {
+  inputTokens: number;
+  model: string;
+  outputTokens: number;
+  purpose: string;
+  reasoningEffort?: string;
+  reasoningTokens: number;
+  stage: string;
+  totalTokens: number;
+};
+
+export type TutorDebugInfo = {
+  actualTokens: TutorDebugTokens;
+  backendRequestCount: number;
+  modelCallUsage?: TutorModelCallUsage[];
+  durationMs: number;
+  estimatedTokens: TutorDebugTokens;
+  finishReason?: string;
+  modelId: string;
+  provider: string;
+  providerRequestCount: number;
+  requestId: string;
+  searchQueryCount: number;
+  selectedPageCount: number;
+  stageCount: number;
+  stages: string[];
+  toolCallCount: number;
+  totalRequestCount: number;
 };
 
 export type StudentAiUsageStatus = {

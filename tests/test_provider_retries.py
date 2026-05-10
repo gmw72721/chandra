@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
-from backend.agent.openrouter_client import OpenRouterClient
+from backend.agent.openrouter_client import OpenRouterClient, normalize_token_usage
 from backend.agent.tools import search_pdf_pages
 from backend.retrieval.pdf_retriever import GeminiPdfRetriever, build_query_features, exact_results_from_pdf_text
 
@@ -131,6 +131,26 @@ def test_query_feature_builder_handles_non_string_query_objects() -> None:
     assert "trig" in features["terms"]
     assert "14" in features["problem_numbers"]
     assert 104 in features["page_numbers"]
+
+
+def test_openrouter_usage_normalizes_reasoning_token_details() -> None:
+    usage = normalize_token_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 125,
+            "completion_tokens_details": {
+                "reasoning_tokens": 5,
+            },
+        }
+    )
+
+    assert usage == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "reasoning_tokens": 5,
+        "total_tokens": 125,
+    }
 
 
 @pytest.mark.asyncio

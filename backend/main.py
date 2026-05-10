@@ -180,8 +180,11 @@ class ChatRequest(BaseModel):
 
 class LangGraphChatRequest(BaseModel):
     classId: str = Field(min_length=1, max_length=200)
+    conversationId: Optional[str] = Field(default=None, max_length=200)
     professorId: str = Field(min_length=1, max_length=200)
     professorName: Optional[str] = Field(default=None, max_length=200)
+    studentId: Optional[str] = Field(default=None, max_length=200)
+    latestStudentMessageId: Optional[str] = Field(default=None, max_length=200)
     modelId: str = Field(min_length=1, max_length=200)
     temperature: Optional[float] = Field(default=None, ge=0, le=2)
     maxTokens: Optional[int] = Field(default=None, ge=1, le=MAX_MODEL_RESPONSE_TOKENS)
@@ -367,6 +370,9 @@ async def langgraph_chat(
             student_profile_context=request.studentLearningProfileContext,
             professor_id=request.professorId,
             professor_name=request.professorName,
+            conversation_id=request.conversationId,
+            latest_student_message_id=request.latestStudentMessageId,
+            student_id=request.studentId,
             openrouter_client=shared_langgraph_openrouter_client(),
         )
     except RuntimeError as error:
@@ -413,6 +419,9 @@ async def langgraph_chat_stream(
                 student_profile_context=request.studentLearningProfileContext,
                 professor_id=request.professorId,
                 professor_name=request.professorName,
+                conversation_id=request.conversationId,
+                latest_student_message_id=request.latestStudentMessageId,
+                student_id=request.studentId,
                 openrouter_client=shared_langgraph_openrouter_client(),
             ):
                 yield json.dumps(event) + "\n"

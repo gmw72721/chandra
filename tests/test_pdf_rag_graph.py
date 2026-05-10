@@ -3,21 +3,30 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import backend.agent.graph as graph_module
 from backend.agent.graph import (
+    answer_leak_gate,
     build_multimodal_final_messages,
     diagnose_search_result,
     forced_initial_search_tool_call,
+    parse_problem_context_from_answer,
+    pdf_rag_response_from_state,
+    remove_problem_context_from_student_text,
     run_pdf_rag_agent,
     run_pdf_rag_agent_stream,
     structured_tutor_output_from_answer,
+    update_active_problem_context,
 )
 from backend.agent.tools import normalize_pdf_page_result
+from backend.agent.tools import SEARCH_PDF_PAGES_TOOL
 from backend.retrieval.pdf_page_assets import (
     deduplicate_page_ranges,
     extract_printed_page_number_from_text,
@@ -56,6 +65,77 @@ class FakeRetriever:
             return self.pages[min(len(self.calls) - 1, len(self.pages) - 1)]  # type: ignore[index,return-value]
 
         return self.pages  # type: ignore[return-value]
+
+
+def minimal_state(**overrides: Any) -> dict[str, Any]:
+    state = {
+        "messages": [{"role": "user", "content": "Help with Solve 2x + 3 = 17."}],
+        "tool_calls": [],
+        "retrieved_pages": [],
+        "page_assets": [],
+        "answer": "",
+        "tool_call_count": 0,
+        "retrieval_confidence": "low",
+        "retrieval_diagnostics": [],
+        "token_usage": {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0, "total_tokens": 0},
+        "token_usage_by_call": [],
+    }
+    state.update(overrides)
+    return state
+
+
+async def wait_until(predicate: Any, *, timeout: float = 1.0) -> None:
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+
+    assert predicate()
+
+
+@pytest.mark.asyncio
+async def test_active_problem_context_read_is_prefetched_before_model_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_started = threading.Event()
+    read_finished = threading.Event()
+
+    def slow_context_read(_state: dict[str, Any]) -> dict[str, Any]:
+        read_started.set()
+        time.sleep(0.12)
+        read_finished.set()
+        return {
+            "problem_id": "problem_prefetched",
+            "problem_text": "Solve 2x + 3 = 17.",
+            "expected_answer": "x = 7",
+        }
+
+    class PrefetchObservingClient(FakeOpenRouterClient):
+        async def chat(self, **kwargs: Any) -> dict[str, Any]:
+            assert read_started.wait(0.2)
+            await asyncio.sleep(0.03)
+            return await super().chat(**kwargs)
+
+    monkeypatch.setattr(graph_module, "read_active_problem_context_from_firestore", slow_context_read)
+    graph_module._ACTIVE_PROBLEM_CONTEXT_CACHE.pop("conv-prefetch-read", None)
+    client = PrefetchObservingClient(
+        [
+            {"content": "", "tool_calls": []},
+            {"content": "Final answer: x = 7.", "tool_calls": []},
+        ]
+    )
+
+    response = await run_pdf_rag_agent(
+        messages=[{"role": "user", "content": "What's the answer?"}],
+        model="openai/gpt-5.4-mini",
+        class_id="class-prefetch-read",
+        conversation_id="conv-prefetch-read",
+        student_id="student-prefetch-read",
+        openrouter_client=client,
+    )
+
+    assert read_finished.is_set()
+    assert "x = 7" not in response["content"]
+    assert "can't give the full answer" in response["content"]
 
 
 def test_twenty_realistic_student_turns_parse_into_expected_sections() -> None:
@@ -244,7 +324,12 @@ def test_twenty_realistic_student_turns_parse_into_expected_sections() -> None:
 
 @pytest.mark.asyncio
 async def test_direct_answer_path_does_not_call_retrieval_for_conceptual_question() -> None:
-    client = FakeOpenRouterClient([{"content": "Try isolating x first.", "tool_calls": []}])
+    client = FakeOpenRouterClient(
+        [
+            {"content": "", "tool_calls": [], "usage": {"input_tokens": 10, "completion_tokens": 2, "total_tokens": 12}},
+            {"content": "Try isolating x first.", "tool_calls": [], "usage": {"input_tokens": 20, "completion_tokens": 5, "total_tokens": 25}},
+        ]
+    )
     retriever = FakeRetriever([])
 
     response = await run_pdf_rag_agent(
@@ -260,14 +345,428 @@ async def test_direct_answer_path_does_not_call_retrieval_for_conceptual_questio
     assert response["structuredOutput"]["sections"]["answer"] == "Try isolating x first."
     assert list(response["structuredOutput"]["sections"].keys()) == ["answer"]
     assert response["structuredOutput"]["metadata"]["sourceConfidence"] == "low"
-    assert len(client.calls) == 1
+    assert len(client.calls) == 2
+    assert client.calls[0]["model"] == "openai/gpt-5.4-mini"
+    assert client.calls[0]["reasoning_effort"] == "low"
+    assert client.calls[1]["model"] == "openai/gpt-4.1-mini"
     assert retriever.calls == []
+    assert response["tokenUsage"]["actual"] == {
+        "input_tokens": 30,
+        "output_tokens": 7,
+        "reasoning_tokens": 0,
+        "total_tokens": 37,
+    }
+    assert [call["purpose"] for call in response["tokenUsage"]["calls"]] == ["router", "final_answer"]
+
+
+@pytest.mark.asyncio
+async def test_router_is_low_reasoning_and_final_uses_configured_default_model() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": "",
+                "tool_calls": [],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14},
+            },
+            {
+                "content": "A variable is isolated when it is alone on one side.",
+                "tool_calls": [],
+                "usage": {
+                    "prompt_tokens": 23,
+                    "completion_tokens": 7,
+                    "total_tokens": 35,
+                    "reasoning_tokens": 5,
+                },
+            },
+        ]
+    )
+
+    response = await run_pdf_rag_agent(
+        class_id="class-algebra",
+        messages=[{"role": "user", "content": "What does isolated variable mean?"}],
+        model="",
+        openrouter_client=client,
+        professor_id="teacher-1",
+        reasoning_effort="high",
+        retriever=FakeRetriever([]),
+    )
+
+    assert client.calls[0]["model"] == "openai/gpt-5.4-mini"
+    assert client.calls[0]["reasoning_effort"] == "low"
+    assert client.calls[1]["model"] == "openai/gpt-5.4-mini"
+    assert client.calls[1]["reasoning_effort"] == "high"
+    assert response["tokenUsage"]["actual"] == {
+        "input_tokens": 34,
+        "output_tokens": 10,
+        "reasoning_tokens": 5,
+        "total_tokens": 49,
+    }
+    assert response["tokenUsage"]["calls"][0]["reasoningEffort"] == "low"
+    assert response["tokenUsage"]["calls"][1]["reasoningEffort"] == "high"
+    assert response["langGraphTrace"]["modelCallUsage"] == response["tokenUsage"]["calls"]
+
+
+def test_search_pdf_pages_tool_schema_stays_short_and_required_fields_remain() -> None:
+    function_schema = SEARCH_PDF_PAGES_TOOL["function"]
+    parameters = function_schema["parameters"]
+
+    assert parameters["required"] == ["query", "student_reason"]
+    assert set(parameters["properties"]) == {"query", "top_k", "student_reason"}
+    assert "Exactly five words" in parameters["properties"]["student_reason"]["description"]
+    assert len(function_schema["description"]) < 260
+    assert "Focused PDF search query" in parameters["properties"]["query"]["description"]
+
+
+def test_problem_context_block_is_parsed_and_removed_before_structuring() -> None:
+    raw_answer = (
+        "Hint: isolate the variable first.\n\n"
+        "Next step: What operation would undo the +3?\n\n"
+        "Problem context:\n"
+        "relation: same_problem\n"
+        "problem: Solve 2x + 3 = 17.\n"
+        "expected_answer: x = 7\n"
+        "source_type: pdf\n"
+        "source_document_id: worksheet-1\n"
+        "source_page: 12\n"
+        "source_chunk_id: chunk-9\n"
+        "confidence: high"
+    )
+
+    context = parse_problem_context_from_answer(raw_answer, minimal_state(), [])
+    cleaned_answer = remove_problem_context_from_student_text(raw_answer)
+    structured = structured_tutor_output_from_answer(cleaned_answer, minimal_state(), [])
+
+    assert context == {
+        "relation": "same_problem",
+        "problem": "Solve 2x + 3 = 17.",
+        "expected_answer": "x = 7",
+        "source_type": "pdf",
+        "source_document_id": "worksheet-1",
+        "source_page": 12,
+        "source_chunk_id": "chunk-9",
+        "confidence": "high",
+    }
+    assert "Problem context" not in cleaned_answer
+    assert "x = 7" not in cleaned_answer
+    assert structured["sections"]["hint"] == "isolate the variable first."
+    assert structured["sections"]["nextStep"] == "What operation would undo the +3?"
+
+
+def test_structured_parser_still_extracts_optional_student_sections() -> None:
+    answer = (
+        "Start by identifying what is given. "
+        "Hint: isolate the variable. "
+        "Explanation: inverse operations undo each other. "
+        "Formula: ax+b=c. "
+        "Example: solve 2y+1=9 the same way. "
+        "Check your work: substitute your result. "
+        "Next step: What operation would you do first?"
+    )
+
+    sections = structured_tutor_output_from_answer(answer, minimal_state(), [])["sections"]
+
+    assert sections["answer"] == "Start by identifying what is given."
+    assert sections["hint"] == "isolate the variable."
+    assert sections["explanation"] == "inverse operations undo each other."
+    assert sections["formula"] == "ax+b=c"
+    assert sections["example"] == "solve 2y+1=9 the same way"
+    assert sections["checkWork"] == "substitute your result."
+    assert sections["nextStep"] == "What operation would you do first?"
+
+
+def test_same_problem_refreshes_existing_context() -> None:
+    existing = {
+        "problem_id": "problem_old",
+        "problem_text": "Solve 2x + 3 = 17.",
+        "last_confirmed_message_id": "old-message",
+        "updated_at": "old",
+    }
+    state = minimal_state(
+        active_problem_context=existing,
+        latest_student_message_id="student-message-2",
+    )
+    parsed = {
+        "relation": "same_problem",
+        "problem": "Solve 2x + 3 = 17.",
+        "expected_answer": None,
+        "source_type": "pdf",
+        "source_document_id": None,
+        "source_page": None,
+        "source_chunk_id": None,
+        "confidence": "high",
+    }
+
+    updated = update_active_problem_context(parsed, state) or {}
+
+    assert updated["problem_id"] == "problem_old"
+    assert updated["last_confirmed_message_id"] == "student-message-2"
+
+
+def test_different_problem_medium_confidence_replaces_context() -> None:
+    state = minimal_state(
+        active_problem_context={
+            "problem_id": "problem_old",
+            "problem_text": "Old problem",
+            "last_confirmed_message_id": "old-message",
+        },
+        latest_student_message_id="student-message-3",
+    )
+    parsed = {
+        "relation": "different_problem",
+        "problem": "Solve y - 4 = 10.",
+        "expected_answer": None,
+        "source_type": "conversation_extracted",
+        "source_document_id": None,
+        "source_page": None,
+        "source_chunk_id": None,
+        "confidence": "medium",
+    }
+
+    updated = update_active_problem_context(parsed, state) or {}
+
+    assert updated["problem_id"] != "problem_old"
+    assert updated["problem_text"] == "Solve y - 4 = 10."
+    assert updated["active_since_message_id"] == "student-message-3"
+
+
+def test_unknown_low_confidence_does_not_overwrite_good_context() -> None:
+    existing = {
+        "problem_id": "problem_old",
+        "problem_text": "Old problem",
+        "last_confirmed_message_id": "old-message",
+    }
+    state = minimal_state(active_problem_context=existing)
+    parsed = {
+        "relation": "unknown",
+        "problem": "Maybe a new problem",
+        "expected_answer": None,
+        "source_type": "unknown",
+        "source_document_id": None,
+        "source_page": None,
+        "source_chunk_id": None,
+        "confidence": "low",
+    }
+
+    updated = update_active_problem_context(parsed, state)
+
+    assert updated == existing
+
+
+def test_no_context_with_problem_text_saves_context() -> None:
+    state = minimal_state(latest_student_message_id="student-message-4")
+    parsed = {
+        "relation": "unknown",
+        "problem": "Find the derivative of x^2.",
+        "expected_answer": None,
+        "source_type": "conversation_extracted",
+        "source_document_id": None,
+        "source_page": None,
+        "source_chunk_id": None,
+        "confidence": "low",
+    }
+
+    updated = update_active_problem_context(parsed, state) or {}
+
+    assert updated["problem_text"] == "Find the derivative of x^2."
+    assert updated["active_since_message_id"] == "student-message-4"
+
+
+@pytest.mark.asyncio
+async def test_problem_context_persistence_does_not_block_response_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def slow_persist(context: dict[str, Any], _state: dict[str, Any]) -> None:
+        time.sleep(0.25)
+        calls.append(("persist", str(context.get("problem_text"))))
+
+    def record_context_log(
+        _state: dict[str, Any],
+        parsed_context: dict[str, Any],
+        _old_context: dict[str, Any] | None,
+        _new_context: dict[str, Any],
+    ) -> None:
+        calls.append(("context_log", str(parsed_context.get("relation"))))
+
+    monkeypatch.setattr(graph_module, "save_active_problem_context_to_firestore", slow_persist)
+    monkeypatch.setattr(graph_module, "log_problem_context_updated", record_context_log)
+
+    raw_answer = (
+        "Hint: isolate the variable first.\n\n"
+        "Problem context:\n"
+        "relation: different_problem\n"
+        "problem: Solve 2x + 3 = 17.\n"
+        "expected_answer: x = 7\n"
+        "source_type: pdf\n"
+        "confidence: high"
+    )
+    state = minimal_state(
+        answer=raw_answer,
+        conversation_id="conv-bg-nonblocking",
+        class_id="class-bg-nonblocking",
+        student_id="student-bg-nonblocking",
+    )
+
+    start = time.perf_counter()
+    response = pdf_rag_response_from_state(state)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.15
+    assert response["structuredOutput"]["sections"]["hint"] == "isolate the variable first."
+    assert "Problem context" not in response["content"]
+
+    await wait_until(lambda: ("persist", "Solve 2x + 3 = 17.") in calls)
+    assert ("context_log", "different_problem") in calls
+
+
+def test_context_change_schedules_background_persistence_and_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduled: list[tuple[str, str]] = []
+
+    def record_schedule(label: str, func: Any, *_args: Any, **_kwargs: Any) -> None:
+        scheduled.append((label, getattr(func, "__name__", "")))
+
+    monkeypatch.setattr(graph_module, "schedule_best_effort_side_effect", record_schedule)
+    state = minimal_state(
+        conversation_id="conv-schedule-context",
+        class_id="class-schedule-context",
+        student_id="student-schedule-context",
+    )
+    parsed = {
+        "relation": "different_problem",
+        "problem": "Solve y - 4 = 10.",
+        "expected_answer": None,
+        "source_type": "conversation_extracted",
+        "source_document_id": None,
+        "source_page": None,
+        "source_chunk_id": None,
+        "confidence": "medium",
+    }
+
+    updated = update_active_problem_context(parsed, state) or {}
+
+    assert updated["problem_text"] == "Solve y - 4 = 10."
+    assert ("conversation_problem_context_persisted", "save_active_problem_context_to_firestore") in scheduled
+    assert ("conversation_problem_context_updated", "log_problem_context_updated") in scheduled
+
+
+def test_answer_leak_gate_checks_each_structured_section() -> None:
+    state = minimal_state(answer_policy={"refuseAnswerOnlyRequests": True})
+    structured = {
+        "sections": {
+            "answer": "Let's work one step at a time.",
+            "hint": "Subtract 3 first.",
+            "explanation": "The expected result is x = 7.",
+            "nextStep": "What do you get after subtracting 3?",
+        }
+    }
+
+    gate = answer_leak_gate(
+        answer="",
+        structured_output=structured,
+        active_problem_context={"expected_answer": "x = 7"},
+        state=state,
+        sources=[],
+    )
+
+    assert gate["passed"] is False
+    assert gate["leaking_sections"] == ["explanation"]
+    assert "expected_answer" in gate["leaked_answer_types"]
+
+
+def test_expected_answer_leak_rewrites_only_leaking_section() -> None:
+    raw_answer = (
+        "We can work one step at a time.\n\n"
+        "Hint: subtract 3 from both sides.\n\n"
+        "Explanation: The final answer is x = 7.\n\n"
+        "Next step: What do you get after subtracting 3?\n\n"
+        "Problem context:\n"
+        "relation: different_problem\n"
+        "problem: Solve 2x + 3 = 17.\n"
+        "expected_answer: x = 7\n"
+        "source_type: pdf\n"
+        "source_page: 12\n"
+        "confidence: high"
+    )
+    response = pdf_rag_response_from_state(minimal_state(answer=raw_answer))
+
+    assert "x = 7" not in response["content"]
+    assert "Problem context" not in response["content"]
+    assert response["structuredOutput"]["sections"]["answer"] == "We can work one step at a time."
+    assert response["structuredOutput"]["sections"]["hint"] == "subtract 3 from both sides."
+    assert "relevant class method" in response["structuredOutput"]["sections"]["explanation"]
+    assert response["structuredOutput"]["sections"]["nextStep"] == "What do you get after subtracting 3?"
+
+
+def test_rewrite_that_still_leaks_returns_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw_answer = (
+        "Final answer: x = 7.\n\n"
+        "Problem context:\n"
+        "relation: different_problem\n"
+        "problem: Solve 2x + 3 = 17.\n"
+        "expected_answer: x = 7\n"
+        "source_type: pdf\n"
+        "confidence: high"
+    )
+
+    monkeypatch.setattr(graph_module, "safe_replacement_section", lambda *_args: "The answer is x = 7.")
+    response = pdf_rag_response_from_state(minimal_state(answer=raw_answer))
+
+    assert response["content"] == graph_module.ANSWER_LEAK_FALLBACK_RESPONSE
+    assert "x = 7" not in response["content"]
+
+
+def test_answer_leak_block_log_is_scheduled_after_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduled: list[tuple[str, str, dict[str, Any]]] = []
+
+    def record_schedule(label: str, func: Any, *_args: Any, **kwargs: Any) -> None:
+        scheduled.append((label, getattr(func, "__name__", ""), kwargs))
+
+    monkeypatch.setattr(graph_module, "schedule_best_effort_side_effect", record_schedule)
+    raw_answer = (
+        "Final answer: x = 7.\n\n"
+        "Problem context:\n"
+        "relation: different_problem\n"
+        "problem: Solve 2x + 3 = 17.\n"
+        "expected_answer: x = 7\n"
+        "source_type: pdf\n"
+        "confidence: high"
+    )
+
+    response = pdf_rag_response_from_state(minimal_state(answer=raw_answer))
+
+    leak_logs = [item for item in scheduled if item[0] == "answer_leak_blocked"]
+    assert leak_logs
+    assert leak_logs[0][1] == "log_answer_leak_blocked"
+    assert leak_logs[0][2]["blocked_response"].startswith("Final answer")
+    assert "x = 7" not in response["content"]
+
+
+def test_frontend_payload_never_includes_problem_context_or_expected_answer() -> None:
+    raw_answer = (
+        "Hint: isolate the variable first.\n\n"
+        "Problem context:\n"
+        "relation: different_problem\n"
+        "problem: Solve 2x + 3 = 17.\n"
+        "expected_answer: x = 7\n"
+        "source_type: pdf\n"
+        "confidence: high"
+    )
+
+    response = pdf_rag_response_from_state(minimal_state(answer=raw_answer))
+    serialized = json.dumps(response)
+
+    assert "Problem context" not in serialized
+    assert "expected_answer" not in serialized
+    assert "x = 7" not in serialized
 
 
 @pytest.mark.asyncio
 async def test_direct_answer_refusal_maps_to_structured_refusal() -> None:
     client = FakeOpenRouterClient(
         [
+            {
+                "content": "",
+                "tool_calls": [],
+            },
             {
                 "content": "I can't give you the final answer, but I can check your attempted next step.",
                 "tool_calls": [],
@@ -294,6 +793,10 @@ async def test_direct_answer_refusal_maps_to_structured_refusal() -> None:
 async def test_next_step_question_label_is_removed() -> None:
     client = FakeOpenRouterClient(
         [
+            {
+                "content": "",
+                "tool_calls": [],
+            },
             {
                 "content": "Hint: Set the two curves equal first.\n\nQuestion: what x-values do you get?",
                 "tool_calls": [],
@@ -400,6 +903,10 @@ def test_labeled_only_response_does_not_duplicate_main_answer() -> None:
 async def test_inline_small_hint_and_bold_section_markers_are_extracted() -> None:
     client = FakeOpenRouterClient(
         [
+            {
+                "content": "",
+                "tool_calls": [],
+            },
             {
                 "content": (
                     "Because the density is only positive for t >= 0. Small hint: use 0 as the lower endpoint. "
@@ -566,7 +1073,7 @@ async def test_streaming_pasted_concrete_math_problem_forces_exact_problem_searc
         )
     ]
 
-    assert [event["type"] for event in events] == ["search_batch", "step", "step", "final"]
+    assert [event["type"] for event in events] == ["search_batch", "step", "step", "step", "final"]
     assert events[0]["searches"][0]["description"] == "Checking exact task and page"
     assert events[-1]["payload"]["content"].startswith("This is listed")
     assert events[-1]["payload"]["structuredOutput"]["metadata"]["sourceConfidence"] == "high"
@@ -987,6 +1494,85 @@ async def test_agent_can_search_again_until_pages_are_sufficient(tmp_path: Path)
         "worksheet optimization table",
         "worksheet optimization problem 8 sensitivity table page 9",
     ]
+
+
+@pytest.mark.asyncio
+async def test_search_again_loop_runs_before_answer_leak_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gate_calls = 0
+    original_gate = graph_module.answer_leak_gate
+
+    def counting_gate(**kwargs: Any) -> dict[str, Any]:
+        nonlocal gate_calls
+        gate_calls += 1
+        return original_gate(**kwargs)
+
+    monkeypatch.setattr(graph_module, "answer_leak_gate", counting_gate)
+    image = tmp_path / "page.png"
+    image.write_bytes(b"page")
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "search_pdf_pages",
+                            "arguments": json.dumps({"query": "worksheet table", "student_reason": "Checking exact worksheet table"}),
+                        },
+                    }
+                ],
+            },
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "search_pdf_pages",
+                            "arguments": json.dumps({"query": "worksheet table page 9", "student_reason": "Checking corrected table page"}),
+                        },
+                    }
+                ],
+            },
+            {"content": "Hint: compare the two table columns.", "tool_calls": []},
+        ]
+    )
+    retriever = FakeRetriever(
+        [
+            [{"doc_id": "doc_1", "title": "Worksheet", "page_start": 1, "page_end": 1, "score": 0.5}],
+            [{"doc_id": "doc_1", "title": "Worksheet", "page_start": 9, "page_end": 9, "score": 0.9}],
+        ]
+    )
+
+    async def page_asset_builder(pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "doc_id": page["doc_id"],
+                "title": page["title"],
+                "page_start": page["page_start"],
+                "page_end": page["page_end"],
+                "images": [str(image)],
+                "citation_label": f"{page['title']}, page {page['page_start']}",
+            }
+            for page in pages
+        ]
+
+    response = await run_pdf_rag_agent(
+        class_id="class-algebra",
+        messages=[{"role": "user", "content": "What does the worksheet table say?"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        page_asset_builder=page_asset_builder,
+        professor_id="teacher-1",
+        retriever=retriever,
+    )
+
+    assert response["content"] == "Hint: compare the two table columns."
+    assert response["langGraphTrace"]["toolCallCount"] == 2
+    assert gate_calls == 1
     assert response["langGraphTrace"]["stages"] == [
         "openrouter_agent",
         "search_pdf_pages",
@@ -1742,9 +2328,9 @@ def test_final_answer_instruction_is_strict(tmp_path: Path) -> None:
     assert "If no sharper query is available" in instruction
     assert "Use retrieval_diagnostics to repair weak searches" in instruction
     assert "found problem page only, missing method" in instruction
-    assert "sqrt/square root" in instruction
+    assert "sqrt/square root" not in instruction
     assert "If the student explicitly asks where, which page, find, identify, or locate a task, question, exercise, or problem" in instruction
-    assert "locate it only; do not ask a follow-up" in instruction
+    assert "answer with the assignment/source location only" in instruction
     assert "If the student asks for the answer, final answer" in instruction
     assert "do not continue completing their exact task" in instruction
     assert "treat that as source lookup, not solving help" in instruction
@@ -2037,7 +2623,7 @@ async def test_streaming_agent_finds_exact_trig_substitution_problem(tmp_path: P
     ]
     final_payload = events[-1]["payload"]
 
-    assert [event["type"] for event in events] == ["search_batch", "step", "step", "final"]
+    assert [event["type"] for event in events] == ["search_batch", "step", "step", "step", "final"]
     assert events[0]["searches"] == [
         {
             "description": "Checking exact trig problem page",
@@ -2187,7 +2773,7 @@ async def test_trig_solving_help_gathers_problem_and_textbook_support(tmp_path: 
     ]
     final_payload = events[-1]["payload"]
 
-    assert [event["type"] for event in events] == ["search_batch", "step", "step", "final"]
+    assert [event["type"] for event in events] == ["search_batch", "step", "step", "step", "final"]
     assert [search["description"] for search in events[0]["searches"]] == [
         "Checking exact trig problem page",
         "Finding textbook method example page",

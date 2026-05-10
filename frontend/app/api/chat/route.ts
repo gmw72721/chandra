@@ -23,6 +23,7 @@ import {
   releaseAiTokenReservation,
   reserveAiTokenUsage,
   type AiUsageReservation,
+  type AiTokenUsage,
   type StudentAiUsageStatus
 } from "@/lib/ai-usage-limits";
 import { defaultOpenRouterModelId } from "@/lib/model-options";
@@ -52,7 +53,7 @@ import {
   tutorModes,
   tutorStudentActions
 } from "@/lib/tutor-response";
-import type { ChatMessage, TutorApiResponse } from "@/lib/types";
+import type { ChatMessage, TutorApiResponse, TutorModelCallUsage } from "@/lib/types";
 
 const STUDENT_TUTOR_BACKEND_UNAVAILABLE_MESSAGE =
   "Chandra is having trouble connecting. Try again in a moment.";
@@ -84,6 +85,20 @@ const chatRequestSchema = z.object({
       langGraphTrace: z
         .object({
           finishReason: z.string().optional(),
+          modelCallUsage: z
+            .array(
+              z.object({
+                inputTokens: z.number(),
+                model: z.string(),
+                outputTokens: z.number(),
+                purpose: z.string(),
+                reasoningEffort: z.string().optional(),
+                reasoningTokens: z.number(),
+                stage: z.string(),
+                totalTokens: z.number()
+              })
+            )
+            .optional(),
           searchQueries: z.array(z.string()),
           selectedPages: z.array(
             z.object({
@@ -227,11 +242,13 @@ async function handlePost(request: Request, requestId: string, setUserId: (userI
       return streamTutorResponse(preparedRequest, requestId);
     }
 
+    const backendRequestStartedAt = performance.now();
     const response = await fetch(`${langGraphBackendBaseUrl()}/api/langgraph/chat`, {
       body: JSON.stringify(preparedRequest.backendRequest),
       headers: await backendHeaders(requestId),
       method: "POST"
     });
+    const backendDurationMs = performance.now() - backendRequestStartedAt;
 
     if (!response.ok) {
       await releaseAiTokenReservationSafely(preparedRequest.aiUsageReservation, requestId);
@@ -246,8 +263,9 @@ async function handlePost(request: Request, requestId: string, setUserId: (userI
     }
 
     const backendPayload = (await response.json()) as RawTutorApiResponse;
+    const actualTokens = actualTokenUsageFromTutorPayload(backendPayload);
     const usageStatus = await finalizeAiTokenUsage({
-      actualUsage: actualTokenUsageFromTutorPayload(backendPayload),
+      actualUsage: actualTokens,
       reservation: preparedRequest.aiUsageReservation
     });
     const tutorResponse = withLearningStrategyTelemetry(
@@ -268,7 +286,14 @@ async function handlePost(request: Request, requestId: string, setUserId: (userI
 
     return NextResponse.json(
       withStudentAiUsageStatus(
-        studentSafeTutorResponse(withConversationMetadata(tutorResponse, preparedRequest.persistence)),
+        tutorResponseForScope({
+          actualTokens,
+          backendPayload,
+          durationMs: backendDurationMs,
+          preparedRequest,
+          requestId,
+          response: withConversationMetadata(tutorResponse, preparedRequest.persistence)
+        }),
         usageStatus ?? preparedRequest.aiUsageReservation?.studentStatus
       )
     );
@@ -340,6 +365,7 @@ type ParsedChatRequest = z.infer<typeof chatRequestSchema>;
 type RawTutorApiResponse = Partial<TutorApiResponse> & {
   tokenUsage?: {
     actual?: unknown;
+    calls?: unknown;
   };
 };
 
@@ -431,8 +457,11 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
     aiUsageReservation,
     backendRequest: {
       classId: courseId,
+      conversationId: persistence?.conversationId,
+      latestStudentMessageId: persistence?.studentMessage.id,
       professorId: scope.professorId,
       professorName: scope.professorName,
+      studentId: scope.role === "student" ? scope.uid : undefined,
       modelId: model,
       temperature,
       maxTokens,
@@ -597,11 +626,12 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
 
       try {
         send({
-          message: "Reading your question.",
+          message: "Deciding whether class PDFs are needed.",
           stage: "reading_question",
           type: "step"
         });
 
+        const backendRequestStartedAt = performance.now();
         const response = await fetch(`${langGraphBackendBaseUrl()}/api/langgraph/chat/stream`, {
           body: JSON.stringify(preparedRequest.backendRequest),
           headers: await backendHeaders(requestId),
@@ -667,8 +697,9 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
 
             if (event.type === "final" && event.payload) {
               const backendPayload = event.payload as RawTutorApiResponse;
+              const actualTokens = actualTokenUsageFromTutorPayload(backendPayload);
               const usageStatus = await finalizeAiTokenUsage({
-                actualUsage: actualTokenUsageFromTutorPayload(backendPayload),
+                actualUsage: actualTokens,
                 reservation: preparedRequest.aiUsageReservation
               });
               const tutorResponse = withLearningStrategyTelemetry(
@@ -688,13 +719,15 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
               }
 
               send({
-                message: "Writing a helpful response from the pages I found.",
-                stage: "writing_answer",
-                type: "step"
-              });
-              send({
                 payload: withStudentAiUsageStatus(
-                  studentSafeTutorResponse(withConversationMetadata(tutorResponse, preparedRequest.persistence)),
+                  tutorResponseForScope({
+                    actualTokens,
+                    backendPayload,
+                    durationMs: performance.now() - backendRequestStartedAt,
+                    preparedRequest,
+                    requestId,
+                    response: withConversationMetadata(tutorResponse, preparedRequest.persistence)
+                  }),
                   usageStatus ?? preparedRequest.aiUsageReservation?.studentStatus
                 ),
                 type: "final"
@@ -872,6 +905,119 @@ function withLearningStrategyTelemetry(
 
 function studentSafeTutorResponse(response: TutorApiResponse): TutorApiResponse {
   return stripTeacherOnlyTutorResponseFields(response);
+}
+
+function tutorResponseForScope({
+  actualTokens,
+  backendPayload,
+  durationMs,
+  preparedRequest,
+  requestId,
+  response
+}: {
+  actualTokens: AiTokenUsage;
+  backendPayload: RawTutorApiResponse;
+  durationMs: number;
+  preparedRequest: PreparedBackendChatRequest;
+  requestId: string;
+  response: TutorApiResponse;
+}): TutorApiResponse {
+  const safeResponse = studentSafeTutorResponse(response);
+
+  if (preparedRequest.scope.role !== "teacher") {
+    return safeResponse;
+  }
+
+  return {
+    ...safeResponse,
+    debugInfo: buildTutorDebugInfo({
+      actualTokens,
+      backendPayload,
+      durationMs,
+      preparedRequest,
+      requestId
+    })
+  };
+}
+
+function buildTutorDebugInfo({
+  actualTokens,
+  backendPayload,
+  durationMs,
+  preparedRequest,
+  requestId
+}: {
+  actualTokens: AiTokenUsage;
+  backendPayload: RawTutorApiResponse;
+  durationMs: number;
+  preparedRequest: PreparedBackendChatRequest;
+  requestId: string;
+}) {
+  const trace = backendPayload.langGraphTrace;
+  const stages = Array.isArray(trace?.stages) ? trace.stages.map(String) : [];
+  const modelCallUsage = normalizeModelCallUsage(backendPayload.tokenUsage?.calls ?? trace?.modelCallUsage);
+  const providerRequestCount = Math.max(
+    modelCallUsage.length,
+    countProviderStages(stages),
+    actualTokens.totalTokens > 0 ? 1 : 0
+  );
+  const toolCallCount = nonnegativeDebugInteger(trace?.toolCallCount);
+  const searchQueryCount = Array.isArray(trace?.searchQueries) ? trace.searchQueries.length : 0;
+  const estimatedOutputTokens = nonnegativeDebugInteger(preparedRequest.backendRequest.maxTokens);
+  const estimatedTotalTokens = nonnegativeDebugInteger(preparedRequest.aiUsageReservation?.estimatedTokens);
+  const estimatedInputTokens = Math.max(0, estimatedTotalTokens - estimatedOutputTokens);
+
+  return {
+    actualTokens,
+    backendRequestCount: 1,
+    durationMs: Math.max(0, Math.round(durationMs)),
+    estimatedTokens: {
+      inputTokens: estimatedInputTokens,
+      outputTokens: estimatedOutputTokens,
+      reasoningTokens: 0,
+      totalTokens: estimatedTotalTokens
+    },
+    finishReason: typeof trace?.finishReason === "string" ? trace.finishReason : undefined,
+    modelCallUsage,
+    modelId: preparedRequest.backendRequest.modelId,
+    provider: "langgraph",
+    providerRequestCount,
+    requestId,
+    searchQueryCount,
+    selectedPageCount: Array.isArray(trace?.selectedPages) ? trace.selectedPages.length : 0,
+    stageCount: stages.length,
+    stages,
+    toolCallCount,
+    totalRequestCount: 1 + providerRequestCount + toolCallCount
+  };
+}
+
+function normalizeModelCallUsage(value: unknown): TutorModelCallUsage[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({
+      inputTokens: nonnegativeDebugInteger(item.inputTokens ?? item.input_tokens),
+      model: String(item.model ?? ""),
+      outputTokens: nonnegativeDebugInteger(item.outputTokens ?? item.output_tokens),
+      purpose: String(item.purpose ?? ""),
+      reasoningEffort: item.reasoningEffort || item.reasoning_effort ? String(item.reasoningEffort ?? item.reasoning_effort) : undefined,
+      reasoningTokens: nonnegativeDebugInteger(item.reasoningTokens ?? item.reasoning_tokens),
+      stage: String(item.stage ?? ""),
+      totalTokens: nonnegativeDebugInteger(item.totalTokens ?? item.total_tokens)
+    }));
+}
+
+function countProviderStages(stages: string[]) {
+  return stages.filter((stage) => stage.startsWith("openrouter_")).length;
+}
+
+function nonnegativeDebugInteger(value: unknown) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue > 0 ? Math.floor(numberValue) : 0;
 }
 
 function studentChatErrorPayload(error: ReportedStudentChatError) {

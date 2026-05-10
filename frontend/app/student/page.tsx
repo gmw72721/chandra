@@ -95,6 +95,7 @@ const aiUsageLimitMessage =
   "Sorry, you have reached your Chandra usage limit.";
 const aiUsageIncreaseRequestComment =
   "Usage increase request: I reached my Chandra usage limit and would like my professor to allow more usage.";
+const teacherPreviewDebugStorageKey = "chandra.teacherPreviewDebugMode";
 
 const welcomeMessageId = "welcome";
 
@@ -168,6 +169,7 @@ function StudentWorkspace() {
   const [isSendingFeedback, setIsSendingFeedback] = useState(false);
   const [usageIncreaseRequestMessage, setUsageIncreaseRequestMessage] = useState("");
   const [isRequestingUsageIncrease, setIsRequestingUsageIncrease] = useState(false);
+  const [isTeacherDebugMode, setIsTeacherDebugMode] = useState(false);
   const isTeacherPreview = searchParams.get("preview") === "teacher";
   const queryClassId = searchParams.get("classId");
   const activeCourseId = isTeacherPreview ? queryClassId ?? "" : profile?.classId ?? "";
@@ -302,6 +304,23 @@ function StudentWorkspace() {
   useEffect(() => {
     resizeStudentComposerTextarea(draftTextareaRef.current);
   }, [draft]);
+
+  useEffect(() => {
+    if (!isTeacherPreview) {
+      setIsTeacherDebugMode(false);
+      return;
+    }
+
+    setIsTeacherDebugMode(window.localStorage.getItem(teacherPreviewDebugStorageKey) === "true");
+  }, [isTeacherPreview]);
+
+  useEffect(() => {
+    if (!isTeacherPreview) {
+      return;
+    }
+
+    window.localStorage.setItem(teacherPreviewDebugStorageKey, String(isTeacherDebugMode));
+  }, [isTeacherDebugMode, isTeacherPreview]);
 
   useEffect(() => {
     if (!firebaseReady || !user || profile?.role !== "student" || isTeacherPreview) {
@@ -827,6 +846,7 @@ function StudentWorkspace() {
         role: "assistant",
         content: data.message ?? data.content ?? "I could not generate a response.",
         createdAt: new Date().toISOString(),
+        debugInfo: data.debugInfo,
         langGraphTrace: data.langGraphTrace,
         retrievalConfidence: data.retrievalConfidence,
         sources: data.sources ?? [],
@@ -1193,12 +1213,15 @@ function StudentWorkspace() {
             isSavingAccountSettings={isSavingAccountSettings}
             isDeletingAccount={isDeletingAccount}
             isSavingThemePreference={isSavingThemePreference}
+            isTeacherDebugMode={isTeacherDebugMode}
+            isTeacherPreview={isTeacherPreview}
             role={profile?.role ?? "student"}
             themePreferenceError={themePreferenceError}
             onAccountDisplayNameChange={setAccountDisplayName}
             onAccountUsernameChange={setAccountUsername}
             onDeleteAccount={handleDeleteAccount}
             onDeleteAccountPasswordChange={setDeleteAccountPassword}
+            onTeacherDebugModeChange={setIsTeacherDebugMode}
             onSaveAccountSettings={saveAccountSettings}
             onSignOut={handleSignOut}
             onSignOutAllSessions={handleSignOutAllSessions}
@@ -1242,7 +1265,11 @@ function StudentWorkspace() {
             {conversationMessagesError ? <p className="form-error chat-error">{conversationMessagesError}</p> : null}
             <div className="message-list student-message-list">
               {messages.map((message) => (
-                <StudentChatMessage message={message} key={message.id} />
+                <StudentChatMessage
+                  debugEnabled={isTeacherPreview && isTeacherDebugMode}
+                  message={message}
+                  key={message.id}
+                />
               ))}
               {isSending && chatProgress ? <ChatProgressMessage progress={chatProgress} /> : null}
             </div>
@@ -1414,12 +1441,21 @@ function StudentFeedbackModal({
   );
 }
 
-const StudentChatMessage = memo(function StudentChatMessage({ message }: { message: ChatMessage }) {
+const StudentChatMessage = memo(function StudentChatMessage({
+  debugEnabled,
+  message
+}: {
+  debugEnabled: boolean;
+  message: ChatMessage;
+}) {
   if (message.role === "student") {
     return (
       <article className="student-workspace-message student">
         <div className="student-message-stack">
-          <div className="message-meta">You</div>
+          <div className="message-meta-row">
+            <div className="message-meta">You</div>
+            {debugEnabled ? <MessageDebugDetails message={message} /> : null}
+          </div>
           <div className="student-message-bubble">
             <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
               {normalizeMarkdownMath(message.content)}
@@ -1441,7 +1477,10 @@ const StudentChatMessage = memo(function StudentChatMessage({ message }: { messa
         C
       </span>
       <div className="assistant-message-stack">
-        <div className="message-meta">Chandra</div>
+        <div className="message-meta-row">
+          <div className="message-meta">Chandra</div>
+          {debugEnabled ? <MessageDebugDetails message={message} /> : null}
+        </div>
         {answerContent ? (
           <div className="assistant-message-bubble">
             <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
@@ -1470,6 +1509,123 @@ const StudentChatMessage = memo(function StudentChatMessage({ message }: { messa
   );
 });
 
+function MessageDebugDetails({ message }: { message: ChatMessage }) {
+  const debug = buildMessageDebugDisplay(message);
+
+  return (
+    <details className="message-debug-details">
+      <summary aria-label={`Show debug details for ${message.role} message`}>
+        Debug · {debug.summary}
+      </summary>
+      <div className="message-debug-panel">
+        <dl>
+          {debug.rows.map((row) => (
+            <div key={row.label}>
+              <dt>{row.label}</dt>
+              <dd>{row.value}</dd>
+            </div>
+          ))}
+        </dl>
+        {debug.stages.length ? (
+          <div className="message-debug-stages" aria-label="Debug stages">
+            {debug.stages.map((stage, index) => (
+              <span key={`${stage}-${index}`}>{stage}</span>
+            ))}
+          </div>
+        ) : null}
+        {debug.modelCallUsage.length ? (
+          <div className="message-debug-calls" aria-label="Model call token usage">
+            {debug.modelCallUsage.map((call, index) => (
+              <div className="message-debug-call" key={`${call.stage}-${call.purpose}-${index}`}>
+                <strong>{call.purpose || call.stage || `Call ${index + 1}`}</strong>
+                <span>{call.stage || "unknown stage"}</span>
+                <span>{call.model || "unknown model"}</span>
+                <span>Reasoning: {call.reasoningEffort || "default"}</span>
+                <span>In {formatInteger(call.inputTokens)} · Reasoning {formatInteger(call.reasoningTokens)} · Out {formatInteger(call.outputTokens)} · Total {formatInteger(call.totalTokens)}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function buildMessageDebugDisplay(message: ChatMessage) {
+  const estimatedMessageTokens = estimateMessageDisplayTokens(message);
+
+  if (message.role === "assistant") {
+    const debugInfo = message.debugInfo;
+    const actualTokens = debugInfo?.actualTokens;
+    const displayTokens = actualTokens?.totalTokens || estimatedMessageTokens;
+    const requestCount = debugInfo?.totalRequestCount ?? inferMessageRequestCount(message);
+    const modelCallUsage = debugInfo?.modelCallUsage ?? message.langGraphTrace?.modelCallUsage ?? [];
+    const rows = [
+      { label: "Actual input tokens", value: formatInteger(actualTokens?.inputTokens ?? 0) },
+      { label: "Actual reasoning tokens", value: formatInteger(actualTokens?.reasoningTokens ?? 0) },
+      { label: "Actual output tokens", value: formatInteger(actualTokens?.outputTokens ?? 0) },
+      { label: "Actual total tokens", value: formatInteger(actualTokens?.totalTokens ?? 0) },
+      { label: "Total requests", value: formatInteger(requestCount) },
+      { label: "Backend requests", value: formatInteger(debugInfo?.backendRequestCount ?? 1) },
+      { label: "Model requests", value: formatInteger(debugInfo?.providerRequestCount ?? inferProviderRequestCount(message)) },
+      { label: "Tool calls", value: formatInteger(debugInfo?.toolCallCount ?? message.langGraphTrace?.toolCallCount ?? 0) },
+      { label: "Search queries", value: formatInteger(debugInfo?.searchQueryCount ?? message.langGraphTrace?.searchQueries?.length ?? 0) },
+      { label: "Selected pages", value: formatInteger(debugInfo?.selectedPageCount ?? message.langGraphTrace?.selectedPages?.length ?? 0) },
+      { label: "Estimated total tokens", value: formatInteger(debugInfo?.estimatedTokens.totalTokens ?? estimatedMessageTokens) },
+      { label: "Duration", value: debugInfo ? formatDuration(debugInfo.durationMs) : "Not recorded" },
+      { label: "Model", value: debugInfo?.modelId || "Not recorded" },
+      { label: "Request ID", value: debugInfo?.requestId || "Not recorded" },
+      { label: "Finish reason", value: debugInfo?.finishReason || message.langGraphTrace?.finishReason || "Not recorded" }
+    ];
+
+    return {
+      modelCallUsage,
+      rows,
+      stages: debugInfo?.stages ?? message.langGraphTrace?.stages ?? [],
+      summary: `${formatInteger(displayTokens)} tokens · ${formatInteger(requestCount)} req`
+    };
+  }
+
+  return {
+    modelCallUsage: [],
+    rows: [
+      { label: "Message tokens", value: formatInteger(estimatedMessageTokens) },
+      { label: "Characters", value: formatInteger(message.content.length) },
+      { label: "Attachments", value: formatInteger(message.attachments?.length ?? 0) },
+      { label: "Created", value: formatAccountActivityTime(message.createdAt) }
+    ],
+    stages: [],
+    summary: `${formatInteger(estimatedMessageTokens)} tokens`
+  };
+}
+
+function estimateMessageDisplayTokens(message: ChatMessage) {
+  const attachmentTokens = (message.attachments?.length ?? 0) * 375;
+  return Math.max(1, Math.ceil(message.content.length / 4) + attachmentTokens);
+}
+
+function inferMessageRequestCount(message: ChatMessage) {
+  return 1 + inferProviderRequestCount(message) + (message.langGraphTrace?.toolCallCount ?? 0);
+}
+
+function inferProviderRequestCount(message: ChatMessage) {
+  const providerStages = message.langGraphTrace?.stages?.filter((stage) => stage.startsWith("openrouter_")).length ?? 0;
+  return Math.max(providerStages, message.role === "assistant" ? 1 : 0);
+}
+
+function formatInteger(value: unknown) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? Math.max(0, Math.round(numberValue)).toLocaleString() : "0";
+}
+
+function formatDuration(durationMs: number) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return "0 ms";
+  }
+
+  return durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)} s` : `${Math.round(durationMs)} ms`;
+}
+
 function StudentSettingsPanel({
   accountEmail,
   accountDisplayName,
@@ -1486,12 +1642,15 @@ function StudentSettingsPanel({
   isSavingAccountSettings,
   isDeletingAccount,
   isSavingThemePreference,
+  isTeacherDebugMode,
+  isTeacherPreview,
   role,
   themePreferenceError,
   onAccountDisplayNameChange,
   onAccountUsernameChange,
   onDeleteAccount,
   onDeleteAccountPasswordChange,
+  onTeacherDebugModeChange,
   onSaveAccountSettings,
   onSignOut,
   onSignOutAllSessions,
@@ -1513,12 +1672,15 @@ function StudentSettingsPanel({
   isSavingAccountSettings: boolean;
   isDeletingAccount: boolean;
   isSavingThemePreference: boolean;
+  isTeacherDebugMode: boolean;
+  isTeacherPreview: boolean;
   role: string;
   themePreferenceError: string;
   onAccountDisplayNameChange: (displayName: string) => void;
   onAccountUsernameChange: (username: string) => void;
   onDeleteAccount: () => Promise<void>;
   onDeleteAccountPasswordChange: (password: string) => void;
+  onTeacherDebugModeChange: (enabled: boolean) => void;
   onSaveAccountSettings: () => Promise<void>;
   onSignOut: () => Promise<void>;
   onSignOutAllSessions: () => Promise<void>;
@@ -1668,6 +1830,24 @@ function StudentSettingsPanel({
           </div>
           {themePreferenceError ? <p className="form-error">{themePreferenceError}</p> : null}
         </section>
+
+        {isTeacherPreview ? (
+          <section className="student-settings-card student-debug-settings-card" aria-labelledby="student-debug-settings">
+            <div className="student-settings-card-heading">
+              <h2 id="student-debug-settings">Debug Mode</h2>
+              <p>Show teacher-only request and token diagnostics beside chat messages.</p>
+            </div>
+            <label className="student-debug-toggle">
+              <input
+                checked={isTeacherDebugMode}
+                type="checkbox"
+                onChange={(event) => onTeacherDebugModeChange(event.target.checked)}
+              />
+              <span aria-hidden="true" />
+              <strong>{isTeacherDebugMode ? "Debug on" : "Debug off"}</strong>
+            </label>
+          </section>
+        ) : null}
 
         <section className="student-settings-card student-membership-settings-card" aria-labelledby="student-class-membership-settings">
           <div className="student-settings-card-heading">

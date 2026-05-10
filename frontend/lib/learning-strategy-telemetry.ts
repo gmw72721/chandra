@@ -171,6 +171,7 @@ export function inferLearningStrategyObservedOutcome(studentMessage: string): Le
 export function stripTeacherOnlyTutorResponseFields(response: TutorApiResponse): TutorApiResponse {
   const studentSafeResponse = { ...response };
 
+  delete studentSafeResponse.debugInfo;
   delete studentSafeResponse.hintLevel;
   delete studentSafeResponse.learningStrategyTelemetry;
   delete studentSafeResponse.mode;

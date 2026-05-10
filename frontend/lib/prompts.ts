@@ -189,12 +189,6 @@ function buildCoreTutorInstructions({
     "",
     "Source-use rules:",
     ...buildSourceUsageInstructions(sourceUsage, answerPolicy),
-    "- Build the query from the student's exact wording plus the likely source type and topic/method, any known title, page, section, problem number, and recent source context.",
-    "- Make retrieval queries specific but not noisy: keep stable titles, sections, page/problem numbers, and distinctive math terms; expand common notation with words such as sqrt/square root, int/integral, derivative/differentiate, and lim/limit; drop filler.",
-    "- For textbook section or chapter requests, search generically with textbook/reading plus the exact section/chapter marker and topic words; do not assume a particular textbook title unless the student or prior cited source named it.",
-    "- If previous retrieval diagnostics say what was missing, build the next query for that missing piece: exact task page, method support, worked example, or corrected section/title.",
-    "- For follow-ups, use any previously cited source context in the conversation before deciding what to retrieve next.",
-    "- Do not retrieve for greetings, study planning, or trivial self-contained questions. For method-teaching questions or a self-contained pasted problem, retrieve when class readings/examples would materially improve the explanation, quote, example, or hint.",
     ...(sourceUsage.citeSourcePages
       ? [
           "- When using source material, mention the source title naturally and include page numbers or section references when available."

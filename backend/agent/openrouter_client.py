@@ -181,20 +181,37 @@ def model_supports_reasoning_effort(model: str) -> bool:
 
 def normalize_token_usage(usage: Any) -> dict[str, int]:
     if not isinstance(usage, dict):
-        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "reasoning_tokens": 0}
 
     input_tokens = nonnegative_int(usage.get("prompt_tokens") or usage.get("input_tokens"))
     output_tokens = nonnegative_int(usage.get("completion_tokens") or usage.get("output_tokens"))
     total_tokens = nonnegative_int(usage.get("total_tokens"))
+    reasoning_tokens = normalize_reasoning_tokens(usage)
 
     if total_tokens <= 0:
-        total_tokens = input_tokens + output_tokens
+        total_tokens = input_tokens + output_tokens + reasoning_tokens
 
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
+        "reasoning_tokens": reasoning_tokens,
     }
+
+
+def normalize_reasoning_tokens(usage: dict[str, Any]) -> int:
+    for details_key in ("completion_tokens_details", "output_tokens_details"):
+        details = usage.get(details_key)
+        if isinstance(details, dict):
+            reasoning_tokens = nonnegative_int(details.get("reasoning_tokens"))
+            if reasoning_tokens:
+                return reasoning_tokens
+
+    return nonnegative_int(
+        usage.get("reasoning_tokens")
+        or usage.get("reasoningTokens")
+        or usage.get("reasoning")
+    )
 
 
 def nonnegative_int(value: Any) -> int:
