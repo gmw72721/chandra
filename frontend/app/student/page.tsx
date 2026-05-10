@@ -1470,6 +1470,8 @@ const StudentChatMessage = memo(function StudentChatMessage({
 
   const answerContent = assistantMessageAnswerContent(message);
   const structuredSections = assistantStructuredSections(message);
+  const problemSection = structuredSections.find((section) => section.kind === "problem");
+  const remainingStructuredSections = structuredSections.filter((section) => section.kind !== "problem");
   const sourceLabels = message.sources?.length ? condensedSourceLabels(message.sources) : [];
 
   return (
@@ -1482,6 +1484,14 @@ const StudentChatMessage = memo(function StudentChatMessage({
           <div className="message-meta">Chandra</div>
           {debugEnabled ? <MessageDebugDetails message={message} /> : null}
         </div>
+        {problemSection ? (
+          <div className={`assistant-structured-section ${problemSection.kind}`} key={problemSection.kind}>
+            <strong>{problemSection.label}</strong>
+            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+              {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(problemSection.content, problemSection.kind))}
+            </ReactMarkdown>
+          </div>
+        ) : null}
         {answerContent ? (
           <div className="assistant-message-bubble">
             <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
@@ -1489,7 +1499,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
             </ReactMarkdown>
           </div>
         ) : null}
-        {structuredSections.map((section) => (
+        {remainingStructuredSections.map((section) => (
           <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
             <strong>{section.label}</strong>
             <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>

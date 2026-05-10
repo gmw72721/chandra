@@ -32,6 +32,9 @@ MAX_RETRIEVED_WINDOWS = 5
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini"
 ROUTER_MODEL = "openai/gpt-5.4-mini"
 ROUTER_REASONING_EFFORT = "low"
+ANSWER_LEAK_GUARD_MAX_TOKENS = 180
+ANSWER_LEAK_GUARD_TEXT_LIMIT = 220
+ANSWER_LEAK_GUARD_PROBLEM_LIMIT = 360
 MAX_PARALLEL_ASSET_ENCODERS = 4
 _SHARED_CLIENT_GRAPH_CACHE: dict[int, Any] = {}
 _ACTIVE_PROBLEM_CONTEXT_CACHE: dict[str, dict[str, Any]] = {}
@@ -44,6 +47,7 @@ PROBLEM_CONTEXT_RELATIONS = {"same_problem", "different_problem", "unknown"}
 PROBLEM_CONTEXT_SOURCE_TYPES = {"assignment_question", "pdf", "uploaded_image", "conversation_extracted", "unknown"}
 PROBLEM_CONTEXT_CONFIDENCE = {"low", "medium", "high"}
 STRUCTURED_SECTION_ORDER = [
+    ("problem", "Problem"),
     ("answer", ""),
     ("hint", "Hint"),
     ("explanation", "Why this works"),
@@ -885,36 +889,7 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
     base_messages = list(state["messages"])
     answer_policy = normalize_answer_policy_state(state.get("answer_policy"))
     source_usage = normalize_source_usage_state(state.get("source_usage"))
-    selected_context = {
-        "retrieved_pages": state.get("retrieved_pages", []),
-        "page_assets": [
-            {
-                "doc_id": asset.get("doc_id"),
-                "title": asset.get("title"),
-                "page_start": asset.get("page_start"),
-                "page_end": asset.get("page_end"),
-                "printed_page_start": asset.get("printed_page_start"),
-                "printed_page_end": asset.get("printed_page_end"),
-                "citation_label": asset.get("citation_label"),
-                "score": asset.get("score"),
-                "material_type": asset.get("material_type"),
-            }
-            for asset in state.get("page_assets", [])
-        ],
-        "searches_used": state.get("tool_call_count", 0),
-        "max_searches": MAX_TOOL_CALLS,
-        "previous_search_queries": state.get("search_queries", []),
-        "retrieval_diagnostics": state.get("retrieval_diagnostics", []),
-        "private_planning_context": {
-            "student_profile_available": bool((state.get("student_profile_context") or {}).get("digest")),
-            "profile_strategy_count": len((state.get("student_profile_context") or {}).get("strategies") or []),
-        },
-        "suggested_next_queries": [
-            diagnostic.get("suggested_next_query")
-            for diagnostic in state.get("retrieval_diagnostics", [])
-            if diagnostic.get("suggested_next_query")
-        ],
-    }
+    selected_context = compact_selected_page_context(state)
     has_selected_pages = bool(state.get("page_assets") or state.get("retrieved_pages"))
     instruction_lines = [
         (
@@ -947,15 +922,23 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
         f"{final_unclear_source_instruction(source_usage)}",
         "Use printed_page_start as the document page number. page_start and page_end are internal render indexes only.",
         "For task-location answers, use a concise shape like `That item is Problem/Question N in Section X, on printed page P of Title.`",
-        "For problem-statement lookup by number, exercise, page, or title, quote the full visible problem statement with source/page context, then stop with a brief offer to help them start.",
+        "For exercise/question/task lookup by number, exercise, page, or title, put the found exercise/question/task statement in a separate `Problem:` section, quote the full visible statement with source/page context, then stop with a brief offer to help them start. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. Do not repeat the same problem text again in the unlabeled main reply.",
         "Do not restate long task text the student already supplied unless needed for clarity.",
-        "Allowed labels when useful: `Hint:`, `Why this works:`, `Formula:`, `Example:`, `Check your work:`. Do not write `Answer:`, `Question:`, `Next step:`, `Your next step:`, `Source:`, or `Sources:`.",
+        (
+            "Structured section labels: when useful, write sections in this order: `Problem:`, `Hint:`, `Why this works:`, "
+            "`Formula:`, `Example:`, `Check your work:`. Use `Problem:` only for the found academic exercise/question/task "
+            "statement the student is working on, not for an issue/error. If you use `Problem:`, put the problem statement only there and keep any main reply to a short follow-up offer. Use `Hint:` for a small nudge, `Why this works:` "
+            "for concept reasoning, `Formula:` for a reusable rule, `Example:` only for a similar different problem, and "
+            "`Check your work:` only when responding to a student attempt. Do not write `Answer:`, `Question:`, `Next step:`, "
+            "`Your next step:`, `Source:`, or `Sources:`; end with one unlabeled direct question when helpful."
+        ),
         "For simple greetings or check-ins, reply naturally in one short chat message and ask what course problem or concept the student wants to work on.",
         "Usually use no more than two optional labeled sections, then end with one direct question.",
         "Use `$...$` or `$$...$$`; do not use `\\(...\\)`, `\\[...\\]`, or plain bracketed math.",
         "Do not use unrelated pages or outside knowledge.",
         (
-            "Internal-only problem tracking: At the end you may add a `Problem context:` block for the backend only. "
+            "Internal-only academic task tracking: At the end you may add a `Problem context:` block for the backend only. "
+            "In this block, problem means the exercise/question/task the student is working on, not an error or issue. "
             "Use newline-separated `key: value` fields with keys relation, problem, expected_answer, source_type, "
             "source_document_id, source_page, source_chunk_id, confidence. Allowed relation values: same_problem, "
             "different_problem, unknown. Allowed source_type values: assignment_question, pdf, uploaded_image, "
@@ -985,6 +968,62 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
 
 def compact_json_dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ": "))
+
+
+def compact_selected_page_context(state: PdfRagState) -> dict[str, Any]:
+    diagnostics = state.get("retrieval_diagnostics", [])
+    queries = [str(query).strip() for query in state.get("search_queries", []) if str(query).strip()]
+    next_queries = [
+        str(diagnostic.get("suggested_next_query")).strip()
+        for diagnostic in diagnostics
+        if str(diagnostic.get("suggested_next_query") or "").strip()
+    ]
+
+    return {
+        "search": {"used": state.get("tool_call_count", 0), "max": MAX_TOOL_CALLS},
+        "pages": [
+            {
+                "d": asset.get("doc_id"),
+                "t": asset.get("title"),
+                "pp": printed_page_label(asset),
+                "mt": asset.get("material_type"),
+                "sc": round(float(asset.get("score") or 0.0), 3),
+            }
+            for asset in state.get("page_assets", [])
+        ],
+        "queries": queries[-3:],
+        "diag": compact_retrieval_diagnostics(diagnostics),
+        "next": next_queries[:3],
+        "profile": {
+            "available": bool((state.get("student_profile_context") or {}).get("digest")),
+            "strategies": len((state.get("student_profile_context") or {}).get("strategies") or []),
+        },
+    }
+
+
+def printed_page_label(asset: dict[str, Any]) -> str:
+    start = nonnegative_int(asset.get("printed_page_start")) or nonnegative_int(asset.get("page_start"))
+    end = nonnegative_int(asset.get("printed_page_end")) or nonnegative_int(asset.get("page_end")) or start
+    if start <= 0:
+        return "unknown"
+    if start == end:
+        return str(start)
+    return f"{start}-{end}"
+
+
+def compact_retrieval_diagnostics(diagnostics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    for diagnostic in diagnostics[-3:]:
+        if not isinstance(diagnostic, dict):
+            continue
+        compacted.append(
+            {
+                "issue": diagnostic.get("issue"),
+                "query": diagnostic.get("query"),
+                "next": diagnostic.get("suggested_next_query"),
+            }
+        )
+    return compacted
 
 def encoded_page_asset_content_parts(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     encoding_jobs = page_asset_encoding_jobs(assets)
@@ -1454,6 +1493,11 @@ async def run_pdf_rag_agent(
             final_state["active_problem_context_prefetch"] = active_problem_context_prefetch
         await finish_active_problem_context_prefetch(final_state)
         answer = answer_or_page_fallback(final_state)
+        answer = await apply_leak_guard_with_model(
+            state=final_state,
+            answer=answer,
+            openrouter_client=client,
+        )
         return pdf_rag_response_from_state(final_state, answer=answer)
     finally:
         await close_owned_openrouter_client(client, owns_client)
@@ -1602,6 +1646,11 @@ async def run_pdf_rag_agent_stream(
 
         if not state["tool_calls"]:
             await finish_active_problem_context_prefetch(state)
+            state["answer"] = await apply_leak_guard_with_model(
+                state=state,
+                answer=state.get("answer") or "",
+                openrouter_client=client,
+            )
             yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
             return
 
@@ -1710,6 +1759,11 @@ async def run_pdf_rag_agent_stream(
 
             if not state["tool_calls"]:
                 await finish_active_problem_context_prefetch(state)
+                state["answer"] = await apply_leak_guard_with_model(
+                    state=state,
+                    answer=state.get("answer") or "",
+                    openrouter_client=client,
+                )
                 yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
                 return
 
@@ -1720,6 +1774,11 @@ async def run_pdf_rag_agent_stream(
             )
 
         await finish_active_problem_context_prefetch(state)
+        state["answer"] = await apply_leak_guard_with_model(
+            state=state,
+            answer=state.get("answer") or "",
+            openrouter_client=client,
+        )
         yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
     finally:
         await close_owned_openrouter_client(client, owns_client)
@@ -1820,15 +1879,40 @@ def parse_problem_context_from_answer(
     match = re.search(r"(?:^|\n)\s*Problem context\s*:\s*(?P<body>.*)\s*$", answer or "", flags=re.IGNORECASE | re.DOTALL)
     fields = parse_problem_context_fields(match.group("body") if match else "")
     first_source = (sources or [None])[0] or {}
+    inferred_problem_context = (
+        infer_problem_context_from_answer(answer, state, first_source)
+        if not fields.get("problem") and state is not None
+        else {}
+    )
 
-    relation = normalize_problem_context_enum(fields.get("relation"), PROBLEM_CONTEXT_RELATIONS, "unknown")
-    source_type = normalize_problem_context_enum(fields.get("source_type"), PROBLEM_CONTEXT_SOURCE_TYPES, "unknown")
-    confidence = normalize_problem_context_enum(fields.get("confidence"), PROBLEM_CONTEXT_CONFIDENCE, "low")
-    source_page = nonnegative_int(fields.get("source_page")) or nonnegative_int(first_source.get("pageNumber"))
-    problem = nullable_problem_context_value(fields.get("problem"))
+    relation = normalize_problem_context_enum(
+        fields.get("relation") or inferred_problem_context.get("relation"),
+        PROBLEM_CONTEXT_RELATIONS,
+        "unknown",
+    )
+    source_type = normalize_problem_context_enum(
+        fields.get("source_type") or inferred_problem_context.get("source_type"),
+        PROBLEM_CONTEXT_SOURCE_TYPES,
+        "unknown",
+    )
+    confidence = normalize_problem_context_enum(
+        fields.get("confidence") or inferred_problem_context.get("confidence"),
+        PROBLEM_CONTEXT_CONFIDENCE,
+        "low",
+    )
+    source_page = (
+        nonnegative_int(fields.get("source_page"))
+        or nonnegative_int(inferred_problem_context.get("source_page"))
+        or nonnegative_int(first_source.get("pageNumber"))
+    )
+    problem = nullable_problem_context_value(fields.get("problem") or inferred_problem_context.get("problem"))
     expected_answer = nullable_problem_context_value(fields.get("expected_answer"))
-    source_document_id = nullable_problem_context_value(fields.get("source_document_id"))
-    source_chunk_id = nullable_problem_context_value(fields.get("source_chunk_id"))
+    source_document_id = nullable_problem_context_value(
+        fields.get("source_document_id") or inferred_problem_context.get("source_document_id")
+    )
+    source_chunk_id = nullable_problem_context_value(
+        fields.get("source_chunk_id") or inferred_problem_context.get("source_chunk_id")
+    )
 
     if source_type == "unknown" and source_document_id:
         source_type = "pdf"
@@ -1859,6 +1943,83 @@ def parse_problem_context_fields(body: str) -> dict[str, str]:
             fields[normalized_key] = value.strip()
 
     return fields
+
+
+def infer_problem_context_from_answer(
+    answer: str,
+    state: PdfRagState,
+    first_source: dict[str, Any],
+) -> dict[str, Any]:
+    candidate = extract_problem_text_from_answer(answer) or extract_problem_text_from_retrieved_pages(state)
+    if not candidate:
+        return {}
+
+    best_page = best_problem_context_page(state)
+    return {
+        "relation": "different_problem",
+        "problem": candidate,
+        "source_type": best_page.get("source_type") or best_page.get("material_type") or best_page.get("materialType") or "pdf",
+        "source_document_id": best_page.get("doc_id") or first_source.get("docId") or first_source.get("title"),
+        "source_page": best_page.get("printed_page_start") or best_page.get("page_start") or first_source.get("pageNumber"),
+        "source_chunk_id": best_page.get("chunk_id") or best_page.get("chunkId"),
+        "confidence": "medium",
+    }
+
+
+def extract_problem_text_from_answer(answer: str) -> str | None:
+    cleaned = remove_problem_context_from_student_text(answer or "")
+    patterns = [
+        r"\b((?:Problem|Exercise|Question)\s+\d+(?:\.\d+)?[^.\n]*(?:says|asks|is|:)\s*.+?)(?:\s+on\s+(?:printed\s+)?page\b|\s+from\b|\n|$)",
+        r"\b(The problem is stated as\s+.+?)(?:\s+on\s+(?:printed\s+)?page\b|\n|$)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, cleaned, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            candidate = normalize_problem_candidate(match.group(1))
+            if candidate:
+                return candidate
+
+    return None
+
+
+def extract_problem_text_from_retrieved_pages(state: PdfRagState) -> str | None:
+    page = best_problem_context_page(state)
+    candidate = normalize_problem_candidate(
+        str(
+            page.get("chunk_text")
+            or page.get("chunkText")
+            or page.get("content")
+            or ""
+        )
+    )
+    return candidate
+
+
+def best_problem_context_page(state: PdfRagState) -> dict[str, Any]:
+    pages = state.get("retrieved_pages") or []
+    if not pages:
+        return {}
+
+    return max(pages, key=lambda page: float(page.get("score") or 0.0))
+
+
+def normalize_problem_candidate(text: str) -> str | None:
+    candidate = re.sub(r"\s+", " ", str(text or "")).strip()
+    candidate = candidate.strip("\"'` ")
+    if not candidate:
+        return None
+
+    if len(candidate) > 800:
+        candidate = candidate[:800].rsplit(" ", 1)[0].strip()
+
+    if not re.search(r"\b(?:problem|exercise|question|prove|solve|find|compute|show|given|integral|derivative|lim)\b", candidate, flags=re.IGNORECASE):
+        return None
+
+    if len(candidate.split()) < 4 and not re.search(r"(=|\\frac|/|\^|√|∫)", candidate):
+        return None
+
+    return candidate
 
 
 def normalize_problem_context_enum(value: Any, allowed: set[str], default: str) -> str:
@@ -2183,6 +2344,349 @@ def answer_leak_gate(
     }
 
 
+def _extract_json_object(content: str) -> dict[str, Any] | None:
+    payload = str(content or "").strip()
+    if not payload:
+        return None
+
+    candidates = [payload]
+    if payload.startswith("```") and "```" in payload[3:]:
+        candidates.insert(0, payload.strip("`").strip())
+
+    fence_match = re.search(r"\{[\s\S]*\}", payload)
+    if fence_match:
+        candidates.append(fence_match.group(0))
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+
+        if isinstance(parsed, dict):
+            return parsed
+
+    return None
+
+
+def _coerce_llm_gate(response: dict[str, Any], answer_policy: dict[str, bool]) -> dict[str, Any] | None:
+    if not isinstance(response, dict):
+        return None
+
+    if not isinstance(response.get("passed"), bool):
+        return None
+
+    leaking_sections = _validate_leak_sections(response.get("leaking_sections"))
+    failure_reasons = [str(item).strip() for item in (response.get("failure_reasons") or []) if str(item).strip()]
+    leaked_types = {str(item).strip() for item in (response.get("leaked_answer_types") or []) if str(item).strip()}
+    risk = str(response.get("risk") or "").strip().lower()
+    risk = risk if risk in {"low", "medium", "high"} else ("high" if leaking_sections else "low")
+    passed = bool(response.get("passed")) and not leaking_sections
+    rewritten_sections = _coerce_rewritten_sections(
+        response.get("rewrites") or response.get("rewritten_sections") or response.get("sections"),
+        leaking_sections,
+    )
+
+    allowed_help_level = "attempt_first" if answer_policy["refuseAnswerOnlyRequests"] else "explain_with_reasoning"
+    teacher_policy_mode = "refuse_answer_only" if answer_policy["refuseAnswerOnlyRequests"] else "allow_explanations"
+
+    return {
+        "passed": passed,
+        "leaking_sections": leaking_sections,
+        "failure_reasons": failure_reasons,
+        "leaked_answer_types": sorted(leaked_types),
+        "risk": "high" if leaking_sections else risk,
+        "rewritten_sections": rewritten_sections,
+        "allowed_help_level": allowed_help_level,
+        "teacher_policy_mode": teacher_policy_mode,
+    }
+
+
+def _build_llm_answer_leak_messages(
+    sections: dict[str, Any],
+    problem_text: str,
+    expected_answer: str | None,
+    latest_student_message: str,
+    recent_messages: list[dict[str, str]],
+    answer_policy: dict[str, bool],
+) -> list[dict[str, Any]]:
+    compact_sections = {
+        name: compact_leak_guard_text(text, max_chars=ANSWER_LEAK_GUARD_TEXT_LIMIT)
+        for name, text in sections.items()
+        if str(text or "").strip()
+    }
+    payload = compact_json_dumps(
+        {
+            "q": compact_leak_guard_text(latest_student_message, max_chars=ANSWER_LEAK_GUARD_TEXT_LIMIT),
+            "p": compact_leak_guard_text(problem_text, max_chars=ANSWER_LEAK_GUARD_PROBLEM_LIMIT),
+            "ans": compact_leak_guard_text(expected_answer, max_chars=ANSWER_LEAK_GUARD_TEXT_LIMIT),
+            "recent": recent_messages,
+            "refuse": answer_policy["refuseAnswerOnlyRequests"],
+            "sections": compact_sections,
+        }
+    )
+
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Classify answer leaks. Return JSON only: "
+                '{"passed":bool,"leaking_sections":["answer|hint|explanation|formula|example|checkWork|nextStep"],'
+                '"failure_reasons":["short"],"leaked_answer_types":["expected_answer|full_solution|policy"],'
+                '"risk":"low|high","rewrites":{"sectionName":"safe rewrite"}}.'
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"{payload}\n"
+                "Here p is the academic exercise/question/task the student is working on, not an error. "
+                "Check every section against p. Decide if it only helps learning or if it reveals the final answer, gets too close to it, "
+                "solves/finishes that exercise/question/task, or gives enough steps that the answer is effectively exposed. "
+                "If passed=false, leaking_sections must include only those exact section keys, and rewrites must include safe replacements "
+                "for every leaking key. Keep safe sections unchanged by omitting them from rewrites."
+            ),
+        },
+    ]
+
+
+def compact_leak_guard_text(value: Any, *, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= max_chars:
+        return text
+
+    return text[:max_chars].rsplit(" ", 1)[0].strip()
+
+
+def recent_user_tutor_messages_for_leak_guard(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    recent: list[dict[str, str]] = []
+    for message in reversed(messages):
+        role = message.get("role")
+        if role not in {"user", "student", "assistant", "tutor"}:
+            continue
+
+        text = message_content_text(message.get("content"))
+        if not text:
+            continue
+
+        normalized_role = "user" if role in {"user", "student"} else "tutor"
+        recent.append(
+            {
+                "role": normalized_role,
+                "text": compact_leak_guard_text(text, max_chars=ANSWER_LEAK_GUARD_TEXT_LIMIT),
+            }
+        )
+        if len(recent) >= 4:
+            break
+
+    return list(reversed(recent))
+
+
+def message_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        return " ".join(
+            str(part.get("text") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+
+    return ""
+
+
+def _coerce_rewritten_sections(value: Any, leaking_sections: list[str]) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+
+    raw_sections = value.get("sections") if isinstance(value.get("sections"), dict) else value
+
+    allowed = set(leaking_sections)
+    rewritten: dict[str, str] = {}
+    for section_name, text in raw_sections.items():
+        normalized_section = str(section_name or "").strip()
+        replacement = str(text or "").strip()
+        if normalized_section in allowed and replacement:
+            rewritten[normalized_section] = replacement
+
+    return rewritten
+
+
+def _validate_leak_sections(value: Any) -> list[str]:
+    known = {name for name, _ in STRUCTURED_SECTION_ORDER}
+    return [item for item in [str(item).strip() for item in (value or [])] if item in known]
+
+
+def append_original_problem_context_block(answer: str, original_answer: str) -> str:
+    match = re.search(r"(?:^|\n)\s*Problem context\s*:.*\s*$", original_answer or "", flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return answer
+
+    return f"{answer.rstrip()}\n\n{match.group(0).strip()}"
+
+
+def problem_text_fallback_from_latest_message(message: str) -> str:
+    text = str(message or "").strip()
+    if not text or is_short_greeting_answer(text):
+        return ""
+
+    if looks_like_concrete_math_problem(text) or looks_like_numbered_task_locator(text):
+        return text
+
+    if len(text.split()) >= 5 and re.search(r"\b(?:problem|question|exercise|solve|prove|find|compute|write|essay)\b", text, flags=re.IGNORECASE):
+        return text
+
+    return ""
+
+
+def problem_text_fallback_from_messages(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") not in {"user", "student"}:
+            continue
+
+        candidate = problem_text_fallback_from_latest_message(message_content_text(message.get("content")))
+        if candidate:
+            return candidate
+
+    return ""
+
+
+async def apply_leak_guard_with_model(
+    *,
+    state: PdfRagState,
+    answer: str,
+    openrouter_client: Any,
+) -> str:
+    if not answer:
+        return answer
+
+    sources = sources_for_answer(state, answer)
+    problem_context = parse_problem_context_from_answer(answer, state, sources)
+    existing_context = state.get("active_problem_context")
+    active_problem_context = (
+        problem_context
+        if not isinstance(existing_context, dict)
+        else existing_context
+    )
+    expected_answer = str((active_problem_context or {}).get("expected_answer") or "").strip()
+    latest_message = latest_student_message_content(state.get("messages", []))
+    recent_messages = recent_user_tutor_messages_for_leak_guard(state.get("messages", []))
+    problem_text = str(
+        (active_problem_context or {}).get("problem_text")
+        or problem_context.get("problem")
+        or problem_text_fallback_from_messages(state.get("messages", []))
+        or ""
+    ).strip()
+    if not problem_text and not expected_answer:
+        state["stage_history"] = append_stage(state, "answer_leak_guard_skipped_no_problem")
+        return answer
+
+    structured_output = structured_tutor_output_from_answer(answer, state, sources)
+    sections = structured_output.get("sections")
+    if not isinstance(sections, dict) or not sections:
+        return answer
+
+    answer_policy = normalize_answer_policy_state(state.get("answer_policy"))
+    heuristic_gate = answer_leak_gate(
+        answer=answer,
+        structured_output=structured_output,
+        active_problem_context=active_problem_context,
+        state=state,
+        sources=sources,
+    )
+    try:
+        guard_model = state.get("model") or DEFAULT_OPENROUTER_MODEL
+        llm_response = await openrouter_client.chat(
+            model=guard_model,
+            messages=_build_llm_answer_leak_messages(
+                sections=sections,
+                problem_text=problem_text,
+                expected_answer=expected_answer,
+                latest_student_message=latest_message,
+                recent_messages=recent_messages,
+                answer_policy=answer_policy,
+            ),
+            temperature=0,
+            max_tokens=ANSWER_LEAK_GUARD_MAX_TOKENS,
+            reasoning_effort=ROUTER_REASONING_EFFORT,
+        )
+    except Exception:
+        return answer
+
+    state["stage_history"] = append_stage(state, "answer_leak_guard")
+    state["token_usage"] = add_token_usage(state.get("token_usage"), llm_response.get("usage"))
+    state["token_usage_by_call"] = append_model_call_usage(
+        state,
+        llm_response.get("usage"),
+        stage="answer_leak_guard",
+        purpose="answer_leak_guard",
+        model=guard_model,
+        reasoning_effort=ROUTER_REASONING_EFFORT,
+    )
+
+    parsed_gate = _extract_json_object(str(llm_response.get("content") or ""))
+    gate = _coerce_llm_gate(parsed_gate, answer_policy) if parsed_gate else None
+    if gate is None:
+        gate = heuristic_gate
+
+    if gate["passed"] and heuristic_gate["passed"]:
+        return answer
+
+    leaking_sections = sorted(
+        set(_validate_leak_sections(gate.get("leaking_sections")))
+        | set(_validate_leak_sections(heuristic_gate.get("leaking_sections")))
+    )
+    if not leaking_sections:
+        return answer
+
+    rewritten_sections = dict(sections)
+    model_rewrites = gate.get("rewritten_sections") if isinstance(gate.get("rewritten_sections"), dict) else {}
+    for section_name in leaking_sections:
+        rewritten_sections[section_name] = model_rewrites.get(section_name) or safe_replacement_section(
+            section_name,
+            latest_message,
+            active_problem_context,
+        )
+
+    rewritten_answer = structured_sections_to_answer(rewritten_sections)
+    rewritten_gate = answer_leak_gate(
+        answer=rewritten_answer,
+        structured_output={
+            "sections": rewritten_sections,
+        },
+        active_problem_context=active_problem_context,
+        state=state,
+        sources=sources,
+    )
+
+    if rewritten_gate["passed"]:
+        return append_original_problem_context_block(rewritten_answer, answer)
+
+    fallback_sections = dict(rewritten_sections)
+    for section_name in _validate_leak_sections(rewritten_gate.get("leaking_sections")):
+        fallback_sections[section_name] = safe_replacement_section(
+            section_name,
+            latest_message,
+            active_problem_context,
+        )
+
+    fallback_answer = structured_sections_to_answer(fallback_sections)
+    fallback_gate = answer_leak_gate(
+        answer=fallback_answer,
+        structured_output={
+            "sections": fallback_sections,
+        },
+        active_problem_context=active_problem_context,
+        state=state,
+        sources=sources,
+    )
+    if fallback_gate["passed"]:
+        return append_original_problem_context_block(fallback_answer, answer)
+
+    return append_original_problem_context_block(ANSWER_LEAK_FALLBACK_RESPONSE, answer)
+
+
 def answer_leak_reasons_for_text(
     text: str,
     *,
@@ -2286,6 +2790,9 @@ def safe_replacement_section(
     latest_student_message: str,
     active_problem_context: dict[str, Any] | None,
 ) -> str:
+    if section_name == "problem":
+        return str((active_problem_context or {}).get("problem_text") or "").strip() or "Use the problem statement your teacher provided."
+
     if section_name == "answer":
         return "I can't give the full answer here, but I can help you work toward it."
 
@@ -2438,14 +2945,13 @@ def build_input_token_breakdown(state: PdfRagState, final_messages: list[dict[st
     final_history_count = max(0, len(final_messages) - 1)
     for index, message in enumerate(final_messages[:-1], start=1):
         role = str(message.get("role") or "unknown")
-        add_debug_text_section(
+        add_debug_history_sections(
             sections,
-            id=f"final.history.{index}.{role}",
-            label=f"Final history {index}: {role}",
+            message=message,
+            index=index,
             stage="openrouter_answer_with_pages",
             purpose="final_answer",
-            kind="message",
-            text=message.get("content"),
+            label_prefix="Final history",
         )
 
     final_prompt = final_messages[-1] if final_messages else {}
@@ -2503,6 +3009,115 @@ def add_final_instruction_sections(sections: list[dict[str, Any]], *, text: str,
             kind="selected_page_metadata",
             text=metadata_text,
         )
+
+
+def add_debug_history_sections(
+    sections: list[dict[str, Any]],
+    *,
+    message: dict[str, Any],
+    index: int,
+    stage: str,
+    purpose: str,
+    label_prefix: str,
+) -> None:
+    role = str(message.get("role") or "unknown")
+    content = message.get("content")
+
+    if role == "system" and isinstance(content, str):
+        add_debug_system_prompt_sections(
+            sections,
+            text=content,
+            message_index=index,
+            stage=stage,
+            purpose=purpose,
+            label_prefix=label_prefix,
+        )
+        return
+
+    add_debug_text_section(
+        sections,
+        id=f"final.history.{index}.{role}",
+        label=f"{label_prefix} {index}: {role}",
+        stage=stage,
+        purpose=purpose,
+        kind="message",
+        text=content,
+    )
+
+
+def add_debug_system_prompt_sections(
+    sections: list[dict[str, Any]],
+    *,
+    text: str,
+    message_index: int,
+    stage: str,
+    purpose: str,
+    label_prefix: str,
+) -> None:
+    grouped_sections = split_debug_system_prompt_sections(text)
+
+    if len(grouped_sections) <= 1:
+        add_debug_text_section(
+            sections,
+            id=f"final.history.{message_index}.system",
+            label=f"{label_prefix} {message_index}: system",
+            stage=stage,
+            purpose=purpose,
+            kind="message",
+            text=text,
+        )
+        return
+
+    for section_index, section in enumerate(grouped_sections, start=1):
+        normalized = section.strip()
+        if not normalized:
+            continue
+
+        add_debug_text_section(
+            sections,
+            id=f"final.history.{message_index}.system.{section_index}",
+            label=f"{label_prefix} {message_index}.{section_index}: {debug_system_prompt_label(normalized)}",
+            stage=stage,
+            purpose=purpose,
+            kind="system_prompt_section",
+            text=section,
+        )
+
+
+def split_debug_system_prompt_sections(text: str) -> list[str]:
+    if not text.strip():
+        return []
+
+    sections: list[str] = []
+    current_lines: list[str] = []
+
+    for line in text.splitlines(keepends=True):
+        if is_debug_system_prompt_heading(line):
+            if current_lines and "".join(current_lines).strip():
+                sections.append("".join(current_lines))
+                current_lines = []
+        current_lines.append(line)
+
+    if current_lines and "".join(current_lines).strip():
+        sections.append("".join(current_lines))
+
+    return sections
+
+
+def is_debug_system_prompt_heading(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("-"):
+        return False
+
+    return stripped.endswith(":")
+
+
+def debug_system_prompt_label(text: str) -> str:
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if first_line.endswith(":"):
+        return first_line[:-1]
+
+    return debug_label_excerpt(first_line or text)
 
 
 def split_debug_sentences(text: str) -> list[str]:
@@ -2866,6 +3481,7 @@ def structured_tutor_output_from_answer(
             structured_answer = candidate_answer
 
     hint = extract_labeled_section(structured_answer, ["hint", "small hint"])
+    problem = extract_labeled_section(structured_answer, ["problem"])
     explanation = extract_labeled_section(structured_answer, ["why this works", "explanation"])
     formula = extract_labeled_section(structured_answer, ["formula", "formulas"])
     example = extract_labeled_section(structured_answer, ["example", "similar example"])
@@ -2884,6 +3500,7 @@ def structured_tutor_output_from_answer(
     optional_section_labels = [
         "hint",
         "small hint",
+        "problem",
         "why this works",
         "explanation",
         "formula",
@@ -2897,12 +3514,19 @@ def structured_tutor_output_from_answer(
         "question",
     ]
     section_answer = remove_labeled_sections(structured_answer, optional_section_labels)
-    has_optional_sections = any([hint, explanation, formula, example, check_work, next_question])
+    if problem:
+        problem, problem_followup = split_problem_section_followup(problem)
+        if problem_followup and not section_answer:
+            section_answer = problem_followup
+    has_optional_sections = any([problem, hint, explanation, formula, example, check_work, next_question])
     if not section_answer and not has_optional_sections:
         section_answer = structured_answer
     sections: dict[str, str] = {
         "answer": section_answer,
     }
+
+    if problem:
+        sections["problem"] = problem
 
     if hint:
         sections["hint"] = hint
@@ -3128,6 +3752,18 @@ def clean_labeled_section_text(text: str) -> str:
     if re.search(r"(\\|=|<|>|\^|_)", cleaned):
         cleaned = cleaned.rstrip(".")
     return cleaned.strip()
+
+
+def split_problem_section_followup(problem: str) -> tuple[str, str]:
+    match = re.search(
+        r"\s+(If you want,?\s+.+|I can help you\s+.+|Want to\s+.+)$",
+        problem,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return problem, ""
+
+    return problem[: match.start()].strip(), match.group(1).strip()
 
 
 def infer_hint_level(answer: str, direct_refusal: bool) -> str:

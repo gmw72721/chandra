@@ -554,37 +554,56 @@ function StudentWorkspace() {
                     </div>
                   </div>
                 ) : (
-                  <>
-                    <span className="chandra-message-avatar" aria-hidden="true">
-                      C
-                    </span>
-                    <div className="assistant-message-stack">
-                      <div className="message-meta">Chandra</div>
-                      {assistantMessageAnswerContent(message) ? (
-                        <div className="assistant-message-bubble">
-                          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                            {normalizeMarkdownMath(assistantMessageAnswerContent(message))}
-                          </ReactMarkdown>
-                        </div>
-                      ) : null}
-                      {assistantStructuredSections(message).map((section) => (
-                        <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
-                          <strong>{section.label}</strong>
-                          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                            {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(section.content, section.kind))}
-                          </ReactMarkdown>
-                        </div>
-                      ))}
-                      {message.sources?.length ? (
-                        <div className="message-sources" aria-label="Sources used">
-                          <strong>Sources:</strong>
-                          {condensedSourceLabels(message.sources).map((label, index) => (
-                            <span key={`${label}-${index}`}>{label}</span>
+                  (() => {
+                    const answerContent = assistantMessageAnswerContent(message);
+                    const structuredSections = assistantStructuredSections(message);
+                    const problemSection = structuredSections.find((section) => section.kind === "problem");
+                    const remainingStructuredSections = structuredSections.filter((section) => section.kind !== "problem");
+
+                    return (
+                      <>
+                        <span className="chandra-message-avatar" aria-hidden="true">
+                          C
+                        </span>
+                        <div className="assistant-message-stack">
+                          <div className="message-meta">Chandra</div>
+                          {problemSection ? (
+                            <div className={`assistant-structured-section ${problemSection.kind}`} key={problemSection.kind}>
+                              <strong>{problemSection.label}</strong>
+                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                                {normalizeMarkdownMath(
+                                  normalizeStructuredSectionMarkdown(problemSection.content, problemSection.kind)
+                                )}
+                              </ReactMarkdown>
+                            </div>
+                          ) : null}
+                          {answerContent ? (
+                            <div className="assistant-message-bubble">
+                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                                {normalizeMarkdownMath(answerContent)}
+                              </ReactMarkdown>
+                            </div>
+                          ) : null}
+                          {remainingStructuredSections.map((section) => (
+                            <div className={`assistant-structured-section ${section.kind}`} key={section.kind}>
+                              <strong>{section.label}</strong>
+                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                                {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(section.content, section.kind))}
+                              </ReactMarkdown>
+                            </div>
                           ))}
+                          {message.sources?.length ? (
+                            <div className="message-sources" aria-label="Sources used">
+                              <strong>Sources:</strong>
+                              {condensedSourceLabels(message.sources).map((label, index) => (
+                                <span key={`${label}-${index}`}>{label}</span>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
-                      ) : null}
-                    </div>
-                  </>
+                      </>
+                    );
+                  })()
                 )}
               </article>
             ))}
@@ -823,6 +842,7 @@ function assistantStructuredSections(message: ChatMessage) {
   }
 
   return [
+    { content: sections.problem, kind: "problem", label: "Problem" },
     { content: sections.hint, kind: "hint", label: "Hint" },
     { content: sections.explanation, kind: "explanation", label: "Why this works" },
     { content: sections.formula, kind: "formula", label: "Formula" },

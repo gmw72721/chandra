@@ -222,6 +222,84 @@ test("exact problem signals beat a slightly better vector match", () => {
   assert.equal(result.hits[0]?.chunk.id, "problem-17");
 });
 
+test("explicit problem lookup prefers an actual heading over a reference mention", () => {
+  const referencePage = makeDocument({
+    id: "reader-reference",
+    kind: "textbook",
+    title: "Linear Algebra Reader",
+    chunks: [
+      {
+        content: "Remark 2.8.15. Example 2.8.16. Let (2.14) denote the previous formula.",
+        id: "reference-2-14",
+        problemNumbers: ["2.8", "2.14"],
+        vector: [1, 0]
+      }
+    ]
+  });
+  const actualProblemPage = makeDocument({
+    id: "reader-exercises",
+    kind: "textbook",
+    title: "Linear Algebra Reader",
+    chunks: [
+      {
+        content: "Exercises 79. 2 .14 . Given the setup of Exercise 2.13, prove the following inequalities.",
+        id: "actual-2-14",
+        problemNumbers: ["2.13", "2.14", "2.15"],
+        vector: [0.92, 0.08]
+      }
+    ]
+  });
+
+  const result = rankMaterialChunks({
+    candidates: toCandidates([referencePage, actualProblemPage]),
+    limit: 5,
+    query: "problem 2.14",
+    queryVector: [1, 0]
+  });
+
+  assert.equal(result.hits[0]?.chunk.id, "actual-2-14");
+});
+
+test("explicit problem lookup narrows to top 3 when scores are not close", () => {
+  const exactProblem = makeDocument({
+    id: "reader-exercises",
+    kind: "textbook",
+    title: "Linear Algebra Reader",
+    chunks: [
+      {
+        content: "Exercises 79. 2 .14 . Given the setup of Exercise 2.13, prove the following inequalities.",
+        id: "actual-2-14",
+        problemNumbers: ["2.13", "2.14", "2.15"],
+        vector: [0.9, 0.1]
+      }
+    ]
+  });
+  const nearMisses = Array.from({ length: 4 }, (_, index) =>
+    makeDocument({
+      id: `reference-${index}`,
+      kind: "textbook",
+      title: "Linear Algebra Reader",
+      chunks: [
+        {
+          content: `Reference page ${index}. Remark 2.8.${index + 10}. Let (2.14) denote the previous formula.`,
+          id: `reference-${index}`,
+          problemNumbers: ["2.14"],
+          vector: [0.2 + index * 0.05, 0.8 - index * 0.05]
+        }
+      ]
+    })
+  );
+
+  const result = rankMaterialChunks({
+    candidates: toCandidates([exactProblem, ...nearMisses]),
+    limit: 5,
+    query: "problem 2.14",
+    queryVector: [1, 0]
+  });
+
+  assert.equal(result.hits.length, 3);
+});
+
 test("practice problems and solutions have distinct material types", () => {
   assert.equal(materialTypeForKind("Practice Problems"), "practice-problems");
   assert.equal(materialTypeForKind("Practice Solutions"), "practice-solutions");

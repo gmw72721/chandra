@@ -20,6 +20,7 @@ export function assistantStructuredSections(message: ChatMessage): AssistantStru
   }
 
   return [
+    { content: sections.problem, kind: "problem", label: "Problem" },
     { content: sections.hint, kind: "hint", label: "Hint" },
     { content: sections.explanation, kind: "explanation", label: "Why this works" },
     { content: sections.formula, kind: "formula", label: "Formula" },

@@ -146,6 +146,7 @@ export type RetrievalConfidence = "high" | "medium" | "low";
 
 export type TutorStructuredSections = {
   answer: string;
+  problem?: string;
   hint?: string;
   explanation?: string;
   formula?: string;

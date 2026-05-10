@@ -14,6 +14,8 @@ import pytest
 import backend.agent.graph as graph_module
 from backend.agent.graph import (
     answer_leak_gate,
+    apply_leak_guard_with_model,
+    build_input_token_breakdown,
     build_multimodal_final_messages,
     diagnose_search_result,
     forced_initial_search_tool_call,
@@ -94,6 +96,45 @@ async def wait_until(predicate: Any, *, timeout: float = 1.0) -> None:
     assert predicate()
 
 
+def test_build_input_token_breakdown_splits_system_prompt_into_sections() -> None:
+    system_prompt = "\n".join(
+        [
+            "You are Chandra, an AI tutor for ACME 1 (Section 1).",
+            "Your goal is to help the student learn, not to simply complete work for them.",
+            "",
+            "Model response controls:",
+            "- Thinking time: medium.",
+            "- Response length: medium.",
+            "",
+            "LangGraph PDF retrieval:",
+            "Tool: search_pdf_pages({ query, student_reason }) searches indexed class PDF page windows.",
+            "",
+            "Query rules:",
+            "- Usually make one concise focused query.",
+        ]
+    )
+    state = minimal_state(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "Where is problem 2.14?"},
+        ]
+    )
+    final_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "Where is problem 2.14?"},
+        {"role": "user", "content": [{"type": "text", "text": "- Use only the selected PDF pages below."}]},
+    ]
+
+    sections = build_input_token_breakdown(state, final_messages)
+    labels = [section["label"] for section in sections]
+
+    assert "Final history 1.1: You are Chandra, an AI tutor for ACME 1 (Section 1)." in labels
+    assert "Final history 1.2: Model response controls" in labels
+    assert "Final history 1.3: LangGraph PDF retrieval" in labels
+    assert "Final history 1.4: Query rules" in labels
+    assert all(label != "Final history 1: system" for label in labels)
+
+
 @pytest.mark.asyncio
 async def test_active_problem_context_read_is_prefetched_before_model_work(monkeypatch: pytest.MonkeyPatch) -> None:
     read_started = threading.Event()
@@ -121,6 +162,19 @@ async def test_active_problem_context_read_is_prefetched_before_model_work(monke
         [
             {"content": "", "tool_calls": []},
             {"content": "Final answer: x = 7.", "tool_calls": []},
+            {
+                "content": json.dumps(
+                    {
+                        "passed": False,
+                        "leaking_sections": ["answer"],
+                        "failure_reasons": ["answer: expected answer appears"],
+                        "leaked_answer_types": ["expected_answer"],
+                        "risk": "high",
+                    }
+                ),
+                "tool_calls": [],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+            },
         ]
     )
 
@@ -134,6 +188,7 @@ async def test_active_problem_context_read_is_prefetched_before_model_work(monke
     )
 
     assert read_finished.is_set()
+    assert len(client.calls) == 3
     assert "x = 7" not in response["content"]
     assert "can't give the full answer" in response["content"]
 
@@ -474,6 +529,20 @@ def test_structured_parser_still_extracts_optional_student_sections() -> None:
     assert sections["nextStep"] == "What operation would you do first?"
 
 
+def test_structured_parser_extracts_problem_section() -> None:
+    answer = (
+        "Exercise 2.14 is on printed page 80 of ACME Textbook.\n\n"
+        "Problem: Given the setup of Exercise 2.13, prove the rank inequalities.\n\n"
+        "Hint: Start from the definition of rank."
+    )
+
+    sections = structured_tutor_output_from_answer(answer, minimal_state(), [])["sections"]
+
+    assert sections["answer"] == "Exercise 2.14 is on printed page 80 of ACME Textbook."
+    assert sections["problem"] == "Given the setup of Exercise 2.13, prove the rank inequalities."
+    assert sections["hint"] == "Start from the definition of rank."
+
+
 def test_same_problem_refreshes_existing_context() -> None:
     existing = {
         "problem_id": "problem_old",
@@ -569,6 +638,56 @@ def test_no_context_with_problem_text_saves_context() -> None:
 
     assert updated["problem_text"] == "Find the derivative of x^2."
     assert updated["active_since_message_id"] == "student-message-4"
+
+
+def test_found_problem_answer_without_context_block_saves_problem_from_answer() -> None:
+    state = minimal_state(
+        answer="Exercise 2.14 says to prove two rank inequalities from the setup of Exercise 2.13 on page 98.",
+        retrieved_pages=[
+            {
+                "doc_id": "acme",
+                "title": "ACME Textbook",
+                "page_start": 98,
+                "page_end": 98,
+                "printed_page_start": 98,
+                "score": 0.99,
+                "chunk_id": "chunk-214",
+                "chunk_text": "2.14. Given the setup of Exercise 2.13, prove the following inequalities.",
+            }
+        ],
+        latest_student_message_id="student-message-found",
+    )
+
+    response = pdf_rag_response_from_state(state)
+    context = state.get("active_problem_context") or {}
+
+    assert "Problem context" not in response["content"]
+    assert context["problem_text"].startswith("Exercise 2.14 says")
+    assert context["source_document_id"] == "acme"
+    assert context["source_page"] == 98
+
+
+def test_found_problem_answer_without_context_block_can_save_problem_from_retrieved_page() -> None:
+    state = minimal_state(
+        answer="That item is Problem 14 on printed page 104 of Calc 1 Homework.",
+        retrieved_pages=[
+            {
+                "doc_id": "calc",
+                "title": "Calc 1 Homework",
+                "page_start": 129,
+                "printed_page_start": 104,
+                "score": 0.99,
+                "chunk_text": "Problem 14 is integral 1/sqrt(9x^2 - 36x + 37) dx.",
+            }
+        ],
+    )
+
+    pdf_rag_response_from_state(state)
+    context = state.get("active_problem_context") or {}
+
+    assert context["problem_text"] == "Problem 14 is integral 1/sqrt(9x^2 - 36x + 37) dx."
+    assert context["source_document_id"] == "calc"
+    assert context["source_page"] == 104
 
 
 @pytest.mark.asyncio
@@ -670,6 +789,287 @@ def test_answer_leak_gate_checks_each_structured_section() -> None:
     assert gate["passed"] is False
     assert gate["leaking_sections"] == ["explanation"]
     assert "expected_answer" in gate["leaked_answer_types"]
+
+
+@pytest.mark.asyncio
+async def test_apply_leak_guard_with_model_rewrites_flagged_sections() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "passed": False,
+                        "leaking_sections": ["answer"],
+                        "failure_reasons": ["answer: expected_answer appears"],
+                        "leaked_answer_types": ["expected_answer"],
+                        "risk": "high",
+                        "rewrites": {
+                            "answer": "I can help you work toward it, but first show the step you tried."
+                        },
+                    }
+                ),
+                "tool_calls": [],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+            },
+        ]
+    )
+    state = minimal_state(
+        messages=[{"role": "user", "content": "What's the answer?"}],
+        active_problem_context={
+            "problem_id": "problem_1",
+            "problem_text": "Solve 2x + 3 = 17.",
+            "expected_answer": "x = 7",
+        },
+    )
+
+    filtered = await apply_leak_guard_with_model(
+        state=state,
+        answer="Final answer: x = 7.",
+        openrouter_client=client,
+    )
+
+    assert "x = 7" not in filtered
+    assert filtered == "I can help you work toward it, but first show the step you tried."
+    assert len(client.calls) == 1
+    assert client.calls[0]["max_tokens"] == graph_module.ANSWER_LEAK_GUARD_MAX_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_apply_leak_guard_rewrites_only_model_flagged_section() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "passed": False,
+                        "leaking_sections": ["explanation"],
+                        "failure_reasons": ["explanation: gives away result"],
+                        "leaked_answer_types": ["expected_answer"],
+                        "risk": "high",
+                        "rewrites": {
+                            "explanation": "Use the inverse-operation idea, but stop before computing the final value."
+                        },
+                    }
+                ),
+                "tool_calls": [],
+            },
+        ]
+    )
+    state = minimal_state(
+        messages=[{"role": "user", "content": "Can you explain this?"}],
+        active_problem_context={
+            "problem_id": "problem_1",
+            "problem_text": "Solve 2x + 3 = 17.",
+            "expected_answer": "x = 7",
+        },
+    )
+
+    filtered = await apply_leak_guard_with_model(
+        state=state,
+        answer=(
+            "We can work one step at a time.\n\n"
+            "Hint: subtract 3 from both sides.\n\n"
+            "Explanation: this gives away the result."
+        ),
+        openrouter_client=client,
+    )
+
+    structured = graph_module.structured_tutor_output_from_answer(filtered, state, [])
+    assert structured["sections"]["answer"] == "We can work one step at a time."
+    assert structured["sections"]["hint"] == "subtract 3 from both sides."
+    assert structured["sections"]["explanation"] == "Use the inverse-operation idea, but stop before computing the final value."
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_apply_leak_guard_runs_with_problem_text_without_expected_answer() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "passed": False,
+                        "leaking_sections": ["explanation"],
+                        "failure_reasons": ["explanation: solves stored problem"],
+                        "leaked_answer_types": ["full_solution"],
+                        "risk": "high",
+                        "rewrites": {
+                            "explanation": "Use the first inverse operation idea, then pause and tell me what you get."
+                        },
+                    }
+                ),
+                "tool_calls": [],
+            }
+        ]
+    )
+    state = minimal_state(
+        messages=[{"role": "user", "content": "Can you explain this?"}],
+        active_problem_context={
+            "problem_id": "problem_1",
+            "problem_text": "Solve 2x + 3 = 17.",
+        },
+    )
+
+    filtered = await apply_leak_guard_with_model(
+        state=state,
+        answer=(
+            "Hint: isolate x.\n\n"
+            "Explanation: subtract 3, divide by 2, and you have the solution."
+        ),
+        openrouter_client=client,
+    )
+
+    structured = graph_module.structured_tutor_output_from_answer(filtered, state, [])
+    assert client.calls
+    assert "ans" in client.calls[0]["messages"][1]["content"]
+    assert structured["sections"]["hint"] == "isolate x."
+    assert structured["sections"]["explanation"] == "Use the first inverse operation idea, then pause and tell me what you get."
+
+
+@pytest.mark.asyncio
+async def test_apply_leak_guard_uses_latest_problem_message_when_context_missing() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "passed": True,
+                        "leaking_sections": [],
+                        "failure_reasons": [],
+                        "leaked_answer_types": [],
+                        "risk": "low",
+                    }
+                ),
+                "tool_calls": [],
+            }
+        ]
+    )
+    state = minimal_state(
+        messages=[
+            {"role": "user", "content": "Solve 2x + 3 = 17 but just give me a hint."},
+            {"role": "assistant", "content": "Try isolating the variable first."},
+            {"role": "user", "content": "Can you tell me the next step?"},
+        ],
+    )
+
+    filtered = await apply_leak_guard_with_model(
+        state=state,
+        answer="Hint: use inverse operations.",
+        openrouter_client=client,
+    )
+
+    assert filtered == "Hint: use inverse operations."
+    assert len(client.calls) == 1
+    assert "Solve 2x + 3 = 17" in client.calls[0]["messages"][1]["content"]
+    assert "Try isolating the variable first" in client.calls[0]["messages"][1]["content"]
+    assert "Can you tell me the next step" in client.calls[0]["messages"][1]["content"]
+    assert state["stage_history"][-1] == "answer_leak_guard"
+
+
+@pytest.mark.asyncio
+async def test_apply_leak_guard_skip_reason_is_debug_visible_without_problem() -> None:
+    client = FakeOpenRouterClient([])
+    state = minimal_state(messages=[{"role": "user", "content": "hi"}])
+
+    filtered = await apply_leak_guard_with_model(
+        state=state,
+        answer="Hi, what course problem do you want to work on?",
+        openrouter_client=client,
+    )
+
+    assert filtered == "Hi, what course problem do you want to work on?"
+    assert client.calls == []
+    assert state["stage_history"][-1] == "answer_leak_guard_skipped_no_problem"
+
+
+@pytest.mark.asyncio
+async def test_apply_leak_guard_uses_compact_llm_call() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "passed": True,
+                        "leaking_sections": [],
+                        "failure_reasons": [],
+                        "leaked_answer_types": [],
+                        "risk": "low",
+                    }
+                ),
+                "tool_calls": [],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+            },
+        ]
+    )
+    state = minimal_state(
+        messages=[{"role": "user", "content": "What do I do next? " + ("long detail " * 100)}],
+        active_problem_context={
+            "problem_id": "problem_1",
+            "problem_text": "Solve 2x + 3 = 17. " + ("extra problem wording " * 120),
+            "expected_answer": "x = 7",
+        },
+    )
+
+    await apply_leak_guard_with_model(
+        state=state,
+        answer="Hint: subtract 3 first. " + ("more explanation " * 100),
+        openrouter_client=client,
+    )
+
+    call = client.calls[0]
+    user_prompt = call["messages"][1]["content"]
+    assert call["max_tokens"] == graph_module.ANSWER_LEAK_GUARD_MAX_TOKENS
+    assert call["temperature"] == 0
+    assert call["reasoning_effort"] == graph_module.ROUTER_REASONING_EFFORT
+    assert len(user_prompt) < 1800
+    assert "Return JSON with keys" not in user_prompt
+    assert state["stage_history"][-1] == "answer_leak_guard"
+    assert state["token_usage_by_call"][-1]["stage"] == "answer_leak_guard"
+    assert state["token_usage_by_call"][-1]["purpose"] == "answer_leak_guard"
+    assert state["token_usage_by_call"][-1]["totalTokens"] == 28
+
+
+@pytest.mark.asyncio
+async def test_apply_leak_guard_preserves_backend_problem_context_after_rewrite() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "passed": False,
+                        "leaking_sections": ["answer"],
+                        "failure_reasons": ["answer: expected_answer appears"],
+                        "leaked_answer_types": ["expected_answer"],
+                        "risk": "high",
+                        "rewrites": {
+                            "answer": "I can help you choose the first inverse operation without giving the result."
+                        },
+                    }
+                ),
+                "tool_calls": [],
+            }
+        ]
+    )
+    raw_answer = (
+        "Final answer: x = 7.\n\n"
+        "Problem context:\n"
+        "relation: different_problem\n"
+        "problem: Solve 2x + 3 = 17.\n"
+        "expected_answer: x = 7\n"
+        "source_type: pdf\n"
+        "confidence: high"
+    )
+
+    filtered = await apply_leak_guard_with_model(
+        state=minimal_state(messages=[{"role": "user", "content": "What's the answer?"}]),
+        answer=raw_answer,
+        openrouter_client=client,
+    )
+    response = pdf_rag_response_from_state(minimal_state(answer=filtered))
+
+    assert "Problem context" in filtered
+    assert "Problem context" not in response["content"]
+    assert "x = 7" not in response["content"]
 
 
 def test_expected_answer_leak_rewrites_only_leaking_section() -> None:

@@ -22,6 +22,8 @@ type CandidateFeatures = RankableChunk & {
   contentText: string;
   documentTitle: string;
   equationTokens: Set<string>;
+  headingProblemNumbers: string[];
+  headingProblemNumberSet: Set<string>;
   materialType: string;
   normalizedContentText: string;
   problemNumbers: string[];
@@ -43,6 +45,7 @@ type CorpusStats = {
 };
 
 const assignmentKinds = new Set(["assignment", "worksheet", "homework", "practice", "quiz"]);
+const explicitProblemLookupTightScoreWindow = 2;
 const stopwords = new Set([
   "about",
   "after",
@@ -96,15 +99,17 @@ export function rankMaterialChunks({
 
   const scored = scoreTopCandidates({
     candidates,
-    limit: Math.max(limit, 2),
+    limit: maxRequestedHits(limit, queryFeatures),
     queryFeatures
   });
-  const hits = scored.slice(0, limit).map(({ chunk, document, matchedProblemNumber, score }) => ({
-    chunk,
-    document,
-    matchedProblemNumber,
-    score
-  }));
+  const hits = scored
+    .slice(0, selectedHitLimit(scored, limit, queryFeatures))
+    .map(({ chunk, document, matchedProblemNumber, score }) => ({
+      chunk,
+      document,
+      matchedProblemNumber,
+      score
+    }));
 
   return {
     confidence: hits.length ? "high" : "low",
@@ -156,15 +161,19 @@ export function problemNumbersFromText(text: string) {
   const normalized = text.toLowerCase();
   const matches = new Set<string>();
   const patterns = [
-    /\b(?:problem|question|exercise|exercises|ex\.?|number|no\.?)\s*#?\s*(\d{1,3}(?:\.\d{1,3})?[a-z]?)\b/g,
+    /\b(?:problem|question|exercise|exercises|ex\.?|number|no\.?)\s*#?\s*(\d{1,3})\s+(\d{1,3}[a-z]?)\b/g,
+    /\b(?:problem|question|exercise|exercises|ex\.?|number|no\.?)\s*#?\s*(\d{1,3})\s*\.\s*(\d{1,3}[a-z]?)\b/g,
+    /\b(?:problem|question|exercise|exercises|ex\.?|number|no\.?)\s*#?\s*(\d{1,3}(?:\.\d{1,3})?[a-z]?)(?!\s+\d)\b/g,
     /(?:^|[\s([{])#\s*(\d{1,3}[a-z]?)\b/g,
     /\bq\s*(\d{1,3}[a-z]?)\b/g,
-    /(?:^|[\s([{])(\d{1,3}\.\d{1,3}[a-z]?)\s*[\).]/g
+    /(?:^|[\s([{])(\d{1,3})\s*\.\s*(\d{1,3}[a-z]?)\s*[\).]/g
   ];
 
   for (const pattern of patterns) {
     for (const match of normalized.matchAll(pattern)) {
-      if (match[1]) {
+      if (match[1] && match[2]) {
+        matches.add(`${match[1]}.${match[2]}`.toUpperCase());
+      } else if (match[1]) {
         matches.add(match[1].toUpperCase());
       }
     }
@@ -288,6 +297,7 @@ function scoreCandidate(
   queryFeatures: ReturnType<typeof getQueryFeatures>,
   corpusStats: CorpusStats
 ): ScoredChunk {
+  const explicitProblemLookup = queryFeatures.explicitProblemLookup;
   const contentVector =
     queryFeatures.embeddingVector?.length &&
     candidate.chunk.vector?.length === queryFeatures.embeddingVector.length
@@ -305,12 +315,16 @@ function scoreCandidate(
   const exactPhraseScore = scoreExactPhrases(candidate.normalizedContentText, queryFeatures.exactPhrases);
   const equationOverlapScore = scoreEquationOverlap(candidate.equationTokens, queryFeatures.equationTokens);
   const matchedProblemNumber = findMatchedProblemNumber(queryFeatures.problemNumbers, candidate.problemNumberSet);
+  const exactProblemHeadingScore = matchedProblemNumber
+    ? Number(candidate.headingProblemNumberSet.has(matchedProblemNumber.toUpperCase()))
+    : 0;
   const problemNumberScore = matchedProblemNumber ? 1 : 0;
   const pageNumberScore = scorePageNumbers(candidate.chunk, queryFeatures.pageNumbers);
   const numberedItemContextScore =
     queryFeatures.numberedItemLookupIntent && hasNumberedItemContext(candidate.searchableText, candidate.materialType)
       ? 1
       : 0;
+  const sectionMatchScore = scoreProblemSectionMatch(candidate, queryFeatures.problemSectionPrefixes);
   const sourceHintScore = scoreSourceHint(candidate, queryFeatures.sourceHints, candidate.documentTitle);
   const assignmentBoost =
     queryFeatures.looksLikeAssignmentProblem &&
@@ -325,14 +339,16 @@ function scoreCandidate(
     matchedProblemNumber,
     score:
       vectorScore * semanticWeight +
-      bm25Score * 2 +
+      (explicitProblemLookup ? 0 : bm25Score * 2) +
       titleScore * 2.25 +
-      chunkTextScore +
+      (explicitProblemLookup ? 0 : chunkTextScore) +
       exactPhraseScore * 8 +
-      equationOverlapScore * 6 +
-      problemNumberScore * 14 +
+      (explicitProblemLookup ? 0 : equationOverlapScore * 6) +
+      exactProblemHeadingScore * 18 +
+      problemNumberScore * (explicitProblemLookup ? 6 : 14) +
       pageNumberScore * 12 +
       numberedItemContextScore * 4 +
+      sectionMatchScore * (explicitProblemLookup ? 6 : 0) +
       sourceHintScore +
       assignmentBoost +
       priorityBoost
@@ -358,6 +374,7 @@ function prepareCandidateFeatures(candidate: RankableChunk): CandidateFeatures {
   const searchableTerms = tokenizeNormalized(searchableText);
   const problemNumbers =
     candidate.chunk.problemNumbers ?? problemNumbersFromText(`${candidate.chunk.label} ${candidate.chunk.content}`);
+  const headingProblemNumbers = headingProblemNumbersFromText(candidate.chunk.content);
 
   return {
     ...candidate,
@@ -365,6 +382,8 @@ function prepareCandidateFeatures(candidate: RankableChunk): CandidateFeatures {
     contentText,
     documentTitle: normalizeText(candidate.document.title),
     equationTokens: new Set(extractEquationTokens(searchableText)),
+    headingProblemNumbers,
+    headingProblemNumberSet: new Set(headingProblemNumbers.map((problemNumber) => problemNumber.toUpperCase())),
     materialType: materialTypeForKind(
       candidate.chunk.materialType ?? candidate.document.materialType ?? candidate.document.kind
     ),
@@ -386,8 +405,17 @@ function getQueryFeatures(query: string, queryVector?: number[], sourceHints: Re
     originalLength: phrase.length
   }));
   const equationTokens = extractEquationTokens(query);
-  const exactLookupIntent =
-    Boolean(problemNumbers.length || pageNumbers.length || exactPhrases.length || equationTokens.length >= 2);
+  const problemLocatorIntent = isProblemLocatorQuery(query);
+  const explicitProblemLookup =
+    problemNumbers.length > 0 &&
+    /\b(?:problem|exercise|question|questions|exercises|ex\.?)\b/i.test(query) &&
+    !/\bexample\b/i.test(query);
+  const exactLookupIntent = Boolean(
+    problemNumbers.length ||
+      pageNumbers.length ||
+      exactPhrases.length ||
+      problemLocatorIntent
+  );
   const numberedItemLookupIntent =
     Boolean(problemNumbers.length) ||
     /\b(?:exercise|exercises|ex\.?|problem|problems|question|questions|number|no\.?|practice|worksheet|assignment)\b/i.test(
@@ -398,11 +426,13 @@ function getQueryFeatures(query: string, queryVector?: number[], sourceHints: Re
     equationTokens,
     exactPhrases,
     exactLookupIntent,
+    explicitProblemLookup,
     looksLikeAssignmentProblem: /\b(homework|worksheet|assignment|problem|question|#\s*\d+|q\s*\d+|number\s+\d+)\b/i.test(
       query
     ),
     pageNumbers,
     problemNumbers,
+    problemSectionPrefixes: problemSectionPrefixes(problemNumbers),
     terms,
     embeddingVector: queryVector,
     lexicalVector: buildTextVectorFromTerms(terms),
@@ -469,6 +499,71 @@ function findMatchedProblemNumber(queryProblemNumbers: string[], chunkProblemNum
   return queryProblemNumbers.find((number) => chunkProblemNumbers.has(number.toUpperCase()));
 }
 
+function headingProblemNumbersFromText(text: string) {
+  const normalized = text.toLowerCase();
+  const matches = new Set<string>();
+  const patterns = [
+    /\b(?:problem|exercise|question|questions|exercises|ex\.?)\s*#?\s*(\d{1,3}(?:\.\d{1,3})?[a-z]?)\b/g,
+    /(?:^|[\s;:([])(\d{1,3})\s*\.\s*(\d{1,3}[a-z]?)\s*\.(?=\s)/gm
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of normalized.matchAll(pattern)) {
+      if (match[1] && match[2]) {
+        matches.add(`${match[1]}.${match[2]}`.toUpperCase());
+      } else if (match[1]) {
+        matches.add(match[1].toUpperCase());
+      }
+    }
+  }
+
+  return [...matches];
+}
+
+function problemSectionPrefixes(problemNumbers: string[]) {
+  return [...new Set(problemNumbers.map((problemNumber) => problemNumber.split(".")[0]).filter(Boolean))];
+}
+
+function scoreProblemSectionMatch(candidate: CandidateFeatures, requestedPrefixes: string[]) {
+  if (!requestedPrefixes.length || !candidate.headingProblemNumbers.length) {
+    return 0;
+  }
+
+  const samePrefixCount = candidate.headingProblemNumbers.filter((problemNumber) =>
+    requestedPrefixes.includes(problemNumber.split(".")[0])
+  ).length;
+
+  if (!samePrefixCount) {
+    return 0;
+  }
+
+  return Math.min(1, samePrefixCount / 3);
+}
+
+function maxRequestedHits(limit: number, queryFeatures: ReturnType<typeof getQueryFeatures>) {
+  return queryFeatures.explicitProblemLookup ? Math.max(limit, 5) : Math.max(limit, 2);
+}
+
+function selectedHitLimit(
+  scored: ScoredChunk[],
+  requestedLimit: number,
+  queryFeatures: ReturnType<typeof getQueryFeatures>
+) {
+  if (!queryFeatures.explicitProblemLookup) {
+    return requestedLimit;
+  }
+
+  if (scored.length <= 3 || requestedLimit <= 3) {
+    return Math.min(requestedLimit, scored.length);
+  }
+
+  const comparisonIndex = Math.min(4, scored.length - 1);
+  const topScore = scored[0]?.score ?? 0;
+  const comparisonScore = scored[comparisonIndex]?.score ?? 0;
+
+  return topScore - comparisonScore <= explicitProblemLookupTightScoreWindow ? Math.min(requestedLimit, 5) : 3;
+}
+
 function scoreExactPhrases(normalizedContent: string, exactPhrases: NormalizedExactPhrase[]) {
   if (!exactPhrases.length) {
     return 0;
@@ -481,16 +576,8 @@ function scoreExactPhrases(normalizedContent: string, exactPhrases: NormalizedEx
 }
 
 function getExactPhrases(input: string) {
-  const lines = input
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter((line) => line.length >= 20);
-
-  if (lines.length) {
-    return lines;
-  }
-
-  return input.length >= 48 ? [input.trim()] : [];
+  const matches = input.matchAll(/['"]([^'"]{20,})['"]|“([^”]{20,})”/g);
+  return [...matches].flatMap((match) => match.slice(1).filter(Boolean));
 }
 
 function scoreTerms(text: string, terms: string[]) {
@@ -589,6 +676,18 @@ function chunkCoversPage(chunk: SourceChunk, pageNumber: number) {
 function extractEquationTokens(input: string) {
   const tokens = input.match(/[a-z]?\d+(?:\.\d+)?|[a-z]\^\d+|[a-z]\d+|[=+\-*/^]|\\(?:int|sum|sqrt|frac)|∞|infinity/gi) ?? [];
   return [...new Set(tokens.map((token) => token.toLowerCase()))];
+}
+
+function isProblemLocatorQuery(query: string) {
+  const normalized = normalizeText(query);
+  const hasLocatorWord = /\b(?:find|where|locate|identify|which|what)\b/.test(normalized);
+  const hasProblemSignal =
+    /\b(?:problem|question|exercise|homework|worksheet|assignment|practice)\b/.test(normalized);
+  const hasEquationSignal =
+    extractEquationTokens(query).length >= 2 ||
+    /(?:[<>=≤≥]|\\(?:int|lim|sum|sqrt|frac)|\b(?:rank|dim|nullity|kernel|image)\s*\()/i.test(query);
+
+  return hasLocatorWord && (hasProblemSignal || hasEquationSignal);
 }
 
 function scoreEquationOverlap(contentEquationTokens: Set<string>, equationTokens: string[]) {

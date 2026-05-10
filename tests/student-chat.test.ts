@@ -411,6 +411,31 @@ test("student chat response normalization preserves structured output", () => {
   });
 });
 
+test("student chat response normalization preserves problem section", () => {
+  const response = normalizeTutorResponse({
+    content: "If you want, I can help you start.",
+    retrievalConfidence: "high",
+    sources: [],
+    structuredOutput: {
+      sections: {
+        answer: "If you want, I can help you start.",
+        problem: "Exercise 2.14: prove the two rank inequalities."
+      },
+      metadata: {
+        hintLevel: "none",
+        mode: "source_lookup",
+        sourceConfidence: "high",
+        studentActionNeeded: "none"
+      }
+    }
+  });
+
+  assert.deepEqual(response.structuredOutput?.sections, {
+    answer: "If you want, I can help you start.",
+    problem: "Exercise 2.14: prove the two rank inequalities."
+  });
+});
+
 test("student chat response normalization converts old flat structured output", () => {
   const response = normalizeTutorResponse({
     content: "Use substitution first. What expression should u equal?",

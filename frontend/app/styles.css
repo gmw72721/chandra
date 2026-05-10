@@ -9677,28 +9677,38 @@ button.student-row[aria-pressed="true"] {
 }
 
 .assistant-structured-section.hint {
-  --section-accent: #d0a62a;
-  --section-bg: rgba(255, 248, 214, 0.9);
+  --section-accent: #c69220;
+  --section-bg: rgba(255, 248, 218, 0.92);
+}
+
+.assistant-structured-section.problem {
+  --section-accent: #53708f;
+  --section-bg: rgba(237, 244, 251, 0.94);
+}
+
+.assistant-structured-section.explanation {
+  --section-accent: #6d8f86;
+  --section-bg: rgba(240, 248, 245, 0.9);
 }
 
 .assistant-structured-section.formula {
-  --section-accent: #7d8790;
-  --section-bg: rgba(246, 247, 248, 0.94);
+  --section-accent: #747f8c;
+  --section-bg: rgba(246, 248, 250, 0.94);
 }
 
 .assistant-structured-section.example {
-  --section-accent: #7aa3c8;
-  --section-bg: rgba(239, 247, 253, 0.92);
+  --section-accent: #6f9fc8;
+  --section-bg: rgba(238, 247, 253, 0.92);
 }
 
 .assistant-structured-section.check-work {
-  --section-accent: #607d8b;
-  --section-bg: rgba(244, 247, 249, 0.92);
+  --section-accent: #9a7355;
+  --section-bg: rgba(250, 244, 239, 0.92);
 }
 
 .assistant-structured-section.next-step {
-  --section-accent: #6f9f99;
-  --section-bg: rgba(238, 249, 247, 0.94);
+  --section-accent: #4f9c8f;
+  --section-bg: rgba(236, 249, 246, 0.94);
 }
 
 .assistant-structured-section.source-note {
@@ -9736,6 +9746,12 @@ button.student-row[aria-pressed="true"] {
   --section-border: rgba(201, 168, 71, 0.24);
 }
 
+.student-workspace-shell[data-appearance="dark"] .assistant-structured-section.problem {
+  --section-accent: #8db7e8;
+  --section-bg: rgba(31, 54, 86, 0.28);
+  --section-border: rgba(141, 183, 232, 0.24);
+}
+
 .student-workspace-shell[data-appearance="dark"] .assistant-structured-section.formula {
   --section-accent: #9aa4bf;
   --section-bg: rgba(17, 23, 42, 0.82);
@@ -9753,6 +9769,18 @@ button.student-row[aria-pressed="true"] {
   --section-accent: #7f8da8;
   --section-bg: rgba(18, 25, 44, 0.74);
   --section-border: rgba(127, 141, 168, 0.18);
+}
+
+.student-workspace-shell[data-appearance="dark"] .assistant-structured-section.explanation {
+  --section-accent: #8fb8a9;
+  --section-bg: rgba(24, 58, 50, 0.24);
+  --section-border: rgba(143, 184, 169, 0.2);
+}
+
+.student-workspace-shell[data-appearance="dark"] .assistant-structured-section.check-work {
+  --section-accent: #c79a78;
+  --section-bg: rgba(79, 49, 30, 0.22);
+  --section-border: rgba(199, 154, 120, 0.2);
 }
 
 .student-workspace-shell[data-appearance="dark"] .assistant-structured-section.next-step {
@@ -9787,6 +9815,12 @@ button.student-row[aria-pressed="true"] {
   --section-border: rgba(201, 168, 71, 0.24);
 }
 
+.teacher-dashboard[data-appearance="dark"] .assistant-structured-section.problem {
+  --section-accent: #8db7e8;
+  --section-bg: rgba(31, 54, 86, 0.28);
+  --section-border: rgba(141, 183, 232, 0.24);
+}
+
 .teacher-dashboard[data-appearance="dark"] .assistant-structured-section.formula {
   --section-accent: #9aa4bf;
   --section-bg: rgba(17, 23, 42, 0.82);
@@ -9804,6 +9838,18 @@ button.student-row[aria-pressed="true"] {
   --section-accent: #7f8da8;
   --section-bg: rgba(18, 25, 44, 0.74);
   --section-border: rgba(127, 141, 168, 0.18);
+}
+
+.teacher-dashboard[data-appearance="dark"] .assistant-structured-section.explanation {
+  --section-accent: #8fb8a9;
+  --section-bg: rgba(24, 58, 50, 0.24);
+  --section-border: rgba(143, 184, 169, 0.2);
+}
+
+.teacher-dashboard[data-appearance="dark"] .assistant-structured-section.check-work {
+  --section-accent: #c79a78;
+  --section-bg: rgba(79, 49, 30, 0.22);
+  --section-border: rgba(199, 154, 120, 0.2);
 }
 
 .teacher-dashboard[data-appearance="dark"] .assistant-structured-section.next-step {

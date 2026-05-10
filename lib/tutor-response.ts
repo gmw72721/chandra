@@ -53,6 +53,7 @@ export function normalizeStructuredTutorOutput(
   const explicitSectionAnswer = optionalStringValue(sectionsRecord.answer);
   const explicitLegacyAnswer = optionalStringValue(record.answer);
   const rawAnswer = normalizeWrappedReferenceNumbers(explicitSectionAnswer ?? explicitLegacyAnswer ?? fallbackAnswer);
+  const problem = stringValue(sectionsRecord.problem);
   const hint = stringValue(sectionsRecord.hint);
   const explanation = stringValue(sectionsRecord.explanation);
   const formula = stringValue(sectionsRecord.formula);
@@ -67,6 +68,7 @@ export function normalizeStructuredTutorOutput(
   return {
     sections: {
       answer,
+      ...(problem ? { problem } : {}),
       ...(hint ? { hint } : {}),
       ...(explanation ? { explanation } : {}),
       ...(formula ? { formula } : {}),
