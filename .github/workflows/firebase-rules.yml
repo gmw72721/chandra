@@ -1,0 +1,37 @@
+name: Deploy Firebase rules
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - firebase.json
+      - firestore.rules
+      - firestore.indexes.json
+      - storage.rules
+
+jobs:
+  deploy-firebase-rules:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Deploy Firestore rules, indexes, and Storage rules
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$GOOGLE_APPLICATION_CREDENTIALS_JSON" ]; then
+            echo "FIREBASE_SERVICE_ACCOUNT secret is not set."
+            exit 1
+          fi
+          printf '%s' "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > "$RUNNER_TEMP/firebase-service-account.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/firebase-service-account.json"
+          npx --yes --package firebase-tools@latest firebase deploy --non-interactive --only firestore:rules,firestore:indexes,storage --project chandra-f6e13

@@ -26,6 +26,7 @@ import {
   isVertexEmbeddingConfigured,
   type VertexEmbeddingResult
 } from "./vertex-embeddings";
+import { firebaseConfig } from "./firebase-config";
 
 export type TutorKnowledgePreview = {
   extractedCharacterCount: number;
@@ -50,6 +51,7 @@ type TutorKnowledgeOriginalSource = {
   originalSourceUrl?: string;
   sourceKind: "file" | "storage" | "url";
   sourceUrl?: string;
+  storageBucket?: string;
 };
 
 const supportedContentTypes = new Set([
@@ -222,6 +224,7 @@ export async function saveTutorKnowledge({
   const pastedText = String(formData.get("text") ?? "").trim();
   const sourceUrl = String(formData.get("sourceUrl") ?? "").trim();
   const storagePath = String(formData.get("storagePath") ?? "").trim();
+  const storageBucket = String(formData.get("storageBucket") ?? "").trim();
   const requestedMaterialId = String(formData.get("materialId") ?? "").trim();
 
   if (!title) {
@@ -260,6 +263,7 @@ export async function saveTutorKnowledge({
       ? await readUploadedStorageSource({
           classId,
           materialId: materialRef.id,
+          storageBucket,
           storagePath
         })
       : null;
@@ -442,7 +446,9 @@ export async function deleteTutorKnowledge({
     throw new TutorKnowledgeHttpError("Tutor knowledge not found.", 404);
   }
 
-  const filePath = String(materialSnapshot.data()?.filePath ?? "");
+  const material = materialSnapshot.data() ?? {};
+  const filePath = String(material.filePath ?? "");
+  const storageBucket = String(material.storageBucket ?? "").trim();
   const [chunksSnapshot, jobsSnapshot] = await Promise.all([
     materialRef.collection("chunks").get(),
     adminDb!
@@ -453,7 +459,7 @@ export async function deleteTutorKnowledge({
       .get()
   ]);
 
-  await deleteMaterialStorageFiles({ classId, filePath, materialId });
+  await deleteMaterialStorageFiles({ classId, filePath, materialId, storageBucket });
   await deleteDocumentsInBatches([
     ...chunksSnapshot.docs.map((chunkDoc) => chunkDoc.ref),
     ...jobsSnapshot.docs.map((jobDoc) => jobDoc.ref)
@@ -698,20 +704,23 @@ async function uploadTutorKnowledgeFile({
     fileUrl: `https://storage.googleapis.com/${bucketName}/${encodedPath}`,
     contentType: file.type || contentTypeFromFileName(file.name),
     fileSize: file.size,
-    sourceKind: "file"
+    sourceKind: "file",
+    storageBucket: bucketName
   };
 }
 
 async function deleteMaterialStorageFiles({
   classId,
   filePath,
-  materialId
+  materialId,
+  storageBucket
 }: {
   classId: string;
   filePath: string;
   materialId: string;
+  storageBucket?: string;
 }) {
-  const bucket = adminStorage!.bucket();
+  const bucket = resolveTutorKnowledgeStorageBucket(storageBucket);
   const materialStoragePrefix = `classes/${classId}/materials/${materialId}/`;
   const [files] = await bucket.getFiles({ prefix: materialStoragePrefix });
   const filePaths = new Set(files.map((file) => file.name));
@@ -851,12 +860,13 @@ function normalizeTopicCandidate(value: string) {
 async function readStoredMaterialFile(material: Record<string, unknown>) {
   const filePath = String(material.filePath ?? "").trim();
   const fileName = String(material.fileName ?? "source").trim() || "source";
+  const storageBucket = String(material.storageBucket ?? "").trim();
 
   if (!filePath) {
     return null;
   }
 
-  const [buffer] = await adminStorage!.bucket().file(filePath).download();
+  const [buffer] = await resolveTutorKnowledgeStorageBucket(storageBucket).file(filePath).download();
   const fileBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 
   return new File([fileBytes], fileName, {
@@ -867,10 +877,12 @@ async function readStoredMaterialFile(material: Record<string, unknown>) {
 async function readUploadedStorageSource({
   classId,
   materialId,
+  storageBucket,
   storagePath
 }: {
   classId: string;
   materialId: string;
+  storageBucket?: string;
   storagePath: string;
 }) {
   const expectedPrefix = `classes/${classId}/materials/${materialId}/original/`;
@@ -879,7 +891,8 @@ async function readUploadedStorageSource({
     throw new TutorKnowledgeHttpError("Uploaded material storage path is invalid.", 400);
   }
 
-  const storageFile = adminStorage!.bucket().file(storagePath);
+  const bucket = resolveTutorKnowledgeStorageBucket(storageBucket);
+  const storageFile = bucket.file(storagePath);
   const [exists] = await storageFile.exists();
 
   if (!exists) {
@@ -901,7 +914,7 @@ async function readUploadedStorageSource({
   validateStoredSourceMetadata({ contentType, fileName, fileSize });
   const [buffer] = await storageFile.download();
   const fileBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
-  const bucketName = adminStorage!.bucket().name;
+  const bucketName = bucket.name;
   const encodedPath = storagePath
     .split("/")
     .map((segment) => encodeURIComponent(segment))
@@ -915,9 +928,30 @@ async function readUploadedStorageSource({
       filePath: storagePath,
       fileSize,
       fileUrl: `https://storage.googleapis.com/${bucketName}/${encodedPath}`,
-      sourceKind: "storage"
+      sourceKind: "storage",
+      storageBucket: bucketName
     } satisfies TutorKnowledgeOriginalSource
   };
+}
+
+function resolveTutorKnowledgeStorageBucket(storageBucket?: string) {
+  const requestedBucket = storageBucket?.trim() ?? "";
+  const adminBucket = adminStorage!.bucket();
+  const allowedBuckets = new Set(
+    [adminBucket.name, firebaseConfig.storageBucket]
+      .map((bucketName) => bucketName?.trim())
+      .filter((bucketName): bucketName is string => Boolean(bucketName))
+  );
+
+  if (!requestedBucket) {
+    return adminBucket;
+  }
+
+  if (!allowedBuckets.has(requestedBucket)) {
+    throw new TutorKnowledgeHttpError("Uploaded material storage bucket is invalid.", 400);
+  }
+
+  return adminStorage!.bucket(requestedBucket);
 }
 
 async function readExistingChunkText(

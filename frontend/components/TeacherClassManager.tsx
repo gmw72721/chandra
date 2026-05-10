@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, memo, type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { ref, uploadBytesResumable } from "firebase/storage";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
@@ -69,6 +70,8 @@ import {
   type TeacherClass
 } from "@/lib/classes";
 import { capitalizeLabel, coerceDate, formatConversationDate } from "@/lib/display-format";
+import { firebaseConfig } from "@/lib/firebase-config";
+import { storage } from "@/lib/firebase";
 import { defaultModelOptions } from "@/lib/model-options";
 import {
   formatBytes,
@@ -2571,7 +2574,8 @@ export function TeacherClassManager({
 
     try {
       const jobId = createMaterialJobId();
-      const formData = buildTutorKnowledgeFormData(activeClassId);
+      const materialId = createMaterialId();
+      const formData = buildTutorKnowledgeFormData(activeClassId, materialId);
       formData.append("jobId", jobId);
       unsubscribeJob = subscribeToMaterialJob(
         activeClassId,
@@ -2586,9 +2590,19 @@ export function TeacherClassManager({
         }
       );
       const token = await getTeacherToken();
+      if (materialFile) {
+        const storagePath = await uploadMaterialFileToStorage({
+          classId: activeClassId,
+          file: materialFile,
+          materialId,
+          onProgress: setMaterialUploadProgress
+        });
+        formData.append("storagePath", storagePath);
+        formData.append("storageBucket", firebaseConfig.storageBucket ?? "");
+      }
       await postTutorKnowledgeForm({
         formData,
-        label: "Uploading source",
+        label: materialFile ? "Saving source" : "Uploading source",
         useBackendProgress: true,
         token,
         url: apiUrl("/api/materials"),
@@ -2651,13 +2665,14 @@ export function TeacherClassManager({
     }
   }
 
-  function buildTutorKnowledgeFormData(classId: string) {
+  function buildTutorKnowledgeFormData(classId: string, materialId: string) {
     if (!materialFile && !materialSourceUrl.trim() && !materialText.trim()) {
       throw new Error("Add a supported file, paste a URL, or paste tutor knowledge text before previewing.");
     }
 
     const formData = new FormData();
     formData.append("classId", classId);
+    formData.append("materialId", materialId);
     formData.append("title", materialTitle);
     formData.append("kind", materialKind);
     formData.append("text", materialText);
@@ -2665,7 +2680,6 @@ export function TeacherClassManager({
 
     if (materialFile) {
       validateTutorKnowledgeFile(materialFile);
-      formData.append("file", materialFile);
     }
 
     return formData;
@@ -8469,6 +8483,82 @@ function createMaterialJobId() {
   }
 
   return `job_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function createMaterialId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `mat_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function materialStoragePath({ classId, file, materialId }: { classId: string; file: File; materialId: string }) {
+  return `classes/${classId}/materials/${materialId}/original/${sanitizeStorageFileName(file.name)}`;
+}
+
+function sanitizeStorageFileName(fileName: string) {
+  return (fileName || "source")
+    .replace(/[/\\]/g, "-")
+    .replace(/[^a-zA-Z0-9._ -]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 140) || "source";
+}
+
+function uploadMaterialFileToStorage({
+  classId,
+  file,
+  materialId,
+  onProgress
+}: {
+  classId: string;
+  file: File;
+  materialId: string;
+  onProgress: (progress: MaterialUploadProgress | null) => void;
+}) {
+  if (!storage) {
+    throw new Error("Firebase Storage is not configured.");
+  }
+
+  const storagePath = materialStoragePath({ classId, file, materialId });
+  const uploadTask = uploadBytesResumable(ref(storage, storagePath), file, {
+    contentType: file.type || undefined
+  });
+
+  onProgress({
+    detail: "Uploading source to Firebase Storage.",
+    percent: 2,
+    step: "upload",
+    uploadPercent: 0
+  });
+
+  return new Promise<string>((resolve, reject) => {
+    uploadTask.on(
+      "state_changed",
+      (snapshot) => {
+        const uploadPercent = Math.round((snapshot.bytesTransferred / Math.max(snapshot.totalBytes, 1)) * 100);
+        onProgress({
+          detail: `Uploading source: ${formatBytes(snapshot.bytesTransferred)} of ${formatBytes(snapshot.totalBytes)} uploaded.`,
+          percent: Math.min(12, 2 + Math.round(uploadPercent * 0.1)),
+          step: "upload",
+          uploadPercent
+        });
+      },
+      (caughtError) => {
+        reject(caughtError);
+      },
+      () => {
+        onProgress({
+          detail: "Upload complete. Chandra is preparing this source.",
+          percent: 12,
+          step: "upload",
+          uploadPercent: 100
+        });
+        resolve(storagePath);
+      }
+    );
+  });
 }
 
 async function copyTextToClipboard(text: string) {

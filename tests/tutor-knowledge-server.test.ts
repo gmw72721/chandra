@@ -103,18 +103,28 @@ test("new material uploads inherit class source defaults", () => {
   assert.match(classCreateRoute, /sourceDefaults: defaultSourceDefaultsSettings/);
 });
 
-test("tutor knowledge uploads original files through the server Storage bucket", () => {
+test("tutor knowledge uploads original files directly to Storage before server processing", () => {
   const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
   const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const rulesSource = readFileSync(join(repoRoot, "storage.rules"), "utf8");
 
-  assert.match(componentSource, /formData\.append\("file", materialFile\)/);
-  assert.doesNotMatch(componentSource, /uploadBytesResumable/);
+  assert.match(componentSource, /uploadBytesResumable/);
+  assert.match(componentSource, /formData\.append\("storagePath", storagePath\)/);
+  assert.match(componentSource, /formData\.append\("storageBucket", firebaseConfig\.storageBucket \?\? ""\)/);
+  assert.doesNotMatch(componentSource, /formData\.append\("file", materialFile\)/);
+  assert.match(source, /formData\.get\("storagePath"\)/);
+  assert.match(source, /formData\.get\("storageBucket"\)/);
+  assert.match(source, /resolveTutorKnowledgeStorageBucket\(storageBucket\)/);
+  assert.match(source, /firebaseConfig\.storageBucket/);
+  assert.match(source, /storageBucket: bucketName/);
   assert.match(source, /uploadTutorKnowledgeFile\(\{ classId, file, materialId: materialRef\.id, updateProgress \}\)/);
   assert.match(source, /Saving the original source file to Firebase Storage/);
   assert.match(source, /adminStorage!\.bucket\(\)\.file\(filePath\)/);
   assert.match(source, /storageFile\.save\(buffer/);
   assert.match(source, /const filePath = `classes\/\$\{classId\}\/materials\/\$\{materialId\}\/original\/\$\{safeFileName\}`/);
   assert.match(source, /sourceKind: "file"/);
+  assert.match(rulesSource, /coTeachers\[request\.auth\.uid\]/);
+  assert.match(rulesSource, /role in \["owner", "co-teacher"\]/);
 });
 
 test("deleting tutor knowledge removes source files, chunks, embeddings, jobs, and material", () => {
@@ -122,7 +132,8 @@ test("deleting tutor knowledge removes source files, chunks, embeddings, jobs, a
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/materials/[materialId]/route.ts"), "utf8");
 
   assert.match(routeSource, /await deleteTutorKnowledge\(\{ classId, materialId \}\)/);
-  assert.match(source, /deleteMaterialStorageFiles\(\{ classId, filePath, materialId \}\)/);
+  assert.match(source, /deleteMaterialStorageFiles\(\{ classId, filePath, materialId, storageBucket \}\)/);
+  assert.match(source, /resolveTutorKnowledgeStorageBucket\(storageBucket\)\.file\(filePath\)\.download\(\)/);
   assert.match(source, /bucket\.getFiles\(\{ prefix: materialStoragePrefix \}\)/);
   assert.match(source, /materialRef\.collection\("chunks"\)\.get\(\)/);
   assert.match(source, /collection\("materialJobs"\)[\s\S]*where\("materialId", "==", materialId\)/);

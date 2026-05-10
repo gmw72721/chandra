@@ -11,7 +11,15 @@ service firebase.storage {
     }
 
     function isClassTeacher(classId) {
-      return isSignedIn() && classDoc(classId).data.teacherId == request.auth.uid;
+      return isSignedIn()
+        && (
+          classDoc(classId).data.teacherId == request.auth.uid
+          || (
+            classDoc(classId).data.coTeachers is map
+            && classDoc(classId).data.coTeachers[request.auth.uid] is map
+            && classDoc(classId).data.coTeachers[request.auth.uid].role in ["owner", "co-teacher"]
+          )
+        );
     }
 
     match /classes/{classId}/materials/{materialId}/original/{fileName=**} {
