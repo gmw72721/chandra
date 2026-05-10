@@ -481,20 +481,22 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
     messages: providerMessages,
     useClassMaterialsFirst: teacherClass?.sourceUsage?.useClassMaterialsFirst !== false
   });
-  const aiUsageReservation = await reserveAiTokenUsage({
-    classId: courseId,
-    estimatedInputTokens: Math.max(1, estimatedTokens - maxTokens),
-    estimatedOutputTokens: maxTokens,
-    estimatedTokens,
-    ipAddress: getClientIpAddress(request),
-    modelId: model,
-    provider: "langgraph",
-    requestLimits: classModelSettings?.requestLimits,
-    role: scope.role,
-    studentId: scope.role === "student" ? scope.uid : undefined,
-    tokenLimits: classModelSettings?.tokenLimits,
-    userId: scope.uid
-  });
+  const aiUsageReservation = scope.role === "teacher"
+    ? null
+    : await reserveAiTokenUsage({
+        classId: courseId,
+        estimatedInputTokens: Math.max(1, estimatedTokens - maxTokens),
+        estimatedOutputTokens: maxTokens,
+        estimatedTokens,
+        ipAddress: getClientIpAddress(request),
+        modelId: model,
+        provider: "langgraph",
+        requestLimits: classModelSettings?.requestLimits,
+        role: scope.role,
+        studentId: scope.uid,
+        tokenLimits: classModelSettings?.tokenLimits,
+        userId: scope.uid
+      });
 
   return {
     aiUsageReservation,

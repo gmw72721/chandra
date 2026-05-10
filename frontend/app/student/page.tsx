@@ -297,7 +297,7 @@ function StudentWorkspace() {
     activeCourseId &&
       !isSending &&
       !studentChatPaused &&
-      !aiUsageStatus?.blocked &&
+      (isTeacherPreview || !aiUsageStatus?.blocked) &&
       !isUploadingAttachment &&
       (draft.trim() || readyComposerAttachments.length)
   );
@@ -1240,7 +1240,7 @@ function StudentWorkspace() {
                 </h1>
               </div>
               <div className="student-main-header-actions">
-                {aiUsageStatus ? (
+                {aiUsageStatus && !isTeacherPreview ? (
                   <StudentAiUsagePanel
                     isRequestingMoreUsage={isRequestingUsageIncrease}
                     requestMessage={usageIncreaseRequestMessage}
@@ -1323,7 +1323,7 @@ function StudentWorkspace() {
                 placeholder={
                   studentChatPaused
                     ? "Your teacher has paused chat for this class."
-                    : aiUsageStatus?.blocked
+                    : !isTeacherPreview && aiUsageStatus?.blocked
                     ? "Ask your professor for more Chandra usage."
                     : activeCourseId
                       ? "Ask about a problem, step, or equation..."
