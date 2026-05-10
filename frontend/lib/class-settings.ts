@@ -36,6 +36,59 @@ export type SourceUsageSettings = {
   quoteSourcePassages: boolean;
 };
 
+export const classAccessRoleOptions = ["owner", "co-teacher", "viewer"] as const;
+export type ClassAccessRole = (typeof classAccessRoleOptions)[number];
+
+export type ClassCoTeacher = {
+  displayName: string;
+  email: string;
+  role: Exclude<ClassAccessRole, "owner">;
+  uid: string;
+};
+
+export const conversationRetentionOptions = ["forever", "30-days", "90-days", "1-year"] as const;
+export type ConversationRetentionPolicy = (typeof conversationRetentionOptions)[number];
+
+export type ClassPrivacySettings = {
+  conversationRetention: ConversationRetentionPolicy;
+};
+
+export const materialSourceTypePreferenceOptions = [
+  "inherit",
+  "student-visible",
+  "teacher-review",
+  "hidden"
+] as const;
+export type MaterialSourceTypePreference = (typeof materialSourceTypePreferenceOptions)[number];
+
+export const materialSourceTypeKeys = [
+  "Assignment",
+  "Textbook",
+  "Notes",
+  "Worked Example",
+  "Rubric",
+  "Answer Key"
+] as const;
+export type MaterialSourceTypeKey = (typeof materialSourceTypeKeys)[number];
+
+export const sourceDefaultPriorityOptions = ["primary", "normal", "low"] as const;
+export type SourceDefaultPriority = (typeof sourceDefaultPriorityOptions)[number];
+
+export type SourceDefaultsSettings = {
+  activeForStudents: boolean;
+  teacherOnly: boolean;
+  citationsRequired: boolean;
+  priority: SourceDefaultPriority;
+  answerKeysTeacherReviewOnly: boolean;
+  sourceTypePreferences: Record<MaterialSourceTypeKey, MaterialSourceTypePreference>;
+};
+
+export type NotificationSettings = {
+  weeklyDigest: boolean;
+  followUpReminders: boolean;
+  newStudentJoinedClass: boolean;
+};
+
 export const reasoningEffortOptions = ["low", "medium", "high"] as const;
 export type ReasoningEffort = (typeof reasoningEffortOptions)[number];
 
@@ -81,6 +134,34 @@ export const defaultSourceUsageSettings: SourceUsageSettings = {
   askClarificationIfSourceUnclear: true,
   preferredSourceType: "Homework and textbook",
   quoteSourcePassages: true
+};
+
+export const defaultPrivacySettings: ClassPrivacySettings = {
+  conversationRetention: "forever"
+};
+
+export const defaultSourceTypePreferences: Record<MaterialSourceTypeKey, MaterialSourceTypePreference> = {
+  Assignment: "inherit",
+  Textbook: "inherit",
+  Notes: "inherit",
+  "Worked Example": "inherit",
+  Rubric: "inherit",
+  "Answer Key": "teacher-review"
+};
+
+export const defaultSourceDefaultsSettings: SourceDefaultsSettings = {
+  activeForStudents: true,
+  teacherOnly: false,
+  citationsRequired: true,
+  priority: "primary",
+  answerKeysTeacherReviewOnly: true,
+  sourceTypePreferences: defaultSourceTypePreferences
+};
+
+export const defaultNotificationSettings: NotificationSettings = {
+  weeklyDigest: true,
+  followUpReminders: true,
+  newStudentJoinedClass: true
 };
 
 export const defaultClassModelSettings: ClassModelSettings = {
@@ -196,6 +277,138 @@ export function normalizeSourceUsageSettings(value: unknown): SourceUsageSetting
   };
 }
 
+export function normalizeClassAccessRole(value: unknown): ClassAccessRole {
+  return classAccessRoleOptions.includes(value as ClassAccessRole) ? (value as ClassAccessRole) : "viewer";
+}
+
+export function normalizeCoTeacher(value: unknown): ClassCoTeacher | null {
+  const source = isRecord(value) ? value : {};
+  const uid = typeof source.uid === "string" ? source.uid.trim() : "";
+  const email = typeof source.email === "string" ? source.email.trim().toLowerCase() : "";
+  const role = normalizeClassAccessRole(source.role);
+
+  if (!uid || role === "owner") {
+    return null;
+  }
+
+  return {
+    displayName: typeof source.displayName === "string" ? normalizeWhitespace(source.displayName) : "",
+    email,
+    role,
+    uid
+  };
+}
+
+export function normalizeClassCoTeachers(value: unknown): Record<string, ClassCoTeacher> {
+  const source = isRecord(value) ? value : {};
+
+  return Object.fromEntries(
+    Object.entries(source)
+      .map(([uid, coTeacher]) => normalizeCoTeacher({ ...(isRecord(coTeacher) ? coTeacher : {}), uid }))
+      .filter((coTeacher): coTeacher is ClassCoTeacher => Boolean(coTeacher))
+      .map((coTeacher) => [coTeacher.uid, coTeacher])
+  );
+}
+
+export function normalizePrivacySettings(value: unknown): ClassPrivacySettings {
+  const source = isRecord(value) ? value : {};
+  const conversationRetention = conversationRetentionOptions.includes(
+    source.conversationRetention as ConversationRetentionPolicy
+  )
+    ? (source.conversationRetention as ConversationRetentionPolicy)
+    : defaultPrivacySettings.conversationRetention;
+
+  return { conversationRetention };
+}
+
+export function normalizeSourceDefaultsSettings(value: unknown): SourceDefaultsSettings {
+  const source = isRecord(value) ? value : {};
+  const priority = sourceDefaultPriorityOptions.includes(source.priority as SourceDefaultPriority)
+    ? (source.priority as SourceDefaultPriority)
+    : defaultSourceDefaultsSettings.priority;
+  const sourceTypePreferences = normalizeSourceTypePreferences(source.sourceTypePreferences);
+
+  return {
+    activeForStudents: booleanWithDefault(source.activeForStudents, true),
+    teacherOnly: booleanWithDefault(source.teacherOnly, false),
+    citationsRequired: booleanWithDefault(source.citationsRequired, true),
+    priority,
+    answerKeysTeacherReviewOnly: booleanWithDefault(source.answerKeysTeacherReviewOnly, true),
+    sourceTypePreferences
+  };
+}
+
+export function sourceDefaultsForMaterialKind(settingsValue: unknown, kindValue: unknown) {
+  const settings = normalizeSourceDefaultsSettings(settingsValue);
+  const kind = normalizeMaterialSourceTypeKey(kindValue);
+  const preference = kind ? settings.sourceTypePreferences[kind] : "inherit";
+  const answerKeyTeacherOnly = settings.answerKeysTeacherReviewOnly && kind === "Answer Key";
+
+  if (answerKeyTeacherOnly || preference === "teacher-review") {
+    return {
+      activeForStudents: false,
+      teacherOnly: true,
+      citationsRequired: settings.citationsRequired,
+      priority: settings.priority
+    };
+  }
+
+  if (preference === "student-visible") {
+    return {
+      activeForStudents: true,
+      teacherOnly: false,
+      citationsRequired: settings.citationsRequired,
+      priority: settings.priority
+    };
+  }
+
+  if (preference === "hidden") {
+    return {
+      activeForStudents: false,
+      teacherOnly: false,
+      citationsRequired: settings.citationsRequired,
+      priority: settings.priority
+    };
+  }
+
+  return {
+    activeForStudents: settings.activeForStudents,
+    teacherOnly: settings.teacherOnly,
+    citationsRequired: settings.citationsRequired,
+    priority: settings.priority
+  };
+}
+
+function normalizeMaterialSourceTypeKey(value: unknown): MaterialSourceTypeKey | null {
+  if (materialSourceTypeKeys.includes(value as MaterialSourceTypeKey)) {
+    return value as MaterialSourceTypeKey;
+  }
+
+  if (value === "Reading") {
+    return "Textbook";
+  }
+
+  if (value === "Example") {
+    return "Worked Example";
+  }
+
+  if (value === "Practice Solutions") {
+    return "Answer Key";
+  }
+
+  return null;
+}
+
+export function normalizeNotificationSettings(value: unknown): NotificationSettings {
+  const source = isRecord(value) ? value : {};
+
+  return {
+    weeklyDigest: booleanWithDefault(source.weeklyDigest, true),
+    followUpReminders: booleanWithDefault(source.followUpReminders, true),
+    newStudentJoinedClass: booleanWithDefault(source.newStudentJoinedClass, true)
+  };
+}
+
 export function normalizeClassModelSettings(value: unknown): ClassModelSettings {
   const source = isRecord(value) ? value : {};
   const reasoningEffort = reasoningEffortOptions.includes(source.reasoningEffort as ReasoningEffort)
@@ -282,6 +495,20 @@ function clampCreativity(value: unknown) {
 
 function booleanWithDefault(value: unknown, defaultValue: boolean) {
   return typeof value === "boolean" ? value : defaultValue;
+}
+
+function normalizeSourceTypePreferences(value: unknown): Record<MaterialSourceTypeKey, MaterialSourceTypePreference> {
+  const source = isRecord(value) ? value : {};
+
+  return Object.fromEntries(
+    materialSourceTypeKeys.map((kind) => {
+      const preference = materialSourceTypePreferenceOptions.includes(source[kind] as MaterialSourceTypePreference)
+        ? (source[kind] as MaterialSourceTypePreference)
+        : defaultSourceTypePreferences[kind];
+
+      return [kind, preference];
+    })
+  ) as Record<MaterialSourceTypeKey, MaterialSourceTypePreference>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

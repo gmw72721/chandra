@@ -370,8 +370,27 @@ def authorize_class_teacher(
     if not class_snapshot.exists:
         raise HTTPException(status_code=404, detail="Class not found.")
 
-    if (class_snapshot.to_dict() or {}).get("teacherId") != decoded["uid"]:
+    class_data = class_snapshot.to_dict() or {}
+
+    if not is_class_teacher(class_data, decoded["uid"]):
         raise HTTPException(status_code=403, detail="Only the class teacher can use this class.")
+
+
+def is_class_teacher(class_data: dict[str, Any], uid: str) -> bool:
+    if class_data.get("teacherId") == uid:
+        return True
+
+    co_teachers = class_data.get("coTeachers")
+
+    if not isinstance(co_teachers, dict):
+        return False
+
+    co_teacher = co_teachers.get(uid)
+
+    if not isinstance(co_teacher, dict):
+        return False
+
+    return co_teacher.get("role") in {"owner", "co-teacher"}
 
 
 def assert_class_exists(class_id: str) -> None:

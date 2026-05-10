@@ -156,6 +156,16 @@ test("material extraction and ingestion reject oversized uploads and text", () =
 test("Firestore class settings rules accept the current teacher settings schema", () => {
   const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
 
+  assert.match(rules, /"privacySettings"/);
+  assert.match(rules, /validPrivacySettings\(request\.resource\.data\.privacySettings\)/);
+  assert.match(rules, /conversationRetention.*\["forever", "30-days", "90-days", "1-year"\]/s);
+  assert.match(rules, /"sourceDefaults"/);
+  assert.match(rules, /validSourceDefaults\(request\.resource\.data\.sourceDefaults\)/);
+  assert.match(rules, /sourceDefaults\.priority in \["primary", "normal", "low"\]/);
+  assert.match(rules, /"notificationSettings"/);
+  assert.match(rules, /validNotificationSettings\(request\.resource\.data\.notificationSettings\)/);
+  assert.match(rules, /"coTeacherIds"/);
+  assert.match(rules, /"coTeachers"/);
   assert.match(rules, /"quoteSourcePassages"/);
   assert.match(rules, /sourceUsage\.quoteSourcePassages is bool/);
   assert.match(rules, /modelSettings\.responseLength in \["short", "medium", "long", "extended"\]/);
@@ -163,6 +173,35 @@ test("Firestore class settings rules accept the current teacher settings schema"
   assert.match(rules, /request\.resource\.data\.openingMessage is string/);
   assert.match(rules, /"studentFacingInstructions"/);
   assert.match(rules, /request\.resource\.data\.studentFacingInstructions is string/);
+});
+
+test("Firestore class list rules match the owned and co-teacher live queries", () => {
+  const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
+  const classesSource = readFileSync(join(repoRoot, "frontend/lib/classes.ts"), "utf8");
+
+  assert.match(classesSource, /where\("teacherId", "==", teacherId\)/);
+  assert.match(classesSource, /where\("coTeacherIds", "array-contains", teacherId\)/);
+  assert.match(rules, /allow list: if isSignedIn\(\)\s*&& resource\.data\.teacherId == request\.auth\.uid/);
+  assert.match(rules, /request\.auth\.uid in resource\.data\.coTeacherIds/);
+});
+
+test("class access and student data actions stay on server routes", () => {
+  const coTeachersRoute = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/co-teachers/route.ts"), "utf8");
+  const inviteCodeRoute = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/invite-code/route.ts"), "utf8");
+  const studentDataRoute = readFileSync(
+    join(repoRoot, "frontend/app/api/classes/[classId]/students/[studentId]/data/route.ts"),
+    "utf8"
+  );
+
+  assert.match(coTeachersRoute, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(coTeachersRoute, /You cannot demote yourself/);
+  assert.match(coTeachersRoute, /FieldValue\.arrayUnion/);
+  assert.match(inviteCodeRoute, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(inviteCodeRoute, /createUniqueClassCode/);
+  assert.match(studentDataRoute, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(studentDataRoute, /Content-Disposition/);
+  assert.match(studentDataRoute, /DELETE_STUDENT_CLASS_DATA/);
+  assert.match(studentDataRoute, /collection\("messages"\)/);
 });
 
 test("Firestore user theme preference updates only validate theme fields", () => {
@@ -180,6 +219,9 @@ test("Firestore profile class membership fields are server-owned", () => {
 
   assert.match(rules, /request\.resource\.data\.role == "student"\s*&& !request\.resource\.data\.keys\(\)\.hasAny\(\["classId", "classIds"\]\)/);
   assert.match(rules, /request\.resource\.data\.diff\(resource\.data\)\.affectedKeys\(\)\.hasOnly\(\[\s*"displayName",\s*"appearance",\s*"themeColor"\s*\]\)/);
+  assert.match(rules, /"username"/);
+  assert.match(rules, /function validProfileUsernameBackfill\(userId\)/);
+  assert.match(rules, /request\.resource\.data\.username == resource\.data\.email/);
   assert.match(rules, /function isStudentInClass\(classId\)/);
 });
 
@@ -215,13 +257,31 @@ test("account settings route updates profile fields server-side for students and
   assert.match(source, /adminAuth!\.verifyIdToken\(token\)/);
   assert.match(source, /const shouldUpdateDisplayName = bodyHasKey\(body, "displayName"\)/);
   assert.match(source, /normalizeDisplayName\(body\.displayName\)/);
+  assert.match(source, /const shouldUpdateUsername = bodyHasKey\(body, "username"\)/);
+  assert.match(source, /normalizeUsername\(body\.username, email\)/);
+  assert.match(source, /assertUsernameIsAvailable\(username, decodedToken\.uid\)/);
   assert.match(source, /normalizeTeacherClassAppearance/);
   assert.match(source, /normalizeTeacherClassThemeColor/);
   assert.match(source, /profileUpdates\.displayName = displayName/);
+  assert.match(source, /username/);
   assert.match(source, /shouldUpdateDisplayName && displayName !== currentDisplayName/);
   assert.match(source, /adminAuth!\.updateUser\(decodedToken\.uid, \{ displayName \}\)/);
   assert.match(source, /where\("teacherId", "==", uid\)/);
   assert.match(source, /collectionGroup\("students"\)/);
+});
+
+test("username login resolver and auth form support username or email sign-in", () => {
+  const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
+  const authFormSource = readFileSync(join(repoRoot, "frontend/components/AuthForm.tsx"), "utf8");
+  const resolveRouteSource = readFileSync(join(repoRoot, "frontend/app/api/auth/resolve-login/route.ts"), "utf8");
+
+  assert.match(authSource, /resolveLoginEmail\(emailOrUsername\)/);
+  assert.match(authSource, /\/api\/auth\/resolve-login/);
+  assert.match(authSource, /username: cleanUsername/);
+  assert.match(authFormSource, /Username or email/);
+  assert.match(authFormSource, /id="username"/);
+  assert.match(resolveRouteSource, /where\("username", "==", identifier\)/);
+  assert.match(resolveRouteSource, /where\("email", "==", identifier\)/);
 });
 
 test("browser-requested app icons are served instead of logging 404s", () => {

@@ -68,6 +68,18 @@ test("student chat posts the saved class and auth token to the tutor API", () =>
   assert.doesNotMatch(apiClientSource, /NEXT_PUBLIC_API_BASE_URL/);
 });
 
+test("teacher preview accepts co-teachers and does not load student-only history", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const tutorChatAuthSource = readFileSync(join(repoRoot, "frontend/lib/tutor-chat-auth.ts"), "utf8");
+  const fastApiSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
+
+  assert.match(tutorChatAuthSource, /allowedTeacherIds\.has\(decodedToken\.uid\)/);
+  assert.match(tutorChatAuthSource, /role === "owner" \|\| role === "co-teacher"/);
+  assert.match(studentSource, /if \(!isTeacherPreview\) \{\s*try \{\s*setConversationSummaries/s);
+  assert.match(fastApiSource, /def is_class_teacher/);
+  assert.match(fastApiSource, /co_teacher\.get\("role"\) in \{"owner", "co-teacher"\}/);
+});
+
 test("student chat persists and resumes class-scoped conversations", () => {
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");

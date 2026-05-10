@@ -590,7 +590,7 @@ function studentMessageForChatError(code: StudentChatErrorCode) {
     case "CHAT_TEACHER_PREVIEW_CLASS_REQUIRED":
       return "Choose a class before previewing student chat.";
     case "CHAT_TEACHER_PREVIEW_FORBIDDEN":
-      return "Only this class's teacher can preview this chat.";
+      return "Only this class's teachers can preview this chat.";
     case "CHAT_ROLE_UNSUPPORTED":
       return "Use a student account to chat with Chandra.";
     case "CHAT_MODEL_NOT_CONFIGURED":
@@ -645,7 +645,7 @@ function classifyTutorChatHttpError(error: TutorChatHttpError): StudentChatError
     return "CHAT_TEACHER_PREVIEW_CLASS_REQUIRED";
   }
 
-  if (message.includes("only the class teacher")) {
+  if (message.includes("only the class teacher") || message.includes("only this class's teachers")) {
     return "CHAT_TEACHER_PREVIEW_FORBIDDEN";
   }
 

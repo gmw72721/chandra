@@ -22,6 +22,7 @@ type PendingProfile = {
   email: string;
   role: AccountRole;
   teacherInviteToken?: string;
+  username?: string;
 };
 
 export function AuthForm() {
@@ -36,6 +37,7 @@ export function AuthForm() {
   const [classId, setClassId] = useState(requestedClassId);
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -64,6 +66,7 @@ export function AuthForm() {
       displayName: pendingProfile.displayName,
       role: pendingProfile.role,
       teacherInviteToken: teacherInviteToken || pendingProfile.teacherInviteToken,
+      username: pendingProfile.username || pendingProfile.email,
       user
     })
       .then((nextProfile) => {
@@ -90,7 +93,8 @@ export function AuthForm() {
           displayName: displayName.trim(),
           email: email.trim().toLowerCase(),
           role,
-          teacherInviteToken: role === "teacher" ? teacherInviteToken : ""
+          teacherInviteToken: role === "teacher" ? teacherInviteToken : "",
+          username: username.trim().toLowerCase()
         });
         await signUpWithRole({
           displayName: displayName.trim(),
@@ -98,7 +102,8 @@ export function AuthForm() {
           password,
           role,
           classId: role === "student" ? classId.trim() : "",
-          teacherInviteToken: role === "teacher" ? teacherInviteToken : ""
+          teacherInviteToken: role === "teacher" ? teacherInviteToken : "",
+          username: username.trim()
         });
         window.localStorage.removeItem(pendingProfileStorageKey);
         router.push(role === "teacher" ? "/teacher" : "/student");
@@ -155,6 +160,7 @@ export function AuthForm() {
                   displayName: displayName.trim() || user.displayName || user.email || "",
                   role,
                   teacherInviteToken: role === "teacher" ? teacherInviteToken : "",
+                  username: user.email ?? "",
                   user
                 });
                 window.localStorage.removeItem(pendingProfileStorageKey);
@@ -287,19 +293,34 @@ export function AuthForm() {
               onChange={(event) => setDisplayName(event.target.value)}
               placeholder="Ada Lovelace"
             />
+
+            <label className="field-label" htmlFor="username">
+              Username
+            </label>
+            <input
+              id="username"
+              required
+              autoCapitalize="none"
+              autoComplete="username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="ada"
+            />
           </>
         ) : null}
 
         <label className="field-label" htmlFor="email">
-          Email
+          {mode === "signin" ? "Username or email" : "Email"}
         </label>
         <input
           id="email"
           required
-          type="email"
+          autoCapitalize="none"
+          autoComplete={mode === "signin" ? "username" : "email"}
+          type={mode === "signin" ? "text" : "email"}
           value={email}
           onChange={(event) => setEmail(event.target.value)}
-          placeholder="you@example.com"
+          placeholder={mode === "signin" ? "ada or you@example.com" : "you@example.com"}
         />
 
         <label className="field-label" htmlFor="password">

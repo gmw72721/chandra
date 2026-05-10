@@ -88,6 +88,21 @@ test("material settings PATCH preserves omitted visibility fields", () => {
   assert.doesNotMatch(routeSource, /Boolean\(body\.(?:activeForStudents|requireCitations|teacherOnly)\)/);
 });
 
+test("new material uploads inherit class source defaults", () => {
+  const classSettingsSource = readFileSync(join(repoRoot, "frontend/lib/class-settings.ts"), "utf8");
+  const serverSource = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
+  const classCreateRoute = readFileSync(join(repoRoot, "frontend/app/api/classes/route.ts"), "utf8");
+
+  assert.match(classSettingsSource, /defaultSourceDefaultsSettings/);
+  assert.match(classSettingsSource, /answerKeysTeacherReviewOnly: true/);
+  assert.match(classSettingsSource, /sourceDefaultsForMaterialKind/);
+  assert.match(classSettingsSource, /Practice Solutions/);
+  assert.match(serverSource, /sourceDefaultsForMaterialKind\(classSnapshot\.data\(\)\?\.sourceDefaults, kind\)/);
+  assert.match(serverSource, /configuredSourceDefaults\.activeForStudents/);
+  assert.match(serverSource, /configuredSourceDefaults\.citationsRequired/);
+  assert.match(classCreateRoute, /sourceDefaults: defaultSourceDefaultsSettings/);
+});
+
 test("tutor knowledge supports direct Storage upload and guarded URL ingestion", () => {
   const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
   const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");

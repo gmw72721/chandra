@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import { FormEvent, memo, type CSSProperties, type ReactNode, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -18,19 +18,31 @@ import {
   defaultRefusalStyle,
   mathNotationOptions,
   normalizeAnswerPolicySettings,
+  normalizeClassCoTeachers,
   normalizeClassModelSettings,
+  normalizeNotificationSettings,
   normalizeOpeningMessage,
+  normalizePrivacySettings,
   normalizeResponseFormatSettings,
+  normalizeSourceDefaultsSettings,
   normalizeSourceUsageSettings,
   normalizeStudentFacingInstructions,
   normalizeTutorBehavior,
+  conversationRetentionOptions,
+  materialSourceTypeKeys,
+  materialSourceTypePreferenceOptions,
   preferredSourceTypeOptions,
   readingLevelOptions,
   reasoningEffortOptions,
   responseLengthOptions,
   tutorBehaviorOptions,
   type AnswerPolicySettings,
+  type ClassAccessRole,
+  type ClassCoTeacher,
+  type ClassPrivacySettings,
+  type NotificationSettings,
   type ResponseFormatSettings,
+  type SourceDefaultsSettings,
   type SourceUsageSettings
 } from "@/lib/class-settings";
 import {
@@ -67,19 +79,17 @@ import type {
   ChatMessage,
   ConversationReviewStatus,
   StudentConversationSummary,
-  StudentLearningProfileContent,
   StudentLearningProfileDocument,
-  StudentLearningTriedStrategy,
   StudentRosterActivitySummary,
   TeacherClassOverview,
-  TeacherClassInsightsDocument,
   TeacherConversationReviewSummary,
   TeacherConversationSourceAuditSummary,
-  TeacherInsightFeedbackAction,
-  TeacherInsightRange,
   TeacherOverviewStatusTone
 } from "@/lib/types";
 import { useAuth } from "./AuthProvider";
+import { TeacherAnalyticsDashboardContent } from "./TeacherAnalyticsDashboard";
+import { formatLearningProfileUpdateResult, StudentLearningProfileCard } from "./StudentLearningProfileCard";
+import { StudentProfilePage } from "./StudentProfilePage";
 
 type MaterialUploadProgress = {
   detail: string;
@@ -88,12 +98,25 @@ type MaterialUploadProgress = {
   uploadPercent: number;
 };
 
-type TeacherTab = "overview" | "roster" | "settings" | "knowledge" | "insights" | "conversations";
-type SettingsPane = "general" | "guidance" | "answerPolicy" | "model" | "response" | "sources" | "invites" | "account" | "appearance";
+type TeacherTab = "overview" | "roster" | "settings" | "knowledge" | "conversations";
+type SettingsPane =
+  | "general"
+  | "classAccess"
+  | "privacy"
+  | "sourceDefaults"
+  | "notifications"
+  | "guidance"
+  | "answerPolicy"
+  | "model"
+  | "response"
+  | "sources"
+  | "invites"
+  | "account"
+  | "appearance";
 type AiTutorSection = "sources" | "behavior" | "answerPolicy" | "response" | "model";
-type InsightSubpage = "summary" | "misconceptions" | "recommendations" | "evidence" | "timeline" | "feedback";
 type KnowledgeFilter = "All" | "Assignments" | "Textbook" | "Notes" | "Worked Examples" | "Rubrics" | "Answer Keys";
 type RosterFilter = "all" | "active" | "inactive" | "highQuestions" | "noConversations";
+type RosterDetailFocus = "activity" | "notes";
 type ConversationFilter =
   | "all"
   | "unreviewed"
@@ -209,6 +232,30 @@ const settingsPanes: Array<{
     label: "General"
   },
   {
+    description: "Invite codes and co-teachers",
+    icon: <UserGroupIcon />,
+    id: "classAccess",
+    label: "Class Access"
+  },
+  {
+    description: "Retention, export, deletion",
+    icon: <ShieldIcon />,
+    id: "privacy",
+    label: "Privacy & Data"
+  },
+  {
+    description: "New material defaults",
+    icon: <DocumentIcon />,
+    id: "sourceDefaults",
+    label: "Source Defaults"
+  },
+  {
+    description: "Saved notification preferences",
+    icon: <BellIcon />,
+    id: "notifications",
+    label: "Notifications"
+  },
+  {
     description: "Teacher invite links",
     icon: <LinkIcon />,
     id: "invites",
@@ -266,40 +313,6 @@ const defaultAiTutorHiddenInstructions = [
 
 const defaultDirectAnswerRedirect =
   "If a student asks for a direct answer, redirect them toward the next useful step and ask a checking question.";
-
-const insightFeedbackOptionRows: Array<{
-  action: TeacherInsightFeedbackAction;
-  itemId: string;
-  label: string;
-  note: string;
-}> = [
-  { action: "useful", itemId: "overall", label: "Useful", note: "This insight was useful." },
-  { action: "notUseful", itemId: "feedback-too-vague", label: "Too vague", note: "This insight was too vague." },
-  {
-    action: "notUseful",
-    itemId: "feedback-wrong-pattern",
-    label: "Wrong pattern",
-    note: "This insight identified the wrong pattern."
-  },
-  {
-    action: "notUseful",
-    itemId: "feedback-too-much-help",
-    label: "Too much help",
-    note: "The suggested tutor support gives too much help."
-  },
-  {
-    action: "notUseful",
-    itemId: "feedback-not-enough-help",
-    label: "Not enough help",
-    note: "The suggested tutor support does not give enough help."
-  },
-  {
-    action: "addNote",
-    itemId: "future-tutoring",
-    label: "Apply to future tutoring",
-    note: "Apply this feedback to future tutoring."
-  }
-];
 
 const fallbackKnowledgeSourceSettings: KnowledgeSourceSettings = {
   activeForStudents: true,
@@ -440,8 +453,16 @@ const conversationStatusLabels: Record<ConversationReviewStatus, string> = {
   reviewed: "Reviewed"
 };
 
-export function TeacherClassManager() {
+export function TeacherClassManager({
+  studentProfileRoute
+}: {
+  studentProfileRoute?: {
+    classId: string;
+    studentId: string;
+  };
+} = {}) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { profile, user } = useAuth();
   const [classes, setClasses] = useState<TeacherClass[]>([]);
   const [students, setStudents] = useState<ClassStudent[]>([]);
@@ -482,9 +503,22 @@ export function TeacherClassManager() {
   const [studentEmail, setStudentEmail] = useState("");
   const [studentName, setStudentName] = useState("");
   const [accountDisplayName, setAccountDisplayName] = useState<string | null>(null);
+  const [accountEmailDraft, setAccountEmailDraft] = useState<string | null>(null);
+  const [accountUsername, setAccountUsername] = useState<string | null>(null);
+  const [currentAccountPassword, setCurrentAccountPassword] = useState("");
+  const [newAccountPassword, setNewAccountPassword] = useState("");
+  const [confirmAccountPassword, setConfirmAccountPassword] = useState("");
   const [accountSettingsMessage, setAccountSettingsMessage] = useState("");
   const [activeTab, setActiveTab] = useState<TeacherTab>("overview");
   const [activeSettingsPane, setActiveSettingsPane] = useState<SettingsPane>("general");
+  const [coTeacherEmail, setCoTeacherEmail] = useState("");
+  const [coTeacherRole, setCoTeacherRole] = useState<Exclude<ClassAccessRole, "owner">>("co-teacher");
+  const [classAccessMessage, setClassAccessMessage] = useState("");
+  const [savingClassAccessAction, setSavingClassAccessAction] = useState("");
+  const [privacyDataMessage, setPrivacyDataMessage] = useState("");
+  const [privacyStudentSearchQuery, setPrivacyStudentSearchQuery] = useState("");
+  const [selectedPrivacyStudentId, setSelectedPrivacyStudentId] = useState("");
+  const [savingPrivacyDataAction, setSavingPrivacyDataAction] = useState("");
   const [activeAiTutorSection, setActiveAiTutorSection] = useState<AiTutorSection>("sources");
   const [isSidebarDrawerOpen, setIsSidebarDrawerOpen] = useState(false);
   const [isClassSwitcherOpen, setIsClassSwitcherOpen] = useState(false);
@@ -499,9 +533,9 @@ export function TeacherClassManager() {
   const [conversationSearchQuery, setConversationSearchQuery] = useState("");
   const [conversationStudentFilter, setConversationStudentFilter] = useState("all");
   const [conversationTopicFilter, setConversationTopicFilter] = useState("all");
-  const [evidenceConversationIds, setEvidenceConversationIds] = useState<string[]>([]);
   const [checkedStudentIds, setCheckedStudentIds] = useState<string[]>([]);
   const [isRosterDetailOpen, setIsRosterDetailOpen] = useState(true);
+  const [rosterDetailFocus, setRosterDetailFocus] = useState<RosterDetailFocus>("activity");
   const [isProfessorReviewOpen, setIsProfessorReviewOpen] = useState(false);
   const [teacherNotesByStudentId, setTeacherNotesByStudentId] = useState<Record<string, string>>({});
   const [conversationNotesById, setConversationNotesById] = useState<Record<string, string>>({});
@@ -511,15 +545,6 @@ export function TeacherClassManager() {
   const [highlightedNoteConversationId, setHighlightedNoteConversationId] = useState("");
   const [expandedSourceConversationId, setExpandedSourceConversationId] = useState("");
   const [savingLearningProfileAction, setSavingLearningProfileAction] = useState("");
-  const [teacherInsights, setTeacherInsights] = useState<TeacherClassInsightsDocument | null>(null);
-  const [teacherInsightRange] = useState<TeacherInsightRange>("today");
-  const [teacherInsightNote, setTeacherInsightNote] = useState("");
-  const [activeInsightPage, setActiveInsightPage] = useState<InsightSubpage>("summary");
-  const [selectedMisconceptionId, setSelectedMisconceptionId] = useState("");
-  const [selectedEvidenceId, setSelectedEvidenceId] = useState("");
-  const [isLoadingTeacherInsights, setIsLoadingTeacherInsights] = useState(false);
-  const [isGeneratingTeacherInsights, setIsGeneratingTeacherInsights] = useState(false);
-  const [savingInsightFeedback, setSavingInsightFeedback] = useState("");
   const [materialTitle, setMaterialTitle] = useState("");
   const [materialKind, setMaterialKind] = useState<TutorKnowledgeKind>("Assignment");
   const [materialFile, setMaterialFile] = useState<File | null>(null);
@@ -533,6 +558,11 @@ export function TeacherClassManager() {
   const [teacherInviteUrl, setTeacherInviteUrl] = useState("");
   const [teacherInviteExpiresAt, setTeacherInviteExpiresAt] = useState("");
   const [teacherInviteCopyStatus, setTeacherInviteCopyStatus] = useState<"" | "copied" | "failed">("");
+  const [classInviteCopyResult, setClassInviteCopyResult] = useState<{
+    classId: string;
+    kind: "code" | "link";
+    status: "copied" | "failed";
+  } | null>(null);
   const [loadedTeacherId, setLoadedTeacherId] = useState("");
   const [loadedDetailsClassId, setLoadedDetailsClassId] = useState("");
   const [isSavingClass, setIsSavingClass] = useState(false);
@@ -583,6 +613,56 @@ export function TeacherClassManager() {
     () => classes.find((teacherClass) => teacherClass.id === activeClassId) ?? null,
     [activeClassId, classes]
   );
+  const studentProfileEmail = studentProfileRoute?.studentId
+    ? decodeURIComponent(studentProfileRoute.studentId).trim().toLowerCase()
+    : "";
+
+  useEffect(() => {
+    const classId = searchParams.get("classId")?.trim();
+    const tab = searchParams.get("tab");
+    const student = searchParams.get("student")?.trim();
+
+    const syncQueryStateTimer = window.setTimeout(() => {
+      if (classId) {
+        setSelectedClassId(classId);
+      }
+
+      if (tab === "overview" || tab === "roster" || tab === "settings" || tab === "knowledge" || tab === "conversations") {
+        setActiveTab(tab);
+        setIsSecondarySidebarOpen(tab === "settings" || tab === "knowledge" || tab === "conversations");
+      }
+
+      if (student) {
+        const decodedStudent = decodeURIComponent(student);
+        setSelectedStudentId(decodedStudent.includes("@") ? encodeURIComponent(decodedStudent.toLowerCase()) : decodedStudent);
+        setSelectedStudentClassId(classId || activeClassId);
+        setIsRosterDetailOpen(true);
+        setRosterDetailFocus("activity");
+        setConversationStudentFilter(decodedStudent.includes("@") ? decodedStudent.toLowerCase() : decodedStudent);
+      }
+    }, 0);
+
+    return () => window.clearTimeout(syncQueryStateTimer);
+  }, [activeClassId, searchParams]);
+
+  useEffect(() => {
+    if (!studentProfileRoute) {
+      return;
+    }
+
+    const syncProfileRouteTimer = window.setTimeout(() => {
+      setSelectedClassId(studentProfileRoute.classId);
+      setActiveTab("roster");
+      setIsSecondarySidebarOpen(true);
+      if (studentProfileEmail) {
+        setSelectedStudentId(encodeURIComponent(studentProfileEmail));
+        setSelectedStudentClassId(studentProfileRoute.classId);
+        setConversationStudentFilter(studentProfileEmail);
+      }
+    }, 0);
+
+    return () => window.clearTimeout(syncProfileRouteTimer);
+  }, [studentProfileEmail, studentProfileRoute]);
   const activeSelectedStudentId = selectedStudentClassId === activeClassId ? selectedStudentId : "";
   const rosterStudents = students;
   const studentActivityByEmail = useMemo(() => buildStudentActivityByEmail(rosterActivity), [rosterActivity]);
@@ -628,7 +708,6 @@ export function TeacherClassManager() {
   const allVisibleStudentsChecked =
     filteredRosterRows.length > 0 && checkedVisibleStudentIds.length === filteredRosterRows.length;
   const someVisibleStudentsChecked = checkedVisibleStudentIds.length > 0;
-  const rosterStats = useMemo(() => buildRosterStats(rosterRows), [rosterRows]);
   const conversationReviewRows = useMemo(
     () => buildConversationReviewRows(classConversations, activeClassId),
     [activeClassId, classConversations]
@@ -649,7 +728,7 @@ export function TeacherClassManager() {
   const filteredConversationReviewRows = useMemo(
     () =>
       filterConversationReviewRows({
-        evidenceConversationIds,
+        evidenceConversationIds: [],
         filter: conversationFilter,
         query: conversationSearchQuery,
         rows: conversationReviewRows,
@@ -660,7 +739,6 @@ export function TeacherClassManager() {
       conversationFilter,
       conversationReviewRows,
       conversationSearchQuery,
-      evidenceConversationIds,
       conversationStudentFilter,
       conversationTopicFilter
     ]
@@ -769,6 +847,10 @@ export function TeacherClassManager() {
   const selectedSourceUsage = normalizeSourceUsageSettings(selectedClass?.sourceUsage);
   const selectedModelSettings = normalizeClassModelSettings(selectedClass?.modelSettings);
   const selectedResponseFormat = normalizeResponseFormatSettings(selectedClass?.responseFormat);
+  const selectedCoTeachers = normalizeClassCoTeachers(selectedClass?.coTeachers);
+  const selectedPrivacySettings = normalizePrivacySettings(selectedClass?.privacySettings);
+  const selectedSourceDefaults = normalizeSourceDefaultsSettings(selectedClass?.sourceDefaults);
+  const selectedNotificationSettings = normalizeNotificationSettings(selectedClass?.notificationSettings);
   const selectedTutorBehavior = normalizeTutorBehavior(selectedClass?.behaviorTitle);
   const selectedBehaviorInstructions =
     selectedClass?.behaviorInstructions?.trim() ? selectedClass.behaviorInstructions : defaultAiTutorHiddenInstructions;
@@ -797,219 +879,30 @@ export function TeacherClassManager() {
   const isLoadingClassDetails = Boolean(activeClassId && loadedDetailsClassId !== activeClassId);
   const hasTutorKnowledgeSource = Boolean(materialFile || materialSourceUrl.trim() || materialText.trim());
   const accountName = profile?.displayName ?? user?.displayName ?? "Teacher";
-  const accountEmail = user?.email ?? "";
+  const accountEmail = profile?.email ?? user?.email ?? "";
+  const accountUsernameValue = profile?.username ?? accountEmail;
+  const accountEmailValue = accountEmailDraft ?? accountEmail;
+  const selectedPrivacyStudent = useMemo(
+    () => students.find((student) => student.id === selectedPrivacyStudentId) ?? null,
+    [selectedPrivacyStudentId, students]
+  );
+  const privacyStudentSearchResults = useMemo(() => {
+    const query = privacyStudentSearchQuery.trim().toLowerCase();
+
+    if (!query) {
+      return [];
+    }
+
+    return students
+      .filter((student) =>
+        `${student.displayName} ${student.email}`.toLowerCase().includes(query)
+      )
+      .slice(0, 8);
+  }, [privacyStudentSearchQuery, students]);
   const totalConversationCount = useMemo(
     () => rosterRows.reduce((sum, row) => sum + row.conversationsCount, 0),
     [rosterRows]
   );
-  const insightsDateLabel = formatInsightsDateLabel(new Date());
-  const hasGeneratedTeacherInsights = Boolean(teacherInsights?.generatedAt);
-
-  const teacherInsightContent = teacherInsights?.insight;
-  const teacherInsightDailySummary = hasGeneratedTeacherInsights ? teacherInsightContent?.dailySummary ?? null : null;
-  const displayedInsightMetrics =
-    hasGeneratedTeacherInsights && Array.isArray(teacherInsightContent?.metrics) ? teacherInsightContent.metrics : [];
-  const displayedInsightEvidenceChips =
-    hasGeneratedTeacherInsights && Array.isArray(teacherInsightContent?.evidenceChips) && teacherInsightContent.evidenceChips.length
-      ? teacherInsightContent.evidenceChips
-      : [];
-  const displayedInsightTrends =
-    hasGeneratedTeacherInsights && Array.isArray(teacherInsightContent?.trends) && teacherInsightContent.trends.length
-      ? teacherInsightContent.trends
-      : null;
-  const displayedInsightTimeline =
-    hasGeneratedTeacherInsights &&
-    Array.isArray(teacherInsightContent?.misconceptionTimeline) &&
-    teacherInsightContent.misconceptionTimeline.length
-      ? teacherInsightContent.misconceptionTimeline
-      : null;
-  const displayedInsightRecommendations =
-    hasGeneratedTeacherInsights &&
-    Array.isArray(teacherInsightContent?.recommendations) &&
-    teacherInsightContent.recommendations.length
-      ? teacherInsightContent.recommendations
-      : null;
-  const displayedInsightEvidenceLinks =
-    hasGeneratedTeacherInsights && Array.isArray(teacherInsightContent?.evidenceLinks) && teacherInsightContent.evidenceLinks.length
-      ? teacherInsightContent.evidenceLinks
-      : null;
-  const insightTrendDisplayRows = useMemo(
-    () =>
-      displayedInsightTrends
-        ? displayedInsightTrends.map((row) => {
-        const conversationIds = Array.isArray(row.evidenceConversationIds) ? row.evidenceConversationIds : [];
-        const activeBuckets = countActiveInsightBuckets(row.sparkline);
-        const isSingleObservation = conversationIds.length <= 1 || activeBuckets <= 1;
-
-        return {
-          change: row.change || buildTrendMovementReason(row.direction, conversationIds.length),
-          conversationIds,
-          evidence: formatInsightEvidenceConversationLabel(conversationIds.length),
-          isSingleObservation,
-          key: row.id,
-          label: row.label,
-          movement: isSingleObservation ? "New observation" : formatTrendMovement(row.direction),
-          movementReason: isSingleObservation
-            ? "One saved conversation is enough to review, but not enough to call a trend."
-            : buildTrendMovementReason(row.direction, conversationIds.length),
-          points: row.sparkline,
-          tone: row.direction
-        };
-      })
-        : [],
-    [displayedInsightTrends]
-  );
-  const insightTimelineDisplayRows = useMemo(
-    () =>
-      displayedInsightTimeline
-        ? displayedInsightTimeline.map((row) => {
-        const conversationIds = Array.isArray(row.evidenceConversationIds) ? row.evidenceConversationIds : [];
-        const evidenceCount = conversationIds.length || row.seenInConversations;
-        const isSingleObservation = evidenceCount <= 1;
-
-        return {
-          appeared: formatInsightDateOnly(row.firstAppeared),
-          conversationIds,
-          confidence: formatInsightConfidenceLabel(row, evidenceCount),
-          confidenceClass: getInsightConfidenceClass(row, evidenceCount),
-          evidenceStrength: formatInsightEvidenceStrengthLabel(row, evidenceCount),
-          isSingleObservation,
-          label: formatInsightConcernLabel(row, evidenceCount),
-          key: row.id,
-          movement: isSingleObservation ? "New observation" : formatMisconceptionMovement(row.status),
-          movementReason: isSingleObservation
-            ? "Early signal from one saved conversation; review before treating it as a class pattern."
-            : buildMisconceptionMovementReason(row.status, evidenceCount),
-          misconception: row.misconception,
-          rootCause: getInsightMisconceptionRootCause(row),
-          seen: formatInsightEvidenceConversationLabel(evidenceCount),
-          signal: getInsightMisconceptionSignal(row, evidenceCount),
-          status: capitalizeLabel(row.status),
-          statusClass: formatInsightStatusClass(row.status),
-          teacherMove: getInsightMisconceptionTeacherMove(row)
-        };
-      })
-        : [],
-    [displayedInsightTimeline]
-  );
-  const insightRecommendationDisplayRows = useMemo(
-    () =>
-      displayedInsightRecommendations
-        ? displayedInsightRecommendations.map((row) => {
-        const conversationIds = Array.isArray(row.evidenceConversationIds) ? row.evidenceConversationIds : [];
-        const evidenceCount = conversationIds.length || row.evidenceCount;
-
-        return {
-          action: capitalizeLabel(row.action),
-          actionId: row.action,
-          confidence: formatInsightConfidenceLabel(row, evidenceCount),
-          conversationIds,
-          evidence: `${evidenceCount} ${evidenceCount === 1 ? "piece" : "pieces"} of evidence`,
-          effort: readInsightString(row, ["effort", "effortLabel"]) || buildRecommendationEffort(row.action),
-          impact: readInsightString(row, ["impact", "impactLabel"]) || buildRecommendationImpact(row.priority),
-          key: row.id,
-          priority: capitalizeLabel(row.priority),
-          suggestedActivity: readInsightString(row, [
-            "suggestedActivity",
-            "activity",
-            "nextActivity",
-            "nextStep",
-            "studentActivity"
-          ]) || buildSuggestedRecommendationActivity(row.action, row.title),
-          title: row.title,
-          why: readInsightString(row, ["why", "rationale", "reason"]) ||
-            buildRecommendationWhy(row.title, evidenceCount),
-          workflowAction: formatRecommendationWorkflowAction(row.action)
-        };
-      })
-        : [],
-    [displayedInsightRecommendations]
-  );
-  const insightEvidenceDisplayRows = useMemo(
-    () =>
-      displayedInsightEvidenceLinks
-        ? displayedInsightEvidenceLinks.map((row) => {
-        const conversationIds = Array.isArray(row.conversationIds) ? row.conversationIds : [];
-        const conversationCount = row.conversationCount || conversationIds.length;
-        const conversations = conversationIds
-          .map((conversationId) => conversationReviewRowById.get(conversationId) ?? null)
-          .filter((conversation): conversation is ConversationReviewRow => Boolean(conversation));
-
-        return {
-          assignment: readInsightString(row, ["assignment", "problem", "problemLabel"]) ||
-            conversations[0]?.title ||
-            row.topic,
-          confidence: readInsightString(row, ["confidence", "confidenceLabel"]) ||
-            buildEvidenceConfidence(conversations, conversationCount),
-          conversationIds,
-          conversations,
-          count: formatInsightEvidenceConversationLabel(conversationCount),
-          detailLabel: conversationCount <= 1 ? "Early signal" : formatInsightEvidenceConversationLabel(conversationCount),
-          initials: Array.isArray(row.studentInitials) ? row.studentInitials : [],
-          key: row.id,
-          sourceSignal: readInsightString(row, ["signal", "snippet", "evidence", "quote"]),
-          signal: readInsightString(row, ["signal", "snippet", "evidence", "quote"]) ||
-            buildEvidenceSignal(conversations[0] ?? null, row.topic),
-          sourceWhy: readInsightString(row, ["why", "rationale", "reason", "supportReason"]),
-          timestamp: formatConversationDate(row.lastSeenAt),
-          topic: row.topic,
-          why: readInsightString(row, ["why", "rationale", "reason", "supportReason"]) ||
-            buildEvidenceSupportReason(row.topic, conversations[0] ?? null, conversationCount)
-        };
-      })
-        : [],
-    [conversationReviewRowById, displayedInsightEvidenceLinks]
-  );
-  const dailySummaryEvidenceConversationId = teacherInsightDailySummary?.evidence?.find(
-    (chip) => chip.conversationId
-  )?.conversationId;
-  const teachingFocusEvidenceLabel =
-    teacherInsightDailySummary?.evidence?.find((chip) => chip.conversationId)?.label ??
-    displayedInsightEvidenceChips.find((chip) => chip.conversationId)?.label ??
-    "";
-  const teachingFocusConversationIds = dailySummaryEvidenceConversationId
-    ? [dailySummaryEvidenceConversationId]
-    : displayedInsightEvidenceChips[0]?.conversationId
-      ? [displayedInsightEvidenceChips[0].conversationId]
-      : insightEvidenceDisplayRows[0]?.conversationIds ?? [];
-  const summaryRecommendationRows = useMemo(
-    () => insightRecommendationDisplayRows.slice(0, 3),
-    [insightRecommendationDisplayRows]
-  );
-  const recentEvidenceRows = useMemo(() => insightEvidenceDisplayRows.slice(0, 2), [insightEvidenceDisplayRows]);
-  const recommendationViewRows = insightRecommendationDisplayRows;
-  const evidenceViewRows = insightEvidenceDisplayRows;
-  const teachingFocusBriefing = buildInsightSummaryBriefing({
-    evidenceChips: displayedInsightEvidenceChips,
-    evidenceRows: insightEvidenceDisplayRows,
-    hasGenerated: hasGeneratedTeacherInsights,
-    recommendations: summaryRecommendationRows,
-    summary: teacherInsightDailySummary
-  });
-  const selectedMisconceptionRow =
-    insightTimelineDisplayRows.find((row) => row.key === selectedMisconceptionId) ?? insightTimelineDisplayRows[0] ?? null;
-  const selectedEvidenceRow =
-    insightEvidenceDisplayRows.find((row) => row.key === selectedEvidenceId) ?? insightEvidenceDisplayRows[0] ?? null;
-  const insightTimelineChartRows = insightTimelineDisplayRows;
-  const insightTrendChartRows = insightTrendDisplayRows;
-  const resolvedInsightLabels = useMemo(
-    () => (teacherInsights?.resolvedItemIds?.length ? teacherInsights.resolvedItemIds.map(formatInsightItemId) : []),
-    [teacherInsights]
-  );
-  const dismissedInsightLabels = useMemo(
-    () => (teacherInsights?.dismissedItemIds?.length ? teacherInsights.dismissedItemIds.map(formatInsightItemId) : []),
-    [teacherInsights]
-  );
-  const savedFeedbackLabels = useMemo(
-    () => [
-      ...(teacherInsights?.usefulItemIds ?? []).map((itemId) => `Useful: ${formatInsightItemId(itemId)}`),
-      ...(teacherInsights?.notUsefulItemIds ?? []).map((itemId) => `Needs adjustment: ${formatInsightItemId(itemId)}`),
-      ...(teacherInsights?.teacherNotes ?? []).map((note) => `Note: ${note}`)
-    ],
-    [teacherInsights]
-  );
-  const insightMetricValue = (metricId: string) =>
-    displayedInsightMetrics.find((metric) => metric.id === metricId)?.value ?? 0;
   const overviewDateLabel = classOverview?.dateLabel ?? overviewDateFormatter.format(new Date());
   const overviewKnowledgeStats = classOverview?.knowledgeStatus ?? buildOverviewKnowledgeStats(materials);
   const overviewReviewQueueRows = classOverview?.reviewQueueRows ?? [];
@@ -1077,6 +970,16 @@ export function TeacherClassManager() {
       unsubscribeStudents();
       unsubscribeMaterials();
     };
+  }, [activeClassId]);
+
+  useEffect(() => {
+    const resetPrivacyStudentSearchTimer = window.setTimeout(() => {
+      setPrivacyStudentSearchQuery("");
+      setSelectedPrivacyStudentId("");
+      setPrivacyDataMessage("");
+    }, 0);
+
+    return () => window.clearTimeout(resetPrivacyStudentSearchTimer);
   }, [activeClassId]);
 
   useEffect(() => {
@@ -1471,61 +1374,6 @@ export function TeacherClassManager() {
   }, [activeClassId, activeSelectedConversationId, user]);
 
   useEffect(() => {
-    if (activeTab !== "insights" || !activeClassId || !user) {
-      return;
-    }
-
-    let isCancelled = false;
-    const loadingTimer = window.setTimeout(() => {
-      if (!isCancelled) {
-        setIsLoadingTeacherInsights(true);
-      }
-    }, 0);
-
-    user
-      .getIdToken()
-      .then(async (token) => {
-        const response = await fetch(
-          apiUrl(
-            `/api/classes/${encodeURIComponent(activeClassId)}/insights?range=${encodeURIComponent(
-              teacherInsightRange
-            )}`
-          ),
-          {
-            headers: {
-              Authorization: `Bearer ${token}`
-            }
-          }
-        );
-        const data = (await response.json()) as { error?: string; snapshot?: TeacherClassInsightsDocument };
-
-        if (!response.ok) {
-          throw new Error(data.error ?? "Teacher insights load failed.");
-        }
-
-        if (!isCancelled) {
-          setTeacherInsights(data.snapshot ?? null);
-        }
-      })
-      .catch((caughtError) => {
-        if (!isCancelled) {
-          setTeacherInsights(null);
-          setError(formatConversationError(caughtError, "Teacher insights load failed."));
-        }
-      })
-      .finally(() => {
-        if (!isCancelled) {
-          setIsLoadingTeacherInsights(false);
-        }
-      });
-
-    return () => {
-      isCancelled = true;
-      window.clearTimeout(loadingTimer);
-    };
-  }, [activeClassId, activeTab, teacherInsightRange, user]);
-
-  useEffect(() => {
     if (activeTab !== "conversations" || !activeClassId || activeSelectedConversationId || !filteredConversationReviewRows.length) {
       return;
     }
@@ -1616,6 +1464,27 @@ export function TeacherClassManager() {
         readingLevel: String(formData.get("responseFormat.readingLevel") ?? ""),
         mathNotation: String(formData.get("responseFormat.mathNotation") ?? "")
       });
+      const privacySettings: ClassPrivacySettings = normalizePrivacySettings({
+        conversationRetention: String(formData.get("privacySettings.conversationRetention") ?? "")
+      });
+      const sourceDefaults: SourceDefaultsSettings = normalizeSourceDefaultsSettings({
+        activeForStudents: formData.has("sourceDefaults.activeForStudents"),
+        teacherOnly: formData.has("sourceDefaults.teacherOnly"),
+        citationsRequired: formData.has("sourceDefaults.citationsRequired"),
+        priority: String(formData.get("sourceDefaults.priority") ?? ""),
+        answerKeysTeacherReviewOnly: formData.has("sourceDefaults.answerKeysTeacherReviewOnly"),
+        sourceTypePreferences: Object.fromEntries(
+          materialSourceTypeKeys.map((kind) => [
+            kind,
+            String(formData.get(`sourceDefaults.sourceTypePreferences.${kind}`) ?? "")
+          ])
+        )
+      });
+      const notificationSettings: NotificationSettings = normalizeNotificationSettings({
+        weeklyDigest: formData.has("notificationSettings.weeklyDigest"),
+        followUpReminders: formData.has("notificationSettings.followUpReminders"),
+        newStudentJoinedClass: formData.has("notificationSettings.newStudentJoinedClass")
+      });
 
       await updateTeacherClassSettings({
         answerPolicy,
@@ -1631,10 +1500,13 @@ export function TeacherClassManager() {
           responseLength: String(formData.get("modelSettings.responseLength") ?? "")
         }),
         name: String(formData.get("name") ?? ""),
+        notificationSettings,
         openingMessage: String(formData.get("openingMessage") ?? ""),
+        privacySettings,
         refusalStyle: String(formData.get("refusalStyle") ?? "").trim() || defaultRefusalStyle,
         responseFormat,
         section: String(formData.get("section") ?? ""),
+        sourceDefaults,
         sourceUsage,
         studentFacingInstructions: String(formData.get("studentFacingInstructions") ?? ""),
         themeColor: selectedClassThemeColor
@@ -1702,6 +1574,256 @@ export function TeacherClassManager() {
     }
   }
 
+  async function copyClassInvite(teacherClass: TeacherClass, kind: "code" | "link") {
+    setError("");
+    setClassInviteCopyResult(null);
+
+    try {
+      const classCode = teacherClass.joinCode?.trim() || (await ensureClassJoinCode(teacherClass.id));
+      const textToCopy = kind === "code" ? classCode : buildClassInviteUrl(classCode);
+
+      await copyTextToClipboard(textToCopy);
+      setClassInviteCopyResult({ classId: teacherClass.id, kind, status: "copied" });
+    } catch (caughtError) {
+      setClassInviteCopyResult({ classId: teacherClass.id, kind, status: "failed" });
+      setError(formatClassError(caughtError, "Class invite copy failed."));
+    }
+  }
+
+  async function resetSelectedClassInviteCode() {
+    if (!activeClassId || !user) {
+      return;
+    }
+
+    const confirmed = window.confirm("Reset the student class invite code? Existing student invite links using the old code will stop working.");
+
+    if (!confirmed) {
+      return;
+    }
+
+    setError("");
+    setClassAccessMessage("");
+    setSavingClassAccessAction("reset-code");
+
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/invite-code`), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      const data = (await response.json()) as { error?: string; joinCode?: string };
+
+      if (!response.ok || !data.joinCode) {
+        throw new Error(data.error ?? "Class invite code reset failed.");
+      }
+
+      setClassAccessMessage(`Class invite code reset to ${data.joinCode}.`);
+    } catch (caughtError) {
+      setError(formatClassError(caughtError, "Class invite code reset failed."));
+    } finally {
+      setSavingClassAccessAction("");
+    }
+  }
+
+  async function addCoTeacher() {
+    if (!activeClassId || !user || !coTeacherEmail.trim()) {
+      return;
+    }
+
+    setError("");
+    setClassAccessMessage("");
+    setSavingClassAccessAction("add-co-teacher");
+
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/co-teachers`), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          email: coTeacherEmail,
+          role: coTeacherRole
+        })
+      });
+      const data = (await response.json()) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Co-teacher update failed.");
+      }
+
+      setCoTeacherEmail("");
+      setClassAccessMessage("Co-teacher access saved.");
+    } catch (caughtError) {
+      setError(formatClassError(caughtError, "Co-teacher update failed."));
+    } finally {
+      setSavingClassAccessAction("");
+    }
+  }
+
+  async function updateCoTeacherRole(coTeacher: ClassCoTeacher, role: Exclude<ClassAccessRole, "owner">) {
+    if (!activeClassId || !user) {
+      return;
+    }
+
+    setError("");
+    setClassAccessMessage("");
+    setSavingClassAccessAction(`role:${coTeacher.uid}`);
+
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/co-teachers`), {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          role,
+          uid: coTeacher.uid
+        })
+      });
+      const data = (await response.json()) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Co-teacher update failed.");
+      }
+
+      setClassAccessMessage("Co-teacher permission saved.");
+    } catch (caughtError) {
+      setError(formatClassError(caughtError, "Co-teacher update failed."));
+    } finally {
+      setSavingClassAccessAction("");
+    }
+  }
+
+  async function removeCoTeacher(coTeacher: ClassCoTeacher) {
+    if (!activeClassId || !user) {
+      return;
+    }
+
+    const confirmed = window.confirm(`Remove ${coTeacher.displayName || coTeacher.email || "this teacher"} from this class?`);
+
+    if (!confirmed) {
+      return;
+    }
+
+    setError("");
+    setClassAccessMessage("");
+    setSavingClassAccessAction(`remove:${coTeacher.uid}`);
+
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/co-teachers`), {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ uid: coTeacher.uid })
+      });
+      const data = (await response.json()) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Co-teacher removal failed.");
+      }
+
+      setClassAccessMessage("Co-teacher removed.");
+    } catch (caughtError) {
+      setError(formatClassError(caughtError, "Co-teacher removal failed."));
+    } finally {
+      setSavingClassAccessAction("");
+    }
+  }
+
+  async function exportStudentClassData(student: ClassStudent) {
+    if (!activeClassId || !user) {
+      return;
+    }
+
+    setError("");
+    setPrivacyDataMessage("");
+    setSavingPrivacyDataAction(`export:${student.id}`);
+
+    try {
+      const token = await user.getIdToken();
+      const studentDataId = encodeURIComponent(student.email || student.id);
+      const response = await fetch(
+        apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/students/${studentDataId}/data`),
+        {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        }
+      );
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? "Student data export failed.");
+      }
+
+      const blob = await response.blob();
+      const downloadUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = downloadUrl;
+      anchor.download = `${activeClassId}-${student.email || student.id}-export.json`;
+      anchor.click();
+      URL.revokeObjectURL(downloadUrl);
+      setPrivacyDataMessage("Student data export downloaded.");
+    } catch (caughtError) {
+      setError(formatClassError(caughtError, "Student data export failed."));
+    } finally {
+      setSavingPrivacyDataAction("");
+    }
+  }
+
+  async function deleteStudentClassData(student: ClassStudent) {
+    if (!activeClassId || !user) {
+      return;
+    }
+
+    const confirmed = window.confirm(`Delete class data for ${student.displayName || student.email}? This removes the roster row, conversations, messages, learning profile, and support notes for this class.`);
+
+    if (!confirmed) {
+      return;
+    }
+
+    setError("");
+    setPrivacyDataMessage("");
+    setSavingPrivacyDataAction(`delete:${student.id}`);
+
+    try {
+      const token = await user.getIdToken();
+      const studentDataId = encodeURIComponent(student.email || student.id);
+      const response = await fetch(
+        apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/students/${studentDataId}/data`),
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ confirm: "DELETE_STUDENT_CLASS_DATA" })
+        }
+      );
+      const data = (await response.json()) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Student data deletion failed.");
+      }
+
+      setSelectedStudentId("");
+      setPrivacyDataMessage("Student class data deleted.");
+    } catch (caughtError) {
+      setError(formatClassError(caughtError, "Student data deletion failed."));
+    } finally {
+      setSavingPrivacyDataAction("");
+    }
+  }
+
   async function updatePersonalThemePreference(nextPreference: {
     appearance?: unknown;
     themeColor?: unknown;
@@ -1733,16 +1855,55 @@ export function TeacherClassManager() {
 
     setError("");
     setAccountSettingsMessage("");
+
+    const nextEmail = accountEmailValue.trim().toLowerCase();
+    const passwordChanged = Boolean(newAccountPassword);
+    const emailChanged = Boolean(nextEmail && nextEmail !== accountEmail.trim().toLowerCase());
+
+    if (!nextEmail) {
+      setError("Enter an email address.");
+      return;
+    }
+
+    if (passwordChanged && newAccountPassword.length < 6) {
+      setError("New password must be at least 6 characters.");
+      return;
+    }
+
+    if (passwordChanged && newAccountPassword !== confirmAccountPassword) {
+      setError("New password and confirmation do not match.");
+      return;
+    }
+
+    if ((emailChanged || passwordChanged) && !currentAccountPassword) {
+      setError("Enter your current password before changing email or password.");
+      return;
+    }
+
     setIsSavingAccountSettings(true);
 
     try {
+      const nextUsername =
+        !accountUsername && accountUsernameValue === accountEmail && emailChanged
+          ? nextEmail
+          : accountUsername ?? accountUsernameValue;
+
       await updateUserAccountSettings({
         appearance: selectedAppearance,
+        currentPassword: currentAccountPassword,
         displayName: accountDisplayName ?? accountName,
+        email: nextEmail,
+        newPassword: newAccountPassword,
         themeColor: selectedThemeColor,
-        uid: user.uid
+        uid: user.uid,
+        username: nextUsername
       });
       setAccountDisplayName(null);
+      setAccountEmailDraft(null);
+      setAccountUsername(null);
+      setCurrentAccountPassword("");
+      setNewAccountPassword("");
+      setConfirmAccountPassword("");
       setAccountSettingsMessage("Account settings saved.");
     } catch (caughtError) {
       setError(formatClassError(caughtError, "Account settings failed."));
@@ -1905,8 +2066,8 @@ export function TeacherClassManager() {
       }
       if (
         !conversationMatchesFilter({
-          evidenceConversationIds,
-          filter: conversationFilter,
+          evidenceConversationIds: [],
+        filter: conversationFilter,
           query: conversationSearchQuery,
           row: updatedRow,
           studentEmail: conversationStudentFilter,
@@ -2021,85 +2182,6 @@ export function TeacherClassManager() {
       setError(formatClassError(caughtError, "Learning profile update failed."));
     } finally {
       setSavingLearningProfileAction("");
-    }
-  }
-
-  async function saveInsightFeedback(action: TeacherInsightFeedbackAction, itemId = "dailySummary", note = "") {
-    if (!activeClassId || !user || savingInsightFeedback || !hasGeneratedTeacherInsights) {
-      return;
-    }
-
-    const feedbackKey = `${action}:${itemId}`;
-    setSavingInsightFeedback(feedbackKey);
-    setError("");
-
-    try {
-      const token = await getTeacherToken();
-      const response = await fetch(
-        apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/insights/feedback`),
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            action,
-            itemId,
-            note,
-            range: teacherInsightRange
-          })
-        }
-      );
-      const data = (await response.json()) as { error?: string; snapshot?: TeacherClassInsightsDocument };
-
-      if (!response.ok) {
-        throw new Error(data.error ?? "Teacher insights feedback save failed.");
-      }
-
-      setTeacherInsights(data.snapshot ?? null);
-      if (action === "addNote") {
-        setTeacherInsightNote("");
-      }
-    } catch (caughtError) {
-      setError(formatClassError(caughtError, "Teacher insights feedback save failed."));
-    } finally {
-      setSavingInsightFeedback("");
-    }
-  }
-
-  async function generateTeacherInsights(force = true) {
-    if (!activeClassId || !user || isGeneratingTeacherInsights) {
-      return;
-    }
-
-    setIsGeneratingTeacherInsights(true);
-    setError("");
-
-    try {
-      const token = await getTeacherToken();
-      const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/insights`), {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          force,
-          range: teacherInsightRange
-        })
-      });
-      const data = (await response.json()) as { error?: string; snapshot?: TeacherClassInsightsDocument };
-
-      if (!response.ok) {
-        throw new Error(data.error ?? "Teacher insights generation failed.");
-      }
-
-      setTeacherInsights(data.snapshot ?? null);
-    } catch (caughtError) {
-      setError(formatClassError(caughtError, "Teacher insights generation failed."));
-    } finally {
-      setIsGeneratingTeacherInsights(false);
     }
   }
 
@@ -2475,6 +2557,7 @@ export function TeacherClassManager() {
       setSelectedStudentId(row.student.id);
       setSelectedStudentClassId(activeClassId);
       setIsRosterDetailOpen(true);
+      setRosterDetailFocus("activity");
     }
 
     setIsProfessorReviewOpen(false);
@@ -2492,6 +2575,7 @@ export function TeacherClassManager() {
       setSelectedConversationId(recentConversation?.id ?? "");
       setSelectedConversationClassId(activeClassId);
       setIsRosterDetailOpen(true);
+      setRosterDetailFocus("activity");
     }
 
     setIsProfessorReviewOpen(false);
@@ -2515,6 +2599,7 @@ export function TeacherClassManager() {
       setSelectedConversationId(conversation.id);
       setSelectedConversationClassId(activeClassId);
       setIsRosterDetailOpen(true);
+      setRosterDetailFocus("activity");
     }
 
     setIsProfessorReviewOpen(false);
@@ -2557,46 +2642,9 @@ export function TeacherClassManager() {
       return;
     }
 
-    if (action.action === "openInsights") {
-      setActiveTab("insights");
-      return;
-    }
-
     if (action.action === "openStudentView") {
       window.location.assign(selectedClass ? `/student?classId=${selectedClass.id}&preview=teacher` : "/student");
     }
-  }
-
-  function openInsightEvidenceConversations(conversationIds: string[]) {
-    const ids = Array.from(new Set(conversationIds.filter(Boolean)));
-
-    if (!ids.length) {
-      return;
-    }
-
-    const firstConversation =
-      conversationReviewRows.find((conversation) => ids.includes(conversation.id)) ??
-      conversationReviewRows.find((conversation) => conversation.id === ids[0]);
-
-    setEvidenceConversationIds(ids);
-    setConversationFilter("all");
-    setConversationSearchQuery("");
-    setConversationStudentFilter("all");
-    setConversationTopicFilter("all");
-
-    if (firstConversation) {
-      setSelectedStudentId(firstConversation.studentId);
-      setSelectedStudentClassId(activeClassId);
-      setSelectedConversationId(firstConversation.id);
-      setSelectedConversationClassId(activeClassId);
-      setIsRosterDetailOpen(true);
-    } else {
-      setSelectedConversationId(ids[0] ?? "");
-      setSelectedConversationClassId(activeClassId);
-    }
-
-    setIsProfessorReviewOpen(false);
-    setActiveTab("conversations");
   }
 
   function selectTeacherClass(teacherClassId: string) {
@@ -2616,6 +2664,7 @@ export function TeacherClassManager() {
     setKnowledgeFilter("All");
     setCheckedStudentIds([]);
     setIsRosterDetailOpen(true);
+    setRosterDetailFocus("activity");
     setIsProfessorReviewOpen(false);
     setRosterSearchQuery("");
     setRosterFilter("all");
@@ -2632,7 +2681,6 @@ export function TeacherClassManager() {
     { icon: <HomeIcon />, id: "overview", label: "Overview" },
     { icon: <UserGroupIcon />, id: "roster", label: "Roster" },
     { icon: <BookOpenIcon />, id: "knowledge", label: "Tutor" },
-    { icon: <TrendLineIcon />, id: "insights", label: "Insights" },
     { icon: <ChatIcon />, id: "conversations", label: "Conversations" },
     {
       href: selectedClass ? `/student?classId=${selectedClass.id}&preview=teacher` : "/student",
@@ -2664,20 +2712,42 @@ export function TeacherClassManager() {
     active: activeSettingsPane === settingsPane.id,
     onClick: () => setActiveSettingsPane(settingsPane.id)
   }));
-  const insightSecondaryItems: Array<{
-    icon: ReactNode;
-    id: InsightSubpage;
-    label: string;
-  }> = [
-    { icon: <NoteIcon />, id: "summary", label: "Summary" },
-    { icon: <StrugglingTopicsIcon />, id: "misconceptions", label: "Misconceptions" },
-    { icon: <LightbulbIcon />, id: "recommendations", label: "Recommendations" },
-    { icon: <LinkIcon />, id: "evidence", label: "Evidence" },
-    { icon: <TrendLineIcon />, id: "timeline", label: "Timeline" },
-    { icon: <CheckCircleIcon />, id: "feedback", label: "Feedback" }
-  ];
+  const isStudentProfileRoute = Boolean(studentProfileRoute);
   const secondarySidebarContent =
-    activeTab === "knowledge"
+    isStudentProfileRoute && studentProfileRoute
+      ? {
+          description: selectedClass?.name ?? "Roster",
+          items: [
+            {
+              active: false,
+              icon: <ChevronLeftIcon />,
+              label: "Back to roster",
+              onClick: () => {
+                router.push(
+                  `/teacher?classId=${encodeURIComponent(studentProfileRoute.classId)}&tab=roster&student=${encodeURIComponent(studentProfileEmail)}`
+                );
+              }
+            },
+            {
+              active: true,
+              icon: <UserIcon />,
+              label: "Student Profile",
+              onClick: () => {}
+            },
+            {
+              active: false,
+              icon: <ChatIcon />,
+              label: "Conversations",
+              onClick: () => {
+                router.push(
+                  `/teacher?classId=${encodeURIComponent(studentProfileRoute.classId)}&tab=conversations&student=${encodeURIComponent(studentProfileEmail)}`
+                );
+              }
+            }
+          ],
+          title: "Roster"
+        }
+      : activeTab === "knowledge"
       ? {
           description: "Tutor controls",
           items: aiTutorSecondaryItems,
@@ -2700,16 +2770,6 @@ export function TeacherClassManager() {
           })),
           title: "Conversations"
         }
-      : activeTab === "insights"
-        ? {
-            description: "Teaching brief",
-            items: insightSecondaryItems.map((item) => ({
-              ...item,
-              active: activeInsightPage === item.id,
-              onClick: () => setActiveInsightPage(item.id)
-            })),
-            title: "Insights"
-          }
       : activeTab === "settings"
         ? {
             description: selectedClass?.name ?? "Class preferences",
@@ -2717,10 +2777,16 @@ export function TeacherClassManager() {
             title: "Settings"
           }
       : null;
-  const hasSecondarySidebar = Boolean(isSecondarySidebarOpen && secondarySidebarContent);
+  const hasSecondarySidebar = Boolean((isSecondarySidebarOpen || isStudentProfileRoute) && secondarySidebarContent);
+  const renderLegacyOverview = false;
   const nextAppearance = selectedAppearance === "dark" ? "light" : "dark";
   const handlePrimaryNavigate = (tab: TeacherTab) => {
-    const tabSupportsSecondary = tab === "knowledge" || tab === "insights" || tab === "conversations" || tab === "settings";
+    if (studentProfileRoute) {
+      router.push(`/teacher?classId=${encodeURIComponent(studentProfileRoute.classId)}&tab=${tab}`);
+      return;
+    }
+
+    const tabSupportsSecondary = tab === "knowledge" || tab === "conversations" || tab === "settings";
     const shouldToggleSecondary = tabSupportsSecondary && activeTab === tab;
 
     setActiveTab(tab);
@@ -2789,39 +2855,70 @@ export function TeacherClassManager() {
             description={secondarySidebarContent.description}
             title={secondarySidebarContent.title}
             items={secondarySidebarContent.items}
-            onClose={() => setIsSecondarySidebarOpen(false)}
+            onClose={() => {
+              if (studentProfileRoute) {
+                router.push(
+                  `/teacher?classId=${encodeURIComponent(studentProfileRoute.classId)}&tab=roster&student=${encodeURIComponent(studentProfileEmail)}`
+                );
+                return;
+              }
+              setIsSecondarySidebarOpen(false);
+            }}
           />
         ) : null}
 
         <section className="teacher-main" aria-label="Class workspace">
           <div className="teacher-main-inner">
-            {!selectedClass || activeTab === "knowledge" || error ? (
+            {!selectedClass || activeTab === "knowledge" || activeTab === "settings" || error ? (
               <div className={selectedClass ? "teacher-sticky-chrome" : undefined}>
-                {!selectedClass || activeTab === "knowledge" ? (
-                  <header className={`teacher-main-header ${activeTab === "knowledge" ? "ai-tutor-main-header" : ""}`}>
+                {!selectedClass || activeTab === "knowledge" || activeTab === "settings" ? (
+                  <header
+                    className={`teacher-main-header ${
+                      activeTab === "knowledge" || activeTab === "settings" ? "ai-tutor-main-header" : ""
+                    }`}
+                  >
                     <div>
-                      <h1>{selectedClass && activeTab === "knowledge" ? "AI Tutor" : "Create a class"}</h1>
+                      <h1>
+                        {selectedClass && activeTab === "knowledge"
+                          ? "AI Tutor"
+                          : selectedClass && activeTab === "settings"
+                            ? "Settings"
+                            : "Create a class"}
+                      </h1>
                       <p>
                         {selectedClass && activeTab === "knowledge"
                           ? "Control how Chandra teaches, answers, and uses your class materials."
+                          : selectedClass && activeTab === "settings"
+                            ? "Manage class details, invites, account, and display preferences."
                           : "Add your first class from the sidebar."}
                       </p>
-                      {selectedClass && activeTab === "knowledge" ? (
+                      {selectedClass && (activeTab === "knowledge" || activeTab === "settings") ? (
                         <span className="ai-tutor-class-context">
                           {selectedClass.name} · {formatSectionLabel(selectedClass.section)}
                         </span>
                       ) : null}
                     </div>
-                    {selectedClass && activeTab === "knowledge" ? (
+                    {selectedClass && (activeTab === "knowledge" || activeTab === "settings") ? (
                       <div className="ai-tutor-header-actions">
-                        <button
-                          className="primary-button teacher-primary-button compact"
-                          disabled={isSavingSettings}
-                          form="ai-tutor-settings-form"
-                          type="submit"
-                        >
-                          {isSavingSettings ? "Saving" : "Save changes"}
-                        </button>
+                        {activeTab === "settings" && activeSettingsPane === "account" ? (
+                          <button
+                            className="primary-button teacher-primary-button compact"
+                            disabled={isSavingAccountSettings}
+                            type="button"
+                            onClick={() => void saveAccountSettings()}
+                          >
+                            {isSavingAccountSettings ? "Saving" : "Save account"}
+                          </button>
+                        ) : (
+                          <button
+                            className="primary-button teacher-primary-button compact"
+                            disabled={isSavingSettings}
+                            form={activeTab === "knowledge" ? "ai-tutor-settings-form" : "class-settings-form"}
+                            type="submit"
+                          >
+                            {isSavingSettings ? "Saving" : "Save changes"}
+                          </button>
+                        )}
                       </div>
                     ) : null}
                   </header>
@@ -2840,7 +2937,32 @@ export function TeacherClassManager() {
                   </div>
                 ) : null}
 
+                {studentProfileRoute ? (
+                  <StudentProfilePage
+                    embedded
+                    classId={studentProfileRoute.classId}
+                    studentId={studentProfileRoute.studentId}
+                  />
+                ) : (
+                  <>
                 {activeTab === "overview" ? (
+                  <TeacherAnalyticsDashboardContent
+                    classLabel={`${selectedClass.name} - ${formatSectionLabel(selectedClass.section)}`}
+                    overview={classOverview}
+                    priorityRows={classOverview?.priorityRows ?? []}
+                    reviewRows={conversationReviewRows}
+                    studentCount={rosterRows.length || students.length}
+                    onOpenPriorityStudent={(row) => openOverviewRoster(row.studentName, row.studentId, row.studentEmail)}
+                    onReviewConversation={(row) => openOverviewConversation(row.title, row.studentName, row.id)}
+                    onReviewProfiles={() => {
+                      setActiveTab("roster");
+                      setIsRosterDetailOpen(true);
+                      setRosterDetailFocus("activity");
+                    }}
+                  />
+                ) : null}
+
+                {renderLegacyOverview && activeTab === "overview" ? (
                   <div className="overview-workspace teacher-content-block" role="tabpanel" aria-busy={isLoadingClassOverview}>
                     <div className="overview-heading-row">
                       <div className="overview-title-block">
@@ -2882,12 +3004,6 @@ export function TeacherClassManager() {
                                 ))}
                               </div>
                             ) : null}
-                            <div className="overview-trend-actions">
-                              <button className="overview-link-action" type="button" onClick={() => setActiveTab("insights")}>
-                                Open insights
-                                <ChevronRightIcon />
-                              </button>
-                            </div>
                           </div>
                           <div className="overview-chart-card" aria-label="Overview metrics">
                             <span>Today</span>
@@ -3049,566 +3165,19 @@ export function TeacherClassManager() {
                   </div>
                 ) : null}
 
-                {activeTab === "insights" ? (
-                  <div className="insights-workspace teacher-content-block" role="tabpanel" aria-busy={isLoadingTeacherInsights}>
-                    <div className="insights-heading-row">
-                      <div className="insights-title-block">
-                        <h2>Insights</h2>
-                        <span>Daily teaching briefing for {selectedClass.name}.</span>
-                      </div>
-                      <div className="insights-controls" aria-label="Insight date and range controls">
-                        <span className="insights-date-button" aria-label="Insights date">
-                          <CalendarIcon />
-                          {insightsDateLabel}
-                        </span>
-                        <button
-                          className="insights-generate-button"
-                          disabled={isGeneratingTeacherInsights}
-                          onClick={() => generateTeacherInsights(true)}
-                          type="button"
-                        >
-                          {isGeneratingTeacherInsights ? "Generating..." : hasGeneratedTeacherInsights ? "Regenerate" : "Generate"}
-                        </button>
-                      </div>
-                    </div>
-
-                    {activeInsightPage === "summary" ? (
-                      <>
-                        <div className="insight-metric-grid summary-metric-grid" aria-label="Insight metrics">
-                          <InsightMetricCard
-                            icon={<ChatIcon />}
-                            label="Conversations"
-                            tone="teal"
-                            value={String(insightMetricValue("conversationsAnalyzed"))}
-                          />
-                          <InsightMetricCard
-                            icon={<StrugglingTopicsIcon />}
-                            label="Misconceptions"
-                            tone="neutral"
-                            value={String(insightMetricValue("emergingMisconceptions"))}
-                          />
-                          <InsightMetricCard
-                            icon={<LightbulbIcon />}
-                            label="Recommendations"
-                            tone="gold"
-                            value={String(insightMetricValue("recommendations"))}
-                          />
-                        </div>
-
-                        <section className="insights-panel teaching-focus-card" aria-labelledby="teaching-focus-title">
-                          <div className="teaching-focus-copy">
-                            <span className="eyebrow">Teaching Focus</span>
-                            <h3 id="teaching-focus-title">{teachingFocusBriefing.title}</h3>
-                            <div className="selected-insight-detail">
-                              <dl aria-label="Teaching focus briefing">
-                                <div>
-                                  <dt>Signal</dt>
-                                  <dd>{teachingFocusBriefing.signal}</dd>
-                                </div>
-                                <div>
-                                  <dt>Evidence</dt>
-                                  <dd>{teachingFocusBriefing.evidence}</dd>
-                                </div>
-                                <div>
-                                  <dt>Confidence</dt>
-                                  <dd>
-                                    <span className={`priority-pill ${teachingFocusBriefing.confidenceClass}`}>
-                                      {teachingFocusBriefing.confidence}
-                                    </span>
-                                  </dd>
-                                </div>
-                                <div>
-                                  <dt>Why it matters</dt>
-                                  <dd>{teachingFocusBriefing.whyItMatters}</dd>
-                                </div>
-                                <div>
-                                  <dt>Recommended move</dt>
-                                  <dd>{teachingFocusBriefing.recommendedMove}</dd>
-                                </div>
-                                <div>
-                                  <dt>Tutor adjustment</dt>
-                                  <dd>{teachingFocusBriefing.tutorAdjustment}</dd>
-                                </div>
-                              </dl>
-                            </div>
-                            {teachingFocusEvidenceLabel ? (
-                              <button
-                                className="insight-evidence-chip"
-                                disabled={!teachingFocusConversationIds.length}
-                                onClick={() => openInsightEvidenceConversations(teachingFocusConversationIds)}
-                                type="button"
-                              >
-                                {formatInsightEvidenceText(teachingFocusEvidenceLabel)}
-                              </button>
-                            ) : null}
-                          </div>
-                          <div className="teaching-focus-actions">
-                            <button
-                              className="recommendation-action secondary"
-                              disabled={!teachingFocusConversationIds.length}
-                              onClick={() => openInsightEvidenceConversations(teachingFocusConversationIds)}
-                              type="button"
-                            >
-                              Open evidence
-                            </button>
-                            <button
-                              className="recommendation-action"
-                              disabled={Boolean(savingInsightFeedback) || !hasGeneratedTeacherInsights}
-                              onClick={() => saveInsightFeedback("markResolved", teacherInsightDailySummary?.title || "dailySummary")}
-                              type="button"
-                            >
-                              Mark resolved
-                            </button>
-                          </div>
-                        </section>
-
-                        <div className="insights-summary-grid">
-                          <section className="insights-panel recommendations-panel" aria-labelledby="top-recommendations-title">
-                            <h3 id="top-recommendations-title">Top Recommendations</h3>
-                            <div className="recommendation-list compact">
-                              {summaryRecommendationRows.map((row) => (
-                                <article className="recommendation-row compact" key={row.key}>
-                                  <span className={`priority-pill ${row.priority.toLowerCase()}`}>{row.priority}</span>
-                                  <span className="recommendation-copy">
-                                    <strong>{row.title}</strong>
-                                  </span>
-                                  <span className="recommendation-evidence-count">{row.evidence}</span>
-                                  <button
-                                    className="recommendation-action"
-                                    disabled={Boolean(savingInsightFeedback) || !hasGeneratedTeacherInsights}
-                                    onClick={() => saveInsightFeedback("useful", row.key)}
-                                    type="button"
-                                  >
-                                    {row.action}
-                                  </button>
-                                </article>
-                              ))}
-                              {!summaryRecommendationRows.length ? (
-                                <div className="insight-empty-card">No recommendations have been generated for this range.</div>
-                              ) : null}
-                            </div>
-                          </section>
-
-                          <section className="insights-panel" aria-labelledby="recent-evidence-title">
-                            <h3 id="recent-evidence-title">Recent Evidence</h3>
-                            <div className="insights-table evidence-table compact" role="table" aria-label="Recent evidence">
-                              {recentEvidenceRows.map((row) => (
-                                <div className="evidence-row compact" key={row.key} role="row">
-                                  <strong role="cell">{row.topic}</strong>
-                                  <span role="cell">{row.count}</span>
-                                  <button
-                                    className="insight-link-button"
-                                    disabled={!row.conversationIds.length}
-                                    onClick={() => openInsightEvidenceConversations(row.conversationIds)}
-                                    role="cell"
-                                    type="button"
-                                  >
-                                    View
-                                  </button>
-                                </div>
-                              ))}
-                              {!recentEvidenceRows.length ? (
-                                <div className="insight-empty-card">No evidence has been generated for this range.</div>
-                              ) : null}
-                            </div>
-                          </section>
-                        </div>
-                      </>
-                    ) : null}
-
-                    {activeInsightPage === "misconceptions" ? (
-                      <div className="insights-focus-grid misconceptions-view">
-                        <section className="insights-panel" aria-labelledby="misconception-list-title">
-                          <h3 id="misconception-list-title">Learning Signals</h3>
-                          <div className="misconception-list">
-                            {insightTimelineDisplayRows.length ? insightTimelineDisplayRows.map((row) => (
-                              <button
-                                aria-pressed={selectedMisconceptionRow?.key === row.key}
-                                key={row.key}
-                                onClick={() => setSelectedMisconceptionId(row.key)}
-                                type="button"
-                              >
-                                <strong>{row.misconception}</strong>
-                                <span>{row.label} · {row.seen}</span>
-                              </button>
-                            )) : (
-                              <div className="insight-empty-card">No learning signals have been generated for this range.</div>
-                            )}
-                          </div>
-                        </section>
-
-                        <section className="insights-panel selected-insight-detail" aria-labelledby="misconception-detail-title">
-                          <h3 id="misconception-detail-title">
-                            {selectedMisconceptionRow?.label ?? "Selected Signal"}
-                          </h3>
-                          {selectedMisconceptionRow ? (
-                            <>
-                              <strong>{selectedMisconceptionRow.misconception}</strong>
-                              <dl>
-                                <div>
-                                  <dt>Likely root cause</dt>
-                                  <dd>{selectedMisconceptionRow.rootCause}</dd>
-                                </div>
-                                <div>
-                                  <dt>Student behavior / signal</dt>
-                                  <dd>{selectedMisconceptionRow.signal}</dd>
-                                </div>
-                                <div>
-                                  <dt>Suggested teacher move</dt>
-                                  <dd>{selectedMisconceptionRow.teacherMove}</dd>
-                                </div>
-                                <div>
-                                  <dt>Status</dt>
-                                  <dd>
-                                    <span className={`insight-status-pill ${selectedMisconceptionRow.statusClass}`}>
-                                      {selectedMisconceptionRow.status}
-                                    </span>
-                                  </dd>
-                                </div>
-                                <div>
-                                  <dt>Confidence</dt>
-                                  <dd>
-                                    <span className={`priority-pill ${selectedMisconceptionRow.confidenceClass}`}>
-                                      {selectedMisconceptionRow.confidence}
-                                    </span>
-                                  </dd>
-                                </div>
-                                <div>
-                                  <dt>Evidence strength</dt>
-                                  <dd>{selectedMisconceptionRow.evidenceStrength}</dd>
-                                </div>
-                              </dl>
-                            </>
-                          ) : (
-                            <p className="insight-empty-inline">Select a signal to see the detail.</p>
-                          )}
-                        </section>
-                      </div>
-                    ) : null}
-
-                    {activeInsightPage === "recommendations" ? (
-                      <section className="insights-panel recommendations-panel" aria-labelledby="recommendation-cards-title">
-                        <h3 id="recommendation-cards-title">Recommendations</h3>
-                        <div className="recommendation-card-grid">
-                          {recommendationViewRows.map((row) => (
-                            <article className="recommendation-card recommendation-workflow-card" key={row.key}>
-                              <div className="recommendation-workflow-heading">
-                                <span className={`priority-pill ${row.priority.toLowerCase()}`}>{row.priority}</span>
-                                <strong>{row.title}</strong>
-                              </div>
-                              <div className="recommendation-meta-row" aria-label="Recommendation decision factors">
-                                <span><b>Impact</b>{row.impact}</span>
-                                <span><b>Confidence</b>{row.confidence}</span>
-                                <span><b>Effort</b>{row.effort}</span>
-                              </div>
-                              <div className="recommendation-rationale">
-                                <p><b>Why</b>{row.why}</p>
-                                <p><b>Suggested activity</b>{row.suggestedActivity}</p>
-                              </div>
-                              <span className="recommendation-evidence-count">{row.evidence}</span>
-                              <div className="recommendation-card-actions">
-                                <button
-                                  disabled={!row.conversationIds.length}
-                                  onClick={() => openInsightEvidenceConversations(row.conversationIds)}
-                                  type="button"
-                                >
-                                  Preview
-                                </button>
-                                <button
-                                  disabled={Boolean(savingInsightFeedback) || !hasGeneratedTeacherInsights}
-                                  onClick={() => saveInsightFeedback("useful", row.key)}
-                                  type="button"
-                                >
-                                  Assign
-                                </button>
-                                <button
-                                  disabled={Boolean(savingInsightFeedback) || !hasGeneratedTeacherInsights}
-                                  onClick={() => saveInsightFeedback("notUseful", row.key, `Needs teacher edit: ${row.title}`)}
-                                  type="button"
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  disabled={Boolean(savingInsightFeedback) || !hasGeneratedTeacherInsights}
-                                  onClick={() => saveInsightFeedback("dismiss", row.key)}
-                                  type="button"
-                                >
-                                  Dismiss
-                                </button>
-                              </div>
-                            </article>
-                          ))}
-                          {!recommendationViewRows.length ? (
-                            <div className="insight-empty-card">No recommendations have been generated for this range.</div>
-                          ) : null}
-                        </div>
-                      </section>
-                    ) : null}
-
-                    {activeInsightPage === "evidence" ? (
-                      <div className="insights-focus-grid evidence-view">
-                        <section className="insights-panel" aria-labelledby="evidence-table-title">
-                          <h3 id="evidence-table-title">Evidence Table</h3>
-                          <div className="insights-table evidence-table focused" role="table" aria-label="Evidence table">
-                            {evidenceViewRows.map((row) => (
-                              <div className="evidence-row focused" key={row.key} role="row">
-                                <strong role="cell">{row.topic}</strong>
-                                <span role="cell">{row.detailLabel}</span>
-                                <span className="initials-pill-list" role="cell">
-                                  {row.initials.map((initial) => (
-                                    <span className="initials-pill" key={`${row.topic}-${initial}`}>
-                                      {initial}
-                                    </span>
-                                  ))}
-                                </span>
-                                <button
-                                  className="insight-link-button"
-                                  onClick={() => setSelectedEvidenceId(row.key)}
-                                  role="cell"
-                                  type="button"
-                                >
-                                  Details
-                                </button>
-                              </div>
-                            ))}
-                            {!evidenceViewRows.length ? (
-                              <div className="insight-empty-card">No evidence has been generated for this range.</div>
-                            ) : null}
-                          </div>
-                        </section>
-
-                        <section className="insights-panel selected-insight-detail" aria-labelledby="evidence-detail-title">
-                          <h3 id="evidence-detail-title">Evidence Detail</h3>
-                          {selectedEvidenceRow ? (
-                            <>
-                              <strong>{selectedEvidenceRow.topic}</strong>
-                              <dl>
-                                <div>
-                                  <dt>Assignment/problem</dt>
-                                  <dd>{selectedEvidenceRow.assignment}</dd>
-                                </div>
-                                <div>
-                                  <dt>Evidence</dt>
-                                  <dd>{selectedEvidenceRow.count}</dd>
-                                </div>
-                                <div>
-                                  <dt>Confidence</dt>
-                                  <dd>{selectedEvidenceRow.confidence}</dd>
-                                </div>
-                                <div>
-                                  <dt>Last seen</dt>
-                                  <dd>{selectedEvidenceRow.timestamp || "Not recorded"}</dd>
-                                </div>
-                                <div>
-                                  <dt>Students</dt>
-                                  <dd>{selectedEvidenceRow.initials.join(", ") || "Student not specified"}</dd>
-                                </div>
-                              </dl>
-                              <div className="evidence-detail-list">
-                                {selectedEvidenceRow.conversations.length ? (
-                                  selectedEvidenceRow.conversations.map((conversation) => (
-                                    <article className="evidence-detail-item" key={conversation.id}>
-                                      <div>
-                                        <span>Student</span>
-                                        <strong>{conversation.studentName}</strong>
-                                      </div>
-                                      <div>
-                                        <span>Assignment/problem</span>
-                                        <strong>{conversation.title || conversation.topic}</strong>
-                                      </div>
-                                      <div>
-                                        <span>Evidence signal</span>
-                                        <p>{selectedEvidenceRow.sourceSignal || buildEvidenceSignal(conversation, selectedEvidenceRow.topic)}</p>
-                                      </div>
-                                      <div>
-                                        <span>Why this supports the insight</span>
-                                        <p>{selectedEvidenceRow.sourceWhy || buildEvidenceSupportReason(selectedEvidenceRow.topic, conversation, 1)}</p>
-                                      </div>
-                                      <div>
-                                        <span>Confidence</span>
-                                        <strong>{buildEvidenceConversationConfidence(conversation)}</strong>
-                                      </div>
-                                      <button
-                                        className="insight-link-button"
-                                        onClick={() => openInsightEvidenceConversations([conversation.id])}
-                                        type="button"
-                                      >
-                                        Open source conversation
-                                      </button>
-                                    </article>
-                                  ))
-                                ) : (
-                                  <article className="evidence-detail-item">
-                                    <div>
-                                      <span>Student</span>
-                                      <strong>{selectedEvidenceRow.initials.join(", ") || "Student not specified"}</strong>
-                                    </div>
-                                    <div>
-                                      <span>Assignment/problem</span>
-                                      <strong>{selectedEvidenceRow.assignment}</strong>
-                                    </div>
-                                    <div>
-                                      <span>Evidence signal</span>
-                                      <p>{selectedEvidenceRow.signal}</p>
-                                    </div>
-                                    <div>
-                                      <span>Why this supports the insight</span>
-                                      <p>{selectedEvidenceRow.why}</p>
-                                    </div>
-                                    <div>
-                                      <span>Confidence</span>
-                                      <strong>{selectedEvidenceRow.confidence}</strong>
-                                    </div>
-                                    <button
-                                      className="insight-link-button"
-                                      disabled={!selectedEvidenceRow.conversationIds.length}
-                                      onClick={() => openInsightEvidenceConversations(selectedEvidenceRow.conversationIds)}
-                                      type="button"
-                                    >
-                                      Open source conversation
-                                    </button>
-                                  </article>
-                                )}
-                              </div>
-                            </>
-                          ) : (
-                            <p className="insight-empty-inline">Select evidence to see the detail.</p>
-                          )}
-                        </section>
-                      </div>
-                    ) : null}
-
-                    {activeInsightPage === "timeline" ? (
-                      <div className="timeline-chart-grid" aria-label="Trend and timeline charts">
-                        {insightTrendChartRows.map((row) => (
-                          <section className="insights-panel timeline-chart-card" key={row.key}>
-                            <span className="eyebrow">{row.movement}</span>
-                            <h3>{row.label}</h3>
-                            {row.isSingleObservation ? (
-                              <div className="timeline-observation-bar" aria-hidden="true"><span /></div>
-                            ) : (
-                              <InsightSparkline points={row.points} tone={row.tone} />
-                            )}
-                            <p><strong>{row.movement}</strong> · {row.movementReason}</p>
-                            <span className="timeline-evidence-note">{row.evidence}</span>
-                          </section>
-                        ))}
-                        {insightTimelineChartRows.map((row) => (
-                          <section className="insights-panel timeline-chart-card" key={row.key}>
-                            <span className="eyebrow">{row.movement}</span>
-                            <h3>{row.misconception}</h3>
-                            {row.isSingleObservation ? (
-                              <div className="timeline-observation-bar" aria-hidden="true"><span /></div>
-                            ) : (
-                              <div className="misconception-timeline-chart" aria-hidden="true">
-                                <span />
-                                <span />
-                                <span />
-                              </div>
-                            )}
-                            <p><strong>{row.movement}</strong> · {row.movementReason}</p>
-                            <span className="timeline-evidence-note">{row.seen} · {row.status}</span>
-                          </section>
-                        ))}
-                        {!insightTrendChartRows.length && !insightTimelineChartRows.length ? (
-                          <section className="insights-panel timeline-chart-card">
-                            <span className="eyebrow">Timeline</span>
-                            <h3>No trend data yet</h3>
-                            <p>Generate insights after students have saved conversations.</p>
-                          </section>
-                        ) : null}
-                      </div>
-                    ) : null}
-
-                    {activeInsightPage === "feedback" ? (
-                      <div className="feedback-focus-grid">
-                        <section className="insights-panel feedback-list-card" aria-labelledby="saved-feedback-title">
-                          <h3 id="saved-feedback-title">Saved Feedback</h3>
-                          {savedFeedbackLabels.length ? savedFeedbackLabels.map((label) => (
-                            <span key={label}>{label}</span>
-                          )) : (
-                            <span>No saved feedback yet.</span>
-                          )}
-                        </section>
-                        <section className="insights-panel feedback-list-card" aria-labelledby="resolved-dismissed-title">
-                          <h3 id="resolved-dismissed-title">Resolved / Dismissed</h3>
-                          {resolvedInsightLabels.map((label) => (
-                            <span key={`resolved-${label}`}>Resolved: {label}</span>
-                          ))}
-                          {dismissedInsightLabels.map((label) => (
-                            <span key={`dismissed-${label}`}>Dismissed: {label}</span>
-                          ))}
-                        </section>
-                        <section className="insights-panel feedback-panel" aria-labelledby="teacher-note-title">
-                          <h3 id="teacher-note-title">Note</h3>
-                          <div className="feedback-option-grid" aria-label="Insight feedback options">
-                            {insightFeedbackOptionRows.map((option) => {
-                              const feedbackKey = `${option.action}:${option.itemId}`;
-
-                              return (
-                                <button
-                                  disabled={Boolean(savingInsightFeedback) || !hasGeneratedTeacherInsights}
-                                  key={option.itemId}
-                                  onClick={() => saveInsightFeedback(option.action, option.itemId, option.note)}
-                                  type="button"
-                                >
-                                  {savingInsightFeedback === feedbackKey ? "Saving..." : option.label}
-                                </button>
-                              );
-                            })}
-                          </div>
-                          <label className="sr-only" htmlFor="teacher-feedback-note">
-                            Teacher feedback note
-                          </label>
-                          <textarea
-                            id="teacher-feedback-note"
-                            onChange={(event) => setTeacherInsightNote(event.target.value)}
-                            placeholder="Tell Chandra what matters for this class..."
-                            rows={4}
-                            value={teacherInsightNote}
-                          />
-                          <button
-                            className="feedback-save-button"
-                            disabled={
-                              Boolean(savingInsightFeedback) || !teacherInsightNote.trim() || !hasGeneratedTeacherInsights
-                            }
-                            onClick={() => saveInsightFeedback("addNote", "overall", teacherInsightNote)}
-                            type="button"
-                          >
-                            {savingInsightFeedback === "addNote:overall" ? "Saving..." : "Save note"}
-                          </button>
-                        </section>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-
                 {activeTab === "settings" ? (
-                  <form className="class-settings-form settings-workspace" key={selectedClass.id} onSubmit={submitSettings}>
-                    <section className="settings-detail" aria-labelledby="settings-detail-title">
-                      <div className="teacher-section-heading settings-page-heading">
+                  <form
+                    className="class-settings-form settings-workspace ai-tutor-workspace teacher-content-block"
+                    id="class-settings-form"
+                    key={selectedClass.id}
+                    onSubmit={submitSettings}
+                  >
+                    <section className="settings-detail ai-tutor-section-panel" aria-labelledby="settings-detail-title">
+                      <div className="ai-tutor-section-heading settings-page-heading">
                         <div>
                           <h2 id="settings-detail-title">{activeSettingsSection.label}</h2>
                           <span>{activeSettingsSection.description}</span>
                         </div>
-                        {activeSettingsPane === "account" ? (
-                          <button
-                            className="primary-button teacher-primary-button compact"
-                            disabled={isSavingAccountSettings}
-                            type="button"
-                            onClick={() => void saveAccountSettings()}
-                          >
-                            {isSavingAccountSettings ? "Saving" : "Save account"}
-                          </button>
-                        ) : (
-                          <button
-                            className="primary-button teacher-primary-button compact"
-                            disabled={isSavingSettings}
-                            type="submit"
-                          >
-                            {isSavingSettings ? "Saving" : "Save changes"}
-                          </button>
-                        )}
                       </div>
 
                       <div className="settings-pane-stack">
@@ -3663,6 +3232,288 @@ export function TeacherClassManager() {
                               defaultValue={selectedStudentFacingInstructions}
                               placeholder="Show your work. Use exact values unless asked for decimals."
                             />
+                          </section>
+                        </div>
+
+                        <div className="settings-pane" hidden={activeSettingsPane !== "classAccess"}>
+                          <section className="settings-group settings-class-access-card" aria-labelledby="settings-class-access">
+                            <h3 id="settings-class-access">Class Access</h3>
+                            <p>Manage the student invite code and teacher access for this class.</p>
+                            <div className="class-invite-row">
+                              <div className="class-invite-details">
+                                <strong>{selectedClass.name}</strong>
+                                <span>{formatSectionLabel(selectedClass.section)}</span>
+                              </div>
+                              <div className="class-invite-code" aria-label={`${selectedClass.name} class code`}>
+                                <span>Class code</span>
+                                <code>{selectedClass.joinCode?.trim() || selectedClass.id}</code>
+                              </div>
+                              <div className="class-invite-actions">
+                                <button
+                                  className="teacher-action-button"
+                                  disabled={savingClassAccessAction === "reset-code"}
+                                  type="button"
+                                  onClick={() => void resetSelectedClassInviteCode()}
+                                >
+                                  <RefreshIcon />
+                                  {savingClassAccessAction === "reset-code" ? "Resetting" : "Reset class invite code"}
+                                </button>
+                              </div>
+                            </div>
+                          </section>
+
+                          <section className="settings-group settings-co-teachers-card" aria-labelledby="settings-co-teachers">
+                            <h3 id="settings-co-teachers">Co-teachers</h3>
+                            <p>Owner access belongs to the primary class teacher. Added teachers can help manage or view the class.</p>
+                            <div className="settings-field-pair">
+                              <div>
+                                <label className="field-label" htmlFor="co-teacher-email">
+                                  Teacher email
+                                </label>
+                                <input
+                                  id="co-teacher-email"
+                                  type="email"
+                                  value={coTeacherEmail}
+                                  onChange={(event) => setCoTeacherEmail(event.target.value)}
+                                  placeholder="teacher@example.com"
+                                />
+                              </div>
+                              <div>
+                                <label className="field-label" htmlFor="co-teacher-role">
+                                  Permission
+                                </label>
+                                <select
+                                  id="co-teacher-role"
+                                  value={coTeacherRole}
+                                  onChange={(event) => setCoTeacherRole(event.target.value as Exclude<ClassAccessRole, "owner">)}
+                                >
+                                  <option value="co-teacher">Co-teacher</option>
+                                  <option value="viewer">Viewer</option>
+                                </select>
+                              </div>
+                            </div>
+                            <button
+                              className="teacher-action-button"
+                              disabled={!coTeacherEmail.trim() || savingClassAccessAction === "add-co-teacher"}
+                              type="button"
+                              onClick={() => void addCoTeacher()}
+                            >
+                              <UserPlusIcon />
+                              {savingClassAccessAction === "add-co-teacher" ? "Adding" : "Add co-teacher"}
+                            </button>
+
+                            <div className="class-invite-list">
+                              <CoTeacherRow
+                                displayName={selectedClass.teacherName}
+                                email=""
+                                role="Owner"
+                              />
+                              {Object.values(selectedCoTeachers).map((coTeacher) => (
+                                <CoTeacherRow
+                                  coTeacher={coTeacher}
+                                  disabled={savingClassAccessAction.includes(coTeacher.uid)}
+                                  key={coTeacher.uid}
+                                  onRemove={() => void removeCoTeacher(coTeacher)}
+                                  onRoleChange={(role) => void updateCoTeacherRole(coTeacher, role)}
+                                  role={coTeacher.role === "co-teacher" ? "Co-teacher" : "Viewer"}
+                                />
+                              ))}
+                            </div>
+                            {classAccessMessage ? <p className="settings-status-message">{classAccessMessage}</p> : null}
+                          </section>
+                        </div>
+
+                        <div className="settings-pane" hidden={activeSettingsPane !== "privacy"}>
+                          <section className="settings-group" aria-labelledby="settings-privacy">
+                            <h3 id="settings-privacy">Conversation Retention</h3>
+                            <p>Saved as a class policy for retention jobs. Existing conversations are not deleted until a server-side job or explicit delete action runs.</p>
+                            <label className="settings-control-label" htmlFor="conversation-retention">
+                              Retention policy
+                            </label>
+                            <select
+                              id="conversation-retention"
+                              name="privacySettings.conversationRetention"
+                              defaultValue={selectedPrivacySettings.conversationRetention}
+                            >
+                              {conversationRetentionOptions.map((option) => (
+                                <option key={option} value={option}>
+                                  {formatConversationRetention(option)}
+                                </option>
+                              ))}
+                            </select>
+                          </section>
+
+                          <section className="settings-group" aria-labelledby="settings-student-data">
+                            <h3 id="settings-student-data">Student Data</h3>
+                            <p>Search for a student, select the matching record, then export or delete that student&apos;s class data.</p>
+                            <label className="settings-search-field" htmlFor="privacy-student-search">
+                              <SearchIcon />
+                              <input
+                                id="privacy-student-search"
+                                placeholder="Search students by name or email"
+                                type="search"
+                                value={privacyStudentSearchQuery}
+                                onChange={(event) => {
+                                  setPrivacyStudentSearchQuery(event.target.value);
+                                  setPrivacyDataMessage("");
+                                }}
+                              />
+                            </label>
+
+                            {privacyStudentSearchQuery.trim() ? (
+                              <div className="privacy-student-results" aria-label="Student search results">
+                                {privacyStudentSearchResults.map((student) => (
+                                  <button
+                                    aria-pressed={selectedPrivacyStudentId === student.id}
+                                    className="privacy-student-result"
+                                    key={student.id}
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedPrivacyStudentId(student.id);
+                                      setPrivacyDataMessage("");
+                                    }}
+                                  >
+                                    <strong>{student.displayName || "Unnamed student"}</strong>
+                                    <span>{student.email}</span>
+                                  </button>
+                                ))}
+                                {!privacyStudentSearchResults.length ? (
+                                  <p className="settings-empty-message">No matching students found.</p>
+                                ) : null}
+                              </div>
+                            ) : (
+                              <p className="settings-empty-message">Enter a name or email to find a student.</p>
+                            )}
+
+                            {selectedPrivacyStudent ? (
+                              <div className="class-invite-list">
+                                <article className="class-invite-row privacy-selected-student">
+                                  <div className="class-invite-details">
+                                    <strong>{selectedPrivacyStudent.displayName || "Unnamed student"}</strong>
+                                    <span>{selectedPrivacyStudent.email}</span>
+                                  </div>
+                                  <div className="class-invite-actions">
+                                    <button
+                                      className="teacher-action-button"
+                                      disabled={savingPrivacyDataAction === `export:${selectedPrivacyStudent.id}`}
+                                      type="button"
+                                      onClick={() => void exportStudentClassData(selectedPrivacyStudent)}
+                                    >
+                                      <DownloadIcon />
+                                      {savingPrivacyDataAction === `export:${selectedPrivacyStudent.id}` ? "Exporting" : "Export JSON"}
+                                    </button>
+                                    <button
+                                      className="teacher-danger-button"
+                                      disabled={savingPrivacyDataAction === `delete:${selectedPrivacyStudent.id}`}
+                                      type="button"
+                                      onClick={() => void deleteStudentClassData(selectedPrivacyStudent)}
+                                    >
+                                      <TrashIcon />
+                                      {savingPrivacyDataAction === `delete:${selectedPrivacyStudent.id}` ? "Deleting" : "Delete class data"}
+                                    </button>
+                                  </div>
+                                </article>
+                              </div>
+                            ) : null}
+                            {privacyDataMessage ? <p className="settings-status-message">{privacyDataMessage}</p> : null}
+                          </section>
+                        </div>
+
+                        <div className="settings-pane" hidden={activeSettingsPane !== "sourceDefaults"}>
+                          <section className="settings-group" aria-labelledby="settings-source-defaults">
+                            <h3 id="settings-source-defaults">New Material Defaults</h3>
+                            <p>Uploads inherit these defaults unless a material-specific setting overrides them later.</p>
+                            <div className="settings-toggle-list">
+                              <SettingsToggle
+                                defaultChecked={selectedSourceDefaults.activeForStudents}
+                                description="New sources are visible to students after processing unless teacher-only is enabled."
+                                name="sourceDefaults.activeForStudents"
+                                title="Active for students"
+                              />
+                              <SettingsToggle
+                                defaultChecked={selectedSourceDefaults.teacherOnly}
+                                description="New sources are saved for teacher review and hidden from student retrieval."
+                                name="sourceDefaults.teacherOnly"
+                                title="Teacher only"
+                              />
+                              <SettingsToggle
+                                defaultChecked={selectedSourceDefaults.citationsRequired}
+                                description="New sources should require citations when Chandra uses them."
+                                name="sourceDefaults.citationsRequired"
+                                title="Citations required"
+                              />
+                              <SettingsToggle
+                                defaultChecked={selectedSourceDefaults.answerKeysTeacherReviewOnly}
+                                description="Answer keys and solution materials default to teacher review only."
+                                name="sourceDefaults.answerKeysTeacherReviewOnly"
+                                title="Use answer keys only for teacher review"
+                              />
+                            </div>
+
+                            <label className="settings-control-label" htmlFor="source-default-priority">
+                              Default priority
+                            </label>
+                            <select
+                              id="source-default-priority"
+                              name="sourceDefaults.priority"
+                              defaultValue={selectedSourceDefaults.priority}
+                            >
+                              <option value="primary">Primary</option>
+                              <option value="normal">Normal</option>
+                              <option value="low">Low</option>
+                            </select>
+                          </section>
+
+                          <section className="settings-group" aria-labelledby="settings-source-type-preferences">
+                            <h3 id="settings-source-type-preferences">Source-type Preferences</h3>
+                            <p>Choose whether common source types should inherit the defaults or use a stricter visibility preference.</p>
+                            <div className="settings-field-pair">
+                              {materialSourceTypeKeys.map((kind) => (
+                                <div key={kind}>
+                                  <label className="field-label" htmlFor={`source-type-${kind}`}>
+                                    {kind}
+                                  </label>
+                                  <select
+                                    id={`source-type-${kind}`}
+                                    name={`sourceDefaults.sourceTypePreferences.${kind}`}
+                                    defaultValue={selectedSourceDefaults.sourceTypePreferences[kind]}
+                                  >
+                                    {materialSourceTypePreferenceOptions.map((preference) => (
+                                      <option key={preference} value={preference}>
+                                        {formatSourceTypePreference(preference)}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              ))}
+                            </div>
+                          </section>
+                        </div>
+
+                        <div className="settings-pane" hidden={activeSettingsPane !== "notifications"}>
+                          <section className="settings-group" aria-labelledby="settings-notifications">
+                            <h3 id="settings-notifications">Notification Preferences</h3>
+                            <p>Preferences are saved for future notification jobs. Email or push delivery is not sent from this settings screen.</p>
+                            <div className="settings-toggle-list">
+                              <SettingsToggle
+                                defaultChecked={selectedNotificationSettings.weeklyDigest}
+                                description="Include this class in future weekly teacher digest jobs."
+                                name="notificationSettings.weeklyDigest"
+                                title="Weekly digest"
+                              />
+                              <SettingsToggle
+                                defaultChecked={selectedNotificationSettings.followUpReminders}
+                                description="Allow future jobs to remind you about conversations marked for follow-up."
+                                name="notificationSettings.followUpReminders"
+                                title="Follow-up reminders"
+                              />
+                              <SettingsToggle
+                                defaultChecked={selectedNotificationSettings.newStudentJoinedClass}
+                                description="Allow future jobs to notify you when a student joins this class."
+                                name="notificationSettings.newStudentJoinedClass"
+                                title="New student joined class"
+                              />
+                            </div>
                           </section>
                         </div>
 
@@ -3916,6 +3767,67 @@ export function TeacherClassManager() {
                               </div>
                             ) : null}
                           </section>
+
+                          <section className="settings-group" aria-labelledby="settings-class-invites">
+                            <h3 id="settings-class-invites">Class Invites</h3>
+                            <p>Share a class code or student invite link for any class you teach.</p>
+                            <div className="class-invite-list">
+                              {classes.map((teacherClass) => {
+                                const classCode = teacherClass.joinCode?.trim() || teacherClass.id;
+                                const codeCopyStatus =
+                                  classInviteCopyResult?.classId === teacherClass.id &&
+                                  classInviteCopyResult.kind === "code"
+                                    ? classInviteCopyResult.status
+                                    : "";
+                                const linkCopyStatus =
+                                  classInviteCopyResult?.classId === teacherClass.id &&
+                                  classInviteCopyResult.kind === "link"
+                                    ? classInviteCopyResult.status
+                                    : "";
+
+                                return (
+                                  <article className="class-invite-row" key={teacherClass.id}>
+                                    <div className="class-invite-details">
+                                      <strong>{teacherClass.name}</strong>
+                                      <span>{formatSectionLabel(teacherClass.section)}</span>
+                                    </div>
+                                    <div className="class-invite-share">
+                                      <div className="class-invite-code" aria-label={`${teacherClass.name} class code`}>
+                                        <span>Class code</span>
+                                        <code>{classCode}</code>
+                                      </div>
+                                      <div className="class-invite-actions">
+                                        <button
+                                          className="teacher-action-button"
+                                          type="button"
+                                          onClick={() => void copyClassInvite(teacherClass, "code")}
+                                        >
+                                          <CopyIcon />
+                                          {codeCopyStatus === "copied"
+                                            ? "Copied"
+                                            : codeCopyStatus === "failed"
+                                              ? "Copy failed"
+                                              : "Copy code"}
+                                        </button>
+                                        <button
+                                          className="teacher-action-button"
+                                          type="button"
+                                          onClick={() => void copyClassInvite(teacherClass, "link")}
+                                        >
+                                          <LinkIcon />
+                                          {linkCopyStatus === "copied"
+                                            ? "Copied"
+                                            : linkCopyStatus === "failed"
+                                              ? "Copy failed"
+                                              : "Copy link"}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </article>
+                                );
+                              })}
+                            </div>
+                          </section>
                         </div>
 
                         <div className="settings-pane" hidden={activeSettingsPane !== "account"}>
@@ -3930,6 +3842,10 @@ export function TeacherClassManager() {
                                 <div>
                                   <dt>Email</dt>
                                   <dd>{accountEmail || "No email on file"}</dd>
+                                </div>
+                                <div>
+                                  <dt>Username</dt>
+                                  <dd>{accountUsernameValue || "No username on file"}</dd>
                                 </div>
                                 <div>
                                   <dt>Role</dt>
@@ -3949,6 +3865,83 @@ export function TeacherClassManager() {
                                 setAccountSettingsMessage("");
                               }}
                             />
+                            <label className="field-label" htmlFor="teacher-account-email">
+                              Email
+                            </label>
+                            <input
+                              id="teacher-account-email"
+                              autoCapitalize="none"
+                              autoComplete="email"
+                              inputMode="email"
+                              value={accountEmailValue}
+                              onChange={(event) => {
+                                setAccountEmailDraft(event.target.value);
+                                setAccountSettingsMessage("");
+                              }}
+                            />
+                            <label className="field-label" htmlFor="teacher-account-username">
+                              Username
+                            </label>
+                            <input
+                              id="teacher-account-username"
+                              autoCapitalize="none"
+                              autoComplete="username"
+                              maxLength={120}
+                              value={accountUsername ?? accountUsernameValue}
+                              onChange={(event) => {
+                                setAccountUsername(event.target.value);
+                                setAccountSettingsMessage("");
+                              }}
+                            />
+                            <div className="account-password-grid">
+                              <div>
+                                <label className="field-label" htmlFor="teacher-current-password">
+                                  Current password
+                                </label>
+                                <input
+                                  id="teacher-current-password"
+                                  autoComplete="current-password"
+                                  type="password"
+                                  value={currentAccountPassword}
+                                  onChange={(event) => {
+                                    setCurrentAccountPassword(event.target.value);
+                                    setAccountSettingsMessage("");
+                                  }}
+                                />
+                              </div>
+                              <div>
+                                <label className="field-label" htmlFor="teacher-new-password">
+                                  New password
+                                </label>
+                                <input
+                                  id="teacher-new-password"
+                                  autoComplete="new-password"
+                                  minLength={6}
+                                  type="password"
+                                  value={newAccountPassword}
+                                  onChange={(event) => {
+                                    setNewAccountPassword(event.target.value);
+                                    setAccountSettingsMessage("");
+                                  }}
+                                />
+                              </div>
+                              <div>
+                                <label className="field-label" htmlFor="teacher-confirm-password">
+                                  Confirm new password
+                                </label>
+                                <input
+                                  id="teacher-confirm-password"
+                                  autoComplete="new-password"
+                                  minLength={6}
+                                  type="password"
+                                  value={confirmAccountPassword}
+                                  onChange={(event) => {
+                                    setConfirmAccountPassword(event.target.value);
+                                    setAccountSettingsMessage("");
+                                  }}
+                                />
+                              </div>
+                            </div>
                             <button
                               className="teacher-action-button teacher-account-save-button"
                               disabled={isSavingAccountSettings}
@@ -4113,13 +4106,6 @@ export function TeacherClassManager() {
                           </button>
                         </div>
 
-                        <div className="roster-stats-grid" aria-label="Roster summary">
-                          <RosterStatCard label="Total students" value={String(rosterStats.totalStudents)} />
-                          <RosterStatCard label="Active now" tone="positive" value={String(rosterStats.activeToday)} />
-                          <RosterStatCard label="Avg questions/student" value={`${formatStatNumber(rosterStats.averageQuestions)}/day`} />
-                          <RosterStatCard label="No activity" value={String(rosterStats.noActivity)} />
-                        </div>
-
                         <div className="roster-workspace">
                           <section className="roster-table-card" aria-label="Student roster">
                             <div className="roster-toolbar">
@@ -4199,10 +4185,9 @@ export function TeacherClassManager() {
                                     role="row"
                                     onClick={() => {
                                       // Legacy test marker: setSelectedStudentId(student.id)
-                                      setSelectedStudentId(row.student.id);
-                                      setSelectedStudentClassId(activeClassId);
-                                      setIsRosterDetailOpen(true);
-                                      setIsProfessorReviewOpen(false);
+                                      router.push(
+                                        `/teacher/classes/${encodeURIComponent(activeClassId)}/students/${encodeURIComponent(row.studentEmail)}`
+                                      );
                                     }}
                                   >
                                     <span className="roster-cell roster-checkbox-cell" role="cell">
@@ -4220,6 +4205,7 @@ export function TeacherClassManager() {
                                           setSelectedStudentId(row.student.id);
                                           setSelectedStudentClassId(activeClassId);
                                           setIsRosterDetailOpen(true);
+                                          setRosterDetailFocus("activity");
                                         }}
                                       />
                                     </span>
@@ -4236,15 +4222,16 @@ export function TeacherClassManager() {
                                     <span className="roster-cell" role="cell">{row.conversationsLabel}</span>
                                     <span className="roster-cell roster-actions-cell" role="cell">
                                       <button
-                                        aria-label={`View chats for ${row.student.displayName}`}
+                                        aria-label={`View conversations for ${row.student.displayName}`}
                                         className="student-icon-button"
-                                        title="View chats"
+                                        title="View conversations"
                                         type="button"
                                         onClick={(event) => {
                                           event.stopPropagation();
                                           setSelectedStudentId(row.student.id);
                                           setSelectedStudentClassId(activeClassId);
                                           setIsRosterDetailOpen(true);
+                                          setRosterDetailFocus("activity");
                                           setSelectedConversationId("");
                                           setSelectedConversationClassId(activeClassId);
                                           setConversationMessages([]);
@@ -4254,33 +4241,30 @@ export function TeacherClassManager() {
                                         <ChatIcon />
                                       </button>
                                       <button
-                                        aria-label={`Open knowledge for ${row.student.displayName}`}
+                                        aria-label={`Edit private notes for ${row.student.displayName}`}
                                         className="student-icon-button"
-                                        title="Knowledge"
+                                        title="Private notes"
                                         type="button"
                                         onClick={(event) => {
                                           event.stopPropagation();
                                           setSelectedStudentId(row.student.id);
                                           setSelectedStudentClassId(activeClassId);
                                           setIsRosterDetailOpen(true);
+                                          setRosterDetailFocus("notes");
+                                          setIsProfessorReviewOpen(false);
                                         }}
                                       >
-                                        <BookOpenIcon />
+                                        <NoteIcon />
                                       </button>
-                                      <button
-                                        aria-label={`Open student profile for ${row.student.displayName}`}
-                                        className="student-icon-button"
-                                        title="Student profile"
-                                        type="button"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          setSelectedStudentId(row.student.id);
-                                          setSelectedStudentClassId(activeClassId);
-                                          setIsRosterDetailOpen(true);
-                                        }}
+                                      <Link
+                                        aria-label={`Open profile for ${row.student.displayName}`}
+                                        className="student-icon-button student-profile-link"
+                                        href={`/teacher/classes/${encodeURIComponent(activeClassId)}/students/${encodeURIComponent(row.studentEmail)}`}
+                                        title="Open profile"
+                                        onClick={(event) => event.stopPropagation()}
                                       >
                                         <UserIcon />
-                                      </button>
+                                      </Link>
                                     </span>
                                   </div>
                                 );
@@ -4312,12 +4296,15 @@ export function TeacherClassManager() {
                             </div>
                           </section>
 
-                          {selectedRosterRow ? (
-                            <aside className="student-detail-panel" aria-label={`${selectedRosterRow.student.displayName} details`}>
+                          {selectedRosterRow ? (() => {
+                            const detailRow = selectedRosterRow;
+
+                            return (
+                            <aside hidden className="student-detail-panel" aria-label={`${detailRow.student.displayName} details`}>
                               <div className="student-detail-heading">
                                 <div>
-                                  <h3>{selectedRosterRow.student.displayName}</h3>
-                                  <span>{selectedRosterRow.student.email}</span>
+                                  <h3>{detailRow.student.displayName}</h3>
+                                  <span>{detailRow.student.email}</span>
                                 </div>
                                 <button
                                   aria-label="Close student detail"
@@ -4331,23 +4318,26 @@ export function TeacherClassManager() {
                                 </button>
                               </div>
 
-                              <section className="student-detail-card student-activity-card" aria-label="Student activity">
+                              <section
+                                className={`student-detail-card student-activity-card${rosterDetailFocus === "activity" ? " is-focused" : ""}`}
+                                aria-label="Student activity"
+                              >
                                 <dl>
                                   <div>
                                     <dt>Last active</dt>
-                                    <dd>{selectedRosterRow.lastActive}</dd>
+                                    <dd>{detailRow.lastActive}</dd>
                                   </div>
                                   <div>
                                     <dt>Questions/day</dt>
-                                    <dd>{formatStatNumber(selectedRosterRow.questionsPerDay)}</dd>
+                                    <dd>{formatStatNumber(detailRow.questionsPerDay)}</dd>
                                   </div>
                                   <div>
                                     <dt>Today&apos;s activity</dt>
-                                    <dd>{formatQuestionCount(selectedRosterRow.questionsToday)}</dd>
+                                    <dd>{formatQuestionCount(detailRow.questionsToday)}</dd>
                                   </div>
                                   <div>
                                     <dt>Conversations</dt>
-                                    <dd>{selectedRosterRow.conversationsLabel}</dd>
+                                    <dd>{detailRow.conversationsLabel}</dd>
                                   </div>
                                 </dl>
                               </section>
@@ -4365,7 +4355,7 @@ export function TeacherClassManager() {
                                   </button>
                                 </div>
                                 <div className="student-recent-list">
-                                  {buildRecentConversationPreviews(selectedRosterRow).map((conversation) => (
+                                  {buildRecentConversationPreviews(detailRow).map((conversation) => (
                                     <div className="student-recent-row" key={`${conversation.title}-${conversation.meta}`}>
                                       <span>{conversation.title}</span>
                                       <time>{conversation.meta}</time>
@@ -4396,33 +4386,33 @@ export function TeacherClassManager() {
                                 }}
                               />
 
-                              <section className="student-detail-card">
+                              <section className={`student-detail-card${rosterDetailFocus === "notes" ? " is-focused" : ""}`}>
                                 <h4>Private teacher notes</h4>
                                 <textarea
-                                  aria-label={`Private teacher notes for ${selectedRosterRow.student.displayName}`}
+                                  aria-label={`Private teacher notes for ${detailRow.student.displayName}`}
                                   maxLength={1000}
                                   rows={5}
                                   value={
-                                    teacherNotesByStudentId[selectedRosterRow.student.id] ??
-                                    selectedRosterRow.teacherNotes
+                                    teacherNotesByStudentId[detailRow.student.id] ??
+                                    detailRow.teacherNotes
                                   }
                                   onChange={(event) =>
                                     setTeacherNotesByStudentId((currentNotes) => ({
                                       ...currentNotes,
-                                      [selectedRosterRow.student.id]: event.target.value
+                                      [detailRow.student.id]: event.target.value
                                     }))
                                   }
                                   onBlur={() => {
-                                    void saveTeacherNotes(selectedRosterRow);
+                                    void saveTeacherNotes(detailRow);
                                   }}
                                 />
                                 <span className="student-note-count">
                                   {(
-                                    teacherNotesByStudentId[selectedRosterRow.student.id] ??
-                                    selectedRosterRow.teacherNotes
+                                    teacherNotesByStudentId[detailRow.student.id] ??
+                                    detailRow.teacherNotes
                                   ).length}{" "}
                                   / 1000
-                                  {savingNotesStudentId === selectedRosterRow.student.id ? " / saving" : ""}
+                                  {savingNotesStudentId === detailRow.student.id ? " / saving" : ""}
                                 </span>
                               </section>
 
@@ -4441,7 +4431,8 @@ export function TeacherClassManager() {
                                 </div>
                               </section>
                             </aside>
-                          ) : null}
+                            );
+                          })() : null}
                         </div>
                       </div>
                     )}
@@ -4896,15 +4887,6 @@ export function TeacherClassManager() {
 
                     {conversationError ? <p className="form-error">{conversationError}</p> : null}
 
-                    {evidenceConversationIds.length ? (
-                      <div className="conversation-evidence-filter">
-                        <span>{formatInsightEvidenceConversationLabel(evidenceConversationIds.length)} from selected insight evidence</span>
-                        <button type="button" onClick={() => setEvidenceConversationIds([])}>
-                          Clear evidence filter
-                        </button>
-                      </div>
-                    ) : null}
-
                     <div className="conversation-review-grid">
                       <section className="conversation-inbox-panel" aria-label="Conversation Inbox">
                         <div className="conversation-panel-heading">
@@ -5249,6 +5231,8 @@ export function TeacherClassManager() {
                     </div>
                   </div>
                 ) : null}
+                  </>
+                )}
               </>
             ) : (
               <div className="empty-state teacher-empty-state">
@@ -5769,524 +5753,55 @@ function SettingsToggle({
   );
 }
 
-function InsightMetricCard({
-  icon,
-  label,
-  tone,
-  value
+function CoTeacherRow({
+  coTeacher,
+  disabled = false,
+  displayName,
+  email,
+  onRemove,
+  onRoleChange,
+  role
 }: {
-  icon: ReactNode;
-  label: string;
-  tone: "gold" | "neutral" | "teal";
-  value: string;
+  coTeacher?: ClassCoTeacher;
+  disabled?: boolean;
+  displayName?: string;
+  email?: string;
+  onRemove?: () => void;
+  onRoleChange?: (role: Exclude<ClassAccessRole, "owner">) => void;
+  role: "Owner" | "Co-teacher" | "Viewer";
 }) {
   return (
-    <article className={`insight-metric-card ${tone}`}>
-      <span className="insight-metric-icon" aria-hidden="true">
-        {icon}
-      </span>
-      <span className="insight-metric-copy">
-        <strong>{value}</strong>
-        <span>{label}</span>
-      </span>
+    <article className="class-invite-row">
+      <div className="class-invite-details">
+        <strong>{displayName || coTeacher?.displayName || coTeacher?.email || "Teacher"}</strong>
+        <span>{email || coTeacher?.email || "Primary class owner"}</span>
+      </div>
+      <div className="class-invite-code">
+        <span>Permission</span>
+        {coTeacher ? (
+          <select
+            aria-label="Co-teacher permission"
+            disabled={disabled}
+            value={coTeacher.role}
+            onChange={(event) => onRoleChange?.(event.target.value as Exclude<ClassAccessRole, "owner">)}
+          >
+            <option value="co-teacher">Co-teacher</option>
+            <option value="viewer">Viewer</option>
+          </select>
+        ) : (
+          <code>{role}</code>
+        )}
+      </div>
+      {coTeacher ? (
+        <div className="class-invite-actions">
+          <button className="teacher-danger-button" disabled={disabled} type="button" onClick={onRemove}>
+            <TrashIcon />
+            Remove
+          </button>
+        </div>
+      ) : null}
     </article>
   );
-}
-
-type InsightTrendTone = "up" | "down" | "new" | "recurring";
-
-function InsightSparkline({ points, tone }: { points?: number[]; tone: InsightTrendTone }) {
-  const pointsByTone = {
-    down: "2,5 14,13 25,12 36,17 47,13 58,16 69,14 80,25 91,23 102,28 113,25 124,31",
-    new: "2,27 14,28 25,23 36,22 47,17 58,20 69,11 80,18 91,12 102,15 113,3 124,7",
-    recurring: "2,12 14,16 25,14 36,8 47,22 58,24 69,7 80,13 91,15 102,19 113,14 124,24",
-    up: "2,23 14,21 25,17 36,10 47,15 58,13 69,4 80,15 91,10 102,12 113,10 124,11"
-  };
-  const polylinePoints = points?.length ? insightSparklinePoints(points) : pointsByTone[tone];
-
-  return (
-    <svg className={`insight-sparkline ${tone}`} viewBox="0 0 126 34" role="img" aria-label={`${tone} trend sparkline`}>
-      <polyline points={polylinePoints} fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function insightSparklinePoints(points: number[]) {
-  const boundedPoints = points.slice(0, 14).map((point) => Math.max(0, Math.min(100, Number(point) || 0)));
-  const maxPoint = Math.max(...boundedPoints, 1);
-  const horizontalStep = boundedPoints.length > 1 ? 124 / (boundedPoints.length - 1) : 124;
-
-  return boundedPoints
-    .map((point, index) => {
-      const x = 2 + index * horizontalStep;
-      const y = 31 - (point / maxPoint) * 28;
-      return `${Math.round(x)},${Math.round(y)}`;
-    })
-    .join(" ");
-}
-
-type InsightRecord = Record<string, unknown>;
-type InsightConfidenceClass = "high" | "medium" | "low";
-
-function buildInsightSummaryBriefing({
-  evidenceChips,
-  evidenceRows,
-  hasGenerated,
-  recommendations,
-  summary
-}: {
-  evidenceChips: Array<{ conversationId?: string; label: string }>;
-  evidenceRows: Array<{ conversationIds: string[]; count: string; topic: string }>;
-  hasGenerated: boolean;
-  recommendations: Array<{ action: string; title: string }>;
-  summary: TeacherClassInsightsDocument["insight"]["dailySummary"] | null | undefined;
-}) {
-  const evidenceCount = countInsightEvidenceConversations(evidenceChips, evidenceRows);
-  const firstRecommendation = recommendations[0];
-  const title =
-    readInsightString(summary, ["teachingFocus", "focus", "title"]) ||
-    (hasGenerated ? "Review today's strongest learning signal" : "Generate insights to create a teaching focus");
-  const signal =
-    readInsightString(summary, ["signal", "studentSignal", "studentBehavior", "studentBehaviour", "body"]) ||
-    (hasGenerated
-      ? "Recent student conversations show a pattern worth checking before the next lesson."
-      : "Chandra will summarize class patterns after insights are generated from saved conversations.");
-  const evidence =
-    readInsightString(summary, ["evidenceSummary", "evidenceText", "evidenceStatement"]) ||
-    formatInsightEvidenceText(evidenceChips.find((chip) => chip.conversationId)?.label ?? "") ||
-    evidenceRows[0]?.count ||
-    "No student conversation evidence yet";
-  const recommendedMove =
-    readInsightString(summary, ["recommendedMove", "teacherMove", "suggestedTeacherMove", "nextMove"]) ||
-    firstRecommendation?.title ||
-    "Open the evidence conversation and decide whether this needs a quick check-in or a short reteach.";
-
-  return {
-    confidence: formatInsightConfidenceLabel(summary, evidenceCount),
-    confidenceClass: getInsightConfidenceClass(summary, evidenceCount),
-    evidence,
-    recommendedMove,
-    signal,
-    title,
-    tutorAdjustment:
-      readInsightString(summary, ["tutorAdjustment", "tutorMove", "recommendedTutorAdjustment", "aiTutorAdjustment"]) ||
-      `Have the tutor ask students to explain their reasoning before moving past ${lowercaseFirst(title)}.`,
-    whyItMatters:
-      readInsightString(summary, ["whyItMatters", "why_it_matters", "rationale", "instructionalRationale"]) ||
-      `If this pattern holds, ${lowercaseFirst(title)} can affect the next explanation, grouping decision, or practice prompt.`
-  };
-}
-
-function countInsightEvidenceConversations(
-  evidenceChips: Array<{ conversationId?: string }>,
-  evidenceRows: Array<{ conversationIds: string[] }>
-) {
-  const conversationIds = new Set<string>();
-  evidenceChips.forEach((chip) => {
-    if (chip.conversationId) {
-      conversationIds.add(chip.conversationId);
-    }
-  });
-  evidenceRows.forEach((row) => row.conversationIds.forEach((conversationId) => conversationIds.add(conversationId)));
-  return conversationIds.size;
-}
-
-function getInsightMisconceptionRootCause(row: unknown) {
-  return (
-    readInsightString(row, ["likelyRootCause", "rootCause", "root_cause", "cause"]) ||
-    "Students may be applying a familiar rule in a context where it no longer fits."
-  );
-}
-
-function getInsightMisconceptionSignal(row: unknown, evidenceCount: number) {
-  return (
-    readInsightString(row, ["studentBehavior", "studentBehaviour", "behavior", "behaviour", "signal"]) ||
-    formatInsightEvidenceConversationLabel(evidenceCount)
-  );
-}
-
-function getInsightMisconceptionTeacherMove(row: unknown) {
-  return (
-    readInsightString(row, ["suggestedTeacherMove", "teacherMove", "recommendedMove", "nextMove"]) ||
-    "Use one targeted check-for-understanding question, then model the missing distinction with student wording from the evidence."
-  );
-}
-
-function formatInsightConcernLabel(row: unknown, evidenceCount: number) {
-  const evidenceStrength = getInsightEvidenceStrengthKey(row, evidenceCount);
-  const confidenceClass = getInsightConfidenceClass(row, evidenceCount);
-
-  if (evidenceStrength === "early_signal") {
-    return "Early signal";
-  }
-
-  if (confidenceClass === "low") {
-    return "Support need";
-  }
-
-  return "Misconception";
-}
-
-function formatInsightConfidenceLabel(value: unknown, evidenceCount = 0) {
-  const confidence = readInsightString(value, ["confidence", "confidenceLabel"]);
-  const numericConfidence = readInsightNumber(value, ["confidence", "confidenceScore"]);
-
-  if (confidence) {
-    if (confidence.toLowerCase().includes("confidence")) {
-      return capitalizeLabel(confidence);
-    }
-
-    return `${capitalizeLabel(confidence)} confidence`;
-  }
-
-  if (typeof numericConfidence === "number") {
-    if (numericConfidence >= 0.75) {
-      return "High confidence";
-    }
-
-    if (numericConfidence >= 0.55) {
-      return "Medium confidence";
-    }
-
-    return "Low confidence";
-  }
-
-  return evidenceCount <= 1 ? "Low confidence" : "Medium confidence";
-}
-
-function getInsightConfidenceClass(value: unknown, evidenceCount = 0): InsightConfidenceClass {
-  const confidence = readInsightString(value, ["confidence", "confidenceLabel"]).toLowerCase();
-  const numericConfidence = readInsightNumber(value, ["confidence", "confidenceScore"]);
-
-  if (confidence.includes("high") || confidence.includes("strong")) {
-    return "high";
-  }
-
-  if (confidence.includes("low") || confidence.includes("early")) {
-    return "low";
-  }
-
-  if (typeof numericConfidence === "number") {
-    if (numericConfidence >= 0.75) {
-      return "high";
-    }
-
-    if (numericConfidence < 0.55) {
-      return "low";
-    }
-  }
-
-  return evidenceCount <= 1 ? "low" : "medium";
-}
-
-function formatInsightEvidenceStrengthLabel(value: unknown, evidenceCount = 0) {
-  const evidenceStrength = getInsightEvidenceStrengthKey(value, evidenceCount);
-
-  if (evidenceStrength === "early_signal") {
-    return "Early signal";
-  }
-
-  return capitalizeLabel(evidenceStrength.replaceAll("_", " "));
-}
-
-function getInsightEvidenceStrengthKey(value: unknown, evidenceCount = 0) {
-  const evidenceStrength = readInsightString(value, ["evidenceStrength", "evidence_strength", "evidenceLevel"]).toLowerCase();
-
-  if (evidenceStrength.includes("early")) {
-    return "early_signal";
-  }
-
-  if (evidenceStrength.includes("strong")) {
-    return "strong";
-  }
-
-  if (evidenceStrength.includes("moderate") || evidenceStrength.includes("medium")) {
-    return "moderate";
-  }
-
-  if (evidenceStrength.includes("weak") || evidenceStrength.includes("low")) {
-    return "early_signal";
-  }
-
-  if (evidenceCount <= 1) {
-    return "early_signal";
-  }
-
-  return evidenceCount >= 3 ? "strong" : "moderate";
-}
-
-function formatInsightEvidenceConversationLabel(count: number) {
-  if (count === 1) {
-    return "Early signal · Seen in 1 student conversation";
-  }
-
-  if (count <= 0) {
-    return "No student conversation evidence yet";
-  }
-
-  return `Seen in ${count} student conversations`;
-}
-
-function formatInsightEvidenceText(value: string) {
-  const trimmedValue = value.trim();
-
-  if (!trimmedValue) {
-    return "";
-  }
-
-  if (trimmedValue.toLowerCase() === "1 conversation") {
-    return "Early signal · Seen in 1 student conversation";
-  }
-
-  return trimmedValue
-    .replace(/\bseen in 1 conversation\b/gi, "Early signal · Seen in 1 student conversation")
-    .replace(/\b1 conversation\b/gi, "1 student conversation");
-}
-
-function formatInsightStatusClass(status: string) {
-  const normalizedStatus = status.toLowerCase();
-
-  if (["active", "improving", "emerging", "resolved"].includes(normalizedStatus)) {
-    return normalizedStatus;
-  }
-
-  return "emerging";
-}
-
-function countActiveInsightBuckets(points: number[] | undefined) {
-  return Array.isArray(points) ? points.filter((point) => Number(point) > 0).length : 0;
-}
-
-function formatTrendMovement(direction: string) {
-  switch (direction) {
-    case "down":
-      return "Improving";
-    case "up":
-      return "Increasing";
-    case "recurring":
-      return "Recurring";
-    case "new":
-    default:
-      return "New observation";
-  }
-}
-
-function buildTrendMovementReason(direction: string, evidenceCount: number) {
-  const evidenceLabel = formatInsightEvidenceConversationLabel(evidenceCount).toLowerCase();
-
-  switch (direction) {
-    case "down":
-      return `Improving because the signal is appearing less often across the current buckets; ${evidenceLabel}.`;
-    case "up":
-      return `Increasing because the signal appears in more recent buckets; ${evidenceLabel}.`;
-    case "recurring":
-      return `Recurring because the same pattern appears in more than one saved conversation; ${evidenceLabel}.`;
-    case "new":
-    default:
-      return `New observation from the current evidence set; ${evidenceLabel}.`;
-  }
-}
-
-function formatMisconceptionMovement(status: string) {
-  switch (status) {
-    case "improving":
-      return "Improving";
-    case "resolved":
-      return "Resolved";
-    case "active":
-      return "Recurring";
-    case "emerging":
-    default:
-      return "Increasing";
-  }
-}
-
-function buildMisconceptionMovementReason(status: string, evidenceCount: number) {
-  switch (status) {
-    case "improving":
-      return `Improving because recent evidence suggests fewer students are showing the same misconception across ${evidenceCount} conversations.`;
-    case "resolved":
-      return `Resolved because the pattern is no longer active in the latest reviewed evidence across ${evidenceCount} conversations.`;
-    case "active":
-      return `Recurring because the same misconception appears across ${evidenceCount} saved conversations.`;
-    case "emerging":
-    default:
-      return `Increasing because the misconception is showing up in the latest evidence across ${evidenceCount} conversations.`;
-  }
-}
-
-function formatRecommendationWorkflowAction(action: string) {
-  switch (action) {
-    case "approve":
-      return "Assign";
-    case "adjust":
-      return "Edit";
-    case "upload":
-      return "Edit sources";
-    case "inspect":
-    default:
-      return "Preview";
-  }
-}
-
-function buildRecommendationImpact(priority: string) {
-  switch (priority) {
-    case "high":
-      return "High";
-    case "low":
-      return "Targeted";
-    case "medium":
-    default:
-      return "Medium";
-  }
-}
-
-function buildRecommendationEffort(action: string) {
-  switch (action) {
-    case "upload":
-      return "Medium";
-    case "adjust":
-      return "Low";
-    case "approve":
-      return "Low";
-    case "inspect":
-    default:
-      return "Quick review";
-  }
-}
-
-function buildRecommendationWhy(title: string, evidenceCount: number) {
-  if (evidenceCount <= 1) {
-    return `This is an early signal tied to one saved conversation. Preview the source before assigning it broadly.`;
-  }
-
-  return `This recommendation is grounded in ${evidenceCount} saved conversations connected to ${lowercaseFirst(title)}.`;
-}
-
-function buildSuggestedRecommendationActivity(action: string, title: string) {
-  switch (action) {
-    case "upload":
-      return `Attach or update the source material students need before trying ${lowercaseFirst(title)}.`;
-    case "adjust":
-      return `Edit the prompt so students explain the step behind ${lowercaseFirst(title)} before receiving help.`;
-    case "approve":
-      return `Assign a short follow-up that asks students to apply ${lowercaseFirst(title)} independently.`;
-    case "inspect":
-    default:
-      return `Preview the evidence, then choose a quick check-for-understanding tied to ${lowercaseFirst(title)}.`;
-  }
-}
-
-function buildEvidenceConfidence(conversations: ConversationReviewRow[], evidenceCount: number) {
-  if (conversations.some((conversation) => conversation.sourceAudit.lowSourceConfidence)) {
-    return "Low confidence";
-  }
-
-  if (evidenceCount >= 3) {
-    return "High confidence";
-  }
-
-  return evidenceCount <= 1 ? "Low confidence" : "Medium confidence";
-}
-
-function buildEvidenceConversationConfidence(conversation: ConversationReviewRow) {
-  if (conversation.latestRetrievalConfidence) {
-    return `${capitalizeLabel(conversation.latestRetrievalConfidence)} confidence`;
-  }
-
-  if (conversation.sourceAudit.lowSourceConfidence) {
-    return "Low confidence";
-  }
-
-  return "Medium confidence";
-}
-
-function buildEvidenceSignal(conversation: ConversationReviewRow | null, topic: string) {
-  if (!conversation) {
-    return `Saved conversation evidence connected to ${topic}.`;
-  }
-
-  const signals = conversation.sourceAudit.learningSignals;
-
-  if (signals.stuckOutcomeCount > 0) {
-    return "Student ended the exchange still stuck.";
-  }
-
-  if (signals.lowConfidenceMessageCount > 0) {
-    return "Tutor or retrieval confidence was low during the exchange.";
-  }
-
-  if (signals.showAttemptCount > 0) {
-    return "Student showed an attempt that can be checked against the insight.";
-  }
-
-  if (signals.pasteProblemCount > 0) {
-    return "Student pasted a specific problem, making the evidence easy to inspect.";
-  }
-
-  if (signals.askTeacherCount > 0) {
-    return "Tutor indicated teacher review may be needed.";
-  }
-
-  if (signals.progressedOutcomeCount > 0) {
-    return "Student progressed after guided support, which helps identify the useful next move.";
-  }
-
-  return `Conversation centered on ${conversation.topic || topic}.`;
-}
-
-function buildEvidenceSupportReason(topic: string, conversation: ConversationReviewRow | null, evidenceCount: number) {
-  if (!conversation) {
-    return evidenceCount <= 1
-      ? "This is an early signal from saved conversation evidence, so it should be verified before being treated as broad."
-      : `This supports ${topic} because multiple saved conversations cite the same topic.`;
-  }
-
-  return `This supports ${topic} because ${conversation.studentName}'s conversation is a concrete source tied to ${conversation.title || conversation.topic}.`;
-}
-
-function readInsightString(value: unknown, fieldNames: string[]) {
-  const record = asInsightRecord(value);
-
-  for (const fieldName of fieldNames) {
-    const fieldValue = record[fieldName];
-
-    if (typeof fieldValue === "string" && fieldValue.trim()) {
-      return fieldValue.trim();
-    }
-  }
-
-  return "";
-}
-
-function readInsightNumber(value: unknown, fieldNames: string[]) {
-  const record = asInsightRecord(value);
-
-  for (const fieldName of fieldNames) {
-    const fieldValue = record[fieldName];
-
-    if (typeof fieldValue === "number" && Number.isFinite(fieldValue)) {
-      return fieldValue;
-    }
-
-    if (typeof fieldValue === "string") {
-      const parsedValue = Number(fieldValue);
-
-      if (Number.isFinite(parsedValue)) {
-        return parsedValue;
-      }
-    }
-  }
-
-  return null;
-}
-
-function asInsightRecord(value: unknown): InsightRecord {
-  return value && typeof value === "object" ? (value as InsightRecord) : {};
-}
-
-function lowercaseFirst(value: string) {
-  return value ? value.charAt(0).toLowerCase() + value.slice(1) : value;
 }
 
 function formatMathNotationLabel(value: string) {
@@ -6319,6 +5834,38 @@ function formatThinkingTimeLabel(value: string) {
   }
 
   return "Medium";
+}
+
+function formatConversationRetention(value: string) {
+  if (value === "30-days") {
+    return "30 days";
+  }
+
+  if (value === "90-days") {
+    return "90 days";
+  }
+
+  if (value === "1-year") {
+    return "1 year";
+  }
+
+  return "Forever";
+}
+
+function formatSourceTypePreference(value: string) {
+  if (value === "student-visible") {
+    return "Student-visible";
+  }
+
+  if (value === "teacher-review") {
+    return "Teacher review";
+  }
+
+  if (value === "hidden") {
+    return "Hidden";
+  }
+
+  return "Inherit defaults";
 }
 
 function KnowledgeToggle({
@@ -6534,18 +6081,6 @@ function formatSectionLabel(section: string) {
   }
 
   return /^[0-9A-Z]$/i.test(trimmedSection) ? `Section ${trimmedSection}` : trimmedSection;
-}
-
-function formatInsightsDateLabel(date: Date) {
-  return `Today · ${overviewDateFormatter.format(date)}`;
-}
-
-function formatInsightItemId(itemId: string) {
-  return itemId
-    .replace(/[-_]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function getInitials(name: string, email: string) {
@@ -6936,23 +6471,6 @@ function TeacherSecondarySidebar({
   );
 }
 
-function RosterStatCard({
-  label,
-  tone,
-  value
-}: {
-  label: string;
-  tone?: "positive" | "warning";
-  value: string;
-}) {
-  return (
-    <article className={`roster-stat-card ${tone ?? ""}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </article>
-  );
-}
-
 function OverviewMetricCard({
   icon,
   isTinted,
@@ -7063,251 +6581,6 @@ function formatOverviewAttention(tone: TeacherOverviewStatusTone) {
   }
 
   return capitalizeLabel(tone);
-}
-
-function StudentLearningProfileCard({
-  isSavingAction,
-  canForceUpdate,
-  onApprove,
-  onClearDraft,
-  onDisable,
-  onForceSevenDays,
-  onUpdateNow,
-  profile,
-  statusMessage
-}: {
-  canForceUpdate: boolean;
-  isSavingAction: string;
-  onApprove: () => void;
-  onClearDraft: () => void;
-  onDisable: () => void;
-  onForceSevenDays: () => void;
-  onUpdateNow: () => void;
-  profile: StudentLearningProfileDocument | null;
-  statusMessage: string;
-}) {
-  const activeProfile = profile?.activeProfile ?? null;
-  const draftProfile = profile?.draftProfile ?? null;
-  const [selectedProfileView, setSelectedProfileView] = useState<"active" | "draft" | null>("draft");
-  const displayProfile =
-    selectedProfileView === "active" && activeProfile
-      ? activeProfile
-      : selectedProfileView === "draft" && draftProfile
-        ? draftProfile
-        : null;
-  const testingStrategies = displayProfile?.triedStrategies.filter(isTestingStrategy).slice(0, 4) ?? [];
-  const profileChanges = activeProfile && draftProfile ? buildLearningProfileChanges(activeProfile, draftProfile) : [];
-
-  return (
-    <section className="student-detail-card learning-profile-card">
-      <div className="student-detail-card-heading">
-        <div>
-          <h4>Learning profile</h4>
-          <span className="learning-profile-status">
-            {formatLearningProfileStatus(profile)}
-            {profile?.lastSuccessfulUpdateAt ? ` / updated ${formatConversationDate(profile.lastSuccessfulUpdateAt)}` : ""}
-          </span>
-        </div>
-        <div className="learning-profile-heading-actions">
-          <button disabled={Boolean(isSavingAction)} type="button" onClick={onUpdateNow}>
-            {isSavingAction === "update" ? "Updating" : "Update"}
-          </button>
-          {canForceUpdate ? (
-            <button disabled={Boolean(isSavingAction)} type="button" onClick={onForceSevenDays}>
-              Force 7d
-            </button>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="learning-profile-counts">
-        <span>{profile?.pendingConversationCount ?? 0} pending conversations</span>
-        <span>{profile?.pendingStudentMessageCount ?? 0} pending student messages</span>
-      </div>
-      {statusMessage ? <p className="learning-profile-status-note">{statusMessage}</p> : null}
-
-      {profileChanges.length ? (
-        <div className="learning-profile-content">
-          <LearningProfileList title="Model change notes" items={draftProfile?.profileChangeNotes ?? []} />
-          <LearningProfileList title="Changes in new draft" items={profileChanges} />
-        </div>
-      ) : null}
-
-      {activeProfile || draftProfile ? (
-        <div className="learning-profile-view-tabs" aria-label="Learning profile versions">
-          <button
-            aria-pressed={selectedProfileView === "active"}
-            disabled={!activeProfile}
-            type="button"
-            onClick={() => setSelectedProfileView(selectedProfileView === "active" ? null : "active")}
-          >
-            Reviewed profile
-          </button>
-          <button
-            aria-pressed={selectedProfileView === "draft"}
-            disabled={!draftProfile}
-            type="button"
-            onClick={() => setSelectedProfileView(selectedProfileView === "draft" ? null : "draft")}
-          >
-            New draft
-          </button>
-        </div>
-      ) : null}
-
-      {displayProfile ? (
-        <div className="learning-profile-content">
-          {displayProfile.summary ? <p className="learning-profile-summary">{displayProfile.summary}</p> : null}
-          <LearningProfileList title="Effective supports" items={displayProfile.effectiveSupports} />
-          <LearningProfileList title="Less effective supports" items={displayProfile.lessEffectiveSupports} />
-          <LearningProfileStrategyList strategies={testingStrategies} />
-          <LearningProfileList title="Try next" items={displayProfile.strategiesToTryNext} />
-          <LearningProfileList title="Notable improvements" items={displayProfile.notableImprovements} />
-          <LearningProfileList title="Evidence notes" items={displayProfile.evidence.map((evidence) => evidence.note)} />
-        </div>
-      ) : (
-        <p className="learning-profile-empty">
-          {activeProfile || draftProfile ? "Select a profile version to view it." : "No reviewed learning profile yet."}
-        </p>
-      )}
-
-      <div className="learning-profile-actions">
-        <button disabled={!draftProfile || Boolean(isSavingAction)} type="button" onClick={onApprove}>
-          {isSavingAction === "approve" ? "Approving" : "Approve"}
-        </button>
-        <button disabled={!activeProfile || Boolean(isSavingAction)} type="button" onClick={profile?.active ? onDisable : onApprove}>
-          {profile?.active
-            ? isSavingAction === "disable"
-              ? "Disabling"
-              : "Disable"
-            : isSavingAction === "approve"
-              ? "Enabling"
-              : "Enable"}
-        </button>
-        <button disabled={!draftProfile || Boolean(isSavingAction)} type="button" onClick={onClearDraft}>
-          {isSavingAction === "clearDraft" ? "Clearing" : "Clear draft"}
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function LearningProfileList({ items, title }: { items: string[]; title: string }) {
-  const visibleItems = items.filter(Boolean).slice(0, 4);
-
-  if (!visibleItems.length) {
-    return null;
-  }
-
-  return (
-    <div className="learning-profile-list">
-      <strong>{title}</strong>
-      <ul>
-        {visibleItems.map((item) => (
-          <li key={item}>{item}</li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function LearningProfileStrategyList({ strategies }: { strategies: StudentLearningTriedStrategy[] }) {
-  if (!strategies.length) {
-    return null;
-  }
-
-  return (
-    <div className="learning-profile-list">
-      <strong>Strategies being tested</strong>
-      <ul>
-        {strategies.map((strategy) => (
-          <li key={strategy.id}>
-            {strategy.strategy}
-            {strategy.nextAction ? ` / ${strategy.nextAction}` : ""}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function isTestingStrategy(strategy: StudentLearningTriedStrategy) {
-  return strategy.status === "currently_testing" || strategy.status === "try_next";
-}
-
-function buildLearningProfileChanges(
-  activeProfile: StudentLearningProfileContent,
-  draftProfile: StudentLearningProfileContent
-) {
-  return [
-    ...summaryChange(activeProfile.summary, draftProfile.summary),
-    ...arrayProfileChanges("effective support", activeProfile.effectiveSupports, draftProfile.effectiveSupports),
-    ...arrayProfileChanges("less effective support", activeProfile.lessEffectiveSupports, draftProfile.lessEffectiveSupports),
-    ...arrayProfileChanges("strategy to try", activeProfile.strategiesToTryNext, draftProfile.strategiesToTryNext),
-    ...arrayProfileChanges("avoid note", activeProfile.avoid, draftProfile.avoid),
-    ...arrayProfileChanges("open question", activeProfile.openQuestions, draftProfile.openQuestions),
-    ...arrayProfileChanges("notable improvement", activeProfile.notableImprovements, draftProfile.notableImprovements),
-    ...strategyProfileChanges(activeProfile.triedStrategies, draftProfile.triedStrategies)
-  ].slice(0, 8);
-}
-
-function summaryChange(activeSummary: string, draftSummary: string) {
-  if (normalizeProfileComparisonText(activeSummary) === normalizeProfileComparisonText(draftSummary)) {
-    return [];
-  }
-
-  if (!activeSummary.trim() && draftSummary.trim()) {
-    return ["Added summary."];
-  }
-
-  if (activeSummary.trim() && !draftSummary.trim()) {
-    return ["Removed summary."];
-  }
-
-  return ["Updated summary wording."];
-}
-
-function arrayProfileChanges(label: string, activeItems: string[], draftItems: string[]) {
-  const activeSet = new Set(activeItems.map(normalizeProfileComparisonText));
-  const draftSet = new Set(draftItems.map(normalizeProfileComparisonText));
-  const added = draftItems
-    .filter((item) => item.trim() && !activeSet.has(normalizeProfileComparisonText(item)))
-    .map((item) => `Added ${label}: ${item}`);
-  const removed = activeItems
-    .filter((item) => item.trim() && !draftSet.has(normalizeProfileComparisonText(item)))
-    .map((item) => `Removed ${label}: ${item}`);
-
-  return [...added, ...removed];
-}
-
-function strategyProfileChanges(
-  activeStrategies: StudentLearningTriedStrategy[],
-  draftStrategies: StudentLearningTriedStrategy[]
-) {
-  const activeByKey = new Map(activeStrategies.map((strategy) => [strategyComparisonKey(strategy), strategy]));
-  const changes: string[] = [];
-
-  draftStrategies.forEach((strategy) => {
-    const activeStrategy = activeByKey.get(strategyComparisonKey(strategy));
-
-    if (!activeStrategy) {
-      changes.push(`Added strategy: ${strategy.strategy}`);
-      return;
-    }
-
-    if (activeStrategy.status !== strategy.status) {
-      changes.push(`Changed strategy status: ${strategy.strategy} (${activeStrategy.status} to ${strategy.status})`);
-    }
-  });
-
-  return changes;
-}
-
-function strategyComparisonKey(strategy: StudentLearningTriedStrategy) {
-  return normalizeProfileComparisonText(strategy.id || strategy.strategy);
-}
-
-function normalizeProfileComparisonText(value: string) {
-  return value.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 const TeacherTranscriptMessage = memo(function TeacherTranscriptMessage({
@@ -7593,6 +6866,40 @@ function EyeIcon() {
   );
 }
 
+function ShieldIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" height="18" viewBox="0 0 24 24" width="18">
+      <path
+        d="M12 3.4 19 6v5.1c0 4.4-2.7 7.9-7 9.5-4.3-1.6-7-5.1-7-9.5V6l7-2.6Z"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+      <path
+        d="m9.3 12 1.8 1.8 3.9-4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+    </svg>
+  );
+}
+
+function BellIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" height="18" viewBox="0 0 24 24" width="18">
+      <path
+        d="M18 10.4c0-3.4-2.1-5.6-6-5.6s-6 2.2-6 5.6v3.8l-1.4 2.3h14.8L18 14.2v-3.8Z"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+      <path d="M9.5 18.8a2.7 2.7 0 0 0 5 0" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+    </svg>
+  );
+}
+
 function SearchIcon() {
   return (
     <svg aria-hidden="true" fill="none" height="17" viewBox="0 0 24 24" width="17">
@@ -7623,6 +6930,66 @@ function LinkIcon() {
         strokeLinejoin="round"
         strokeWidth="2"
       />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" height="18" viewBox="0 0 24 24" width="18">
+      <rect
+        height="13"
+        rx="2"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="2"
+        width="13"
+        x="8"
+        y="8"
+      />
+      <path
+        d="M5 16H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v1"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" height="18" viewBox="0 0 24 24" width="18">
+      <path d="M20 6v5h-5" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+      <path d="M4 18v-5h5" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+      <path
+        d="M6.2 9A7 7 0 0 1 18.7 7.8L20 11M4 13l1.3 3.2A7 7 0 0 0 17.8 15"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+    </svg>
+  );
+}
+
+function UserPlusIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" height="18" viewBox="0 0 24 24" width="18">
+      <path d="M15 19a6 6 0 0 0-12 0" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+      <path d="M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" stroke="currentColor" strokeWidth="2" />
+      <path d="M19 8v6M16 11h6" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" height="18" viewBox="0 0 24 24" width="18">
+      <path d="M12 3v12" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+      <path d="m7 10 5 5 5-5" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+      <path d="M5 20h14" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
     </svg>
   );
 }
@@ -8367,25 +7734,6 @@ function filterRosterRows(rows: RosterRow[], query: string, filter: RosterFilter
   });
 }
 
-function buildRosterStats(rows: RosterRow[]) {
-  let activeToday = 0;
-  let noActivity = 0;
-  let totalQuestions = 0;
-
-  for (const row of rows) {
-    activeToday += Number(row.activeToday);
-    noActivity += Number(row.status === "No activity");
-    totalQuestions += row.questionsPerDay;
-  }
-
-  return {
-    activeToday,
-    averageQuestions: rows.length ? totalQuestions / rows.length : 0,
-    noActivity,
-    totalStudents: rows.length
-  };
-}
-
 function formatStatNumber(value: number) {
   return value.toLocaleString(undefined, {
     maximumFractionDigits: 1,
@@ -8432,52 +7780,6 @@ function formatConversationMeta(conversation: StudentConversationSummary) {
   ].filter(Boolean).join(" / ");
 }
 
-function formatLearningProfileStatus(profile: StudentLearningProfileDocument | null) {
-  if (!profile) {
-    return "No profile";
-  }
-
-  if (!profile.active) {
-    return profile.draftProfile ? "Draft awaiting review" : "Disabled";
-  }
-
-  if (!profile.teacherReviewed) {
-    return "Draft awaiting review";
-  }
-
-  return `Active / ${profile.confidence} confidence`;
-}
-
-function formatLearningProfileUpdateResult(result: { reason?: string } | undefined, forced: boolean) {
-  if (result?.reason === "updated") {
-    return forced ? "Created a new draft from the past 7 days." : "Created a new draft for teacher review.";
-  }
-
-  if (result?.reason === "below_threshold") {
-    return "Not enough new data yet. Use Force 7d to draft from the past 7 days.";
-  }
-
-  if (result?.reason === "no_recent_data") {
-    return "No conversations or student messages found in the past 7 days.";
-  }
-
-  if (result?.reason === "model_unavailable") {
-    return "The model update was unavailable. Check OPENROUTER_API_KEY.";
-  }
-
-  return "";
-}
-
-function formatInsightDateOnly(value: unknown) {
-  const date = coerceDate(value);
-
-  if (!date) {
-    return String(value ?? "").trim();
-  }
-
-  return shortDateFormatter.format(date);
-}
-
 function formatClassError(caughtError: unknown, fallback: string) {
   const message = caughtError instanceof Error ? caughtError.message : fallback;
 
@@ -8522,6 +7824,14 @@ async function copyTextToClipboard(text: string) {
   } finally {
     document.body.removeChild(textArea);
   }
+}
+
+function buildClassInviteUrl(classCode: string) {
+  const inviteUrl = new URL("/auth", window.location.origin);
+  inviteUrl.searchParams.set("role", "student");
+  inviteUrl.searchParams.set("classId", classCode);
+
+  return inviteUrl.toString();
 }
 
 function materialJobToUploadProgress(progress: MaterialJobProgress): MaterialUploadProgress {

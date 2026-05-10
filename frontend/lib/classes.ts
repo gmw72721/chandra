@@ -24,7 +24,11 @@ import {
 import {
   type AnswerPolicySettings,
   type ClassModelSettings,
+  type ClassCoTeacher,
+  type ClassPrivacySettings,
+  type NotificationSettings,
   type ResponseFormatSettings,
+  type SourceDefaultsSettings,
   type SourceUsageSettings,
   type TutorBehavior
 } from "./class-settings";
@@ -46,11 +50,16 @@ export type TeacherClass = {
   answerPolicy?: AnswerPolicySettings;
   behaviorTitle?: TutorBehavior;
   behaviorInstructions?: string;
+  coTeacherIds?: string[];
+  coTeachers?: Record<string, ClassCoTeacher>;
   defaultAssignmentContext?: string;
   modelSettings?: ClassModelSettings;
+  notificationSettings?: NotificationSettings;
   openingMessage?: string;
+  privacySettings?: ClassPrivacySettings;
   refusalStyle?: string;
   responseFormat?: ResponseFormatSettings;
+  sourceDefaults?: SourceDefaultsSettings;
   sourceUsage?: SourceUsageSettings;
   studentFacingInstructions?: string;
   createdAt?: unknown;
@@ -115,18 +124,45 @@ export function subscribeToTeacherClasses(
   assertFirestoreReady();
 
   const classesQuery = query(collection(db!, "classes"), where("teacherId", "==", teacherId));
+  const coTeacherClassesQuery = query(collection(db!, "classes"), where("coTeacherIds", "array-contains", teacherId));
+  const classMap = new Map<string, TeacherClass>();
+  const emitClasses = () => {
+    callback(Array.from(classMap.values()).sort((firstClass, secondClass) => firstClass.name.localeCompare(secondClass.name)));
+  };
 
-  return onSnapshot(
+  const unsubscribeOwned = onSnapshot(
     classesQuery,
     (snapshot) => {
-      const classes = snapshot.docs
-        .map((classDoc) => ({ id: classDoc.id, ...classDoc.data() }) as TeacherClass)
-        .sort((firstClass, secondClass) => firstClass.name.localeCompare(secondClass.name));
-
-      callback(classes);
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === "removed") {
+          classMap.delete(change.doc.id);
+        } else {
+          classMap.set(change.doc.id, { id: change.doc.id, ...change.doc.data() } as TeacherClass);
+        }
+      });
+      emitClasses();
     },
     (error) => onError?.(error)
   );
+  const unsubscribeCoTeacher = onSnapshot(
+    coTeacherClassesQuery,
+    (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === "removed") {
+          classMap.delete(change.doc.id);
+        } else {
+          classMap.set(change.doc.id, { id: change.doc.id, ...change.doc.data() } as TeacherClass);
+        }
+      });
+      emitClasses();
+    },
+    (error) => onError?.(error)
+  );
+
+  return () => {
+    unsubscribeOwned();
+    unsubscribeCoTeacher();
+  };
 }
 
 export function subscribeToMaterialJob(
@@ -272,10 +308,13 @@ export async function updateTeacherClassSettings({
   defaultAssignmentContext,
   modelSettings,
   name,
+  notificationSettings,
   openingMessage,
+  privacySettings,
   refusalStyle,
   responseFormat,
   section,
+  sourceDefaults,
   sourceUsage,
   studentFacingInstructions,
   themeColor
@@ -288,10 +327,13 @@ export async function updateTeacherClassSettings({
   defaultAssignmentContext: string;
   modelSettings: ClassModelSettings;
   name: string;
+  notificationSettings: NotificationSettings;
   openingMessage: string;
+  privacySettings: ClassPrivacySettings;
   refusalStyle: string;
   responseFormat: ResponseFormatSettings;
   section: string;
+  sourceDefaults: SourceDefaultsSettings;
   sourceUsage: SourceUsageSettings;
   studentFacingInstructions: string;
   themeColor: TeacherClassThemeColor;
@@ -306,10 +348,13 @@ export async function updateTeacherClassSettings({
     defaultAssignmentContext: defaultAssignmentContext.trim(),
     modelSettings,
     name: name.trim(),
+    notificationSettings,
     openingMessage: openingMessage.trim(),
+    privacySettings,
     refusalStyle: refusalStyle.trim(),
     responseFormat,
     section: section.trim(),
+    sourceDefaults,
     sourceUsage,
     studentFacingInstructions: studentFacingInstructions.trim(),
     themeColor: normalizeTeacherClassThemeColor(themeColor)

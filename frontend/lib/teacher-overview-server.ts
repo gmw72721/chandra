@@ -39,20 +39,27 @@ export async function getTeacherClassOverview({
 
   const overviewTimezone = normalizeOverviewTimezone(timezone);
   const overviewDate = normalizeOverviewDate(date, overviewTimezone);
-  const [rosterActivity, conversations, knowledgeStatus, learningProfileRows, insightContext] = await Promise.all([
+  const previousOverviewDate = shiftOverviewDate(overviewDate, -1);
+  const [rosterActivity, previousRosterActivity, conversations, knowledgeStatus, learningProfileRows] = await Promise.all([
     listTeacherRosterActivity({ classId, date: overviewDate, timezone: overviewTimezone }),
+    listTeacherRosterActivity({ classId, date: previousOverviewDate, timezone: overviewTimezone }),
     listTeacherClassConversations({ classId }),
     buildKnowledgeStatus(classId),
-    buildLearningProfileRows(classId),
-    getOverviewInsightContext(classId)
+    buildLearningProfileRows(classId)
   ]);
   const conversationsToday = conversations.filter((conversation) =>
     isOverviewDate(conversation.lastMessageAt, overviewDate, overviewTimezone)
   );
+  const conversationsPreviousDay = conversations.filter((conversation) =>
+    isOverviewDate(conversation.lastMessageAt, previousOverviewDate, overviewTimezone)
+  );
   const questionsToday = rosterActivity.reduce((sum, row) => sum + row.questionsToday, 0);
+  const questionsPreviousDay = previousRosterActivity.reduce((sum, row) => sum + row.questionsToday, 0);
   const activeStudentsToday = rosterActivity.filter((row) => row.status === "active" || row.questionsToday > 0).length;
+  const inactiveStudentsToday = Math.max(rosterActivity.length - activeStudentsToday, 0);
   const priorityRows = buildPriorityRows(rosterActivity, conversations);
   const reviewQueueRows = buildReviewQueueRows(conversations, overviewDate, overviewTimezone);
+  const learningProfileCounts = countLearningProfileStatuses(learningProfileRows);
 
   return {
     classId,
@@ -60,18 +67,22 @@ export async function getTeacherClassOverview({
     dateLabel: formatOverviewDateLabel(overviewDate),
     generatedAt: new Date().toISOString(),
     knowledgeStatus,
-    learningProfileRows,
+    learningProfileRows: learningProfileRows.slice(0, maxLearningProfileRows),
     metrics: {
       activeNow: rosterActivity.filter((row) => row.status === "active").length,
       averageQuestionsPerStudentPerDay: averageQuestionsPerStudentDay(rosterActivity),
-      noActivity: rosterActivity.filter((row) => row.status === "no_activity").length,
+      conversationCountPreviousDay: conversationsPreviousDay.length,
+      draftLearningProfiles: learningProfileCounts.draft,
+      missingLearningProfiles: learningProfileCounts.missing,
+      noActivity: inactiveStudentsToday,
+      questionsPreviousDay,
       questionsToday,
+      reviewedLearningProfiles: learningProfileCounts.reviewed,
       totalConversations: conversations.length,
       totalStudents: rosterActivity.length
     },
     nextActions: buildNextActions({
       conversations,
-      insightContext,
       knowledgeStatus,
       learningProfileRows,
       priorityRows,
@@ -92,16 +103,14 @@ export async function getTeacherClassOverview({
     reviewQueueRows,
     summary: {
       activeStudentsToday,
-      body:
-        insightContext.body ||
-        buildFallbackSummaryBody({
+      body: buildFallbackSummaryBody({
           activeStudentsToday,
           conversationCountToday: conversationsToday.length,
           questionsToday
         }),
       conversationCountToday: conversationsToday.length,
       questionsToday,
-      title: insightContext.title || "Today's Summary",
+      title: "Today's Summary",
       topTopics: buildTopTopics(conversationsToday.length ? conversationsToday : conversations)
     },
     timezone: overviewTimezone
@@ -257,8 +266,24 @@ async function buildLearningProfileRows(classId: string): Promise<TeacherClassOv
         tone: status.tone
       };
     })
-    .sort(learningProfileRowSort)
-    .slice(0, maxLearningProfileRows);
+    .sort(learningProfileRowSort);
+}
+
+function countLearningProfileStatuses(rows: TeacherClassOverviewLearningProfileRow[]) {
+  return rows.reduce(
+    (counts, row) => {
+      if (row.status === "Active") {
+        counts.reviewed += 1;
+      } else if (row.status === "Draft") {
+        counts.draft += 1;
+      } else {
+        counts.missing += 1;
+      }
+
+      return counts;
+    },
+    { draft: 0, missing: 0, reviewed: 0 }
+  );
 }
 
 async function buildKnowledgeStatus(classId: string): Promise<TeacherClassOverviewKnowledgeStat[]> {
@@ -283,94 +308,6 @@ async function buildKnowledgeStatus(classId: string): Promise<TeacherClassOvervi
     { label: "Teacher-only", tone: "teacher-only", value: teacherOnly },
     { label: "Active for students", tone: "ready", value: activeForStudents }
   ];
-}
-
-type OverviewInsightRecommendation = {
-  action: "inspect" | "upload" | "adjust" | "approve";
-  evidenceConversationIds: string[];
-  evidenceCount: number;
-  id: string;
-  priority: "high" | "medium" | "low";
-  title: string;
-};
-
-type OverviewInsightContext = {
-  body: string;
-  dismissedItemIds: Set<string>;
-  notUsefulItemIds: Set<string>;
-  recommendations: OverviewInsightRecommendation[];
-  resolvedItemIds: Set<string>;
-  title: string;
-  usefulItemIds: Set<string>;
-};
-
-async function getOverviewInsightContext(classId: string): Promise<OverviewInsightContext> {
-  const snapshot = await adminDb!.collection("classes").doc(classId).collection("teacherInsights").doc("today").get();
-  const data = snapshot.data() ?? {};
-  const insight = data.insight && typeof data.insight === "object" ? (data.insight as Record<string, unknown>) : {};
-  const dailySummary =
-    insight.dailySummary && typeof insight.dailySummary === "object"
-      ? (insight.dailySummary as Record<string, unknown>)
-      : {};
-
-  return {
-    body: conciseSummaryText(String(dailySummary.body ?? "")),
-    dismissedItemIds: stringSet(data.dismissedItemIds),
-    notUsefulItemIds: stringSet(data.notUsefulItemIds),
-    recommendations: Array.isArray(insight.recommendations)
-      ? insight.recommendations
-          .map(normalizeOverviewInsightRecommendation)
-          .filter((recommendation): recommendation is OverviewInsightRecommendation => Boolean(recommendation))
-      : [],
-    resolvedItemIds: stringSet(data.resolvedItemIds),
-    usefulItemIds: stringSet(data.usefulItemIds),
-    title: conciseSummaryText(String(dailySummary.title ?? ""))
-  };
-}
-
-function normalizeOverviewInsightRecommendation(value: unknown): OverviewInsightRecommendation | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-
-  const source = value as Record<string, unknown>;
-  const title = conciseSummaryText(String(source.title ?? ""));
-
-  if (!title) {
-    return null;
-  }
-
-  return {
-    action: normalizeOverviewInsightRecommendationAction(source.action),
-    evidenceConversationIds: Array.isArray(source.evidenceConversationIds)
-      ? Array.from(new Set(source.evidenceConversationIds.map(String).filter(Boolean))).slice(0, 6)
-      : [],
-    evidenceCount: Math.max(0, Number(source.evidenceCount ?? 0)),
-    id: String(source.id ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-")).replace(/^-+|-+$/g, "") || title,
-    priority: source.priority === "high" || source.priority === "medium" ? source.priority : "low",
-    title
-  };
-}
-
-function normalizeOverviewInsightRecommendationAction(value: unknown): OverviewInsightRecommendation["action"] {
-  return value === "upload" || value === "adjust" || value === "approve" ? value : "inspect";
-}
-
-function stringSet(value: unknown) {
-  return new Set(Array.isArray(value) ? value.map(String).filter(Boolean) : []);
-}
-
-function conciseSummaryText(value: string) {
-  const normalized = value.replace(/\s+/g, " ").trim();
-
-  if (!normalized) {
-    return "";
-  }
-
-  const firstSentence = normalized.match(/^.*?[.!?](?:\s|$)/)?.[0].trim() || normalized;
-  const summary = firstSentence.length >= 50 ? firstSentence : normalized;
-
-  return summary.length > maxSummaryBodyLength ? `${summary.slice(0, maxSummaryBodyLength - 3).trim()}...` : summary;
 }
 
 function buildFallbackSummaryBody({
@@ -406,7 +343,6 @@ type OverviewActionCandidate = TeacherClassOverviewNextAction & {
 
 function buildNextActions({
   conversations,
-  insightContext,
   knowledgeStatus,
   learningProfileRows,
   priorityRows,
@@ -414,7 +350,6 @@ function buildNextActions({
   rosterActivity
 }: {
   conversations: TeacherConversationReviewSummary[];
-  insightContext: OverviewInsightContext;
   knowledgeStatus: TeacherClassOverviewKnowledgeStat[];
   learningProfileRows: TeacherClassOverviewLearningProfileRow[];
   priorityRows: TeacherClassOverviewPriorityRow[];
@@ -787,59 +722,6 @@ function buildNextActions({
     }, "knowledge:spot-check", ["Active sources are available", "Quality-control today's answers"]);
   }
 
-  insightContext.recommendations
-    .filter((recommendation) => !insightContext.resolvedItemIds.has(recommendation.id))
-    .filter((recommendation) => !insightContext.dismissedItemIds.has(recommendation.id))
-    .filter((recommendation) => !insightContext.notUsefulItemIds.has(recommendation.id))
-    .slice(0, 4)
-    .forEach((recommendation) => {
-      const action = actionForInsightRecommendation(recommendation, {
-        draftProfiles,
-        totalUploaded
-      });
-      const firstEvidenceConversationId = recommendation.evidenceConversationIds.find((conversationId) =>
-        conversations.some((conversation) => conversation.id === conversationId)
-      );
-      const usefulBoost = insightContext.usefulItemIds.has(recommendation.id) ? 10 : 0;
-      const recommendationPriority = recommendation.priority === "high" ? 84 : recommendation.priority === "medium" ? 66 : 48;
-
-      addAction({
-        action,
-        conversationId: action === "reviewConversations" ? firstEvidenceConversationId : undefined,
-        detail: `${recommendation.title}${recommendation.evidenceCount ? ` (${recommendation.evidenceCount} supporting ${recommendation.evidenceCount === 1 ? "chat" : "chats"})` : ""}.`,
-        evidenceConversationIds: recommendation.evidenceConversationIds,
-        id: `insight-${recommendation.id}`,
-        label: labelForInsightRecommendation(recommendation),
-        tone: recommendation.priority === "high" ? "follow-up" : "teacher-only"
-      }, {
-        confidence: clampScore(72 + usefulBoost),
-        effort: action === "addKnowledge" ? 70 : 42,
-        evidence: clampScore(45 + recommendation.evidenceCount * 9 + recommendation.evidenceConversationIds.length * 6),
-        freshness: 78,
-        impact: recommendationPriority,
-        urgency: recommendationPriority
-      }, `insight:${recommendation.id}`, [
-        `${capitalizeOverviewWord(recommendation.priority)} planning signal`,
-        recommendation.evidenceCount ? `${recommendation.evidenceCount} supporting ${recommendation.evidenceCount === 1 ? "chat" : "chats"}` : null,
-        insightContext.usefulItemIds.has(recommendation.id) ? "Marked useful before" : null
-      ]);
-    });
-
-  addAction({
-    action: "openInsights",
-    detail: "Review the strongest learning pattern before planning tomorrow's lesson.",
-    id: "open-insights",
-    label: "Review class insight",
-    tone: "teacher-only"
-  }, {
-    confidence: 64,
-    effort: 32,
-    evidence: insightContext.body ? 42 : 22,
-    freshness: 34,
-    impact: 38,
-    urgency: 28
-  }, "insights:fallback", [insightContext.body ? "Daily insight summary is available" : "Fallback planning check"]);
-
   addAction({
     action: "openStudentView",
     detail: "Preview what students see after your latest changes.",
@@ -1010,44 +892,6 @@ function summarizeStudentConversationSignals(conversations: TeacherConversationR
       stuckOutcomeCount: 0
     }
   );
-}
-
-function actionForInsightRecommendation(
-  recommendation: OverviewInsightRecommendation,
-  context: {
-    draftProfiles: TeacherClassOverviewLearningProfileRow[];
-    totalUploaded: number;
-  }
-): TeacherClassOverviewNextAction["action"] {
-  if (recommendation.action === "upload") {
-    return context.totalUploaded ? "openKnowledge" : "addKnowledge";
-  }
-
-  if (recommendation.action === "approve" && context.draftProfiles.length) {
-    return "reviewLearningProfiles";
-  }
-
-  if (recommendation.action === "inspect" && recommendation.evidenceConversationIds.length) {
-    return "reviewConversations";
-  }
-
-  return "openInsights";
-}
-
-function labelForInsightRecommendation(recommendation: OverviewInsightRecommendation) {
-  if (recommendation.action === "upload") {
-    return "Add missing class source";
-  }
-
-  if (recommendation.action === "approve") {
-    return "Approve learner profile";
-  }
-
-  if (recommendation.action === "adjust") {
-    return "Plan a teaching scaffold";
-  }
-
-  return "Review insight evidence";
 }
 
 function medianNumber(values: number[]) {
@@ -1312,6 +1156,17 @@ function normalizeOverviewDate(date: string | null | undefined, timezone: string
   }
 
   return dateKeyInTimezone(new Date().toISOString(), timezone);
+}
+
+function shiftOverviewDate(date: string, dayDelta: number) {
+  const parsedDate = new Date(`${date}T12:00:00.000Z`);
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return date;
+  }
+
+  parsedDate.setUTCDate(parsedDate.getUTCDate() + dayDelta);
+  return parsedDate.toISOString().slice(0, 10);
 }
 
 function isOverviewDate(value: unknown, date: string, timezone: string) {

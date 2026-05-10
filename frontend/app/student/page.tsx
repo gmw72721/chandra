@@ -123,6 +123,7 @@ function StudentWorkspace() {
   const [themePreferenceError, setThemePreferenceError] = useState("");
   const [isSavingThemePreference, setIsSavingThemePreference] = useState(false);
   const [accountDisplayName, setAccountDisplayName] = useState<string | null>(null);
+  const [accountUsername, setAccountUsername] = useState<string | null>(null);
   const [accountSettingsError, setAccountSettingsError] = useState("");
   const [isSavingAccountSettings, setIsSavingAccountSettings] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -245,6 +246,7 @@ function StudentWorkspace() {
   const conversationMessageCount = selectedConversation?.messageCount ?? 0;
   const accountName = profile?.displayName ?? user?.displayName ?? "Student";
   const accountEmail = profile?.email ?? user?.email ?? "";
+  const accountUsernameValue = profile?.username ?? accountEmail;
   const { isUploadingAttachment, readyComposerAttachments } = useMemo(() => {
     const readyAttachments: ComposerAttachment[] = [];
     let hasUploadInFlight = false;
@@ -631,11 +633,13 @@ function StudentWorkspace() {
         setSelectedConversationClassId(activeCourseId);
       }
 
-      try {
-        setConversationSummaries(await fetchStudentConversationSummaries({ classId: activeCourseId, token }));
-        setConversationLoadError("");
-      } catch (caughtError) {
-        setConversationLoadError(describeStudentConversationLoadError(caughtError));
+      if (!isTeacherPreview) {
+        try {
+          setConversationSummaries(await fetchStudentConversationSummaries({ classId: activeCourseId, token }));
+          setConversationLoadError("");
+        } catch (caughtError) {
+          setConversationLoadError(describeStudentConversationLoadError(caughtError));
+        }
       }
 
       setMessages((current) => [
@@ -707,9 +711,11 @@ function StudentWorkspace() {
         appearance: activeAppearance,
         displayName: accountDisplayName ?? accountName,
         themeColor: activeThemeColor,
-        uid: user.uid
+        uid: user.uid,
+        username: accountUsername ?? accountUsernameValue
       });
       setAccountDisplayName(null);
+      setAccountUsername(null);
     } catch (caughtError) {
       setAccountSettingsError(caughtError instanceof Error ? caughtError.message : "Account settings failed.");
     } finally {
@@ -955,6 +961,7 @@ function StudentWorkspace() {
           <StudentSettingsPanel
             accountEmail={accountEmail}
             accountDisplayName={accountDisplayName ?? accountName}
+            accountUsername={accountUsername ?? accountUsernameValue}
             accountSettingsError={accountSettingsError}
             activeAppearance={activeAppearance}
             activeClass={activeClass}
@@ -967,6 +974,7 @@ function StudentWorkspace() {
             role={profile?.role ?? "student"}
             themePreferenceError={themePreferenceError}
             onAccountDisplayNameChange={setAccountDisplayName}
+            onAccountUsernameChange={setAccountUsername}
             onSaveAccountSettings={saveAccountSettings}
             onSignOut={handleSignOut}
             onBackToChat={() => setStudentMainView("chat")}
@@ -1129,6 +1137,7 @@ const StudentChatMessage = memo(function StudentChatMessage({ message }: { messa
 function StudentSettingsPanel({
   accountEmail,
   accountDisplayName,
+  accountUsername,
   accountSettingsError,
   activeAppearance,
   activeClass,
@@ -1141,6 +1150,7 @@ function StudentSettingsPanel({
   role,
   themePreferenceError,
   onAccountDisplayNameChange,
+  onAccountUsernameChange,
   onSaveAccountSettings,
   onSignOut,
   onBackToChat,
@@ -1148,6 +1158,7 @@ function StudentSettingsPanel({
 }: {
   accountEmail: string;
   accountDisplayName: string;
+  accountUsername: string;
   accountSettingsError: string;
   activeAppearance: TeacherClassAppearance;
   activeClass: StudentVisibleClass | null;
@@ -1160,6 +1171,7 @@ function StudentSettingsPanel({
   role: string;
   themePreferenceError: string;
   onAccountDisplayNameChange: (displayName: string) => void;
+  onAccountUsernameChange: (username: string) => void;
   onSaveAccountSettings: () => Promise<void>;
   onSignOut: () => Promise<void>;
   onBackToChat: () => void;
@@ -1204,6 +1216,19 @@ function StudentSettingsPanel({
                 maxLength={80}
                 value={accountDisplayName}
                 onChange={(event) => onAccountDisplayNameChange(event.target.value)}
+              />
+            </div>
+            <div>
+              <label className="student-settings-control-label" htmlFor="student-account-username">
+                Username
+              </label>
+              <input
+                id="student-account-username"
+                autoCapitalize="none"
+                autoComplete="username"
+                maxLength={120}
+                value={accountUsername}
+                onChange={(event) => onAccountUsernameChange(event.target.value)}
               />
             </div>
           </div>

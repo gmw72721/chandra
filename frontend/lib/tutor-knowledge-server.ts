@@ -4,6 +4,7 @@ import { FieldValue, type DocumentReference } from "firebase-admin/firestore";
 import { isIP } from "net";
 import { PDFDocument } from "pdf-lib";
 import { adminAuth, adminDb, adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
+import { sourceDefaultsForMaterialKind } from "./class-settings";
 import { attachPdfSlicesToChunks } from "./pdf-embedding-chunks";
 import {
   classifyTutorKnowledgePage,
@@ -136,11 +137,30 @@ export async function authorizeClassTeacher(request: Request, classId: string) {
     throw new TutorKnowledgeHttpError("Class not found.", 404);
   }
 
-  if (classSnapshot.data()?.teacherId !== decodedToken.uid) {
+  const classData = classSnapshot.data() ?? {};
+  const coTeacherRole = readCoTeacherRole(classData.coTeachers, decodedToken.uid);
+
+  if (classData.teacherId !== decodedToken.uid && coTeacherRole !== "owner" && coTeacherRole !== "co-teacher") {
     throw new TutorKnowledgeHttpError("Only the class teacher can manage tutor knowledge.", 403);
   }
 
   return { classSnapshot, uid: decodedToken.uid };
+}
+
+function readCoTeacherRole(coTeachers: unknown, uid: string) {
+  if (!coTeachers || typeof coTeachers !== "object" || Array.isArray(coTeachers)) {
+    return "";
+  }
+
+  const coTeacher = (coTeachers as Record<string, unknown>)[uid];
+
+  if (!coTeacher || typeof coTeacher !== "object" || Array.isArray(coTeacher)) {
+    return "";
+  }
+
+  const role = (coTeacher as Record<string, unknown>).role;
+
+  return typeof role === "string" ? role : "";
 }
 
 export async function buildTutorKnowledgePreview(formData: FormData): Promise<TutorKnowledgePreview> {
@@ -271,7 +291,15 @@ export async function saveTutorKnowledge({
   }
 
   const materialType = materialTypeForKind(kind);
-  const sourceSettings = defaultSourceSettingsForKind(kind);
+  const classSnapshot = await adminDb!.collection("classes").doc(classId).get();
+  const configuredSourceDefaults = sourceDefaultsForMaterialKind(classSnapshot.data()?.sourceDefaults, kind);
+  const sourceSettings = normalizeTutorKnowledgeSourceSettings({
+    ...defaultSourceSettingsForKind(kind),
+    activeForStudents: configuredSourceDefaults.activeForStudents,
+    priority: configuredSourceDefaults.priority,
+    requireCitations: configuredSourceDefaults.citationsRequired,
+    teacherOnly: configuredSourceDefaults.teacherOnly
+  });
 
   await materialRef.set({
     classId,

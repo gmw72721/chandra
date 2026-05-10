@@ -10,7 +10,9 @@ export const runtime = "nodejs";
 type AccountSettingsBody = {
   appearance?: unknown;
   displayName?: unknown;
+  email?: unknown;
   themeColor?: unknown;
+  username?: unknown;
 };
 
 type AccountSettingsProfile = {
@@ -21,6 +23,7 @@ type AccountSettingsProfile = {
   role?: unknown;
   themeColor?: unknown;
   uid?: unknown;
+  username?: unknown;
 };
 
 class AccountSettingsError extends Error {
@@ -52,11 +55,22 @@ export async function PATCH(request: Request) {
     }
 
     const shouldUpdateDisplayName = bodyHasKey(body, "displayName");
+    const shouldUpdateEmail = bodyHasKey(body, "email");
+    const shouldUpdateUsername = bodyHasKey(body, "username");
+    const currentEmail = firstString(currentProfile.email, decodedToken.email).toLowerCase();
+    const tokenEmail = firstString(decodedToken.email).toLowerCase();
+    const email = shouldUpdateEmail
+      ? normalizeEmail(body.email, tokenEmail)
+      : currentEmail;
     const currentDisplayName =
       firstString(currentProfile.displayName, decodedToken.name, decodedToken.email) || "Chandra user";
+    const currentUsername = normalizeStoredUsername(currentProfile.username, currentEmail);
     const displayName = shouldUpdateDisplayName
       ? normalizeDisplayName(body.displayName)
       : currentDisplayName;
+    const username = shouldUpdateUsername
+      ? normalizeUsername(body.username, email)
+      : currentUsername;
     const appearance = bodyHasKey(body, "appearance")
       ? normalizeTeacherClassAppearance(body.appearance)
       : normalizeTeacherClassAppearance(currentProfile.appearance);
@@ -64,9 +78,15 @@ export async function PATCH(request: Request) {
       ? normalizeTeacherClassThemeColor(body.themeColor)
       : normalizeTeacherClassThemeColor(currentProfile.themeColor);
 
+    if (username !== currentUsername) {
+      await assertUsernameIsAvailable(username, decodedToken.uid);
+    }
+
     const profileUpdates: Record<string, unknown> = {
       appearance,
-      themeColor
+      email,
+      themeColor,
+      username
     };
 
     if (shouldUpdateDisplayName) {
@@ -82,7 +102,7 @@ export async function PATCH(request: Request) {
     if (shouldUpdateDisplayName && displayName !== currentDisplayName) {
       await syncDisplayNameReferences({
         displayName,
-        email: firstString(currentProfile.email, decodedToken.email).toLowerCase(),
+        email,
         role: currentProfile.role,
         uid: decodedToken.uid
       });
@@ -93,8 +113,10 @@ export async function PATCH(request: Request) {
         ...currentProfile,
         appearance,
         displayName,
+        email,
         themeColor,
-        uid: decodedToken.uid
+        uid: decodedToken.uid,
+        username
       }
     });
   } catch (caughtError) {
@@ -175,6 +197,68 @@ function normalizeDisplayName(value: unknown) {
   }
 
   return displayName;
+}
+
+function normalizeEmail(value: unknown, tokenEmail: string) {
+  const email = typeof value === "string" ? value.trim().toLowerCase() : "";
+
+  if (!email) {
+    throw new AccountSettingsError("Enter an email address.", 400);
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new AccountSettingsError("Enter a valid email address.", 400);
+  }
+
+  if (!tokenEmail || email !== tokenEmail) {
+    throw new AccountSettingsError("Confirm the new email with Firebase Auth before saving profile settings.", 400);
+  }
+
+  return email;
+}
+
+function normalizeStoredUsername(value: unknown, fallbackEmail: string) {
+  const username = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return username || fallbackEmail;
+}
+
+function normalizeUsername(value: unknown, accountEmail: string) {
+  const username = typeof value === "string" ? value.trim().toLowerCase() : "";
+
+  if (!username) {
+    throw new AccountSettingsError("Enter a username.", 400);
+  }
+
+  if (username.length > 120) {
+    throw new AccountSettingsError("Username must be 120 characters or fewer.", 400);
+  }
+
+  if (username.includes("@") && username !== accountEmail) {
+    throw new AccountSettingsError("Use your account email or a username without @.", 400);
+  }
+
+  if (!/^[a-z0-9._%+-@]+$/.test(username)) {
+    throw new AccountSettingsError("Username can use letters, numbers, dots, underscores, hyphens, plus, percent, and @.", 400);
+  }
+
+  return username;
+}
+
+async function assertUsernameIsAvailable(username: string, uid: string) {
+  if (username.includes("@")) {
+    return;
+  }
+
+  const usernameSnapshot = await adminDb!
+    .collection("users")
+    .where("username", "==", username)
+    .limit(1)
+    .get();
+  const usernameOwner = usernameSnapshot.docs[0];
+
+  if (usernameOwner && usernameOwner.id !== uid) {
+    throw new AccountSettingsError("That username is already in use.", 409);
+  }
 }
 
 function isSupportedAccountRole(role: unknown) {

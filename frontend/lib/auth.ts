@@ -1,11 +1,15 @@
 "use client";
 
 import {
+  EmailAuthProvider,
   User,
   createUserWithEmailAndPassword,
   onAuthStateChanged,
+  reauthenticateWithCredential,
   signInWithEmailAndPassword,
   signOut,
+  updateEmail,
+  updatePassword,
   updateProfile
 } from "firebase/auth";
 import {
@@ -13,7 +17,8 @@ import {
   getDoc,
   onSnapshot,
   serverTimestamp,
-  setDoc
+  setDoc,
+  updateDoc
 } from "firebase/firestore";
 import { normalizeClassCode } from "./class-code";
 import {
@@ -29,6 +34,7 @@ export type AccountRole = "student" | "teacher";
 export type UserProfile = {
   uid: string;
   email: string;
+  username: string;
   displayName: string;
   role: AccountRole;
   appearance?: TeacherClassAppearance;
@@ -62,7 +68,15 @@ export function subscribeToUserProfile(
   return onSnapshot(
     doc(db, "users", uid),
     (snapshot) => {
-      callback(snapshot.exists() ? (snapshot.data() as UserProfile) : null);
+      if (!snapshot.exists()) {
+        callback(null);
+        return;
+      }
+
+      const data = snapshot.data();
+      const profile = normalizeUserProfile(data);
+      callback(profile);
+      void backfillMissingUsername(uid, data, profile);
     },
     (error) => {
       onError?.(error);
@@ -76,7 +90,8 @@ export async function signUpWithRole({
   password,
   role,
   classId,
-  teacherInviteToken
+  teacherInviteToken,
+  username
 }: {
   displayName: string;
   email: string;
@@ -84,23 +99,31 @@ export async function signUpWithRole({
   role: AccountRole;
   classId?: string;
   teacherInviteToken?: string;
+  username?: string;
 }) {
   assertFirebaseReady();
 
-  const credential = await createUserWithEmailAndPassword(auth!, email, password);
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanUsername = normalizeAccountUsername(username, cleanEmail);
+  assertAccountUsernameIsValid(cleanUsername, cleanEmail);
+  await assertUsernameIsAvailable(cleanUsername);
+
+  const credential = await createUserWithEmailAndPassword(auth!, cleanEmail, password);
   await updateProfile(credential.user, { displayName });
 
   if (role === "teacher") {
     return createTeacherProfile({
       displayName,
       teacherInviteToken,
+      username: cleanUsername,
       user: credential.user
     });
   }
 
   const profile: UserProfile = {
     uid: credential.user.uid,
-    email,
+    email: cleanEmail,
+    username: cleanUsername,
     displayName,
     role,
     createdAt: serverTimestamp()
@@ -112,7 +135,7 @@ export async function signUpWithRole({
     const cleanClassId = await joinStudentClass({
       classCode: classId,
       displayName,
-      email,
+      email: cleanEmail,
       syncProfile: true,
       user: credential.user
     });
@@ -134,30 +157,37 @@ export async function createRoleProfile({
   role,
   user,
   classId,
-  teacherInviteToken
+  teacherInviteToken,
+  username
 }: {
   displayName: string;
   role: AccountRole;
   user: User;
   classId?: string;
   teacherInviteToken?: string;
+  username?: string;
 }) {
   assertFirebaseReady();
 
   const cleanDisplayName = displayName.trim() || user.displayName || user.email || "Chandra user";
+  const cleanEmail = String(user.email ?? "").trim().toLowerCase();
+  const cleanUsername = normalizeAccountUsername(username, cleanEmail);
+  assertAccountUsernameIsValid(cleanUsername, cleanEmail);
   await updateProfile(user, { displayName: cleanDisplayName });
 
   if (role === "teacher") {
     return createTeacherProfile({
       displayName: cleanDisplayName,
       teacherInviteToken,
+      username: cleanUsername,
       user
     });
   }
 
   const profile: UserProfile = {
     uid: user.uid,
-    email: user.email ?? "",
+    email: cleanEmail,
+    username: cleanUsername,
     displayName: cleanDisplayName,
     role,
     createdAt: serverTimestamp()
@@ -169,7 +199,7 @@ export async function createRoleProfile({
     const cleanClassId = await joinStudentClass({
       classCode: classId,
       displayName: cleanDisplayName,
-      email: user.email ?? "",
+      email: cleanEmail,
       syncProfile: true,
       user
     });
@@ -186,8 +216,9 @@ export async function createRoleProfile({
   return profile;
 }
 
-export async function signInWithEmail(email: string, password: string) {
+export async function signInWithEmail(emailOrUsername: string, password: string) {
   assertFirebaseReady();
+  const email = await resolveLoginEmail(emailOrUsername);
   return signInWithEmailAndPassword(auth!, email, password);
 }
 
@@ -237,7 +268,7 @@ export async function getUserProfile(uid: string) {
   }
 
   const snapshot = await getDoc(doc(db, "users", uid));
-  return snapshot.exists() ? (snapshot.data() as UserProfile) : null;
+  return snapshot.exists() ? normalizeUserProfile(snapshot.data()) : null;
 }
 
 export async function updateStudentClass({
@@ -280,22 +311,59 @@ export async function updateUserThemePreference({
 
 export async function updateUserAccountSettings({
   appearance,
+  currentPassword,
   displayName,
+  email,
+  newPassword,
+  username,
   themeColor,
   uid
 }: {
   appearance?: TeacherClassAppearance;
+  currentPassword?: string;
   displayName?: string;
+  email?: string;
+  newPassword?: string;
+  username?: string;
   themeColor?: TeacherClassThemeColor;
   uid: string;
 }) {
   assertFirebaseReady();
 
-  if (auth!.currentUser?.uid !== uid) {
+  const currentUser = auth!.currentUser;
+
+  if (currentUser?.uid !== uid) {
     throw new Error("Sign in before changing account settings.");
   }
 
-  const token = await auth!.currentUser.getIdToken();
+  const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+  const currentEmail = String(currentUser.email ?? "").trim().toLowerCase();
+  const cleanNewPassword = typeof newPassword === "string" ? newPassword : "";
+  const shouldUpdateEmail = Boolean(cleanEmail && cleanEmail !== currentEmail);
+  const shouldUpdatePassword = Boolean(cleanNewPassword);
+
+  if (shouldUpdateEmail || shouldUpdatePassword) {
+    const cleanCurrentPassword = String(currentPassword ?? "");
+
+    if (!currentEmail || !cleanCurrentPassword) {
+      throw new Error("Enter your current password before changing email or password.");
+    }
+
+    await reauthenticateWithCredential(
+      currentUser,
+      EmailAuthProvider.credential(currentEmail, cleanCurrentPassword)
+    );
+
+    if (shouldUpdatePassword) {
+      await updatePassword(currentUser, cleanNewPassword);
+    }
+
+    if (shouldUpdateEmail) {
+      await updateEmail(currentUser, cleanEmail);
+    }
+  }
+
+  const token = await currentUser.getIdToken(true);
   const response = await fetch("/api/account/settings", {
     method: "PATCH",
     headers: {
@@ -305,6 +373,8 @@ export async function updateUserAccountSettings({
     body: JSON.stringify({
       ...(appearance ? { appearance: normalizeTeacherClassAppearance(appearance) } : {}),
       ...(typeof displayName === "string" ? { displayName } : {}),
+      ...(cleanEmail ? { email: cleanEmail } : {}),
+      ...(typeof username === "string" ? { username } : {}),
       ...(themeColor ? { themeColor: normalizeTeacherClassThemeColor(themeColor) } : {})
     })
   });
@@ -315,7 +385,7 @@ export async function updateUserAccountSettings({
   }
 
   if (typeof displayName === "string") {
-    await updateProfile(auth!.currentUser, { displayName: data.profile.displayName });
+    await updateProfile(currentUser, { displayName: data.profile.displayName });
   }
 
   return data.profile;
@@ -324,6 +394,106 @@ export async function updateUserAccountSettings({
 function assertFirebaseReady() {
   if (!isFirebaseConfigured || !auth || !db) {
     throw new Error("Firebase is not configured. Add NEXT_PUBLIC_FIREBASE_* values to .env.local.");
+  }
+}
+
+export function normalizeAccountUsername(value: unknown, fallbackEmail = "") {
+  const username = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return username || fallbackEmail.trim().toLowerCase();
+}
+
+function assertAccountUsernameIsValid(username: string, accountEmail: string) {
+  if (!username) {
+    throw new Error("Enter a username.");
+  }
+
+  if (username.length > 120) {
+    throw new Error("Username must be 120 characters or fewer.");
+  }
+
+  if (username.includes("@") && username !== accountEmail) {
+    throw new Error("Use your account email or a username without @.");
+  }
+
+  if (!/^[a-z0-9._%+-@]+$/.test(username)) {
+    throw new Error("Username can use letters, numbers, dots, underscores, hyphens, plus, percent, and @.");
+  }
+}
+
+function normalizeUserProfile(data: Record<string, unknown>): UserProfile {
+  const email = String(data.email ?? "").trim().toLowerCase();
+
+  return {
+    ...(data as UserProfile),
+    email,
+    username: normalizeAccountUsername(data.username, email)
+  };
+}
+
+async function resolveLoginEmail(emailOrUsername: string) {
+  const identifier = emailOrUsername.trim().toLowerCase();
+
+  if (!identifier) {
+    return identifier;
+  }
+
+  if (identifier.includes("@")) {
+    return identifier;
+  }
+
+  const response = await fetch("/api/auth/resolve-login", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ identifier })
+  });
+  const data = (await response.json().catch(() => ({}))) as { email?: string; error?: string };
+
+  if (!response.ok || !data.email) {
+    throw new Error(data.error ?? "No account matches that username.");
+  }
+
+  return data.email;
+}
+
+async function assertUsernameIsAvailable(username: string) {
+  if (!username || username.includes("@")) {
+    return;
+  }
+
+  const response = await fetch("/api/auth/resolve-login", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ identifier: username })
+  });
+
+  if (response.status === 404) {
+    return;
+  }
+
+  const data = (await response.json().catch(() => ({}))) as { error?: string };
+
+  if (response.ok) {
+    throw new Error("That username is already in use.");
+  }
+
+  if (response.status !== 500) {
+    throw new Error(data.error ?? "Username check failed.");
+  }
+}
+
+async function backfillMissingUsername(uid: string, data: Record<string, unknown>, profile: UserProfile) {
+  if (!db || typeof data.username === "string" || !profile.email) {
+    return;
+  }
+
+  try {
+    await updateDoc(doc(db, "users", uid), { username: profile.email });
+  } catch {
+    // Server-side account settings also backfill username; ignore client rule or network failures here.
   }
 }
 
@@ -411,10 +581,12 @@ async function joinStudentClass({
 async function createTeacherProfile({
   displayName,
   teacherInviteToken,
+  username,
   user
 }: {
   displayName: string;
   teacherInviteToken?: string;
+  username: string;
   user: User;
 }) {
   const token = await user.getIdToken();
@@ -426,7 +598,8 @@ async function createTeacherProfile({
     },
     body: JSON.stringify({
       displayName,
-      inviteToken: teacherInviteToken ?? ""
+      inviteToken: teacherInviteToken ?? "",
+      username
     })
   });
   const data = (await response.json()) as { profile?: UserProfile; error?: string };

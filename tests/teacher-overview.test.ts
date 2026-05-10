@@ -27,8 +27,6 @@ test("teacher overview aggregates existing roster, conversations, knowledge, and
   assert.match(serverSource, /const reviewQueueRows = buildReviewQueueRows/);
   assert.match(serverSource, /filter\(conversationNeedsTeacherReview\)/);
   assert.match(serverSource, /nextActions: buildNextActions/);
-  assert.match(serverSource, /getOverviewInsightContext/);
-  assert.match(serverSource, /collection\("teacherInsights"\)\.doc\("today"\)/);
   assert.match(serverSource, /type ScoredAction/);
   assert.match(serverSource, /scoreOverviewAction/);
   assert.match(serverSource, /learningSignals/);

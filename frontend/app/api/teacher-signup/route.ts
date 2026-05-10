@@ -8,6 +8,7 @@ export const runtime = "nodejs";
 type TeacherSignupBody = {
   displayName?: unknown;
   inviteToken?: unknown;
+  username?: unknown;
 };
 
 class TeacherSignupError extends Error {
@@ -43,12 +44,16 @@ export async function POST(request: Request) {
     const displayName =
       firstString(body.displayName, decodedToken.name, decodedToken.email) || "Chandra teacher";
     const email = String(decodedToken.email ?? "").trim().toLowerCase();
+    const username = normalizeUsername(body.username, email);
+    await assertUsernameIsAvailable(username, decodedToken.uid);
+
     const profile = {
       createdAt: FieldValue.serverTimestamp(),
       displayName,
       email,
       role: "teacher",
-      uid: decodedToken.uid
+      uid: decodedToken.uid,
+      username
     };
 
     await adminDb!.runTransaction(async (transaction) => {
@@ -145,4 +150,40 @@ function firstString(...values: unknown[]) {
   }
 
   return "";
+}
+
+function normalizeUsername(value: unknown, fallbackEmail: string) {
+  const username = typeof value === "string" ? value.trim().toLowerCase() : "";
+  const normalizedUsername = username || fallbackEmail;
+
+  if (normalizedUsername.includes("@") && normalizedUsername !== fallbackEmail) {
+    throw new TeacherSignupError("Use your account email or a username without @.", 400);
+  }
+
+  if (normalizedUsername.length > 120) {
+    throw new TeacherSignupError("Username must be 120 characters or fewer.", 400);
+  }
+
+  if (!/^[a-z0-9._%+-@]+$/.test(normalizedUsername)) {
+    throw new TeacherSignupError("Username can use letters, numbers, dots, underscores, hyphens, plus, percent, and @.", 400);
+  }
+
+  return normalizedUsername;
+}
+
+async function assertUsernameIsAvailable(username: string, uid: string) {
+  if (!username || username.includes("@")) {
+    return;
+  }
+
+  const snapshot = await adminDb!
+    .collection("users")
+    .where("username", "==", username)
+    .limit(1)
+    .get();
+  const existingUser = snapshot.docs[0];
+
+  if (existingUser && existingUser.id !== uid) {
+    throw new TeacherSignupError("That username is already in use.", 409);
+  }
 }

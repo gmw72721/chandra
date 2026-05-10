@@ -303,11 +303,13 @@ function StudentWorkspace() {
         setSelectedConversationClassId(activeCourseId);
       }
 
-      try {
-        setConversationSummaries(await fetchStudentConversationSummaries({ classId: activeCourseId, token }));
-        setConversationLoadError("");
-      } catch (caughtError) {
-        setConversationLoadError(describeStudentConversationLoadError(caughtError));
+      if (!isTeacherPreview) {
+        try {
+          setConversationSummaries(await fetchStudentConversationSummaries({ classId: activeCourseId, token }));
+          setConversationLoadError("");
+        } catch (caughtError) {
+          setConversationLoadError(describeStudentConversationLoadError(caughtError));
+        }
       }
 
       setMessages((current) => [

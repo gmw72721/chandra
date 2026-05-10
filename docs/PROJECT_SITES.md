@@ -30,7 +30,7 @@ Do not put API keys, service account JSON, private keys, or shared secrets in th
 | Firebase Console | https://console.firebase.google.com/project/chandra-f6e13/overview | Main Firebase project dashboard. |
 | Firebase App Hosting | https://console.firebase.google.com/project/chandra-f6e13/apphosting | Frontend hosting backend `chandra-frontend`. |
 | Firebase Authentication | https://console.firebase.google.com/project/chandra-f6e13/authentication/users | Email/password user accounts. |
-| Firestore Database | https://console.firebase.google.com/project/chandra-f6e13/firestore | Classes, users, conversations, materials, insights, and vector chunks. |
+| Firestore Database | https://console.firebase.google.com/project/chandra-f6e13/firestore | Classes, users, conversations, materials, and vector chunks. |
 | Firebase Storage | https://console.firebase.google.com/project/chandra-f6e13/storage | Uploaded course materials and tutor knowledge files. |
 | Google Cloud Console | https://console.cloud.google.com/home/dashboard?project=chandra-f6e13 | Main Google Cloud dashboard for the project. |
 | Cloud Run | https://console.cloud.google.com/run/detail/us-central1/chandra-backend?project=chandra-f6e13 | Backend service `chandra-backend`. |
@@ -85,8 +85,6 @@ In local development that means:
 | `/api/classes/join` | Student joins a class. |
 | `/api/classes/resolve` | Resolve class information. |
 | `/api/classes/[classId]/overview` | Teacher class overview. |
-| `/api/classes/[classId]/insights` | Teacher insight generation and reads. |
-| `/api/classes/[classId]/insights/feedback` | Feedback on generated insights. |
 | `/api/classes/[classId]/roster/sync` | Roster sync. |
 | `/api/classes/[classId]/roster/activity` | Roster activity data. |
 | `/api/classes/[classId]/materials/retrieval-test` | Test class material retrieval. |

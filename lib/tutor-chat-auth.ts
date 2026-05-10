@@ -63,8 +63,8 @@ export async function authorizeTutorChatRequest(
 
     const classScope = await getClassProfessorScope(classId);
 
-    if (classScope.professorId !== decodedToken.uid) {
-      throw new TutorChatHttpError("Only the class teacher can preview this chat.", 403);
+    if (!classScope.allowedTeacherIds.has(decodedToken.uid)) {
+      throw new TutorChatHttpError("Only this class's teachers can preview this chat.", 403);
     }
 
     return { classId, ...classScope, role, uid: decodedToken.uid };
@@ -94,15 +94,45 @@ async function getClassProfessorScope(classId: string) {
 
   const classData = classSnapshot.data() ?? {};
   const professorId = String(classData.teacherId ?? classData.professorId ?? "").trim();
+  const allowedTeacherIds = new Set<string>();
+
+  if (professorId) {
+    allowedTeacherIds.add(professorId);
+  }
+
+  for (const [uid, role] of Object.entries(readCoTeacherRoles(classData.coTeachers))) {
+    if (role === "owner" || role === "co-teacher") {
+      allowedTeacherIds.add(uid);
+    }
+  }
 
   if (!professorId) {
     throw new TutorChatHttpError("This class is missing teacher ownership metadata.", 403);
   }
 
   return {
+    allowedTeacherIds,
     professorId,
     professorName: String(classData.teacherName ?? classData.professorName ?? "").trim() || undefined
   };
+}
+
+function readCoTeacherRoles(coTeachers: unknown): Record<string, string> {
+  if (!coTeachers || typeof coTeachers !== "object" || Array.isArray(coTeachers)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(coTeachers as Record<string, unknown>).flatMap(([uid, coTeacher]) => {
+      if (!coTeacher || typeof coTeacher !== "object" || Array.isArray(coTeacher)) {
+        return [];
+      }
+
+      const role = (coTeacher as Record<string, unknown>).role;
+
+      return typeof role === "string" ? [[uid, role]] : [];
+    })
+  );
 }
 
 function getBearerToken(request: Request) {

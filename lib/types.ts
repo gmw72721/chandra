@@ -395,120 +395,6 @@ export type StudentLearningProfileDocument = {
   draftProfile?: StudentLearningProfileContent | null;
 };
 
-export type TeacherInsightRange = "today" | "yesterday" | "7d" | "30d";
-
-export type TeacherInsightMetric = {
-  id: string;
-  label: string;
-  value: number;
-  tone?: "teal" | "orange" | "gold";
-};
-
-export type TeacherInsightEvidenceChip = {
-  id: string;
-  label: string;
-  conversationId: string;
-  messageId?: string;
-} & TeacherInsightQuality;
-
-export type TeacherInsightQualityLevel = "low" | "medium" | "high";
-
-export type TeacherInsightEvidenceStrength = "early_signal" | "moderate" | "strong";
-
-export type TeacherInsightQuality = {
-  confidence: TeacherInsightQualityLevel;
-  impact: TeacherInsightQualityLevel;
-  severity: TeacherInsightQualityLevel;
-  evidenceStrength: TeacherInsightEvidenceStrength;
-  rootCause: string;
-  whyItMatters: string;
-  nextTeacherMove: string;
-  tutorAdjustment: string;
-  affectedStudentCount: number;
-  relevantMessageCount: number;
-};
-
-export type TeacherInsightDailySummary = {
-  title: string;
-  body: string;
-  evidence: TeacherInsightEvidenceChip[];
-} & TeacherInsightQuality;
-
-export type TeacherInsightTrendDirection = "up" | "down" | "new" | "recurring";
-
-export type TeacherInsightTrend = {
-  id: string;
-  label: string;
-  change: string;
-  direction: TeacherInsightTrendDirection;
-  evidenceConversationIds: string[];
-  sparkline: number[];
-} & TeacherInsightQuality;
-
-export type TeacherInsightMisconceptionStatus = "active" | "improving" | "emerging" | "resolved";
-
-export type TeacherInsightMisconceptionTimelineItem = {
-  id: string;
-  misconception: string;
-  firstAppeared: string;
-  seenInConversations: number;
-  status: TeacherInsightMisconceptionStatus;
-  evidenceConversationIds: string[];
-} & TeacherInsightQuality;
-
-export type TeacherInsightRecommendationPriority = "high" | "medium" | "low";
-
-export type TeacherInsightRecommendationAction = "inspect" | "upload" | "adjust" | "approve";
-
-export type TeacherInsightRecommendation = {
-  id: string;
-  priority: TeacherInsightRecommendationPriority;
-  title: string;
-  evidenceCount: number;
-  action: TeacherInsightRecommendationAction;
-  evidenceConversationIds: string[];
-} & TeacherInsightQuality;
-
-export type TeacherInsightEvidenceLink = {
-  id: string;
-  topic: string;
-  conversationCount: number;
-  studentInitials: string[];
-  lastSeenAt: string;
-  conversationIds: string[];
-} & TeacherInsightQuality;
-
-export type TeacherClassInsightsContent = {
-  metrics: TeacherInsightMetric[];
-  dailySummary: TeacherInsightDailySummary;
-  evidenceChips: TeacherInsightEvidenceChip[];
-  trends: TeacherInsightTrend[];
-  misconceptionTimeline: TeacherInsightMisconceptionTimelineItem[];
-  recommendations: TeacherInsightRecommendation[];
-  evidenceLinks: TeacherInsightEvidenceLink[];
-};
-
-export type TeacherInsightFeedbackAction = "useful" | "notUseful" | "dismiss" | "markResolved" | "addNote";
-
-export type TeacherClassInsightsDocument = {
-  id: string;
-  classId: string;
-  range: TeacherInsightRange;
-  generatedAt: unknown;
-  updatedAt: unknown;
-  modelId: string;
-  conversationCount: number;
-  studentCount: number;
-  studentMessageCount: number;
-  insight: TeacherClassInsightsContent;
-  teacherReviewed?: boolean;
-  dismissedItemIds?: string[];
-  usefulItemIds?: string[];
-  notUsefulItemIds?: string[];
-  resolvedItemIds?: string[];
-  teacherNotes?: string[];
-};
-
 export type TeacherOverviewStatusTone =
   | "active"
   | "ai-review"
@@ -527,8 +413,13 @@ export type TeacherOverviewStatusTone =
 export type TeacherClassOverviewMetricSummary = {
   activeNow: number;
   averageQuestionsPerStudentPerDay: number;
+  conversationCountPreviousDay: number;
+  draftLearningProfiles: number;
+  missingLearningProfiles: number;
   noActivity: number;
+  questionsPreviousDay: number;
   questionsToday: number;
+  reviewedLearningProfiles: number;
   totalConversations: number;
   totalStudents: number;
 };
@@ -605,7 +496,6 @@ export type TeacherClassOverviewNextAction = {
     | "addKnowledge"
     | "addStudent"
     | "openKnowledge"
-    | "openInsights"
     | "openRoster"
     | "openStudentView"
     | "reviewConversations"
