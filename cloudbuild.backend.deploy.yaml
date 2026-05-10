@@ -52,37 +52,9 @@ steps:
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:latest
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    id: grant-secret-access
-    waitFor:
-      - push-revision-image
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        set -euo pipefail
-
-        secrets=(
-          chandra-backend-openrouter-api-key
-          chandra-backend-backend-shared-secret
-          chandra-backend-next-public-firebase-api-key
-          chandra-backend-gemini-api-key
-          chandra-backend-better-stack-source-token
-          chandra-backend-better-stack-ingesting-host
-          chandra-backend-better-stack-uptime-api-token
-        )
-
-        for secret in "${secrets[@]}"; do
-          gcloud secrets add-iam-policy-binding "$secret" \
-            --project "${PROJECT_ID}" \
-            --member "serviceAccount:${_SERVICE_ACCOUNT}" \
-            --role roles/secretmanager.secretAccessor \
-            --quiet
-        done
-
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: deploy-cloud-run
     waitFor:
-      - grant-secret-access
+      - push-revision-image
     entrypoint: gcloud
     args:
       - run
