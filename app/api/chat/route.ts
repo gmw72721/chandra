@@ -710,6 +710,10 @@ function classifyBackendResponseError(status: number, detail: string): StudentCh
     return "TUTOR_BACKEND_TIMEOUT";
   }
 
+  if (normalizedDetail.includes("ai usage reservation required")) {
+    return "TUTOR_BACKEND_REQUEST_FAILED";
+  }
+
   if (status === 429 || normalizedDetail.includes("rate limit")) {
     return "TUTOR_BACKEND_RATE_LIMITED";
   }
@@ -734,6 +738,10 @@ function classifyBackendStreamError(detail: string): StudentChatErrorCode {
 
   if (normalizedDetail.includes("timeout") || normalizedDetail.includes("timed out")) {
     return "TUTOR_BACKEND_TIMEOUT";
+  }
+
+  if (normalizedDetail.includes("ai usage reservation required")) {
+    return "TUTOR_BACKEND_REQUEST_FAILED";
   }
 
   if (normalizedDetail.includes("rate limit")) {

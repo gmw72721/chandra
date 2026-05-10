@@ -346,7 +346,7 @@ async def langgraph_chat(
         max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
         max_total_message_chars=MAX_PROVIDER_TOTAL_MESSAGE_CHARS,
     )
-    enforce_ai_usage_reservation(request.aiUsageReservation)
+    enforce_ai_usage_reservation(request.aiUsageReservation, student_id=request.studentId)
 
     try:
         from backend.agent.graph import run_pdf_rag_agent
@@ -394,7 +394,7 @@ async def langgraph_chat_stream(
         max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
         max_total_message_chars=MAX_PROVIDER_TOTAL_MESSAGE_CHARS,
     )
-    enforce_ai_usage_reservation(request.aiUsageReservation)
+    enforce_ai_usage_reservation(request.aiUsageReservation, student_id=request.studentId)
 
     try:
         from backend.agent.graph import run_pdf_rag_agent_stream
@@ -450,7 +450,10 @@ def describe_stream_error(error: Exception) -> str:
     return f"{error.__class__.__name__}: the tutor service crashed while processing this request. Check the FastAPI terminal for the traceback."
 
 
-def enforce_ai_usage_reservation(ai_usage_reservation: Optional[dict[str, Any]]) -> None:
+def enforce_ai_usage_reservation(ai_usage_reservation: Optional[dict[str, Any]], *, student_id: Optional[str] = None) -> None:
+    if not str(student_id or "").strip():
+        return
+
     reservation = ai_usage_reservation or {}
     reservation_id = str(reservation.get("id") or "").strip()
     estimated_tokens = nonnegative_int(reservation.get("estimatedTokens"))
@@ -509,7 +512,7 @@ async def extract_material(
 async def chat(request: ChatRequest, authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
     validate_message_payload_size(request.messages)
     scope = authorize_tutor_chat_request(request, authorization)
-    enforce_ai_usage_reservation(request.aiUsageReservation)
+    enforce_ai_usage_reservation(request.aiUsageReservation, student_id=scope["uid"] if scope["role"] == "student" else None)
     course_id = scope["classId"]
     set_current_class_id(course_id)
     latest_student_message = next(

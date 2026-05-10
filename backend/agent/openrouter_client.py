@@ -106,11 +106,15 @@ class OpenRouterClient:
         for attempt in range(self.max_retries + 1):
             try:
                 client = self._get_http_client()
-                return await client.post(
+                response = await client.post(
                     self._chat_completions_url,
                     headers=self._headers,
                     json=payload,
                 )
+                if response.status_code not in {429, 500, 502, 503, 504} or attempt >= self.max_retries:
+                    return response
+
+                await asyncio.sleep(openrouter_retry_delay(response, attempt))
             except (httpx.TransportError, httpx.TimeoutException, ssl.SSLError) as error:
                 await self.aclose()
 
@@ -166,6 +170,17 @@ def openrouter_http_referer() -> str:
         raise RuntimeError("OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production.")
 
     return "http://localhost:3000"
+
+
+def openrouter_retry_delay(response: httpx.Response, attempt: int) -> float:
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return min(8.0, max(0.5, float(retry_after)))
+        except ValueError:
+            pass
+
+    return min(8.0, 0.75 * (2**attempt))
 
 
 @lru_cache(maxsize=128)
