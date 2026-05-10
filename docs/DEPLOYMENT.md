@@ -55,6 +55,8 @@ BETTER_STACK_LEARNING_PROFILE_HEARTBEAT_URL=
 BETTER_STACK_ENV=production
 ```
 
+Every secret referenced by `apphosting.yaml` must exist in Secret Manager and be granted to the App Hosting backend before a rollout starts.
+
 ## Backend
 
 Build the backend image from the repository root:
