@@ -227,7 +227,7 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
     defaultOpenRouterModelId;
   const temperature = creativityToTemperature(classModelSettings?.creativity ?? 35);
   const maxTokens = responseLengthToMaxTokens(classModelSettings?.responseLength ?? "medium");
-  const reasoningEffort = classModelSettings?.reasoningEffort ?? "medium";
+  const reasoningEffort = classModelSettings?.reasoningEffort ?? "low";
   const studentLearningProfileContext =
     scope.role === "student"
       ? await getStudentLearningProfileContextForTutor({

@@ -196,7 +196,7 @@ export const defaultAiRequestLimitSettings: AiRequestLimitSettings = {
 
 export const defaultClassModelSettings: ClassModelSettings = {
   modelId: defaultOpenRouterModelId,
-  reasoningEffort: "medium",
+  reasoningEffort: "low",
   creativity: 35,
   responseLength: "medium",
   requestLimits: defaultAiRequestLimitSettings,
