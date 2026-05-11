@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, memo, type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
@@ -58,6 +59,7 @@ import {
   addStudentToClass,
   createTeacherClass,
   ensureClassJoinCode,
+  subscribeToClassMaterialJobs,
   subscribeToMaterialJob,
   subscribeToClassMaterials,
   subscribeToClassStudents,
@@ -94,16 +96,22 @@ import { useAuth } from "../frontend/components/AuthProvider";
 import { TeacherAnalyticsDashboardContent } from "../frontend/components/TeacherAnalyticsDashboard";
 import { formatLearningProfileUpdateResult, StudentLearningProfileCard } from "../frontend/components/StudentLearningProfileCard";
 import { StudentProfilePage } from "../frontend/components/StudentProfilePage";
+import { storage } from "@/lib/firebase";
 
 type MaterialUploadProgress = {
   detail: string;
   percent: number;
-  step: "prepare" | "upload" | "read" | "chunk" | "embed" | "save" | "complete";
+  step: "prepare" | "upload" | "read" | "pages" | "chunk" | "embed" | "save" | "complete";
   uploadPercent: number;
 };
-type MaterialUploadDisplayStep = "upload" | "read" | "prepare" | "ready";
+type MaterialUploadDisplayStep = "upload" | "read" | "pages" | "prepare" | "ready";
 
-const materialUploadDisplaySteps: MaterialUploadDisplayStep[] = ["upload", "read", "prepare", "ready"];
+const materialUploadDisplaySteps: MaterialUploadDisplayStep[] = ["upload", "read", "pages", "prepare", "ready"];
+
+type UploadedTutorKnowledgeStorageFile = {
+  storageBucket?: string;
+  storagePath: string;
+};
 
 type TeacherTab = "overview" | "roster" | "settings" | "knowledge" | "conversations";
 type SettingsPane =
@@ -447,11 +455,13 @@ const apiKnowledgePriorityValues: Record<NonNullable<ClassMaterial["priority"]>,
   primary: "Primary"
 };
 const knowledgeStatusLabels: Record<ClassMaterial["status"], string> = {
+  deleting: "Deleting",
   processing: "Processing",
   ready: "Ready",
   uploaded: "Needs review"
 };
 const knowledgeStatusClasses: Record<ClassMaterial["status"], string> = {
+  deleting: "processing",
   processing: "processing",
   ready: "ready",
   uploaded: "review"
@@ -596,7 +606,9 @@ export function TeacherClassManager({
   const [materialSourceUrl, setMaterialSourceUrl] = useState("");
   const [materialText, setMaterialText] = useState("");
   const [materialUploadProgress, setMaterialUploadProgress] = useState<MaterialUploadProgress | null>(null);
+  const [materialJobProgressByMaterialId, setMaterialJobProgressByMaterialId] = useState<Record<string, MaterialJobProgress>>({});
   const [materialSuccess, setMaterialSuccess] = useState("");
+  const [statusDetailMaterialId, setStatusDetailMaterialId] = useState("");
   const [fileInputKey, setFileInputKey] = useState(0);
   const [error, setError] = useState("");
   const [conversationError, setConversationError] = useState("");
@@ -904,6 +916,13 @@ export function TeacherClassManager({
     [selectedMaterial, sourceSettingsByMaterialId]
   );
   const selectedMaterialDetail = selectedMaterial ? materialDetailsById[selectedMaterial.id] ?? null : null;
+  const statusDetailMaterial = useMemo(
+    () => materials.find((material) => material.id === statusDetailMaterialId) ?? null,
+    [materials, statusDetailMaterialId]
+  );
+  const statusDetailProgress = statusDetailMaterial
+    ? materialProgressForMaterial(statusDetailMaterial, materialJobProgressByMaterialId[statusDetailMaterial.id])
+    : undefined;
   const selectedAnswerPolicy = normalizeAnswerPolicySettings(selectedClass?.answerPolicy);
   const selectedSourceUsage = normalizeSourceUsageSettings(selectedClass?.sourceUsage);
   const selectedModelSettings = normalizeClassModelSettings(selectedClass?.modelSettings);
@@ -1030,10 +1049,21 @@ export function TeacherClassManager({
         markLoaded();
       }
     );
+    const unsubscribeMaterialJobs = subscribeToClassMaterialJobs(
+      activeClassId,
+      (jobProgress) => {
+        setMaterialJobProgressByMaterialId(buildLatestMaterialJobProgressMap(jobProgress));
+      },
+      (caughtError) => {
+        setMaterialJobProgressByMaterialId({});
+        setError(formatClassError(caughtError, "Tutor knowledge progress load failed."));
+      }
+    );
 
     return () => {
       unsubscribeStudents();
       unsubscribeMaterials();
+      unsubscribeMaterialJobs();
     };
   }, [activeClassId]);
 
@@ -2568,18 +2598,26 @@ export function TeacherClassManager({
     setIsSavingMaterial(true);
 
     let unsubscribeJob = () => {};
+    let keepJobSubscription = false;
 
     try {
       const jobId = createMaterialJobId();
       const materialId = createMaterialId();
-      const formData = buildTutorKnowledgeFormData(activeClassId, materialId);
-      formData.append("jobId", jobId);
       unsubscribeJob = subscribeToMaterialJob(
         activeClassId,
         jobId,
         (progress) => {
           if (progress) {
+            if (progress.materialId) {
+              setMaterialJobProgressByMaterialId((currentProgress) => ({
+                ...currentProgress,
+                [progress.materialId!]: progress
+              }));
+            }
             setMaterialUploadProgress(materialJobToUploadProgress(progress));
+            if (progress.step === "ready" || progress.step === "failed") {
+              unsubscribeJob();
+            }
           }
         },
         (caughtError) => {
@@ -2587,14 +2625,27 @@ export function TeacherClassManager({
         }
       );
       const token = await getTeacherToken();
-      await postTutorKnowledgeForm({
+      const uploadedSource = materialFile
+        ? await uploadTutorKnowledgeFileToStorage({
+            classId: activeClassId,
+            file: materialFile,
+            materialId,
+            onProgress: setMaterialUploadProgress,
+            token
+          })
+        : undefined;
+      const formData = buildTutorKnowledgeFormData(activeClassId, materialId, uploadedSource);
+      formData.append("jobId", jobId);
+      const saveResponse = await postTutorKnowledgeForm({
         formData,
         label: materialFile ? "Saving source" : "Uploading source",
+        suppressUploadProgress: Boolean(uploadedSource),
         useBackendProgress: true,
         token,
         url: apiUrl("/api/materials"),
         onProgress: setMaterialUploadProgress
       });
+      keepJobSubscription = responseIsBackgroundProcessing(saveResponse);
 
       setMaterialTitle("");
       setMaterialFile(null);
@@ -2602,13 +2653,15 @@ export function TeacherClassManager({
       setMaterialText("");
       setMaterialKind("Assignment");
       setFileInputKey((currentKey) => currentKey + 1);
-      setMaterialSuccess("Tutor knowledge saved.");
+      setMaterialSuccess("Tutor knowledge is processing in the background.");
       setIsKnowledgeDialogOpen(false);
     } catch (caughtError) {
       setError(formatClassError(caughtError, "Tutor knowledge save failed."));
     } finally {
       setIsSavingMaterial(false);
-      unsubscribeJob();
+      if (!keepJobSubscription) {
+        unsubscribeJob();
+      }
     }
   }
 
@@ -2626,6 +2679,18 @@ export function TeacherClassManager({
     setError("");
     setMaterialSuccess("");
     setDeletingMaterialId(material.id);
+    setMaterialJobProgressByMaterialId((currentProgress) => ({
+      ...currentProgress,
+      [material.id]: {
+        id: `${material.id}-delete-local`,
+        classId: activeClassId,
+        detail: "Delete requested. Preparing to remove this source.",
+        materialId: material.id,
+        percent: 5,
+        step: "deleting_source",
+        title: material.title
+      }
+    }));
 
     try {
       const token = await getTeacherToken();
@@ -2652,7 +2717,11 @@ export function TeacherClassManager({
     }
   }
 
-  function buildTutorKnowledgeFormData(classId: string, materialId: string) {
+  function buildTutorKnowledgeFormData(
+    classId: string,
+    materialId: string,
+    uploadedSource?: UploadedTutorKnowledgeStorageFile
+  ) {
     if (!materialFile && !materialSourceUrl.trim() && !materialText.trim()) {
       throw new Error("Add a supported file, paste a URL, or paste tutor knowledge text before previewing.");
     }
@@ -2665,7 +2734,10 @@ export function TeacherClassManager({
     formData.append("text", materialText);
     formData.append("sourceUrl", materialSourceUrl.trim());
 
-    if (materialFile) {
+    if (uploadedSource) {
+      formData.append("storagePath", uploadedSource.storagePath);
+      formData.append("storageBucket", uploadedSource.storageBucket ?? "");
+    } else if (materialFile) {
       validateTutorKnowledgeFile(materialFile);
       formData.append("file", materialFile);
     }
@@ -2753,6 +2825,14 @@ export function TeacherClassManager({
     setRetrievalResults([]);
     setIsMaterialDetailDrawerOpen(true);
     void loadMaterialDetail(material.id);
+  }
+
+  function openMaterialStatusDetail(material: ClassMaterial) {
+    setStatusDetailMaterialId(material.id);
+  }
+
+  function closeMaterialStatusDetail() {
+    setStatusDetailMaterialId("");
   }
 
   function closeMaterialDetail() {
@@ -4863,9 +4943,18 @@ export function TeacherClassManager({
                                       </span>
                                     </span>
                                     <span className="knowledge-source-cell" role="cell">
-                                      <span className={`knowledge-badge ${knowledgeStatusClass(material)}`}>
-                                        {formatKnowledgeStatus(material)}
-                                      </span>
+                                      <button
+                                        aria-label={`Open status for ${material.title}`}
+                                        className={`knowledge-badge knowledge-status-button ${knowledgeStatusClass(material)}`}
+                                        title="Source status"
+                                        type="button"
+                                        onClick={() => openMaterialStatusDetail(material)}
+                                      >
+                                        {formatKnowledgeStatus(
+                                          material,
+                                          materialProgressForMaterial(material, materialJobProgressByMaterialId[material.id])
+                                        )}
+                                      </button>
                                     </span>
                                     <span className="knowledge-source-cell numeric" role="cell">
                                       {formatMaterialChunkCount(material)}
@@ -4883,7 +4972,7 @@ export function TeacherClassManager({
                                       <button
                                         aria-label={`Delete ${material.title}`}
                                         className="knowledge-icon-button danger"
-                                        disabled={deletingMaterialId === material.id}
+                                        disabled={deletingMaterialId === material.id || material.status === "deleting"}
                                         title="Delete source"
                                         type="button"
                                         onClick={() => deleteMaterial(material)}
@@ -5708,7 +5797,10 @@ export function TeacherClassManager({
                 <dt>Indexing status</dt>
                 <dd>
                   <span className={`knowledge-badge ${knowledgeStatusClass(selectedMaterial)}`}>
-                    {formatKnowledgeStatus(selectedMaterial)}
+                    {formatKnowledgeStatus(
+                      selectedMaterial,
+                      materialProgressForMaterial(selectedMaterial, materialJobProgressByMaterialId[selectedMaterial.id])
+                    )}
                   </span>
                 </dd>
               </div>
@@ -5869,6 +5961,99 @@ export function TeacherClassManager({
               )}
             </section>
           </aside>
+        </div>
+      ) : null}
+
+      {statusDetailMaterial ? (
+        <div className="modal-backdrop" role="presentation" onClick={closeMaterialStatusDetail}>
+          <section
+            aria-labelledby="knowledge-status-title"
+            aria-modal="true"
+            className="modal-dialog status-modal-dialog"
+            role="dialog"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-heading">
+              <div>
+                <h3 id="knowledge-status-title">Source status</h3>
+                <span>{statusDetailMaterial.title}</span>
+              </div>
+              <button
+                aria-label="Close source status"
+                className="secondary-button compact"
+                type="button"
+                onClick={closeMaterialStatusDetail}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="status-detail-summary">
+              <span className={`knowledge-badge ${knowledgeStatusClass(statusDetailMaterial)}`}>
+                {formatKnowledgeStatus(statusDetailMaterial, statusDetailProgress)}
+              </span>
+              <strong>{materialStatusSummary(statusDetailMaterial, statusDetailProgress)}</strong>
+              <p>{materialStatusDetail(statusDetailMaterial, statusDetailProgress)}</p>
+            </div>
+
+            <div
+              aria-label="Source preparation progress"
+              aria-valuemax={100}
+              aria-valuemin={0}
+              aria-valuenow={materialStatusPercent(statusDetailMaterial, statusDetailProgress)}
+              className="status-detail-progress"
+              role="progressbar"
+            >
+              <span style={{ width: `${materialStatusPercent(statusDetailMaterial, statusDetailProgress)}%` }} />
+            </div>
+
+            <dl className="status-detail-grid">
+              <div>
+                <dt>Overall</dt>
+                <dd>{materialOverallStatusLabel(statusDetailMaterial)}</dd>
+              </div>
+              <div>
+                <dt>Progress</dt>
+                <dd>{materialStatusPercent(statusDetailMaterial, statusDetailProgress)}%</dd>
+              </div>
+              <div>
+                <dt>Pages uploaded</dt>
+                <dd>{formatMaterialPagesUploaded(statusDetailMaterial, statusDetailProgress)}</dd>
+              </div>
+              <div>
+                <dt>Tutor read</dt>
+                <dd>{formatMaterialTutorRead(statusDetailMaterial, statusDetailProgress)}</dd>
+              </div>
+              <div>
+                <dt>File</dt>
+                <dd>{formatMaterialFileType(statusDetailMaterial)}</dd>
+              </div>
+              <div>
+                <dt>Updated</dt>
+                <dd>{formatMaterialStatusUpdatedAt(statusDetailProgress)}</dd>
+              </div>
+            </dl>
+
+            {statusDetailProgress?.error ? (
+              <p className="status-detail-error">{statusDetailProgress.error}</p>
+            ) : null}
+
+            <div className="dialog-actions">
+              <button
+                className="secondary-button compact"
+                type="button"
+                onClick={() => {
+                  closeMaterialStatusDetail();
+                  openMaterialDetail(statusDetailMaterial);
+                }}
+              >
+                Open settings
+              </button>
+              <button className="primary-button teacher-primary-button compact" type="button" onClick={closeMaterialStatusDetail}>
+                Done
+              </button>
+            </div>
+          </section>
         </div>
       ) : null}
 
@@ -6548,8 +6733,294 @@ function knowledgeVisibilityClass(settings: KnowledgeSourceSettings) {
   return settings.teacherOnly ? "teacher-only" : "active";
 }
 
-function formatKnowledgeStatus(material: ClassMaterial) {
+function formatKnowledgeStatus(material: ClassMaterial, progress?: MaterialJobProgress) {
+  if (material.status === "deleting") {
+    return `Deleting ${materialStatusPercent(material, progress)}%`;
+  }
+
+  if (material.status === "processing") {
+    return `${materialStatusPercent(material, progress)}%`;
+  }
+
   return knowledgeStatusLabels[material.status];
+}
+
+function materialStatusSummary(material: ClassMaterial, progress?: MaterialJobProgress) {
+  if (progress?.step === "failed" || progress?.error) {
+    return "Processing failed";
+  }
+
+  if (material.status === "ready") {
+    return "Ready for students";
+  }
+
+  if (material.status === "uploaded") {
+    return "Needs review";
+  }
+
+  if (material.status === "deleting") {
+    return "Deleting source";
+  }
+
+  return "Preparing source";
+}
+
+function materialStatusDetail(material: ClassMaterial, progress?: MaterialJobProgress) {
+  if (progress?.error) {
+    return progress.error;
+  }
+
+  if (material.status === "ready") {
+    return "This source is indexed and available according to its visibility settings.";
+  }
+
+  if (material.status === "uploaded") {
+    return "This source was uploaded but is not ready for student use.";
+  }
+
+  if (material.status === "deleting") {
+    return "Chandra is deleting this source and its generated page files.";
+  }
+
+  return "Chandra is uploading page files and reading the source for tutoring.";
+}
+
+function materialStatusPercent(material: ClassMaterial, progress?: MaterialJobProgress) {
+  if (typeof material.processingPercent === "number") {
+    return Math.max(0, Math.min(100, Math.round(material.processingPercent)));
+  }
+
+  if (typeof progress?.percent === "number") {
+    return Math.max(0, Math.min(100, Math.round(progress.percent)));
+  }
+
+  if (material.status === "ready") {
+    return 100;
+  }
+
+  return material.status === "processing" || material.status === "deleting" ? 15 : 0;
+}
+
+function materialOverallStatusLabel(material: ClassMaterial) {
+  if (material.status === "ready") {
+    return "Ready";
+  }
+
+  if (material.status === "deleting") {
+    return "Deleting source";
+  }
+
+  if (material.status === "uploaded") {
+    return "Needs review";
+  }
+
+  const pagesDone = material.pageAssetTotalPages
+    ? (material.pageAssetCompletedPages ?? 0) >= material.pageAssetTotalPages
+    : false;
+  const tutorReadDone = material.tutorReadTotalSections
+    ? (material.tutorReadCompletedSections ?? 0) >= material.tutorReadTotalSections
+    : false;
+
+  if (pagesDone && tutorReadDone) {
+    return "Saving source";
+  }
+
+  if (material.pageAssetTotalPages || material.tutorReadTotalSections) {
+    return "Uploading pages and reading for tutor";
+  }
+
+  return "Preparing source";
+}
+
+function materialJobStepLabel(progress: MaterialJobProgress | undefined, materialStatus: ClassMaterial["status"]) {
+  const step = progress?.step;
+
+  if (step === "upload_received") {
+    return "Saving original source file";
+  }
+
+  if (step === "reading_file") {
+    return "Reading source and extracting text";
+  }
+
+  if (step === "chunking_material") {
+    return progress?.totalChunks
+      ? `Chunking material: ${progress.totalChunks} sections found`
+      : "Chunking material";
+  }
+
+  if (step === "preparing_pdf_pages") {
+    return progress?.totalPages
+      ? `Uploading mini PDFs: page ${progress.completedPages ?? 0} of ${progress.totalPages}`
+      : "Uploading mini PDF pages";
+  }
+
+  if (step === "reading_pdf_pages") {
+    return progress?.totalPages
+      ? `Google Document AI OCR: page ${progress.completedPages ?? 0} of ${progress.totalPages}`
+      : "Running Google Document AI OCR";
+  }
+
+  if (step === "embedding_chunks") {
+    return progress?.totalChunks
+      ? `Gemini embeddings: section ${progress.completedChunks ?? 0} of ${progress.totalChunks}`
+      : "Running Gemini embeddings";
+  }
+
+  if (step === "saving_to_class") {
+    return "Saving source to class";
+  }
+
+  if (step === "deleting_source") {
+    return "Starting delete";
+  }
+
+  if (step === "deleting_storage") {
+    return "Deleting original file and mini PDF pages";
+  }
+
+  if (step === "deleting_chunks") {
+    return progress?.totalChunks
+      ? `Deleting indexed sections: ${progress.totalChunks}`
+      : "Deleting indexed sections";
+  }
+
+  if (step === "deleting_material") {
+    return "Removing source from library";
+  }
+
+  if (step === "ready") {
+    return "Ready";
+  }
+
+  if (step === "failed") {
+    return "Failed";
+  }
+
+  return knowledgeStatusLabels[materialStatus];
+}
+
+function formatMaterialStatusPages(material: ClassMaterial, progress?: MaterialJobProgress) {
+  if (progress?.totalPages) {
+    return `${progress.completedPages ?? 0}/${progress.totalPages}`;
+  }
+
+  return typeof material.pageCount === "number" && material.pageCount > 0
+    ? material.pageCount.toLocaleString()
+    : "-";
+}
+
+function formatMaterialPagesUploaded(material: ClassMaterial, progress?: MaterialJobProgress) {
+  const completedPages = material.pageAssetCompletedPages ?? (
+    progress?.step === "preparing_pdf_pages" ? progress.completedPages : undefined
+  );
+  const totalPages = material.pageAssetTotalPages ?? (
+    progress?.step === "preparing_pdf_pages" ? progress.totalPages : undefined
+  );
+
+  const progressLabel = formatCountProgress(completedPages, totalPages);
+  if (progressLabel) {
+    return progressLabel;
+  }
+
+  return material.status === "ready" ? "Complete" : "-";
+}
+
+function formatMaterialTutorRead(material: ClassMaterial, progress?: MaterialJobProgress) {
+  const completedSections = material.tutorReadCompletedSections ?? (
+    progress?.step === "embedding_chunks"
+      ? progress.completedChunks
+      : progress?.step === "reading_pdf_pages"
+        ? progress.completedPages
+        : undefined
+  );
+  const totalSections = material.tutorReadTotalSections ?? (
+    progress?.step === "embedding_chunks"
+      ? progress.totalChunks
+      : progress?.step === "reading_pdf_pages"
+        ? progress.totalPages
+        : undefined
+  );
+
+  const progressLabel = formatCountProgress(completedSections, totalSections);
+  if (progressLabel) {
+    return progressLabel;
+  }
+
+  return material.status === "ready" ? "Complete" : "-";
+}
+
+function formatCountProgress(completed: number | null | undefined, total: number | null | undefined) {
+  if (typeof total !== "number" || total <= 0) {
+    return "";
+  }
+
+  const rawCompleted = typeof completed === "number" ? completed : 0;
+  const safeCompleted = Math.min(Math.max(0, rawCompleted), total);
+  const percent = Math.round((safeCompleted / total) * 100);
+  return `${safeCompleted}/${total} (${percent}%)`;
+}
+
+function formatMaterialStatusSections(material: ClassMaterial, progress?: MaterialJobProgress) {
+  if (progress?.totalChunks) {
+    return `${progress.completedChunks ?? 0}/${progress.totalChunks}`;
+  }
+
+  return typeof material.chunkCount === "number" && material.chunkCount > 0
+    ? material.chunkCount.toLocaleString()
+    : "-";
+}
+
+function formatMaterialStatusUpdatedAt(progress?: MaterialJobProgress) {
+  return progress?.updatedAt ? formatConversationDate(progress.updatedAt) || "Just now" : "Not reported";
+}
+
+function materialProgressForMaterial(material: ClassMaterial, jobProgress?: MaterialJobProgress): MaterialJobProgress | undefined {
+  const materialProgress = material.processingStep || typeof material.processingPercent === "number" || material.processingDetail
+    ? {
+        id: `${material.id}-material-progress`,
+        classId: "",
+        completedChunks: material.processingCompletedChunks ?? undefined,
+        completedPages: material.processingCompletedPages ?? undefined,
+        detail: material.processingDetail ?? materialStatusSummary(material),
+        error: material.processingError ?? undefined,
+        materialId: material.id,
+        percent: typeof material.processingPercent === "number" ? material.processingPercent : material.status === "ready" ? 100 : 15,
+        step: material.processingStep ?? (material.status === "ready" ? "ready" : material.status === "deleting" ? "deleting_source" : "upload_received"),
+        title: material.title,
+        totalChunks: material.processingTotalChunks ?? undefined,
+        totalPages: material.processingTotalPages ?? undefined,
+        updatedAt: material.processingUpdatedAt
+      } satisfies MaterialJobProgress
+    : undefined;
+
+  if (materialProgress && jobProgress) {
+    return materialProgress.percent >= jobProgress.percent ? materialProgress : jobProgress;
+  }
+
+  return materialProgress ?? jobProgress;
+}
+
+function buildLatestMaterialJobProgressMap(progressItems: MaterialJobProgress[]) {
+  const progressByMaterialId: Record<string, MaterialJobProgress> = {};
+
+  for (const progress of progressItems) {
+    const materialId = progress.materialId?.trim();
+
+    if (!materialId) {
+      continue;
+    }
+
+    const currentProgress = progressByMaterialId[materialId];
+    const currentUpdatedAt = currentProgress ? coerceDate(currentProgress.updatedAt)?.getTime() ?? 0 : 0;
+    const nextUpdatedAt = coerceDate(progress.updatedAt)?.getTime() ?? 0;
+
+    if (!currentProgress || nextUpdatedAt >= currentUpdatedAt) {
+      progressByMaterialId[materialId] = progress;
+    }
+  }
+
+  return progressByMaterialId;
 }
 
 function knowledgeStatusClass(material: ClassMaterial) {
@@ -6557,7 +7028,7 @@ function knowledgeStatusClass(material: ClassMaterial) {
 }
 
 function formatMaterialChunkCount(material: ClassMaterial) {
-  return material.chunkCount ?? "-";
+  return material.pageCount ?? material.chunkCount ?? "-";
 }
 
 function formatRetrievalPageLabel(label: string) {
@@ -8523,11 +8994,51 @@ function buildTeacherInviteUrl(inviteId: string) {
 
 function materialJobToUploadProgress(progress: MaterialJobProgress): MaterialUploadProgress {
   return {
-    detail: progress.detail,
+    detail: compactMaterialJobDetail(progress),
     percent: progress.percent,
     step: materialJobStepToUploadStep(progress.step),
     uploadPercent: 100
   };
+}
+
+function compactMaterialJobDetail(progress: MaterialJobProgress) {
+  if (progress.detail) {
+    return progress.detail;
+  }
+
+  if (progress.step === "preparing_pdf_pages" && progress.completedPages && progress.totalPages) {
+    return `Uploading mini PDF page ${progress.completedPages} of ${progress.totalPages}.`;
+  }
+
+  if (progress.step === "reading_pdf_pages" && progress.completedPages && progress.totalPages) {
+    return `Running Google Document AI OCR on page ${progress.completedPages} of ${progress.totalPages}.`;
+  }
+
+  if (progress.step === "embedding_chunks" && progress.completedChunks && progress.totalChunks) {
+    return `Running Gemini embeddings for section ${progress.completedChunks} of ${progress.totalChunks}.`;
+  }
+
+  if (progress.step === "upload_received") {
+    return "Upload received.";
+  }
+
+  if (progress.step === "reading_file") {
+    return "Reading source.";
+  }
+
+  if (progress.step === "chunking_material") {
+    return progress.totalChunks ? `${progress.totalChunks} sections found.` : "Sectioning source.";
+  }
+
+  if (progress.step === "saving_to_class") {
+    return "Saving to class.";
+  }
+
+  if (progress.step === "ready") {
+    return "Ready for students.";
+  }
+
+  return progress.detail;
 }
 
 function materialJobStepToUploadStep(step: MaterialJobProgress["step"]): MaterialUploadProgress["step"] {
@@ -8543,6 +9054,14 @@ function materialJobStepToUploadStep(step: MaterialJobProgress["step"]): Materia
     return "chunk";
   }
 
+  if (step === "preparing_pdf_pages") {
+    return "pages";
+  }
+
+  if (step === "reading_pdf_pages") {
+    return "embed";
+  }
+
   if (step === "embedding_chunks") {
     return "embed";
   }
@@ -8554,11 +9073,116 @@ function materialJobStepToUploadStep(step: MaterialJobProgress["step"]): Materia
   return "complete";
 }
 
+async function uploadTutorKnowledgeFileToStorage({
+  classId,
+  file,
+  materialId,
+  onProgress,
+  token
+}: {
+  classId: string;
+  file: File;
+  materialId: string;
+  onProgress: (progress: MaterialUploadProgress | null) => void;
+  token: string;
+}): Promise<UploadedTutorKnowledgeStorageFile> {
+  validateTutorKnowledgeFile(file);
+
+  if (!storage) {
+    throw new Error("Firebase Storage is not configured for direct source upload.");
+  }
+
+  onProgress({
+    detail: "Preparing direct Firebase Storage upload.",
+    percent: 2,
+    step: "prepare",
+    uploadPercent: 0
+  });
+
+  const sessionResponse = await fetch(apiUrl("/api/materials/upload-session"), {
+    body: JSON.stringify({ classId, materialId }),
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    method: "POST"
+  });
+  const sessionData = (await sessionResponse.json().catch(() => ({}))) as { error?: string };
+
+  if (!sessionResponse.ok) {
+    throw new Error(sessionData.error ?? "Tutor knowledge upload session failed.");
+  }
+
+  const storagePath = `classes/${classId}/materials/${materialId}/original/${safeStorageFileName(file.name)}`;
+  const uploadTask = uploadBytesResumable(storageRef(storage, storagePath), file, {
+    contentType: file.type || contentTypeForTutorKnowledgeFile(file.name)
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    uploadTask.on(
+      "state_changed",
+      (snapshot) => {
+        const uploadPercent = snapshot.totalBytes
+          ? Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)
+          : 0;
+
+        onProgress({
+          detail: `${formatBytes(snapshot.bytesTransferred)} / ${formatBytes(snapshot.totalBytes)} uploaded to Firebase Storage.`,
+          percent: Math.min(12, 2 + Math.round(uploadPercent * 0.1)),
+          step: "upload",
+          uploadPercent
+        });
+      },
+      (caughtError) => reject(caughtError),
+      () => resolve()
+    );
+  });
+
+  onProgress({
+    detail: "Upload complete. Starting background source processing.",
+    percent: 12,
+    step: "upload",
+    uploadPercent: 100
+  });
+
+  return {
+    storageBucket: storage.app.options.storageBucket,
+    storagePath
+  };
+}
+
+function safeStorageFileName(fileName: string) {
+  const trimmed = fileName.trim() || "source";
+  return trimmed
+    .replace(/[^\w. -]+/g, "_")
+    .replace(/\s+/g, "_")
+    .slice(0, 140);
+}
+
+function contentTypeForTutorKnowledgeFile(fileName: string) {
+  const extension = fileName.toLowerCase().split(".").pop();
+
+  if (extension === "pdf") {
+    return "application/pdf";
+  }
+
+  if (extension === "md") {
+    return "text/markdown";
+  }
+
+  if (extension === "csv") {
+    return "text/csv";
+  }
+
+  return "text/plain";
+}
+
 function postTutorKnowledgeForm<TResponse = { error?: string }>({
   completionDetail = "Source is saved and ready for students.",
   formData,
   label,
   onProgress,
+  suppressUploadProgress = false,
   token,
   useBackendProgress = false,
   url
@@ -8567,6 +9191,7 @@ function postTutorKnowledgeForm<TResponse = { error?: string }>({
   formData: FormData;
   label: string;
   onProgress: (progress: MaterialUploadProgress | null) => void;
+  suppressUploadProgress?: boolean;
   token: string;
   useBackendProgress?: boolean;
   url: string;
@@ -8581,14 +9206,20 @@ function postTutorKnowledgeForm<TResponse = { error?: string }>({
       }
     };
 
-    onProgress({
-      detail: "Starting the upload.",
-      percent: 2,
-      step: "prepare",
-      uploadPercent: 0
-    });
+    if (!suppressUploadProgress) {
+      onProgress({
+        detail: "Starting the upload.",
+        percent: 2,
+        step: "prepare",
+        uploadPercent: 0
+      });
+    }
 
     request.upload.onprogress = (event) => {
+      if (suppressUploadProgress) {
+        return;
+      }
+
       if (!event.lengthComputable) {
         return;
       }
@@ -8596,7 +9227,7 @@ function postTutorKnowledgeForm<TResponse = { error?: string }>({
       const uploadPercent = Math.min(100, Math.round((event.loaded / event.total) * 100));
 
       onProgress({
-        detail: `${label}: ${formatBytes(event.loaded)} of ${formatBytes(event.total)} uploaded.`,
+        detail: `${formatBytes(event.loaded)} / ${formatBytes(event.total)} uploaded.`,
         percent: useBackendProgress
           ? Math.min(12, 2 + Math.round(uploadPercent * 0.1))
           : Math.min(67, 8 + Math.round(uploadPercent * 0.58)),
@@ -8606,10 +9237,14 @@ function postTutorKnowledgeForm<TResponse = { error?: string }>({
     };
 
     request.upload.onload = () => {
+      if (suppressUploadProgress) {
+        return;
+      }
+
       onProgress({
         detail: useBackendProgress
-          ? "Upload complete. Chandra is preparing this source."
-          : "Upload complete. Chandra is reading this source.",
+          ? "Upload complete. Preparing source."
+          : "Upload complete. Reading source.",
         percent: useBackendProgress ? 12 : processingPercent,
         step: useBackendProgress ? "upload" : "read",
         uploadPercent: 100
@@ -8647,6 +9282,19 @@ function postTutorKnowledgeForm<TResponse = { error?: string }>({
         return;
       }
 
+      if (useBackendProgress && responseIsBackgroundProcessing(data)) {
+        if (!suppressUploadProgress) {
+          onProgress({
+            detail: "Processing in background.",
+            percent: 15,
+            step: "upload",
+            uploadPercent: 100
+          });
+        }
+        resolve(data as TResponse);
+        return;
+      }
+
       onProgress({
         detail: completionDetail,
         percent: 100,
@@ -8660,6 +9308,10 @@ function postTutorKnowledgeForm<TResponse = { error?: string }>({
     request.setRequestHeader("Authorization", `Bearer ${token}`);
     request.send(formData);
   });
+}
+
+function responseIsBackgroundProcessing(data: unknown) {
+  return Boolean(data && typeof data === "object" && "processing" in data && data.processing === true);
 }
 
 function parseJsonResponse(responseText: string) {
@@ -8695,6 +9347,10 @@ function uploadStepLabel(step: MaterialUploadProgress["step"]) {
     return "Reading";
   }
 
+  if (step === "pages") {
+    return "Pages";
+  }
+
   if (step === "chunk") {
     return "Preparing";
   }
@@ -8712,15 +9368,19 @@ function uploadStepLabel(step: MaterialUploadProgress["step"]) {
 
 function uploadDisplayStepLabel(step: MaterialUploadDisplayStep) {
   if (step === "upload") {
-    return "Upload source";
+    return "Upload";
   }
 
   if (step === "read") {
-    return "Read source";
+    return "Read";
+  }
+
+  if (step === "pages") {
+    return "Pages";
   }
 
   if (step === "prepare") {
-    return "Prepare for tutor";
+    return "Prepare";
   }
 
   return "Ready";
@@ -8752,6 +9412,10 @@ function uploadDisplayStepFromProgressStep(step: MaterialUploadProgress["step"])
 
   if (step === "read") {
     return "read";
+  }
+
+  if (step === "pages") {
+    return "pages";
   }
 
   if (step === "complete") {

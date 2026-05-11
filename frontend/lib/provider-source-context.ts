@@ -50,6 +50,7 @@ function selectedPagesContext(message: ChatMessage) {
         page.printedPageStart ? `printed page ${page.printedPageStart}` : "",
         page.pageStart ? `internal page ${page.pageStart}` : "",
         page.materialType ? `material type ${page.materialType}` : "",
+        page.section ? `section ${page.section}` : "",
         page.citationLabel ? `citation ${page.citationLabel}` : ""
       ]
         .filter(Boolean)

@@ -6,9 +6,9 @@
 runConfig:
   minInstances: 0
   maxInstances: 10
-  concurrency: 80
-  cpu: 1
-  memoryMiB: 1024
+  concurrency: 10
+  cpu: 2
+  memoryMiB: 4096
 
 env:
   # App Hosting deploys run `npm run build`; explicit type validation remains
@@ -168,5 +168,41 @@ env:
       - RUNTIME
   - variable: VERTEX_EMBEDDING_DIMENSIONS
     value: "768"
+    availability:
+      - RUNTIME
+  - variable: GEMINI_EMBEDDING_BATCH_SIZE
+    value: "32"
+    availability:
+      - RUNTIME
+  - variable: GEMINI_EMBEDDING_BATCH_CONCURRENCY
+    value: "6"
+    availability:
+      - RUNTIME
+  - variable: DOCUMENT_AI_OCR_PROCESSOR_ID
+    value: 5d3fa32c2ebe2a90
+    availability:
+      - RUNTIME
+  - variable: DOCUMENT_AI_OCR_LOCATION
+    value: us
+    availability:
+      - RUNTIME
+  - variable: DOCUMENT_AI_OCR_REQUESTS_PER_MINUTE
+    value: "60"
+    availability:
+      - RUNTIME
+  - variable: DOCUMENT_AI_OCR_PAGES_PER_REQUEST
+    value: "15"
+    availability:
+      - RUNTIME
+  - variable: PDF_PAGE_TRANSCRIPTION_CONCURRENCY
+    value: "3"
+    availability:
+      - RUNTIME
+  - variable: PDF_PAGE_PROGRESS_UPDATE_INTERVAL
+    value: "25"
+    availability:
+      - RUNTIME
+  - variable: PDF_PAGE_ASSET_CONCURRENCY
+    value: "16"
     availability:
       - RUNTIME

@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { lookup } from "dns/promises";
 import { FieldValue, type DocumentReference } from "firebase-admin/firestore";
+import { GoogleAuth, type JWTInput } from "google-auth-library";
 import { isIP } from "net";
 import { PDFDocument } from "pdf-lib";
 import { adminAuth, adminDb, adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
@@ -17,13 +18,14 @@ import {
   type TutorKnowledgePage
 } from "./tutor-knowledge";
 import { TutorKnowledgeHttpError } from "./tutor-knowledge-errors";
-import { materialTypeForKind, problemNumbersFromText } from "./retrieval-ranking";
+import { materialTypeForKind, problemNumbersFromText, sectionMarkersFromText } from "./retrieval-ranking";
 import type { TutorKnowledgePriority } from "./types";
 import {
   VertexEmbeddingError,
   createVertexEmbedding,
   createVertexEmbeddings,
   isVertexEmbeddingConfigured,
+  type VertexEmbeddingPart,
   type VertexEmbeddingResult
 } from "./vertex-embeddings";
 import { firebaseConfig } from "./firebase-config";
@@ -63,6 +65,24 @@ const supportedContentTypes = new Set([
   "text/x-markdown"
 ]);
 const embeddingConcurrencyLimit = 4;
+const defaultPdfPageTranscriptionConcurrencyLimit = 3;
+const defaultDocumentAiOcrProcessorId = "5d3fa32c2ebe2a90";
+const documentAiOcrMaxAttempts = 6;
+const defaultDocumentAiOcrPagesPerRequest = 15;
+const maxDocumentAiOcrPagesPerRequest = 15;
+const documentAiOcrPagesPerRequest = Math.min(
+  maxDocumentAiOcrPagesPerRequest,
+  readOptionalPositiveInteger(process.env.DOCUMENT_AI_OCR_PAGES_PER_REQUEST) ?? defaultDocumentAiOcrPagesPerRequest
+);
+const defaultDocumentAiOcrRequestsPerMinute = 60;
+const documentAiOcrRequestIntervalMs = Math.ceil(
+  60_000 / (readOptionalPositiveInteger(process.env.DOCUMENT_AI_OCR_REQUESTS_PER_MINUTE) ?? defaultDocumentAiOcrRequestsPerMinute)
+);
+let nextDocumentAiOcrRequestAt = 0;
+const pdfPageProgressUpdateInterval = readOptionalPositiveInteger(process.env.PDF_PAGE_PROGRESS_UPDATE_INTERVAL) ?? 25;
+const pdfPageTranscriptionConcurrencyLimit =
+  readOptionalPositiveInteger(process.env.PDF_PAGE_TRANSCRIPTION_CONCURRENCY)
+  ?? defaultPdfPageTranscriptionConcurrencyLimit;
 const maxTutorKnowledgeFileBytes = 500 * 1024 * 1024;
 const maxTutorKnowledgePastedTextCharacters = 250000;
 const maxTutorKnowledgeUrlRedirects = 4;
@@ -268,18 +288,26 @@ type MaterialJobStep =
   | "upload_received"
   | "reading_file"
   | "chunking_material"
+  | "preparing_pdf_pages"
+  | "reading_pdf_pages"
   | "embedding_chunks"
   | "saving_to_class"
+  | "deleting_source"
+  | "deleting_storage"
+  | "deleting_chunks"
+  | "deleting_material"
   | "ready"
   | "failed";
 
 type MaterialJobProgressUpdate = {
   completedChunks?: number;
+  completedPages?: number;
   detail: string;
   error?: string;
   percent: number;
   step: MaterialJobStep;
   totalChunks?: number;
+  totalPages?: number;
 };
 
 export type TutorKnowledgeSourceSettings = {
@@ -463,21 +491,6 @@ export async function saveTutorKnowledge({
   }
 
   const sourceFile = file ?? storedSource?.file ?? null;
-  const ingestion = await buildTutorKnowledgeIngestion({
-    docId: materialRef.id,
-    file: sourceFile,
-    pastedText,
-    sourceUrl,
-    title,
-    updateProgress
-  });
-  const searchableText = ingestion.searchableText;
-  const chunks = ingestion.chunks;
-
-  if (!searchableText && !chunks.length) {
-    throw new TutorKnowledgeHttpError("No tutor knowledge text was found. This source may be private, scanned, or unsupported.", 400);
-  }
-
   const materialType = materialTypeForKind(kind);
   const classSnapshot = await adminDb!.collection("classes").doc(classId).get();
   const configuredSourceDefaults = sourceDefaultsForMaterialKind(classSnapshot.data()?.sourceDefaults, kind);
@@ -487,6 +500,10 @@ export async function saveTutorKnowledge({
     priority: configuredSourceDefaults.priority,
     requireCitations: configuredSourceDefaults.citationsRequired,
     teacherOnly: configuredSourceDefaults.teacherOnly
+  });
+  const sourceMode = getTutorKnowledgeSourceMode({
+    hasFile: Boolean(sourceFile || sourceUrl),
+    hasPastedText: Boolean(pastedText)
   });
 
   await materialRef.set({
@@ -513,20 +530,80 @@ export async function saveTutorKnowledge({
         ? "student-visible"
         : "hidden",
     ...fileMetadata,
-    characterCount: searchableText.length,
-    chunkCount: chunks.length,
+    characterCount: 0,
+    chunkCount: 0,
     embeddingProvider: "vertex-ai",
     embeddingStatus: isVertexEmbeddingConfigured() ? "processing" : "not-configured",
+    processingCompletedChunks: null,
+    processingCompletedPages: null,
+    processingDetail: "Upload received. Starting server-side processing.",
+    processingError: null,
+    processingPercent: 15,
+    processingStep: "upload_received",
+    processingTotalChunks: null,
+    processingTotalPages: null,
+    processingUpdatedAt: FieldValue.serverTimestamp(),
     status: "processing",
     addedAt: FieldValue.serverTimestamp(),
     createdAt: FieldValue.serverTimestamp(),
-    pageCount: ingestion.pageCount,
-    sourceMode: getTutorKnowledgeSourceMode({
-      hasFile: Boolean(sourceFile || sourceUrl),
-      hasPastedText: Boolean(pastedText)
-    }),
-    ...ingestion.sourceMetadata,
+    pageCount: 0,
+    sourceMode,
     ...(pastedText ? { textSource: pastedText } : {}),
+    visualPageCount: 0
+  });
+
+  let ingestion: Awaited<ReturnType<typeof buildTutorKnowledgeIngestion>>;
+
+  try {
+    ingestion = await buildTutorKnowledgeIngestion({
+      classId,
+      docId: materialRef.id,
+      file: sourceFile,
+      materialId: materialRef.id,
+      pastedText,
+      pageAssetStorageBucket: String((fileMetadata as Partial<TutorKnowledgeOriginalSource>).storageBucket ?? ""),
+      sourceUrl,
+      title,
+      updateProgress
+    });
+  } catch (caughtError) {
+    await materialRef.update({
+      embeddingError: caughtError instanceof Error ? caughtError.message : String(caughtError),
+      embeddingFailedAt: FieldValue.serverTimestamp(),
+      embeddingStatus: "failed",
+      processingDetail: "Tutor knowledge processing failed before it was ready.",
+      processingError: caughtError instanceof Error ? caughtError.message : String(caughtError),
+      processingPercent: 100,
+      processingStep: "failed",
+      processingUpdatedAt: FieldValue.serverTimestamp(),
+      status: "uploaded"
+    });
+    throw caughtError;
+  }
+
+  const searchableText = ingestion.searchableText;
+  const chunks = ingestion.chunks;
+
+  if (!searchableText && !chunks.length) {
+    await materialRef.update({
+      embeddingError: "No tutor knowledge text was found.",
+      embeddingFailedAt: FieldValue.serverTimestamp(),
+      embeddingStatus: "failed",
+      processingDetail: "No tutor knowledge text was found.",
+      processingError: "No tutor knowledge text was found.",
+      processingPercent: 100,
+      processingStep: "failed",
+      processingUpdatedAt: FieldValue.serverTimestamp(),
+      status: "uploaded"
+    });
+    throw new TutorKnowledgeHttpError("No tutor knowledge text was found. This source may be private, scanned, or unsupported.", 400);
+  }
+
+  await materialRef.update({
+    characterCount: searchableText.length,
+    chunkCount: chunks.length,
+    pageCount: ingestion.pageCount,
+    ...ingestion.sourceMetadata,
     visualPageCount: ingestion.visualPageCount
   });
 
@@ -560,6 +637,10 @@ export async function saveTutorKnowledge({
     await materialRef.update({
       embeddingStatus: isVertexEmbeddingConfigured() ? "ready" : "not-configured",
       indexedAt: FieldValue.serverTimestamp(),
+      processingPercent: 100,
+      processingStep: "ready",
+      processingDetail: "Source is ready for students.",
+      processingUpdatedAt: FieldValue.serverTimestamp(),
       status: "ready"
     });
     await updateProgress({
@@ -631,6 +712,14 @@ export async function deleteTutorKnowledge({
   const material = materialSnapshot.data() ?? {};
   const filePath = String(material.filePath ?? "");
   const storageBucket = String(material.storageBucket ?? "").trim();
+
+  await updateMaterialDeleteProgress({
+    detail: "Delete requested. Preparing to remove this source.",
+    materialRef,
+    percent: 10,
+    step: "deleting_source"
+  });
+
   const [chunksSnapshot, jobsSnapshot] = await Promise.all([
     materialRef.collection("chunks").get(),
     adminDb!
@@ -641,11 +730,32 @@ export async function deleteTutorKnowledge({
       .get()
   ]);
 
+  await updateMaterialDeleteProgress({
+    detail: "Deleting original source files.",
+    materialRef,
+    percent: 35,
+    step: "deleting_storage"
+  });
   await deleteMaterialStorageFiles({ classId, filePath, materialId, storageBucket });
+
+  await updateMaterialDeleteProgress({
+    detail: `Deleting ${chunksSnapshot.size} indexed section${chunksSnapshot.size === 1 ? "" : "s"}.`,
+    materialRef,
+    percent: 70,
+    step: "deleting_chunks",
+    totalChunks: chunksSnapshot.size
+  });
   await deleteDocumentsInBatches([
     ...chunksSnapshot.docs.map((chunkDoc) => chunkDoc.ref),
     ...jobsSnapshot.docs.map((jobDoc) => jobDoc.ref)
   ]);
+
+  await updateMaterialDeleteProgress({
+    detail: "Removing source from the class library.",
+    materialRef,
+    percent: 95,
+    step: "deleting_material"
+  });
   await materialRef.delete();
 }
 
@@ -766,9 +876,12 @@ export async function reprocessTutorKnowledge({
   }
 
   const ingestion = await buildTutorKnowledgeIngestion({
+    classId,
     docId: materialId,
     file,
+    materialId,
     pastedText: textSource || fallbackText,
+    pageAssetStorageBucket: String(material.storageBucket ?? ""),
     sourceUrl,
     title
   });
@@ -914,6 +1027,33 @@ async function deleteMaterialStorageFiles({
   await Promise.all(
     Array.from(filePaths).map((path) => bucket.file(path).delete({ ignoreNotFound: true }))
   );
+}
+
+async function updateMaterialDeleteProgress({
+  detail,
+  materialRef,
+  percent,
+  step,
+  totalChunks
+}: {
+  detail: string;
+  materialRef: DocumentReference;
+  percent: number;
+  step: Extract<MaterialJobStep, "deleting_source" | "deleting_storage" | "deleting_chunks" | "deleting_material">;
+  totalChunks?: number;
+}) {
+  await materialRef.update({
+    processingCompletedChunks: step === "deleting_chunks" ? 0 : null,
+    processingCompletedPages: null,
+    processingDetail: detail,
+    processingError: null,
+    processingPercent: Math.max(0, Math.min(100, percent)),
+    processingStep: step,
+    processingTotalChunks: totalChunks ?? null,
+    processingTotalPages: null,
+    processingUpdatedAt: FieldValue.serverTimestamp(),
+    status: "deleting"
+  });
 }
 
 function defaultSourceSettingsForKind(kind: string): TutorKnowledgeSourceSettings {
@@ -1150,15 +1290,21 @@ async function readExistingChunkText(
 }
 
 async function buildTutorKnowledgeIngestion({
+  classId,
   docId,
   file,
+  materialId,
+  pageAssetStorageBucket,
   pastedText,
   sourceUrl,
   title,
   updateProgress
 }: {
+  classId?: string;
   docId: string;
   file: File | null;
+  materialId?: string;
+  pageAssetStorageBucket?: string;
   pastedText: string;
   sourceUrl?: string;
   title: string;
@@ -1177,9 +1323,13 @@ async function buildTutorKnowledgeIngestion({
   });
   const urlIngestion = normalizedSourceUrl
     ? await extractChunksFromUrl({
+        classId,
         docId,
+        materialId,
+        pageAssetStorageBucket,
         sourceUrl: normalizedSourceUrl,
-        title
+        title,
+        updateProgress
       })
     : {
         chunks: [] as TutorKnowledgeChunk[],
@@ -1190,13 +1340,18 @@ async function buildTutorKnowledgeIngestion({
       };
   const fileIngestion = file
     ? await extractChunksFromFile({
+        classId,
         docId,
         file,
-        title
+        materialId,
+        pageAssetStorageBucket,
+        title,
+        updateProgress
       })
     : {
         chunks: [] as TutorKnowledgeChunk[],
         extractedText: "",
+        metadata: {},
         pageCount: 0,
         visualPageCount: 0
       };
@@ -1229,19 +1384,30 @@ async function buildTutorKnowledgeIngestion({
     extractedText: [urlIngestion.extractedText, fileIngestion.extractedText].filter((text) => text.trim()).join("\n\n"),
     pageCount: urlIngestion.pageCount + fileIngestion.pageCount,
     searchableText,
-    sourceMetadata: urlIngestion.metadata,
+    sourceMetadata: {
+      ...urlIngestion.metadata,
+      ...fileIngestion.metadata
+    },
     visualPageCount: urlIngestion.visualPageCount + fileIngestion.visualPageCount
   };
 }
 
 async function extractChunksFromFile({
+  classId,
   docId,
   file,
-  title
+  materialId,
+  pageAssetStorageBucket,
+  title,
+  updateProgress
 }: {
+  classId?: string;
   docId: string;
   file: File;
+  materialId?: string;
+  pageAssetStorageBucket?: string;
   title: string;
+  updateProgress?: (progress: MaterialJobProgressUpdate) => Promise<void>;
 }) {
   validateFile(file);
   const buffer = Buffer.from(await file.arrayBuffer());
@@ -1255,6 +1421,7 @@ async function extractChunksFromFile({
         title
       }),
       extractedText,
+      metadata: {},
       pageCount: 0,
       visualPageCount: 0
     };
@@ -1266,26 +1433,49 @@ async function extractChunksFromFile({
     pages,
     title
   });
+  const visualPdfPageNumbers = pdfPageAssetPageNumbersForChunks(chunks);
+  const sourcePdfPromise = visualPdfPageNumbers.length
+    ? PDFDocument.load(buffer, { ignoreEncryption: true })
+    : Promise.resolve(null);
+  const chunksWithPdfParts = visualPdfPageNumbers.length
+    ? await sourcePdfPromise.then((sourcePdf) => attachPdfSlicesToChunks({
+        chunks,
+        pdfBytes: buffer,
+        shouldAttachPdfSlice: shouldAttachPdfPartForEmbedding,
+        sourcePdf: sourcePdf!
+      }))
+    : chunks;
+  const chunksWithReadableContent = await transcribeVisualPdfChunks({
+    chunks: chunksWithPdfParts,
+    title,
+    updateProgress
+  });
 
   return {
-    chunks: await attachPdfSlicesToChunks({
-      chunks,
-      pdfBytes: buffer
-    }),
-    extractedText: pages.map((page) => page.text.trim()).filter(Boolean).join("\n\n"),
+    chunks: chunksWithReadableContent,
+    extractedText: extractedTextWithTranscribedVisualChunks(pages, chunksWithReadableContent),
+    metadata: {},
     pageCount: pages.length,
     visualPageCount: pages.filter((page) => classifyTutorKnowledgePage(page) !== "text-heavy").length
   };
 }
 
 async function extractChunksFromUrl({
+  classId,
   docId,
+  materialId,
+  pageAssetStorageBucket,
   sourceUrl,
-  title
+  title,
+  updateProgress
 }: {
+  classId?: string;
   docId: string;
+  materialId?: string;
+  pageAssetStorageBucket?: string;
   sourceUrl: string;
   title: string;
+  updateProgress?: (progress: MaterialJobProgressUpdate) => Promise<void>;
 }) {
   const downloaded = await downloadTutorKnowledgeUrl(sourceUrl);
   const contentType = downloaded.contentType || contentTypeFromFileName(downloaded.fileName);
@@ -1304,11 +1494,22 @@ async function extractChunksFromUrl({
       downloaded.buffer.byteOffset + downloaded.buffer.byteLength
     ) as ArrayBuffer;
     const file = new File([fileBytes], downloaded.fileName, { type: contentType });
-    const extracted = await extractChunksFromFile({ docId, file, title });
+    const extracted = await extractChunksFromFile({
+      classId,
+      docId,
+      file,
+      materialId,
+      pageAssetStorageBucket,
+      title,
+      updateProgress
+    });
 
     return {
       ...extracted,
-      metadata
+      metadata: {
+        ...metadata,
+        ...extracted.metadata
+      }
     };
   }
 
@@ -1352,16 +1553,14 @@ async function extractChunksFromUrl({
 }
 
 async function extractPdfPages(buffer: Buffer): Promise<TutorKnowledgePage[]> {
-  const pageInfoByNumberPromise = extractPdfPageInfo(buffer);
   let pages = await extractPdfTextPages(buffer, { lineEnforce: true }).catch(() =>
     extractPdfTextPages(buffer, { lineEnforce: false }).catch(async () =>
-      visualPdfPagesFromPageInfo(await pageInfoByNumberPromise)
+      visualPdfPagesFromPageInfo(await extractPdfPageInfo(buffer))
     )
   );
-  const pageInfoByNumber = await pageInfoByNumberPromise;
 
   if (!pages.length) {
-    pages = visualPdfPagesFromPageInfo(pageInfoByNumber);
+    pages = visualPdfPagesFromPageInfo(await extractPdfPageInfo(buffer));
   }
 
   if (!pages.length) {
@@ -1373,8 +1572,6 @@ async function extractPdfPages(buffer: Buffer): Promise<TutorKnowledgePage[]> {
 
   return pages.map((page) => {
     const text = page.text.trim();
-    const pageInfo = pageInfoByNumber.get(page.num);
-    const pageArea = pageInfo?.area ?? 0;
     const wordCount = text.split(/\s+/).filter(Boolean).length;
     const lineCount = text.split(/\r?\n/).filter((line) => line.trim().length >= 3).length;
 
@@ -1383,14 +1580,611 @@ async function extractPdfPages(buffer: Buffer): Promise<TutorKnowledgePage[]> {
         embeddedImageCount: 0,
         imageCoverageRatio: text ? 0 : 1,
         lineCount,
-        pageArea,
-        textDensity: pageArea ? wordCount / pageArea : 0
+        pageArea: 0,
+        textDensity: 0
       },
       isVisual: !text,
       pageNumber: page.num,
       text
     };
   });
+}
+
+function pdfPageAssetPageNumbersForChunks(chunks: TutorKnowledgeChunk[]) {
+  const pageNumbers = new Set<number>();
+
+  for (const chunk of chunks) {
+    if (!shouldPrebuildPdfPageAsset(chunk) || !chunk.pageStart || !chunk.pageEnd) {
+      continue;
+    }
+
+    for (let pageNumber = chunk.pageStart; pageNumber <= chunk.pageEnd; pageNumber += 1) {
+      pageNumbers.add(pageNumber);
+    }
+  }
+
+  return Array.from(pageNumbers).sort((first, second) => first - second);
+}
+
+function shouldPrebuildPdfPageAsset(chunk: TutorKnowledgeChunk) {
+  return chunk.sourceType === "mixed" || chunk.sourceType === "page-image";
+}
+
+function shouldAttachPdfPartForEmbedding(chunk: TutorKnowledgeChunk) {
+  return shouldPrebuildPdfPageAsset(chunk);
+}
+
+async function transcribeVisualPdfChunks({
+  chunks,
+  title,
+  updateProgress
+}: {
+  chunks: TutorKnowledgeChunk[];
+  title: string;
+  updateProgress?: (progress: MaterialJobProgressUpdate) => Promise<void>;
+}) {
+  const transcribableChunks = chunks.filter(shouldTranscribePdfChunk);
+
+  if (!transcribableChunks.length) {
+    return chunks;
+  }
+
+  const documentAiConfig = getDocumentAiOcrConfig();
+
+  if (!documentAiConfig) {
+    throw new TutorKnowledgeHttpError(
+      "This PDF has visual pages, but Google Document AI OCR is not configured. Add DOCUMENT_AI_OCR_PROCESSOR_ID, GOOGLE_CLOUD_PROJECT, and Google credentials.",
+      500
+    );
+  }
+
+  const accessToken = await getDocumentAiAccessToken();
+  let completedPages = 0;
+  const transcriptions = new Map<number, string>();
+  const ocrBatches = documentAiOcrChunkBatches(transcribableChunks);
+  let completedBatches = 0;
+
+  await mapWithConcurrency(ocrBatches, pdfPageTranscriptionConcurrencyLimit, async (batch) => {
+    const batchTranscriptions = await transcribePdfPageChunkBatch({
+      accessToken,
+      batch,
+      config: documentAiConfig,
+      title
+    });
+
+    for (const [order, transcription] of batchTranscriptions) {
+      if (transcription) {
+        transcriptions.set(order, transcription);
+      }
+    }
+
+    completedBatches += 1;
+    completedPages += batch.chunks.length;
+    if (shouldReportPageProgress(completedPages, transcribableChunks.length)) {
+      await updateProgress?.({
+        completedPages,
+        detail: `Running Google Document AI OCR batch ${completedBatches} of ${ocrBatches.length} (${completedPages}/${transcribableChunks.length} pages).`,
+        percent: Math.min(49, 30 + Math.round((completedPages / Math.max(transcribableChunks.length, 1)) * 18)),
+        step: "reading_pdf_pages",
+        totalPages: transcribableChunks.length
+      });
+    }
+
+  });
+
+  if (!transcriptions.size) {
+    if (chunks.some((chunk) => !isWeakPdfChunkContent(chunk.content))) {
+      await updateProgress?.({
+        completedPages: transcribableChunks.length,
+        detail: `Google Document AI OCR did not return text for ${formatPageList(pageNumbersForChunks(transcribableChunks))}. Check those page images if source text is missing.`,
+        percent: 49,
+        step: "reading_pdf_pages",
+        totalPages: transcribableChunks.length
+      });
+      return chunks;
+    }
+
+    throw new TutorKnowledgeHttpError(
+      `Google Document AI OCR could not read ${formatPageList(pageNumbersForChunks(transcribableChunks))}. The material was not indexed because those pages would only save placeholder text.`,
+      502
+    );
+  }
+
+  const failedChunks = transcribableChunks.filter((chunk) => !transcriptions.has(chunk.order));
+
+  if (failedChunks.length) {
+    await updateProgress?.({
+      completedPages: transcribableChunks.length,
+      detail: `Google Document AI OCR did not return text for ${formatPageList(pageNumbersForChunks(failedChunks))}. Check those page images if source text is missing.`,
+      percent: 49,
+      step: "reading_pdf_pages",
+      totalPages: transcribableChunks.length
+    });
+  }
+
+  return chunks.map((chunk) => {
+    const transcription = transcriptions.get(chunk.order);
+
+    if (!transcription) {
+      return chunk;
+    }
+
+    return {
+      ...chunk,
+      chunkText: transcription,
+      content: transcription,
+      section: chunk.section || extractSectionHeading(transcription)
+    };
+  });
+}
+
+function pageNumbersForChunks(chunks: TutorKnowledgeChunk[]) {
+  return chunks
+    .map((chunk) => chunk.pageStart ?? chunk.pageEnd ?? extractPageNumber(chunk.label))
+    .filter((pageNumber): pageNumber is number => typeof pageNumber === "number" && Number.isFinite(pageNumber))
+    .sort((first, second) => first - second);
+}
+
+function formatPageList(pageNumbers: number[]) {
+  if (!pageNumbers.length) {
+    return "the failed pages";
+  }
+
+  const uniquePages = Array.from(new Set(pageNumbers));
+  const visiblePages = uniquePages.slice(0, 12).join(", ");
+  const remainingCount = uniquePages.length - 12;
+
+  return remainingCount > 0
+    ? `pages ${visiblePages}, and ${remainingCount} more`
+    : `pages ${visiblePages}`;
+}
+
+type DocumentAiOcrChunkBatch = {
+  chunks: TutorKnowledgeChunk[];
+  pdfPart: NonNullable<TutorKnowledgeChunk["pdfPart"]>;
+};
+
+function documentAiOcrChunkBatches(chunks: TutorKnowledgeChunk[]) {
+  const sortedChunks = [...chunks].sort((first, second) =>
+    (first.pageStart ?? 0) - (second.pageStart ?? 0) || first.order - second.order
+  );
+  const batches: DocumentAiOcrChunkBatch[] = [];
+  let currentChunks: TutorKnowledgeChunk[] = [];
+
+  for (const chunk of sortedChunks) {
+    if (currentChunks.length >= documentAiOcrPagesPerRequest) {
+      batches.push(documentAiOcrChunkBatch(currentChunks));
+      currentChunks = [];
+    }
+
+    currentChunks.push(chunk);
+  }
+
+  if (currentChunks.length) {
+    batches.push(documentAiOcrChunkBatch(currentChunks));
+  }
+
+  return batches;
+}
+
+function documentAiOcrChunkBatch(chunks: TutorKnowledgeChunk[]): DocumentAiOcrChunkBatch {
+  const pdfParts = chunks
+    .map((chunk) => chunk.pdfPart)
+    .filter((pdfPart): pdfPart is NonNullable<TutorKnowledgeChunk["pdfPart"]> => Boolean(pdfPart));
+
+  return {
+    chunks,
+    pdfPart: pdfParts.length === 1 ? pdfParts[0] : mergedPdfPartForChunks(chunks)
+  };
+}
+
+function mergedPdfPartForChunks(chunks: TutorKnowledgeChunk[]): NonNullable<TutorKnowledgeChunk["pdfPart"]> {
+  const joinedPdfParts = chunks
+    .map((chunk) => chunk.pdfPart)
+    .filter((pdfPart): pdfPart is NonNullable<TutorKnowledgeChunk["pdfPart"]> => Boolean(pdfPart));
+
+  if (joinedPdfParts.length !== chunks.length) {
+    throw new TutorKnowledgeHttpError("Could not build a Google Document AI OCR page batch.", 500);
+  }
+
+  return {
+    data: joinedPdfParts.map((pdfPart) => filePartToBase64(pdfPart)).join("\n"),
+    mimeType: "application/x-chandra-pdf-part-list"
+  };
+}
+
+function shouldTranscribePdfChunk(chunk: TutorKnowledgeChunk) {
+  if (!chunk.pdfPart || !shouldPrebuildPdfPageAsset(chunk)) {
+    return false;
+  }
+
+  return isWeakPdfChunkContent(chunk.content);
+}
+
+function isWeakPdfChunkContent(content: string) {
+  const normalized = content.replace(/\s+/g, " ").trim();
+
+  if (!normalized) {
+    return true;
+  }
+
+  if (/^Visual PDF page \d{1,5} from .+$/i.test(normalized)) {
+    return true;
+  }
+
+  return normalized.split(/\s+/).filter(Boolean).length < 30;
+}
+
+async function transcribePdfPageChunkBatch({
+  accessToken,
+  batch,
+  config,
+  title
+}: {
+  accessToken: string;
+  batch: DocumentAiOcrChunkBatch;
+  config: DocumentAiOcrConfig;
+  title: string;
+}) {
+  try {
+    const result = await processDocumentAiOcrPageBatch({
+      accessToken,
+      batch,
+      config,
+      title
+    });
+
+    return splitDocumentAiBatchText(result, batch.chunks);
+  } catch (caughtError) {
+    if (caughtError instanceof TutorKnowledgeHttpError) {
+      throw caughtError;
+    }
+
+    console.warn(
+      "Google Document AI OCR failed.",
+      caughtError instanceof Error ? caughtError.message : String(caughtError)
+    );
+    return new Map<number, string>();
+  }
+}
+
+async function processDocumentAiOcrPageBatch({
+  accessToken,
+  batch,
+  config,
+  title
+}: {
+  accessToken: string;
+  batch: DocumentAiOcrChunkBatch;
+  config: DocumentAiOcrConfig;
+  title: string;
+}) {
+  const documentPdfPart = await documentAiPdfPartForBatch(batch);
+
+  for (let attempt = 0; attempt < documentAiOcrMaxAttempts; attempt += 1) {
+    await waitForDocumentAiOcrRequestSlot();
+
+    const response = await fetch(buildDocumentAiProcessUrl(config), {
+      body: JSON.stringify({
+        fieldMask: "text,pages.layout,pages.pageNumber",
+        rawDocument: {
+          content: filePartToBase64(documentPdfPart),
+          displayName: documentAiDisplayName(`${title} pages ${batch.chunks[0]?.pageStart ?? ""}-${batch.chunks.at(-1)?.pageEnd ?? ""}`),
+          mimeType: documentPdfPart.mimeType
+        }
+      }),
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      method: "POST"
+    });
+
+    if (response.ok) {
+      return await response.json();
+    }
+
+    const detail = await response.text();
+
+    if (!shouldRetryDocumentAiOcr(response.status) || attempt === documentAiOcrMaxAttempts - 1) {
+      throw new TutorKnowledgeHttpError(
+        `Google Document AI OCR failed with ${response.status}: ${detail.slice(0, 400)}`,
+        response.status === 404 ? 502 : response.status
+      );
+    }
+
+    await sleep(documentAiOcrRetryDelayMs(response.headers.get("retry-after"), attempt));
+  }
+
+  return "";
+}
+
+async function documentAiPdfPartForBatch(batch: DocumentAiOcrChunkBatch) {
+  if (batch.pdfPart.mimeType !== "application/x-chandra-pdf-part-list") {
+    return batch.pdfPart;
+  }
+
+  const mergedPdf = await PDFDocument.create();
+
+  for (const encodedPdfPart of String(batch.pdfPart.data).split("\n").filter(Boolean)) {
+    const sourcePdf = await PDFDocument.load(Buffer.from(encodedPdfPart, "base64"), { ignoreEncryption: true });
+    const copiedPages = await mergedPdf.copyPages(
+      sourcePdf,
+      Array.from({ length: sourcePdf.getPageCount() }, (_, index) => index)
+    );
+    copiedPages.forEach((page) => mergedPdf.addPage(page));
+  }
+
+  return {
+    data: await mergedPdf.save(),
+    mimeType: "application/pdf"
+  };
+}
+
+function splitDocumentAiBatchText(payload: unknown, chunks: TutorKnowledgeChunk[]) {
+  const documentText = readDocumentAiText(payload);
+  const pages = readDocumentAiPages(payload);
+  const transcriptions = new Map<number, string>();
+
+  if (!documentText) {
+    return transcriptions;
+  }
+
+  chunks.forEach((chunk, index) => {
+    const page = pages[index];
+    const pageText = page ? textForDocumentAiPage(documentText, page) : "";
+    transcriptions.set(chunk.order, normalizeTranscribedText(pageText));
+  });
+
+  if (Array.from(transcriptions.values()).some(Boolean)) {
+    return transcriptions;
+  }
+
+  if (chunks.length === 1) {
+    transcriptions.set(chunks[0].order, normalizeTranscribedText(documentText));
+    return transcriptions;
+  }
+
+  const chunkTexts = splitDocumentAiTextEvenly(documentText, chunks.length);
+
+  chunks.forEach((chunk, index) => {
+    transcriptions.set(chunk.order, normalizeTranscribedText(chunkTexts[index] ?? ""));
+  });
+
+  return transcriptions;
+}
+
+function splitDocumentAiTextEvenly(text: string, chunkCount: number) {
+  if (chunkCount <= 1) {
+    return [text];
+  }
+
+  const lines = text.split(/\n+/).filter((line) => line.trim());
+  const targetLinesPerChunk = Math.max(1, Math.ceil(lines.length / chunkCount));
+  const chunks: string[] = [];
+
+  for (let index = 0; index < chunkCount; index += 1) {
+    chunks.push(lines.slice(index * targetLinesPerChunk, (index + 1) * targetLinesPerChunk).join("\n"));
+  }
+
+  return chunks;
+}
+
+async function waitForDocumentAiOcrRequestSlot() {
+  const now = Date.now();
+  const scheduledAt = Math.max(now, nextDocumentAiOcrRequestAt);
+  nextDocumentAiOcrRequestAt = scheduledAt + documentAiOcrRequestIntervalMs;
+  const waitMs = scheduledAt - now;
+
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+}
+
+function shouldRetryDocumentAiOcr(status: number) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function documentAiOcrRetryDelayMs(retryAfter: string | null, attempt: number) {
+  const retryAfterMs = readRetryAfterMs(retryAfter);
+
+  if (retryAfterMs !== undefined) {
+    return retryAfterMs;
+  }
+
+  return Math.min(60_000, 2_000 * 2 ** attempt);
+}
+
+type DocumentAiOcrConfig = {
+  location: string;
+  processorId: string;
+  projectId: string;
+};
+
+function getDocumentAiOcrConfig(): DocumentAiOcrConfig | null {
+  const projectId = (
+    process.env.DOCUMENT_AI_PROJECT_ID
+    ?? process.env.GOOGLE_CLOUD_PROJECT
+    ?? process.env.FIREBASE_PROJECT_ID
+    ?? ""
+  ).trim();
+  const location = (
+    process.env.DOCUMENT_AI_OCR_LOCATION
+    ?? process.env.GOOGLE_CLOUD_LOCATION
+    ?? "us"
+  ).trim();
+  const processorId = (
+    process.env.DOCUMENT_AI_OCR_PROCESSOR_ID
+    ?? defaultDocumentAiOcrProcessorId
+  ).trim();
+
+  if (!projectId || !location || !processorId) {
+    return null;
+  }
+
+  return { location, processorId, projectId };
+}
+
+async function getDocumentAiAccessToken() {
+  const auth = new GoogleAuth({
+    ...(getGoogleCredentials() ? { credentials: getGoogleCredentials() } : {}),
+    scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+  });
+  const client = await auth.getClient();
+  const accessTokenResponse = await client.getAccessToken();
+  const token = typeof accessTokenResponse === "string" ? accessTokenResponse : accessTokenResponse?.token;
+
+  if (!token) {
+    throw new TutorKnowledgeHttpError("Google auth did not return an access token for Document AI OCR.", 500);
+  }
+
+  return token;
+}
+
+function getGoogleCredentials(): JWTInput | undefined {
+  const serviceAccountJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON ?? process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+
+  if (serviceAccountJson) {
+    const serviceAccount = JSON.parse(serviceAccountJson) as JWTInput & {
+      clientEmail?: string;
+      privateKey?: string;
+      projectId?: string;
+    };
+
+    return {
+      client_email: serviceAccount.client_email ?? serviceAccount.clientEmail,
+      private_key: (serviceAccount.private_key ?? serviceAccount.privateKey)?.replace(/\\n/g, "\n"),
+      project_id: serviceAccount.project_id ?? serviceAccount.projectId
+    };
+  }
+
+  const clientEmail = process.env.GOOGLE_CLIENT_EMAIL ?? process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey = process.env.GOOGLE_PRIVATE_KEY ?? process.env.FIREBASE_PRIVATE_KEY;
+  const projectId = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.FIREBASE_PROJECT_ID;
+
+  if (!clientEmail || !privateKey || !projectId) {
+    return undefined;
+  }
+
+  return {
+    client_email: clientEmail,
+    private_key: privateKey.replace(/\\n/g, "\n"),
+    project_id: projectId
+  };
+}
+
+function buildDocumentAiProcessUrl({ location, processorId, projectId }: DocumentAiOcrConfig) {
+  const endpoint = `${location}-documentai.googleapis.com`;
+  const name = [
+    "projects",
+    projectId,
+    "locations",
+    location,
+    "processors",
+    processorId
+  ].map(encodeURIComponent).join("/");
+
+  return `https://${endpoint}/v1/${name}:process`;
+}
+
+function readDocumentAiText(payload: unknown) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  const document = (payload as { document?: { text?: unknown } }).document;
+
+  return typeof document?.text === "string" ? document.text : "";
+}
+
+function readDocumentAiPages(payload: unknown) {
+  if (!payload || typeof payload !== "object") {
+    return [] as Array<{ layout?: { textAnchor?: unknown } }>;
+  }
+
+  const document = (payload as { document?: { pages?: unknown } }).document;
+
+  return Array.isArray(document?.pages)
+    ? document.pages.filter((page): page is { layout?: { textAnchor?: unknown } } => Boolean(page && typeof page === "object"))
+    : [];
+}
+
+function textForDocumentAiPage(documentText: string, page: { layout?: { textAnchor?: unknown } }) {
+  const textSegments = (page.layout?.textAnchor as { textSegments?: unknown[] } | undefined)?.textSegments;
+
+  if (!Array.isArray(textSegments) || !textSegments.length) {
+    return "";
+  }
+
+  return textSegments
+    .map((segment) => {
+      if (!segment || typeof segment !== "object") {
+        return "";
+      }
+
+      const startIndex = documentAiTextAnchorIndex((segment as { startIndex?: unknown }).startIndex) ?? 0;
+      const endIndex = documentAiTextAnchorIndex((segment as { endIndex?: unknown }).endIndex);
+
+      return endIndex === undefined ? "" : documentText.slice(startIndex, endIndex);
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function documentAiTextAnchorIndex(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    return Number(value);
+  }
+
+  return undefined;
+}
+
+function documentAiDisplayName(value: string) {
+  return value
+    .replace(/[*?[\]%{}'",~=:/]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240) || "Chandra PDF page";
+}
+
+function normalizeTranscribedText(text: string) {
+  return text
+    .replace(/^```(?:text)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function filePartToBase64(file: VertexEmbeddingPart) {
+  if (typeof file.data !== "string") {
+    return Buffer.from(file.data).toString("base64");
+  }
+
+  const dataUrlMatch = file.data.match(/^data:[^;]+;base64,(?<base64>.+)$/);
+
+  if (dataUrlMatch?.groups?.base64) {
+    return dataUrlMatch.groups.base64;
+  }
+
+  return Buffer.from(file.data).toString("base64");
+}
+
+function extractedTextWithTranscribedVisualChunks(pages: TutorKnowledgePage[], chunks: TutorKnowledgeChunk[]) {
+  const extractedPageText = pages.map((page) => page.text.trim()).filter(Boolean);
+  const transcribedText = chunks
+    .filter((chunk) => shouldPrebuildPdfPageAsset(chunk) && !isWeakPdfChunkContent(chunk.content))
+    .map((chunk) => chunk.content.trim())
+    .filter(Boolean);
+
+  return [...extractedPageText, ...transcribedText].join("\n\n");
 }
 
 async function extractPdfTextPages(buffer: Buffer, options: { lineEnforce: boolean }) {
@@ -1447,23 +2241,27 @@ async function extractPdfPageInfoWithPdfLib(buffer: Buffer) {
   try {
     const pdf = await PDFDocument.load(buffer, { ignoreEncryption: true });
 
-    return new Map(
-      pdf.getPages().map((page, index) => {
-        const { height, width } = page.getSize();
-
-        return [
-          index + 1,
-          {
-            area: width * height,
-            height,
-            width
-          }
-        ];
-      })
-    );
+    return extractPdfPageInfoFromDocument(pdf);
   } catch {
     return new Map<number, { area: number; height: number; width: number }>();
   }
+}
+
+function extractPdfPageInfoFromDocument(pdf: PDFDocument) {
+  return new Map(
+    pdf.getPages().map((page, index) => {
+      const { height, width } = page.getSize();
+
+      return [
+        index + 1,
+        {
+          area: width * height,
+          height,
+          width
+        }
+      ];
+    })
+  );
 }
 
 function visualPdfPagesFromPageInfo(pageInfoByNumber: Map<number, { area: number; height: number; width: number }>) {
@@ -1550,11 +2348,15 @@ async function writeChunks({
   title: string;
 }) {
   let completedEmbeddings = 0;
+  if (!skipEmbeddings && chunks.length) {
+    await onEmbeddingProgress?.({ completed: 0, total: chunks.length });
+  }
+
   const embeddings = skipEmbeddings
     ? []
     : await createVertexEmbeddings(
         chunks.map((chunk) => ({
-          file: chunk.pdfPart ?? chunk.pageImage,
+          file: embeddingFileForChunk(chunk),
           taskType: "RETRIEVAL_DOCUMENT",
           text: chunk.content,
           title
@@ -1668,14 +2470,19 @@ export async function prepareTutorKnowledgeChunkData({
   const chunkEmbedding = embedding ?? (skipEmbedding
     ? undefined
     : await createEmbedding({
-        file: chunk.pdfPart ?? chunk.pageImage,
+        file: embeddingFileForChunk(chunk),
         taskType: "RETRIEVAL_DOCUMENT",
         text: chunk.content,
         title
       }));
   const { pageImage: _pageImage, pdfPart: _pdfPart, ...storedChunk } = chunk;
   const pageNumber = chunk.pageStart ?? extractPageNumber(chunk.label);
-  const sectionHeading = chunk.section ?? extractSectionHeading(chunk.content);
+  const canonicalContent = canonicalChunkContent(chunk);
+  const sectionHeading = chunk.section ?? extractSectionHeading(canonicalContent);
+  const pageStart = chunk.pageStart ?? pageNumber;
+  const pageEnd = chunk.pageEnd ?? pageNumber;
+  const problemNumbers = problemNumbersFromText(`${chunk.label}\n${canonicalContent}`);
+  const sectionMarkers = sectionMarkersFromText(`${chunk.label}\n${sectionHeading}\n${canonicalContent}`);
 
   return {
     ...storedChunk,
@@ -1683,7 +2490,8 @@ export async function prepareTutorKnowledgeChunkData({
     class_id: classId,
     chunkId: chunkId ?? "",
     chunkIndex,
-    chunk_text: chunk.chunkText ?? chunk.content,
+    content: canonicalContent,
+    chunk_text: canonicalContent,
     course_id: classId,
     createdAt: FieldValue.serverTimestamp(),
     doc_id: chunk.docId ?? materialId,
@@ -1692,23 +2500,37 @@ export async function prepareTutorKnowledgeChunkData({
     hasPdfPart: Boolean(chunk.pdfPart),
     materialId,
     materialType,
-    excerpt: buildChunkExcerpt(chunk.chunkText ?? chunk.content),
-    page_end: chunk.pageEnd ?? pageNumber,
-    page_start: chunk.pageStart ?? pageNumber,
-    pageEnd: chunk.pageEnd ?? pageNumber,
+    excerpt: buildChunkExcerpt(canonicalContent),
+    page_end: pageEnd,
+    page_start: pageStart,
+    pageEnd,
     pageNumber,
-    pageStart: chunk.pageStart ?? pageNumber,
-    problemNumbers: problemNumbersFromText(`${chunk.label}\n${chunk.content}`),
+    pageNumbers: pageNumbersForChunk(pageStart, pageEnd),
+    pageStart,
+    problemNumbers,
     professorId,
     professorName: normalizedProfessorName,
     professor_id: professorId,
     professor_name: normalizedProfessorName,
     section: sectionHeading,
     sectionHeading,
+    sectionMarkers,
     teacherId: professorId,
     title,
     ...buildChunkEmbeddingMetadata(chunkEmbedding)
   };
+}
+
+function pageNumbersForChunk(pageStart: number | null | undefined, pageEnd: number | null | undefined) {
+  if (!pageStart || !pageEnd) {
+    return [];
+  }
+
+  const firstPage = Math.max(1, Math.min(pageStart, pageEnd));
+  const lastPage = Math.max(firstPage, pageEnd);
+  const pageCount = Math.min(100, lastPage - firstPage + 1);
+
+  return Array.from({ length: pageCount }, (_item, index) => firstPage + index);
 }
 
 export function buildEmbeddingFailureMaterialMetadata(error: VertexEmbeddingError) {
@@ -1744,25 +2566,189 @@ function createMaterialJobProgressWriter({
   }
 
   const jobRef = adminDb!.collection("classes").doc(classId).collection("materialJobs").doc(normalizedJobId);
+  const materialRef = adminDb!.collection("classes").doc(classId).collection("materials").doc(materialId);
+  let progressWriteQueue = Promise.resolve();
+
+  const writeProgress = async (progress: MaterialJobProgressUpdate) => {
+    const percent = Math.max(0, Math.min(100, progress.percent));
+    const materialSnapshot = await materialRef.get();
+    const materialData = materialSnapshot.data() ?? {};
+    const nextPageCompleted = progress.step === "preparing_pdf_pages"
+      ? progress.completedPages ?? 0
+      : readProgressNumber(materialData.pageAssetCompletedPages);
+    const nextPageTotal = progress.step === "preparing_pdf_pages"
+      ? progress.totalPages ?? 0
+      : readProgressNumber(materialData.pageAssetTotalPages);
+    const nextTutorCompleted = progress.step === "embedding_chunks"
+      ? progress.completedChunks ?? 0
+      : progress.step === "reading_pdf_pages"
+        ? progress.completedPages ?? 0
+        : readProgressNumber(materialData.tutorReadCompletedSections);
+    const nextTutorTotal = progress.step === "embedding_chunks"
+      ? progress.totalChunks ?? 0
+      : progress.step === "reading_pdf_pages"
+        ? progress.totalPages ?? 0
+        : readProgressNumber(materialData.tutorReadTotalSections);
+    const pageAssetPercent = nextPageTotal ? Math.round((nextPageCompleted / nextPageTotal) * 100) : null;
+    const tutorReadPercent = nextTutorTotal ? Math.round((nextTutorCompleted / nextTutorTotal) * 100) : null;
+    const totalPercent = totalMaterialProcessingPercent({
+      currentPercent: percent,
+      materialStatus: String(materialData.status ?? ""),
+      previousPercent: readProgressNumber(materialData.processingPercent),
+      pageAssetPercent,
+      step: progress.step,
+      tutorReadPercent
+    });
+    const progressDocument = {
+      classId,
+      completedChunks: progress.completedChunks ?? null,
+      completedPages: progress.completedPages ?? null,
+      detail: progress.detail,
+      error: progress.error ?? null,
+      materialId,
+      percent,
+      professorId: teacherId,
+      step: progress.step,
+      title,
+      totalChunks: progress.totalChunks ?? null,
+      totalPages: progress.totalPages ?? null,
+      updatedAt: FieldValue.serverTimestamp()
+    };
+    const materialProgressDocument = {
+      ...(progress.step === "preparing_pdf_pages"
+        ? {
+            pageAssetCompletedPages: progress.completedPages ?? null,
+            pageAssetPercent,
+            pageAssetTotalPages: progress.totalPages ?? null
+          }
+        : {}),
+      ...(progress.step === "embedding_chunks"
+        ? {
+            tutorReadCompletedSections: progress.completedChunks ?? null,
+            tutorReadPercent,
+            tutorReadTotalSections: progress.totalChunks ?? null
+          }
+        : {}),
+      ...(progress.step === "reading_pdf_pages"
+        ? {
+            tutorReadCompletedSections: progress.completedPages ?? null,
+            tutorReadPercent,
+            tutorReadTotalSections: progress.totalPages ?? null
+          }
+        : {}),
+      processingCompletedChunks: progress.completedChunks ?? null,
+      processingCompletedPages: progress.completedPages ?? null,
+      processingDetail: progress.detail,
+      processingError: progress.error ?? null,
+      processingPercent: totalPercent,
+      processingStep: progress.step,
+      processingTotalChunks: progress.totalChunks ?? null,
+      processingTotalPages: progress.totalPages ?? null,
+      processingUpdatedAt: FieldValue.serverTimestamp()
+    };
+
+    await jobRef.set(progressDocument, { merge: true });
+
+    await materialRef.update(materialProgressDocument).catch((caughtError) => {
+      if (progress.step !== "upload_received") {
+        console.warn("Tutor knowledge material progress update failed.", caughtError);
+      }
+    });
+  };
 
   return async (progress: MaterialJobProgressUpdate) => {
-    await jobRef.set(
-      {
-        classId,
-        completedChunks: progress.completedChunks ?? null,
-        detail: progress.detail,
-        error: progress.error ?? null,
-        materialId,
-        percent: Math.max(0, Math.min(100, progress.percent)),
-        professorId: teacherId,
-        step: progress.step,
-        title,
-        totalChunks: progress.totalChunks ?? null,
-        updatedAt: FieldValue.serverTimestamp()
-      },
-      { merge: true }
-    );
+    progressWriteQueue = progressWriteQueue
+      .catch(() => {})
+      .then(() => writeProgress(progress));
+
+    await progressWriteQueue;
   };
+}
+
+function readProgressNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function readOptionalPositiveInteger(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  const numberValue = Number(value);
+
+  if (!Number.isInteger(numberValue) || numberValue <= 0) {
+    return undefined;
+  }
+
+  return numberValue;
+}
+
+function shouldReportPageProgress(completed: number, total: number) {
+  return completed === 1
+    || completed >= total
+    || completed % pdfPageProgressUpdateInterval === 0;
+}
+
+function readRetryAfterMs(retryAfter: string | null) {
+  if (!retryAfter) {
+    return undefined;
+  }
+
+  const seconds = Number(retryAfter);
+
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+
+  const retryDate = Date.parse(retryAfter);
+
+  if (Number.isFinite(retryDate)) {
+    return Math.max(0, retryDate - Date.now());
+  }
+
+  return undefined;
+}
+
+function sleep(durationMs: number) {
+  return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+function totalMaterialProcessingPercent({
+  currentPercent,
+  materialStatus,
+  pageAssetPercent,
+  previousPercent,
+  step,
+  tutorReadPercent
+}: {
+  currentPercent: number;
+  materialStatus: string;
+  pageAssetPercent: number | null;
+  previousPercent: number;
+  step: MaterialJobStep;
+  tutorReadPercent: number | null;
+}) {
+  if (
+    materialStatus === "deleting"
+    || step === "deleting_source"
+    || step === "deleting_storage"
+    || step === "deleting_chunks"
+    || step === "deleting_material"
+    || step === "failed"
+    || step === "ready"
+    || step === "saving_to_class"
+    || step === "upload_received"
+    || step === "reading_file"
+    || step === "chunking_material"
+  ) {
+    return Math.max(previousPercent, currentPercent);
+  }
+
+  const pageContribution = (pageAssetPercent ?? 0) * 0.2;
+  const tutorReadContribution = (tutorReadPercent ?? 0) * 0.45;
+  const combinedPercent = Math.round(30 + pageContribution + tutorReadContribution);
+
+  return Math.max(previousPercent, Math.min(95, combinedPercent));
 }
 
 function buildChunkEmbeddingMetadata(embedding: VertexEmbeddingResult | undefined) {
@@ -1778,6 +2764,16 @@ function buildChunkEmbeddingMetadata(embedding: VertexEmbeddingResult | undefine
     embeddingProvider: embedding.provider,
     embeddingTaskType: embedding.taskType
   };
+}
+
+function canonicalChunkContent(chunk: TutorKnowledgeChunk) {
+  return (chunk.content.trim() || chunk.chunkText?.trim() || "").trim();
+}
+
+function embeddingFileForChunk(chunk: TutorKnowledgeChunk) {
+  return isWeakPdfChunkContent(canonicalChunkContent(chunk))
+    ? chunk.pdfPart ?? chunk.pageImage
+    : undefined;
 }
 
 function buildChunkExcerpt(content: string) {

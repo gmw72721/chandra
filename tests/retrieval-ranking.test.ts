@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildLowConfidenceTutorMessage,
   createSourceMetadata,
+  exactLookupLocatorsFromText,
   hasExactLookupSignal,
   materialTypeForKind,
   problemNumbersFromText,
@@ -260,6 +261,47 @@ test("explicit problem lookup prefers an actual heading over a reference mention
   assert.equal(result.hits[0]?.chunk.id, "actual-2-14");
 });
 
+test("exact exercise lookup prefers page 98 target over later formula reference", () => {
+  const laterReferencePage = makeDocument({
+    id: "reader-late-exercises",
+    kind: "textbook",
+    title: "Linear Algebra Reader",
+    chunks: [
+      {
+        content: "Chapter 2 exercises. 2.47. Let (2.14) denote the previous displayed formula.",
+        id: "page-132-2-47",
+        pageNumber: 132,
+        problemNumbers: ["2.14", "2.47"],
+        vector: [1, 0]
+      }
+    ]
+  });
+  const targetExercisePage = makeDocument({
+    id: "reader-exercises",
+    kind: "textbook",
+    title: "Linear Algebra Reader",
+    chunks: [
+      {
+        content: "2.14. Given the setup of Exercise 2.13, prove the following inequalities.",
+        id: "page-98-2-14",
+        pageNumber: 98,
+        vector: [0.6, 0.4]
+      }
+    ]
+  });
+
+  const result = rankMaterialChunks({
+    candidates: toCandidates([laterReferencePage, targetExercisePage]),
+    limit: 5,
+    query: "Problem 2.14",
+    queryVector: [1, 0]
+  });
+
+  assert.equal(result.hits[0]?.chunk.id, "page-98-2-14");
+  assert.equal(result.hits[0]?.chunk.pageNumber, 98);
+  assert.equal(result.hits[0]?.matchedProblemNumber, "2.14");
+});
+
 test("explicit problem lookup narrows to top 3 when scores are not close", () => {
   const exactProblem = makeDocument({
     id: "reader-exercises",
@@ -410,6 +452,19 @@ test("concept method queries with equations do not force exact lookup", () => {
     false
   );
   assert.equal(hasExactLookupSignal("where is rank(KL) <= rank(L) in the PDF?"), true);
+});
+
+test("exact lookup locators only capture concrete page problem and section markers", () => {
+  assert.deepEqual(exactLookupLocatorsFromText("find exact task in assignment problem PDF worksheet"), {
+    pageNumbers: [],
+    problemNumbers: [],
+    sectionMarkers: []
+  });
+  assert.deepEqual(exactLookupLocatorsFromText("section 2.14 problem 7 on page 32"), {
+    pageNumbers: [32],
+    problemNumbers: ["7"],
+    sectionMarkers: ["2.14"]
+  });
 });
 
 test("problem number match is returned in source metadata", () => {

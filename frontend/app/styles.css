@@ -3374,12 +3374,12 @@ button.student-row[aria-pressed="true"] {
 .material-add-form .upload-progress {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 10px;
-  margin-top: 18px;
+  gap: 7px;
+  margin-top: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: white;
-  padding: 14px;
+  padding: 10px;
 }
 
 .material-add-form .upload-progress>div:first-child {
@@ -3415,6 +3415,10 @@ button.student-row[aria-pressed="true"] {
   width: min(760px, 100%);
 }
 
+.status-modal-dialog {
+  width: min(520px, 100%);
+}
+
 .modal-heading,
 .dialog-actions {
   display: flex;
@@ -3431,6 +3435,13 @@ button.student-row[aria-pressed="true"] {
 .modal-heading h3 {
   margin: 0;
   font-size: 1.24rem;
+}
+
+.modal-heading span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.86rem;
 }
 
 .modal-form {
@@ -3452,13 +3463,13 @@ button.student-row[aria-pressed="true"] {
 .upload-progress p {
   margin: 0;
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.82rem;
 }
 
 .upload-progress-track {
   display: block;
   overflow: hidden;
-  height: 10px;
+  height: 7px;
   border-radius: 999px;
   background: #eee7da;
 }
@@ -3473,8 +3484,8 @@ button.student-row[aria-pressed="true"] {
 
 .upload-progress-steps {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -3482,15 +3493,15 @@ button.student-row[aria-pressed="true"] {
 
 .upload-progress-steps li {
   display: grid;
-  min-height: 54px;
+  min-height: 36px;
   align-content: space-between;
-  gap: 4px;
+  gap: 2px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 6px;
   background: #f8f5ed;
-  padding: 8px;
+  padding: 5px 6px;
   color: var(--muted);
-  font-size: 0.76rem;
+  font-size: 0.68rem;
   font-weight: 800;
 }
 
@@ -3508,7 +3519,83 @@ button.student-row[aria-pressed="true"] {
 
 .upload-progress-steps small {
   color: inherit;
+  font-size: 0.66rem;
+}
+
+.status-detail-summary {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.status-detail-summary strong {
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+.status-detail-summary p,
+.status-detail-error {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.status-detail-progress {
+  display: block;
+  overflow: hidden;
+  height: 8px;
+  margin-top: 14px;
+  border-radius: 999px;
+  background: #eee7da;
+}
+
+.status-detail-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--theme-primary);
+  transition: width 180ms ease;
+}
+
+.status-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0 0;
+}
+
+.status-detail-grid div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fffdf8;
+  padding: 9px 10px;
+}
+
+.status-detail-grid dt {
+  margin-bottom: 3px;
+  color: var(--muted);
   font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.status-detail-grid dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.9rem;
+  font-weight: 750;
+}
+
+.status-detail-error {
+  margin-top: 12px;
+  border: 1px solid #f0c4bd;
+  border-radius: 7px;
+  background: #fff0ee;
+  padding: 9px 10px;
+  color: #9d2f20;
 }
 
 .class-detail-grid {
@@ -4035,6 +4122,10 @@ button.student-row[aria-pressed="true"] {
 
   .upload-progress-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .status-detail-grid {
+    grid-template-columns: 1fr;
   }
 
   .material-add-form .material-actions,
@@ -8576,15 +8667,27 @@ button.student-row[aria-pressed="true"] {
 .knowledge-badge {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
+  min-height: 24px;
   width: fit-content;
   border: 1px solid #d8d2c8;
-  border-radius: 7px;
+  border-radius: 6px;
   background: #f8f5f0;
-  padding: 0 8px;
-  font-size: 0.78rem;
+  padding: 0 7px;
+  font-size: 0.72rem;
   font-weight: 800;
   white-space: nowrap;
+}
+
+.knowledge-status-button {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.knowledge-status-button:hover,
+.knowledge-status-button:focus-visible {
+  border-color: var(--theme-primary);
+  box-shadow: 0 0 0 3px var(--theme-primary-ring);
+  outline: 0;
 }
 
 .knowledge-badge.active,
@@ -10968,8 +11071,19 @@ button.student-row[aria-pressed="true"] {
 
 .student-workspace-shell[data-appearance="dark"] .assistant-structured-section.problem {
   --section-accent: #8db7e8;
-  --section-bg: rgba(31, 54, 86, 0.28);
-  --section-border: rgba(141, 183, 232, 0.24);
+  --section-bg: rgba(24, 38, 61, 0.92);
+  --section-border: rgba(141, 183, 232, 0.42);
+  color: #d8e2ef;
+}
+
+.student-workspace-shell[data-appearance="dark"] .assistant-structured-section.problem p:first-of-type:has(> strong:only-child) strong {
+  background: rgba(216, 226, 239, 0.16);
+  color: #eef5ff;
+}
+
+.student-workspace-shell[data-appearance="dark"] .assistant-structured-section.problem p strong,
+.student-workspace-shell[data-appearance="dark"] .assistant-structured-section.problem .katex {
+  color: #c7dcff;
 }
 
 .student-workspace-shell[data-appearance="dark"] .assistant-structured-section.formula {

@@ -28,6 +28,7 @@ type CandidateFeatures = RankableChunk & {
   normalizedContentText: string;
   problemNumbers: string[];
   problemNumberSet: Set<string>;
+  problemSearchText: string;
   searchableTerms: string[];
   searchableText: string;
   termCounts: Map<string, number>;
@@ -314,7 +315,7 @@ function scoreCandidate(
   const chunkTextScore = scoreTerms(candidate.searchableText, queryFeatures.terms);
   const exactPhraseScore = scoreExactPhrases(candidate.normalizedContentText, queryFeatures.exactPhrases);
   const equationOverlapScore = scoreEquationOverlap(candidate.equationTokens, queryFeatures.equationTokens);
-  const matchedProblemNumber = findMatchedProblemNumber(queryFeatures.problemNumbers, candidate.problemNumberSet);
+  const matchedProblemNumber = findMatchedProblemNumber(queryFeatures.problemNumbers, candidate);
   const exactProblemHeadingScore = matchedProblemNumber
     ? Number(candidate.headingProblemNumberSet.has(matchedProblemNumber.toUpperCase()))
     : 0;
@@ -390,6 +391,7 @@ function prepareCandidateFeatures(candidate: RankableChunk): CandidateFeatures {
     normalizedContentText: normalizeText(contentText),
     problemNumbers,
     problemNumberSet: new Set(problemNumbers.map((problemNumber) => problemNumber.toUpperCase())),
+    problemSearchText: `${documentText} ${contentText}`,
     searchableTerms,
     searchableText,
     termCounts: countTerms(searchableTerms)
@@ -491,12 +493,69 @@ function scoreSourceHint(
   }, 0);
 }
 
-function findMatchedProblemNumber(queryProblemNumbers: string[], chunkProblemNumbers: Set<string>) {
-  if (!queryProblemNumbers.length || !chunkProblemNumbers.size) {
+function findMatchedProblemNumber(queryProblemNumbers: string[], candidate: CandidateFeatures) {
+  if (!queryProblemNumbers.length) {
     return undefined;
   }
 
-  return queryProblemNumbers.find((number) => chunkProblemNumbers.has(number.toUpperCase()));
+  return queryProblemNumbers.find((number) =>
+    contentHasRequestedProblemNumber(candidate.problemSearchText, new Set([number.toUpperCase()]))
+  );
+}
+
+function contentHasRequestedProblemNumber(text: string, requestedProblemNumbers: Set<string>) {
+  if (!requestedProblemNumbers.size) {
+    return false;
+  }
+
+  for (const problemNumber of requestedProblemNumbers) {
+    if (problemNumber.includes(".")) {
+      if (
+        labeledDottedProblemNumberPattern(problemNumber).test(text) ||
+        dottedProblemItemPattern(problemNumber).test(text)
+      ) {
+        return true;
+      }
+
+      continue;
+    }
+
+    if (problemNumbersFromText(text).includes(problemNumber.toUpperCase())) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function labeledDottedProblemNumberPattern(problemNumber: string) {
+  const flexibleNumber = flexibleDottedProblemNumber(problemNumber);
+
+  return new RegExp(
+    String.raw`\b(?:problem|problems|exercise|exercises|ex\.?|question|questions|number|no\.?)\s*#?\s*${flexibleNumber}(?!\s*\.\s*\d)\b`,
+    "i"
+  );
+}
+
+function dottedProblemItemPattern(problemNumber: string) {
+  const flexibleNumber = flexibleDottedProblemNumber(problemNumber);
+  const itemStart =
+    "give|given|giv|prove|show|let|find|determine|compute|suppose|consider|verify|establish|use|assume|recall|for|if|what|which|why|does";
+
+  return new RegExp(String.raw`(?<![\d.(])${flexibleNumber}\s*[\).:]\s*(?=(?:${itemStart})\b)`, "i");
+}
+
+function flexibleDottedProblemNumber(problemNumber: string) {
+  return problemNumber
+    .toLowerCase()
+    .split(".")
+    .filter(Boolean)
+    .map(escapeRegExp)
+    .join(String.raw`\s*\.\s*`);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function headingProblemNumbersFromText(text: string) {

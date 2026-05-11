@@ -26,6 +26,11 @@ PROBLEM_NUMBER_PATTERNS = (
     re.compile(r"\bq\s*(\d{1,3}[a-z]?)\b"),
     re.compile(r"(?:^|[\s(\[{])(\d{1,3})\s*\.\s*(\d{1,3}[a-z]?)\s*[\).]"),
 )
+BARE_DOTTED_PROBLEM_NUMBER_RE = re.compile(r"(?<![\d.])(\d{1,3})\s*\.\s*(\d{1,3}[a-z]?)(?!\s*\.\s*\d)")
+BARE_DOTTED_PROBLEM_CONTEXT_RE = re.compile(
+    r"\b(?:copy|exercise|exercises|explain|find|help|locate|problem|prove|question|quote|read|show|stuck|what|where|which)\b"
+)
+SECTION_PREFIX_BEFORE_DOTTED_NUMBER_RE = re.compile(r"\b(?:chapter|ch\.?|section|sec\.?|sect\.?|§)\s*#?\s*$")
 PAGE_NUMBER_PATTERNS = (
     re.compile(r"\b(?:page|pg\.?|p\.?)\s*#?\s*(\d{1,4})\b"),
     re.compile(r"\bprinted\s+page\s+(\d{1,4})\b"),
@@ -579,6 +584,7 @@ class GeminiPdfRetriever:
 def build_query_features(query: Any) -> dict[str, Any]:
     query = ensure_text(query)
     terms = tokenize(query)
+    ordered_problem_numbers = ordered_problem_numbers_from_text(query)
     problem_numbers = problem_numbers_from_text(query)
     page_numbers = page_numbers_from_text(query)
     section_markers = section_markers_from_text(query)
@@ -606,6 +612,7 @@ def build_query_features(query: Any) -> dict[str, Any]:
             )
         ),
         "page_numbers": page_numbers,
+        "primary_problem_numbers": tuple(ordered_problem_numbers[:1]),
         "problem_locator_intent": problem_locator_intent,
         "problem_numbers": problem_numbers,
         "section_markers": section_markers,
@@ -658,6 +665,11 @@ def hybrid_page_score(
     )
     requested_problem_numbers = exact_search_problem_numbers(query_features)
     has_requested_problem_match = content_has_requested_problem_number(searchable_text, requested_problem_numbers)
+    primary_problem_numbers = {
+        str(problem_number).upper()
+        for problem_number in query_features.get("primary_problem_numbers") or []
+    }
+    has_primary_problem_match = content_has_requested_problem_number(searchable_text, primary_problem_numbers)
     has_section_and_problem_locator = bool(query_features["problem_numbers"] and query_features["section_markers"])
     problem_score = (
         (40 if has_section_and_problem_locator else 14)
@@ -683,6 +695,7 @@ def hybrid_page_score(
         + exact_item_context_score
         + page_score
         + problem_score
+        + (22 if has_primary_problem_match and len(requested_problem_numbers) > 1 else 0)
         + problem_miss_penalty
         + material_preference_score(query_features, searchable_text=searchable_text, material_type=material_type)
     )
@@ -1044,18 +1057,50 @@ def term_overlap_score(text: str, terms: list[str]) -> float:
 
 
 def problem_numbers_from_text(text: Any) -> set[str]:
+    return set(ordered_problem_numbers_from_text(text))
+
+
+def ordered_problem_numbers_from_text(text: Any) -> list[str]:
     text = ensure_text(text)
     normalized = text.lower()
-    numbers: set[str] = set()
+    numbers: list[str] = []
+    seen: set[str] = set()
+
+    def add_number(problem_number: str) -> None:
+        normalized_problem_number = problem_number.upper()
+
+        if normalized_problem_number in seen:
+            return
+
+        seen.add(normalized_problem_number)
+        numbers.append(normalized_problem_number)
 
     for pattern in PROBLEM_NUMBER_PATTERNS:
         for match in pattern.finditer(normalized):
             if len(match.groups()) >= 2 and match.group(2):
-                numbers.add(f"{match.group(1)}.{match.group(2)}".upper())
+                add_number(f"{match.group(1)}.{match.group(2)}")
             elif match.group(1):
-                numbers.add(match.group(1).upper())
+                add_number(match.group(1))
+
+    if should_extract_bare_dotted_problem_numbers(normalized):
+        for match in BARE_DOTTED_PROBLEM_NUMBER_RE.finditer(normalized):
+            prefix = normalized[max(0, match.start() - 24):match.start()]
+
+            if SECTION_PREFIX_BEFORE_DOTTED_NUMBER_RE.search(prefix):
+                continue
+
+            add_number(f"{match.group(1)}.{match.group(2)}")
 
     return numbers
+
+
+def should_extract_bare_dotted_problem_numbers(normalized_text: str) -> bool:
+    stripped = normalized_text.strip()
+
+    if BARE_DOTTED_PROBLEM_NUMBER_RE.fullmatch(stripped):
+        return True
+
+    return bool(BARE_DOTTED_PROBLEM_CONTEXT_RE.search(stripped))
 
 
 def page_numbers_from_text(text: Any) -> set[int]:
@@ -1193,7 +1238,7 @@ def dotted_problem_item_pattern(problem_number: str) -> str:
     parts = [re.escape(part) for part in problem_number.lower().split(".") if part]
     flexible_number = r"\s*\.\s*".join(parts)
     item_start = (
-        r"give|giv|prove|show|let|find|determine|compute|suppose|consider|verify|"
+        r"give|given|giv|prove|show|let|find|determine|compute|suppose|consider|verify|"
         r"establish|use|assume|recall|for|if|what|which|why|does"
     )
     return rf"(?<![\d.(]){flexible_number}\s*[\).:]\s*(?=(?:{item_start})\b)"

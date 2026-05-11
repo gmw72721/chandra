@@ -7,6 +7,12 @@ export type RetrievalRankingResult = {
 
 export type RetrievalSourceHint = Pick<TutorSource, "pageNumber" | "problemNumber" | "title">;
 
+export type ExactLookupLocators = {
+  pageNumbers: number[];
+  problemNumbers: string[];
+  sectionMarkers: string[];
+};
+
 export type RankableChunk = {
   chunk: SourceChunk;
   document: SourceDocument;
@@ -28,6 +34,7 @@ type CandidateFeatures = RankableChunk & {
   normalizedContentText: string;
   problemNumbers: string[];
   problemNumberSet: Set<string>;
+  problemSearchText: string;
   searchableTerms: string[];
   searchableText: string;
   termCounts: Map<string, number>;
@@ -187,6 +194,19 @@ export function hasExactLookupSignal(query: string) {
   return queryFeatures.exactLookupIntent;
 }
 
+export function exactLookupLocatorsFromText(query: string): ExactLookupLocators {
+  return {
+    pageNumbers: pageNumbersFromText(query),
+    problemNumbers: problemNumbersFromText(query),
+    sectionMarkers: sectionMarkersFromText(query)
+  };
+}
+
+export function hasConcreteExactLookupLocator(query: string) {
+  const locators = exactLookupLocatorsFromText(query);
+  return Boolean(locators.problemNumbers.length || locators.pageNumbers.length || locators.sectionMarkers.length);
+}
+
 export function materialTypeForKind(kind: string) {
   const normalized = kind.trim().toLowerCase();
 
@@ -314,7 +334,7 @@ function scoreCandidate(
   const chunkTextScore = scoreTerms(candidate.searchableText, queryFeatures.terms);
   const exactPhraseScore = scoreExactPhrases(candidate.normalizedContentText, queryFeatures.exactPhrases);
   const equationOverlapScore = scoreEquationOverlap(candidate.equationTokens, queryFeatures.equationTokens);
-  const matchedProblemNumber = findMatchedProblemNumber(queryFeatures.problemNumbers, candidate.problemNumberSet);
+  const matchedProblemNumber = findMatchedProblemNumber(queryFeatures.problemNumbers, candidate);
   const exactProblemHeadingScore = matchedProblemNumber
     ? Number(candidate.headingProblemNumberSet.has(matchedProblemNumber.toUpperCase()))
     : 0;
@@ -390,6 +410,7 @@ function prepareCandidateFeatures(candidate: RankableChunk): CandidateFeatures {
     normalizedContentText: normalizeText(contentText),
     problemNumbers,
     problemNumberSet: new Set(problemNumbers.map((problemNumber) => problemNumber.toUpperCase())),
+    problemSearchText: `${documentText} ${contentText}`,
     searchableTerms,
     searchableText,
     termCounts: countTerms(searchableTerms)
@@ -491,12 +512,69 @@ function scoreSourceHint(
   }, 0);
 }
 
-function findMatchedProblemNumber(queryProblemNumbers: string[], chunkProblemNumbers: Set<string>) {
-  if (!queryProblemNumbers.length || !chunkProblemNumbers.size) {
+function findMatchedProblemNumber(queryProblemNumbers: string[], candidate: CandidateFeatures) {
+  if (!queryProblemNumbers.length) {
     return undefined;
   }
 
-  return queryProblemNumbers.find((number) => chunkProblemNumbers.has(number.toUpperCase()));
+  return queryProblemNumbers.find((number) =>
+    contentHasRequestedProblemNumber(candidate.problemSearchText, new Set([number.toUpperCase()]))
+  );
+}
+
+function contentHasRequestedProblemNumber(text: string, requestedProblemNumbers: Set<string>) {
+  if (!requestedProblemNumbers.size) {
+    return false;
+  }
+
+  for (const problemNumber of requestedProblemNumbers) {
+    if (problemNumber.includes(".")) {
+      if (
+        labeledDottedProblemNumberPattern(problemNumber).test(text) ||
+        dottedProblemItemPattern(problemNumber).test(text)
+      ) {
+        return true;
+      }
+
+      continue;
+    }
+
+    if (problemNumbersFromText(text).includes(problemNumber.toUpperCase())) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function labeledDottedProblemNumberPattern(problemNumber: string) {
+  const flexibleNumber = flexibleDottedProblemNumber(problemNumber);
+
+  return new RegExp(
+    String.raw`\b(?:problem|problems|exercise|exercises|ex\.?|question|questions|number|no\.?)\s*#?\s*${flexibleNumber}(?!\s*\.\s*\d)\b`,
+    "i"
+  );
+}
+
+function dottedProblemItemPattern(problemNumber: string) {
+  const flexibleNumber = flexibleDottedProblemNumber(problemNumber);
+  const itemStart =
+    "give|given|giv|prove|show|let|find|determine|compute|suppose|consider|verify|establish|use|assume|recall|for|if|what|which|why|does";
+
+  return new RegExp(String.raw`(?<![\d.(])${flexibleNumber}\s*[\).:]\s*(?=(?:${itemStart})\b)`, "i");
+}
+
+function flexibleDottedProblemNumber(problemNumber: string) {
+  return problemNumber
+    .toLowerCase()
+    .split(".")
+    .filter(Boolean)
+    .map(escapeRegExp)
+    .join(String.raw`\s*\.\s*`);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function headingProblemNumbersFromText(text: string) {
@@ -638,7 +716,7 @@ function buildCorpusStats(candidates: CandidateFeatures[], queryTerms: string[])
   };
 }
 
-function pageNumbersFromText(text: string) {
+export function pageNumbersFromText(text: string) {
   const normalized = text.toLowerCase();
   const matches = new Set<number>();
   const patterns = [
@@ -651,6 +729,25 @@ function pageNumbersFromText(text: string) {
       const pageNumber = Number(match[1]);
       if (Number.isInteger(pageNumber) && pageNumber > 0) {
         matches.add(pageNumber);
+      }
+    }
+  }
+
+  return [...matches];
+}
+
+export function sectionMarkersFromText(text: string) {
+  const normalized = text.toLowerCase();
+  const matches = new Set<string>();
+  const patterns = [
+    /\b(?:section|sec\.?|sect\.?)\s+(\d+(?:\.\d+)*[a-z]?)\b/g,
+    /\b(?:chapter|ch\.?)\s+(\d+(?:\.\d+)*[a-z]?)\b/g
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of normalized.matchAll(pattern)) {
+      if (match[1]) {
+        matches.add(match[1].toUpperCase());
       }
     }
   }

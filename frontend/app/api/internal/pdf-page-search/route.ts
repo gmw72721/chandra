@@ -43,9 +43,12 @@ export async function POST(request: Request) {
       page_start: hit.chunk.pageStart ?? hit.chunk.pageNumber ?? 1,
       score: hit.score,
       section: hit.chunk.sectionHeading ?? hit.chunk.section ?? "",
+      source_type: hit.chunk.sourceType ?? hit.chunk.source_type ?? "",
+      sourceType: hit.chunk.sourceType ?? hit.chunk.source_type ?? "",
       source_pdf_path: hit.document.filePath ?? hit.document.fileUrl ?? "",
       title: hit.chunk.title ?? hit.document.title
-    }))
+    })),
+    timings: retrieval.timings
   });
 }
 

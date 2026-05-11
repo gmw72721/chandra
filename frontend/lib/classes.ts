@@ -89,10 +89,26 @@ export type ClassMaterial = {
   fileSize?: number;
   characterCount?: number;
   chunkCount?: number;
+  pageCount?: number;
+  pageAssetCompletedPages?: number;
+  pageAssetPercent?: number;
+  pageAssetTotalPages?: number;
+  tutorReadCompletedSections?: number;
+  tutorReadPercent?: number;
+  tutorReadTotalSections?: number;
+  processingCompletedChunks?: number;
+  processingCompletedPages?: number;
+  processingDetail?: string;
+  processingError?: string;
+  processingPercent?: number;
+  processingStep?: MaterialJobStep;
+  processingTotalChunks?: number;
+  processingTotalPages?: number;
+  processingUpdatedAt?: unknown;
   priority?: TutorKnowledgePriority;
   requireCitations?: boolean;
   sourceMode?: TutorKnowledgeSourceMode;
-  status: "uploaded" | "processing" | "ready";
+  status: "uploaded" | "processing" | "deleting" | "ready";
   teacherOnly?: boolean;
   addedAt?: unknown;
 };
@@ -101,8 +117,14 @@ export type MaterialJobStep =
   | "upload_received"
   | "reading_file"
   | "chunking_material"
+  | "preparing_pdf_pages"
+  | "reading_pdf_pages"
   | "embedding_chunks"
   | "saving_to_class"
+  | "deleting_source"
+  | "deleting_storage"
+  | "deleting_chunks"
+  | "deleting_material"
   | "ready"
   | "failed";
 
@@ -110,6 +132,7 @@ export type MaterialJobProgress = {
   id: string;
   classId: string;
   completedChunks?: number;
+  completedPages?: number;
   detail: string;
   error?: string;
   materialId?: string;
@@ -117,6 +140,7 @@ export type MaterialJobProgress = {
   step: MaterialJobStep;
   title?: string;
   totalChunks?: number;
+  totalPages?: number;
   updatedAt?: unknown;
 };
 
@@ -181,6 +205,22 @@ export function subscribeToMaterialJob(
     doc(db!, "classes", classId, "materialJobs", jobId),
     (snapshot) => {
       callback(snapshot.exists() ? ({ id: snapshot.id, ...snapshot.data() } as MaterialJobProgress) : null);
+    },
+    (error) => onError?.(error)
+  );
+}
+
+export function subscribeToClassMaterialJobs(
+  classId: string,
+  callback: (progress: MaterialJobProgress[]) => void,
+  onError?: (error: Error) => void
+) {
+  assertFirestoreReady();
+
+  return onSnapshot(
+    collection(db!, "classes", classId, "materialJobs"),
+    (snapshot) => {
+      callback(snapshot.docs.map((jobDoc) => ({ id: jobDoc.id, ...jobDoc.data() }) as MaterialJobProgress));
     },
     (error) => onError?.(error)
   );

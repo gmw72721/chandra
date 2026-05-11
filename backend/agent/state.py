@@ -12,10 +12,16 @@ class PdfRagState(TypedDict):
     tool_calls: list[dict[str, Any]]
     retrieved_pages: list[dict[str, Any]]
     page_assets: list[dict[str, Any]]
+    prior_selected_pages: NotRequired[list[dict[str, Any]]]
+    prior_page_assets: NotRequired[list[dict[str, Any]]]
+    kept_prior_pages: NotRequired[list[dict[str, Any]]]
+    kept_prior_page_assets: NotRequired[list[dict[str, Any]]]
+    router_prior_page_decision: NotRequired[dict[str, Any]]
     answer: str
     finish_reason: NotRequired[str]
     tool_call_count: int
     stage_history: NotRequired[list[str]]
+    stage_durations: NotRequired[list[dict[str, Any]]]
     search_queries: NotRequired[list[str]]
     model: NotRequired[str]
     temperature: NotRequired[float]

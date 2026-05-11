@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
 import {
   TutorKnowledgeHttpError,
@@ -21,23 +21,38 @@ export async function POST(request: Request) {
     const classData = classSnapshot.data() ?? {};
     const professorName = String(classData.teacherName ?? classData.professorName ?? "").trim();
     const jobId = String(formData.get("jobId") ?? "").trim();
-    const material = await saveTutorKnowledge({ classId, formData, jobId, professorName, teacherId: uid });
+    const materialId = String(formData.get("materialId") ?? "").trim();
 
-    await writeAuditLog({
-      actor: { email: actorEmail, uid },
-      eventType: "material.uploaded",
-      metadata: {
-        jobId,
-        title: String(formData.get("title") ?? "").trim()
-      },
-      route: "/api/materials",
-      target: {
-        classId,
-        materialId: material.id
+    after(async () => {
+      try {
+        const material = await saveTutorKnowledge({ classId, formData, jobId, professorName, teacherId: uid });
+
+        await writeAuditLog({
+          actor: { email: actorEmail, uid },
+          eventType: "material.uploaded",
+          metadata: {
+            jobId,
+            title: String(formData.get("title") ?? "").trim()
+          },
+          route: "/api/materials",
+          target: {
+            classId,
+            materialId: material.id
+          }
+        });
+      } catch (caughtError) {
+        console.error("Tutor knowledge background save failed.", caughtError);
       }
     });
 
-    return NextResponse.json(material);
+    return NextResponse.json(
+      {
+        id: materialId,
+        jobId,
+        processing: true
+      },
+      { status: 202 }
+    );
   } catch (caughtError) {
     return handleTutorKnowledgeError(caughtError);
   }

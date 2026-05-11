@@ -1,14 +1,13 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
-import { PDFDocument } from "pdf-lib";
 import { z } from "zod";
-import { adminStorage } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
 
 const pageSchema = z.object({
+  chunk_text: z.string().max(3000).optional(),
+  chunkText: z.string().max(3000).optional(),
+  chunkTextPreview: z.string().max(3000).optional(),
   doc_id: z.string().max(500).optional(),
   docId: z.string().max(500).optional(),
   material_type: z.string().max(100).optional(),
@@ -18,7 +17,10 @@ const pageSchema = z.object({
   pageEnd: z.number().int().min(1).max(10000).optional(),
   pageStart: z.number().int().min(1).max(10000).optional(),
   score: z.number().optional(),
-  source_pdf_path: z.string().min(1).max(5000),
+  section: z.string().max(500).optional(),
+  source_type: z.string().max(100).optional(),
+  sourceType: z.string().max(100).optional(),
+  source_pdf_path: z.string().max(5000).optional(),
   sourcePdfPath: z.string().min(1).max(5000).optional(),
   title: z.string().min(1).max(500).optional()
 });
@@ -29,11 +31,6 @@ const requestSchema = z.object({
 });
 
 type RequestedPage = z.infer<typeof pageSchema>;
-const cacheRoot = path.join(process.cwd(), ".chandra-dev", "pdf-assets");
-const sourceCacheDirectory = path.join(cacheRoot, "sources");
-const pageCacheDirectory = path.join(cacheRoot, "pages");
-const sourcePdfCache = new Map<string, Promise<Buffer>>();
-const miniPdfCache = new Map<string, Promise<Buffer | null>>();
 
 export async function POST(request: Request) {
   const authError = authorizeInternalRequest(request);
@@ -76,21 +73,7 @@ async function buildAssets(pages: RequestedPage[], maxTotalPages: number) {
 }
 
 async function buildAsset(page: RequestedPage, pageStart: number, pageEnd: number) {
-  const asset = metadataOnlyAsset(page, pageStart, pageEnd);
-  const sourcePdfPath = page.source_pdf_path ?? page.sourcePdfPath ?? "";
-
-  try {
-    const sourcePdf = await loadSourcePdf(sourcePdfPath);
-    const miniPdf = await extractCachedMiniPdf(sourcePdfPath, sourcePdf, pageStart, pageEnd);
-
-    if (miniPdf) {
-      asset.file_data_url = `data:application/pdf;base64,${miniPdf.toString("base64")}`;
-    }
-  } catch (error) {
-    console.error("Internal PDF asset build failed.", error);
-  }
-
-  return asset;
+  return metadataOnlyAsset(page, pageStart, pageEnd);
 }
 
 function metadataOnlyAsset(page: RequestedPage, pageStart: number, pageEnd: number) {
@@ -98,6 +81,7 @@ function metadataOnlyAsset(page: RequestedPage, pageStart: number, pageEnd: numb
 
   return {
     citation_label: citationLabel(title, pageStart, pageEnd),
+    chunk_text: compactTextPreview(page.chunk_text ?? page.chunkText ?? page.chunkTextPreview ?? ""),
     doc_id: page.doc_id ?? page.docId ?? "",
     images: [],
     material_type: page.material_type ?? page.materialType ?? "",
@@ -106,11 +90,14 @@ function metadataOnlyAsset(page: RequestedPage, pageStart: number, pageEnd: numb
     printed_page_end: null,
     printed_page_start: null,
     score: page.score ?? 0,
+    section: page.section ?? "",
+    source_type: page.source_type ?? page.sourceType ?? "",
+    source_pdf_path: page.source_pdf_path ?? page.sourcePdfPath ?? "",
     title
   } as {
     citation_label: string;
+    chunk_text: string;
     doc_id: string;
-    file_data_url?: string;
     images: string[];
     material_type: string;
     page_end: number;
@@ -118,177 +105,20 @@ function metadataOnlyAsset(page: RequestedPage, pageStart: number, pageEnd: numb
     printed_page_end: null;
     printed_page_start: null;
     score: number;
+    section: string;
+    source_type: string;
+    source_pdf_path: string;
     title: string;
   };
 }
 
-async function loadSourcePdf(sourcePdfPath: string) {
-  const cacheKey = hashCacheKey(sourcePdfPath);
-  const cached = sourcePdfCache.get(cacheKey);
-
-  if (cached) {
-    return cached;
+function compactTextPreview(text: string) {
+  const preview = text.replace(/\s+/g, " ").trim();
+  if (preview.length <= 700) {
+    return preview;
   }
 
-  const pending = loadCachedSourcePdf(sourcePdfPath, cacheKey).catch((error) => {
-    sourcePdfCache.delete(cacheKey);
-    throw error;
-  });
-
-  sourcePdfCache.set(cacheKey, pending);
-  return pending;
-}
-
-async function loadCachedSourcePdf(sourcePdfPath: string, cacheKey: string) {
-  await mkdir(sourceCacheDirectory, { recursive: true });
-  const cachePath = path.join(sourceCacheDirectory, `${cacheKey}.pdf`);
-
-  try {
-    return await readFile(cachePath);
-  } catch {
-    const buffer = await downloadSourcePdf(sourcePdfPath);
-    await writeFile(cachePath, buffer);
-    return buffer;
-  }
-}
-
-async function downloadSourcePdf(sourcePdfPath: string) {
-  const storageReference = parseStorageReference(sourcePdfPath);
-
-  if (storageReference) {
-    if (!adminStorage) {
-      throw new Error("Firebase Admin Storage is not configured.");
-    }
-
-    const { bucketName, objectPath } = storageReference;
-    const bucket = bucketName ? adminStorage.bucket(bucketName) : adminStorage.bucket();
-    const [buffer] = await bucket.file(objectPath).download();
-    return buffer;
-  }
-
-  if (sourcePdfPath.startsWith("http://") || sourcePdfPath.startsWith("https://")) {
-    const response = await fetch(sourcePdfPath);
-
-    if (!response.ok) {
-      throw new Error(`PDF download failed with status ${response.status}.`);
-    }
-
-    return Buffer.from(await response.arrayBuffer());
-  }
-
-  if (!adminStorage) {
-    throw new Error("Firebase Admin Storage is not configured.");
-  }
-
-  const [buffer] = await adminStorage.bucket().file(sourcePdfPath).download();
-  return buffer;
-}
-
-async function extractCachedMiniPdf(sourcePdfPath: string, sourcePdf: Buffer, pageStart: number, pageEnd: number) {
-  const cacheKey = hashCacheKey(`${sourcePdfPath}:${pageStart}:${pageEnd}`);
-  const cached = miniPdfCache.get(cacheKey);
-
-  if (cached) {
-    return cached;
-  }
-
-  const pending = readOrCreateMiniPdf(cacheKey, sourcePdf, pageStart, pageEnd).catch((error) => {
-    miniPdfCache.delete(cacheKey);
-    throw error;
-  });
-
-  miniPdfCache.set(cacheKey, pending);
-  return pending;
-}
-
-async function readOrCreateMiniPdf(cacheKey: string, sourcePdf: Buffer, pageStart: number, pageEnd: number) {
-  await mkdir(pageCacheDirectory, { recursive: true });
-  const cachePath = path.join(pageCacheDirectory, `${cacheKey}.pdf`);
-
-  try {
-    return await readFile(cachePath);
-  } catch {
-    const miniPdf = await extractMiniPdf(sourcePdf, pageStart, pageEnd);
-
-    if (!miniPdf) {
-      return null;
-    }
-
-    const buffer = Buffer.from(miniPdf);
-    await writeFile(cachePath, buffer);
-    return buffer;
-  }
-}
-
-async function extractMiniPdf(sourcePdf: Buffer, pageStart: number, pageEnd: number) {
-  const source = await PDFDocument.load(sourcePdf, { ignoreEncryption: true });
-  const pageCount = source.getPageCount();
-  const indexes = [];
-
-  for (let pageNumber = pageStart; pageNumber <= Math.min(pageEnd, pageCount); pageNumber += 1) {
-    indexes.push(pageNumber - 1);
-  }
-
-  if (!indexes.length) {
-    return null;
-  }
-
-  const output = await PDFDocument.create();
-  const copiedPages = await output.copyPages(source, indexes);
-
-  for (const page of copiedPages) {
-    output.addPage(page);
-  }
-
-  return output.save();
-}
-
-function hashCacheKey(value: string) {
-  return createHash("sha256").update(value).digest("hex").slice(0, 32);
-}
-
-function parseStorageReference(sourcePdfPath: string) {
-  if (sourcePdfPath.startsWith("gs://")) {
-    const bucketAndPath = sourcePdfPath.slice("gs://".length);
-    const separatorIndex = bucketAndPath.indexOf("/");
-
-    if (separatorIndex > 0) {
-      return {
-        bucketName: bucketAndPath.slice(0, separatorIndex),
-        objectPath: bucketAndPath.slice(separatorIndex + 1)
-      };
-    }
-  }
-
-  try {
-    const parsed = new URL(sourcePdfPath);
-
-    if (parsed.hostname === "storage.googleapis.com") {
-      const [bucketName, ...pathParts] = parsed.pathname.split("/").filter(Boolean);
-
-      if (bucketName && pathParts.length) {
-        return {
-          bucketName,
-          objectPath: decodeURIComponent(pathParts.join("/"))
-        };
-      }
-    }
-
-    if (parsed.hostname === "firebasestorage.googleapis.com") {
-      const match = parsed.pathname.match(/^\/v0\/b\/([^/]+)\/o\/(.+)$/);
-
-      if (match) {
-        return {
-          bucketName: decodeURIComponent(match[1]),
-          objectPath: decodeURIComponent(match[2])
-        };
-      }
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
+  return preview.slice(0, 700).replace(/\s+\S*$/, "").trim();
 }
 
 function citationLabel(title: string, pageStart: number, pageEnd: number) {

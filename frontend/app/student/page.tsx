@@ -37,7 +37,8 @@ import type {
   StudentFeedbackPromptReason,
   StudentFeedbackRating,
   TutorApiResponse,
-  TutorInputTokenSection
+  TutorInputTokenSection,
+  TutorStageDuration
 } from "@/lib/types";
 
 type ChatProgress = {
@@ -1572,6 +1573,26 @@ function MessageDebugDetails({ message }: { message: ChatMessage }) {
             ))}
           </div>
         ) : null}
+        {debug.stageDurations.length ? (
+          <div className="message-debug-calls" aria-label="Stage timing">
+            {debug.stageDurations.map((stage, index) => (
+              <div className="message-debug-call" key={`${stage.stage}-${index}`}>
+                <strong>{stage.label || stage.stage || `Stage ${index + 1}`}</strong>
+                <span>{stage.stage || "unknown stage"}</span>
+                <span>{formatDuration(stage.durationMs)}</span>
+                {stage.model ? <span>Model: {String(stage.model)}</span> : null}
+                {stage.queryCount ? <span>Queries: {formatInteger(Number(stage.queryCount))}</span> : null}
+                {stage.resultCount ? <span>Results: {formatInteger(Number(stage.resultCount))}</span> : null}
+                {stage.pageAssetCount ? <span>Page assets: {formatInteger(Number(stage.pageAssetCount))}</span> : null}
+                {stage.pdfDownloadCount !== undefined ? <span>PDF downloads: {formatInteger(Number(stage.pdfDownloadCount))}</span> : null}
+                {stage.attachedFileCount !== undefined ? <span>Attached files: {formatInteger(Number(stage.attachedFileCount))}</span> : null}
+                {formatStageTimingDetails(stage).map((row) => (
+                  <span key={row.label}>{row.label}: {row.value}</span>
+                ))}
+              </div>
+            ))}
+          </div>
+        ) : null}
         {debug.modelCallUsage.length ? (
           <div className="message-debug-calls" aria-label="Model call token usage">
             {debug.modelCallUsage.map((call, index) => (
@@ -1633,6 +1654,7 @@ function buildMessageDebugDisplay(message: ChatMessage) {
     const inputTokenBreakdown = sortInputTokenBreakdown(
       debugInfo?.inputTokenBreakdown ?? message.langGraphTrace?.inputTokenBreakdown ?? []
     );
+    const stageDurations = sortStageDurations(debugInfo?.stageDurations ?? message.langGraphTrace?.stageDurations ?? []);
     const inputBreakdownTotal = inputTokenBreakdown.reduce((total, section) => total + section.estimatedTokens, 0);
     const rows = [
       { label: "Actual input tokens", value: formatInteger(actualTokens?.inputTokens ?? 0) },
@@ -1659,6 +1681,7 @@ function buildMessageDebugDisplay(message: ChatMessage) {
       inputTokenBreakdown,
       modelCallUsage,
       rows,
+      stageDurations,
       stages: debugInfo?.stages ?? message.langGraphTrace?.stages ?? [],
       summary: `${formatInteger(displayTokens)} tokens · ${formatInteger(requestCount)} req`
     };
@@ -1674,6 +1697,7 @@ function buildMessageDebugDisplay(message: ChatMessage) {
       { label: "Attachments", value: formatInteger(message.attachments?.length ?? 0) },
       { label: "Created", value: formatAccountActivityTime(message.createdAt) }
     ],
+    stageDurations: [],
     stages: [],
     summary: `${formatInteger(estimatedMessageTokens)} tokens`
   };
@@ -1694,6 +1718,85 @@ function sortInputTokenBreakdown(sections: TutorInputTokenSection[]) {
 
     return first.label.localeCompare(second.label);
   });
+}
+
+function sortStageDurations(stages: TutorStageDuration[]) {
+  return [...stages]
+    .filter((stage) => Number.isFinite(stage.durationMs) && stage.durationMs >= 0)
+    .sort((first, second) => second.durationMs - first.durationMs);
+}
+
+function formatStageTimingDetails(stage: TutorStageDuration) {
+  const timings = stage.timings;
+
+  if (!timings || typeof timings !== "object") {
+    return [];
+  }
+
+  if (Array.isArray((timings as { queries?: unknown }).queries)) {
+    return (timings as { queries: unknown[] }).queries.flatMap((queryTiming, index) =>
+      formatTimingObject(queryTiming).map((row) => ({
+        label: `Query ${index + 1} ${row.label}`,
+        value: row.value
+      }))
+    );
+  }
+
+  return formatTimingObject(timings);
+}
+
+function formatTimingObject(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return [];
+  }
+
+  return Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => key !== "queries")
+    .map(([key, rawValue]) => {
+      const formattedValue = formatTimingValue(key, rawValue);
+      return formattedValue ? { label: humanizeTimingKey(key), value: formattedValue } : null;
+    })
+    .filter((row): row is { label: string; value: string } => row !== null);
+}
+
+function formatTimingValue(key: string, value: unknown) {
+  if (typeof value === "boolean") {
+    return value ? "yes" : "no";
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return key.endsWith("Ms") ? formatDuration(value) : formatInteger(value);
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+
+  return "";
+}
+
+function humanizeTimingKey(key: string) {
+  const labels: Record<string, string> = {
+    exactLookupChunkCount: "Exact lookup chunks",
+    exactLookupChunkSearchMs: "Exact lookup chunk search",
+    exactLookupMaterialLoadMs: "Exact lookup material load",
+    exactLookupMaterialReadCount: "Exact lookup material reads",
+    exactLookupReason: "Exact lookup reason",
+    fallbackKeywordLoadMs: "Keyword fallback load",
+    fallbackRankingMs: "Keyword fallback ranking",
+    hasIndexedMaterialsCheckMs: "Indexed-material check",
+    query: "Query",
+    queryEmbeddingCacheHit: "Embedding cache hit",
+    queryEmbeddingMs: "Query embedding",
+    totalMs: "Retrieval total",
+    vectorCandidateBuildMs: "Vector material/chunk reads",
+    vectorCandidateCount: "Vector candidates",
+    vectorMaterialReadCount: "Material docs read",
+    vectorRankingMs: "Vector ranking",
+    vectorSearchMs: "Firestore vector search"
+  };
+
+  return labels[key] ?? key.replace(/([A-Z])/g, " $1").replace(/\bMs\b/g, "ms").trim();
 }
 
 function inferMessageRequestCount(message: ChatMessage) {

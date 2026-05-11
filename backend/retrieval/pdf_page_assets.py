@@ -20,6 +20,8 @@ MAX_TOTAL_PAGES = 12
 _NEXT_PAGE_ASSET_CLIENT: httpx.AsyncClient | None = None
 _PAGE_ASSET_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _PAGE_ASSET_CACHE_MAX = 256
+_NEXT_PAGE_ASSET_RESPONSE_CACHE: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+_NEXT_PAGE_ASSET_RESPONSE_CACHE_MAX = 128
 PRINTED_PAGE_FOOTER_PATTERNS = (
     re.compile(r"[-\u2013\u2014]\s*(\d{1,5})\s*[-\u2013\u2014]"),
     re.compile(r"\b[Pp]age\s+(\d{1,5})\b"),
@@ -35,7 +37,11 @@ async def fetch_or_render_pdf_pages(
 ) -> list[dict[str, Any]]:
     """Fetch/render only selected PDF page ranges into multimodal assets."""
 
-    selected_ranges = deduplicate_page_ranges(retrieved_pages, max_total_pages=max_total_pages)
+    selected_ranges = [
+        item
+        for item in deduplicate_page_ranges(retrieved_pages, max_total_pages=max_total_pages)
+        if str(item.get("source_pdf_path") or "").strip()
+    ]
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     source_cache = await resolve_pdf_sources(selected_ranges, output_dir=target_dir)
@@ -56,6 +62,11 @@ async def fetch_pdf_page_assets_via_next(
 
     if not selected_ranges:
         return []
+
+    cache_key = next_page_asset_response_cache_key(selected_ranges, max_total_pages=max_total_pages)
+    cached_assets = _NEXT_PAGE_ASSET_RESPONSE_CACHE.get(cache_key)
+    if cached_assets is not None:
+        return copy_page_asset_list(cached_assets)
 
     shared_secret = os.getenv("BACKEND_SHARED_SECRET", "").strip()
 
@@ -94,7 +105,11 @@ async def fetch_pdf_page_assets_via_next(
         return [metadata_only_page_asset(page) for page in selected_ranges]
 
     assets = payload.get("assets") if isinstance(payload, dict) else []
-    return assets if isinstance(assets, list) else [metadata_only_page_asset(page) for page in selected_ranges]
+    if not isinstance(assets, list):
+        return [metadata_only_page_asset(page) for page in selected_ranges]
+
+    remember_next_page_asset_response(cache_key, assets)
+    return copy_page_asset_list(assets)
 
 
 def next_page_asset_http_client() -> httpx.AsyncClient:
@@ -121,6 +136,7 @@ def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "citation_label": citation_label(str(page.get("title") or "Untitled PDF"), page_start, page_end),
+        "chunk_text": compact_text_preview(page.get("chunk_text") or page.get("chunkText") or ""),
         "doc_id": str(page.get("doc_id") or ""),
         "images": [],
         "material_type": str(page.get("material_type") or ""),
@@ -129,6 +145,9 @@ def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
         "printed_page_end": None,
         "printed_page_start": None,
         "score": float(page.get("score") or 0.0),
+        "section": str(page.get("section") or ""),
+        "source_type": str(page.get("source_type") or page.get("sourceType") or ""),
+        "source_pdf_path": str(page.get("source_pdf_path") or page.get("sourcePdfPath") or ""),
         "title": str(page.get("title") or "Untitled PDF"),
     }
 
@@ -176,6 +195,10 @@ async def build_page_asset(item: dict[str, Any], source_pdf: Path, output_dir: P
         "material_type": str(item.get("material_type") or ""),
         "images": images,
         "citation_label": citation_label(item["title"], display_page_start, display_page_end),
+        "chunk_text": compact_text_preview(item.get("chunk_text") or item.get("chunkText") or ""),
+        "section": str(item.get("section") or ""),
+        "source_type": str(item.get("source_type") or item.get("sourceType") or ""),
+        "source_pdf_path": str(item.get("source_pdf_path") or item.get("sourcePdfPath") or ""),
     }
 
     if not images:
@@ -214,7 +237,20 @@ def copy_page_asset(asset: dict[str, Any]) -> dict[str, Any]:
     copied = dict(asset)
     if isinstance(copied.get("images"), list):
         copied["images"] = list(copied["images"])
+    if isinstance(copied.get("file_data_urls"), list):
+        copied["file_data_urls"] = list(copied["file_data_urls"])
     return copied
+
+
+def copy_page_asset_list(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [copy_page_asset(asset) for asset in assets]
+
+
+def compact_text_preview(text: Any, *, max_chars: int = 700) -> str:
+    preview = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(preview) <= max_chars:
+        return preview
+    return preview[:max_chars].rsplit(" ", 1)[0].strip()
 
 
 def remember_page_asset(cache_key: tuple[Any, ...], asset: dict[str, Any]) -> None:
@@ -222,6 +258,39 @@ def remember_page_asset(cache_key: tuple[Any, ...], asset: dict[str, Any]) -> No
         _PAGE_ASSET_CACHE.pop(next(iter(_PAGE_ASSET_CACHE)))
 
     _PAGE_ASSET_CACHE[cache_key] = copy_page_asset(asset)
+
+
+def remember_next_page_asset_response(cache_key: tuple[Any, ...], assets: list[dict[str, Any]]) -> None:
+    if len(_NEXT_PAGE_ASSET_RESPONSE_CACHE) >= _NEXT_PAGE_ASSET_RESPONSE_CACHE_MAX:
+        _NEXT_PAGE_ASSET_RESPONSE_CACHE.pop(next(iter(_NEXT_PAGE_ASSET_RESPONSE_CACHE)))
+
+    _NEXT_PAGE_ASSET_RESPONSE_CACHE[cache_key] = copy_page_asset_list(assets)
+
+
+def next_page_asset_response_cache_key(
+    selected_ranges: list[dict[str, Any]],
+    *,
+    max_total_pages: int,
+) -> tuple[Any, ...]:
+    return (
+        max_total_pages,
+        tuple(page_asset_response_page_key(page) for page in selected_ranges),
+    )
+
+
+def page_asset_response_page_key(page: dict[str, Any]) -> tuple[Any, ...]:
+    chunk_text = str(page.get("chunk_text") or page.get("chunkText") or "")
+    chunk_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()[:16] if chunk_text else ""
+    return (
+        str(page.get("doc_id") or ""),
+        str(page.get("title") or ""),
+        int(page.get("page_start") or 1),
+        int(page.get("page_end") or page.get("page_start") or 1),
+        str(page.get("source_pdf_path") or page.get("sourcePdfPath") or ""),
+        str(page.get("material_type") or page.get("materialType") or ""),
+        float(page.get("score") or 0.0),
+        chunk_hash,
+    )
 
 
 def file_signature(path: Path) -> tuple[int, int]:

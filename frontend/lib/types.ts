@@ -28,6 +28,8 @@ export type SourceDocument = {
   classId?: string;
   citationsRequired?: boolean;
   materialType?: string;
+  pageAssetPrefix?: string;
+  pageAssetStorageBucket?: string;
   filePath?: string;
   fileUrl?: string;
   priority?: TutorKnowledgePriority;
@@ -50,14 +52,20 @@ export type SourceChunk = {
   excerpt?: string;
   materialId?: string;
   materialType?: string;
+  pageAssetPrefix?: string;
+  pageAssetStorageBucket?: string;
   pageEnd?: number;
   pageNumber?: number;
+  pageNumbers?: number[];
   pageStart?: number;
   problemNumbers?: string[];
   professorId?: string;
   professorName?: string;
   section?: string;
   sectionHeading?: string;
+  sectionMarkers?: string[];
+  sourceType?: "text" | "page-image" | "mixed" | "pasted";
+  source_type?: "text" | "page-image" | "mixed" | "pasted";
   teacherId?: string;
   title?: string;
   vector?: number[];
@@ -344,14 +352,21 @@ export type TutorTrace = {
   searchQueries: string[];
   selectedPages: Array<{
     citationLabel?: string;
+    chunkTextPreview?: string;
     docId?: string;
     materialType?: string;
     pageEnd?: number;
+    pageAssetPrefix?: string;
+    pageAssetStorageBucket?: string;
     pageStart?: number;
     printedPageEnd?: number;
     printedPageStart?: number;
+    section?: string;
+    sourceType?: string;
+    sourcePdfPath?: string;
     title?: string;
   }>;
+  stageDurations?: TutorStageDuration[];
   stages: string[];
   toolCallCount: number;
 };
@@ -402,11 +417,19 @@ export type TutorInputTokenSection = {
   stage?: string;
 };
 
+export type TutorStageDuration = {
+  durationMs: number;
+  label: string;
+  stage: string;
+  [key: string]: unknown;
+};
+
 export type TutorDebugInfo = {
   actualTokens: TutorDebugTokens;
   backendRequestCount: number;
   inputTokenBreakdown?: TutorInputTokenSection[];
   modelCallUsage?: TutorModelCallUsage[];
+  stageDurations?: TutorStageDuration[];
   durationMs: number;
   estimatedTokens: TutorDebugTokens;
   finishReason?: string;

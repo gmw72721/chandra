@@ -65,7 +65,7 @@ class OpenRouterClient:
         if max_tokens:
             payload["max_tokens"] = max_tokens
 
-        if reasoning_effort and model_supports_reasoning_effort(model):
+        if reasoning_effort and reasoning_effort != "auto" and model_supports_reasoning_effort(model):
             payload["reasoning"] = {"effort": reasoning_effort}
 
         if tools:

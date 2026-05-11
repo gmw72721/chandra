@@ -36,6 +36,10 @@ export type TutorKnowledgeChunk = {
   order: number;
   chunkText?: string;
   docId?: string;
+  pageAssetPrefix?: string;
+  pageAssetStorageBucket?: string;
+  page_asset_prefix?: string;
+  page_asset_storage_bucket?: string;
   pageEnd?: number;
   pageImage?: TutorKnowledgeChunkImage;
   pdfPart?: TutorKnowledgeChunkFile;

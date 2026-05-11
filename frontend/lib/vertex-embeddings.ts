@@ -42,8 +42,9 @@ type VertexEmbeddingConfig = {
 
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
 const geminiApiBaseUrl = "https://generativelanguage.googleapis.com/v1beta";
-const defaultGeminiEmbeddingBatchSize = 6;
+const defaultGeminiEmbeddingBatchSize = 32;
 const defaultGeminiEmbeddingBatchMaxBytes = 8 * 1024 * 1024;
+const defaultGeminiEmbeddingBatchConcurrency = 6;
 let warnedAboutMissingVertexConfig = false;
 
 export class VertexEmbeddingError extends Error {
@@ -109,30 +110,37 @@ export async function createVertexEmbeddings(
   try {
     if (isGeminiApiEmbeddingModel(config.model)) {
       const geminiApiKey = getGeminiApiKey();
+      const batchConcurrency =
+        readOptionalPositiveInteger(process.env.GEMINI_EMBEDDING_BATCH_CONCURRENCY)
+        ?? defaultGeminiEmbeddingBatchConcurrency;
       let completed = 0;
 
-      for (const batch of buildGeminiEmbeddingBatches({ config, inputs: indexedInputs })) {
-        const payload = await fetchGeminiEmbeddingBatch({ batch, config, geminiApiKey });
+      await mapWithConcurrency(
+        buildGeminiEmbeddingBatches({ config, inputs: indexedInputs }),
+        batchConcurrency,
+        async (batch) => {
+          const payload = await fetchGeminiEmbeddingBatch({ batch, config, geminiApiKey });
 
-        batch.forEach((input, batchIndex) => {
-          const values = readEmbeddingValues({ embedding: payload.embeddings?.[batchIndex] });
+          batch.forEach((input, batchIndex) => {
+            const values = readEmbeddingValues({ embedding: payload.embeddings?.[batchIndex] });
 
-          if (!values.length) {
-            throw new Error("Gemini API did not return an embedding vector.");
-          }
+            if (!values.length) {
+              throw new Error("Gemini API did not return an embedding vector.");
+            }
 
-          results[input.index] = {
-            dimensions: values.length,
-            model: config.model,
-            provider: "vertex-ai",
-            taskType: input.taskType,
-            values
-          };
-        });
+            results[input.index] = {
+              dimensions: values.length,
+              model: config.model,
+              provider: "vertex-ai",
+              taskType: input.taskType,
+              values
+            };
+          });
 
-        completed += batch.length;
-        await options.onProgress?.({ completed, total: indexedInputs.length });
-      }
+          completed += batch.length;
+          await options.onProgress?.({ completed, total: indexedInputs.length });
+        }
+      );
 
       return results;
     }
@@ -492,6 +500,25 @@ function readRetryDelayMs(retryAfter: string | null) {
 
 function sleep(durationMs: number) {
   return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+async function mapWithConcurrency<TItem>(
+  items: TItem[],
+  concurrencyLimit: number,
+  mapItem: (item: TItem, index: number) => Promise<void>
+) {
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrencyLimit), items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        await mapItem(items[currentIndex], currentIndex);
+      }
+    })
+  );
 }
 
 type VertexEmbeddingPredictResponse = {

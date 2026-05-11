@@ -193,10 +193,10 @@ gcloud run deploy "$SERVICE" \
   --ingress all \
   --timeout 900s \
   --concurrency 10 \
-  --cpu 1 \
-  --memory 2Gi \
+  --cpu 2 \
+  --memory 4Gi \
   --min-instances 0 \
-  --max-instances 5 \
+  --max-instances 8 \
   --set-env-vars "$(join_by_comma "${plain_env_pairs[@]}")" \
   --set-secrets "$(join_by_comma "${secret_env_pairs[@]}")"
 
