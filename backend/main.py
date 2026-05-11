@@ -1175,10 +1175,10 @@ def normalize_source_usage(value: Optional[dict[str, Any]]) -> dict[str, Any]:
 def normalize_model_settings(value: Optional[dict[str, Any]]) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     response_length = str(source.get("responseLength") or "medium").lower()
-    reasoning_effort = str(source.get("reasoningEffort") or "medium").lower()
+    reasoning_effort = str(source.get("reasoningEffort") or "low").lower()
     return {
         "modelId": str(source.get("modelId") or DEFAULT_OPENROUTER_MODEL),
-        "reasoningEffort": reasoning_effort if reasoning_effort in {"low", "medium", "high"} else "medium",
+        "reasoningEffort": reasoning_effort if reasoning_effort in {"low", "medium", "high"} else "low",
         "creativity": clamp_int(source.get("creativity"), 35, 0, 100),
         "responseLength": response_length if response_length in {"short", "medium", "long", "extended"} else "medium",
     }

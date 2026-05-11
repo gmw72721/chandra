@@ -147,33 +147,15 @@ def build_pdf_rag_graph(
         await maybe_adjust_ai_usage_reservation(state, messages)
         input_token_breakdown = build_input_token_breakdown(state, messages)
         final_model = state.get("model") or DEFAULT_OPENROUTER_MODEL
-        final_reasoning_effort = state.get("reasoning_effort")
+        final_reasoning_effort = ROUTER_REASONING_EFFORT
         response = await client.chat(
             model=final_model,
             messages=messages,
-            tools=[SEARCH_PDF_PAGES_TOOL],
-            tool_choice="auto",
             temperature=state.get("temperature", 0.4),
             max_tokens=state.get("max_tokens"),
             reasoning_effort=final_reasoning_effort,
         )
-        requested_tool_calls = [
-            tool_call
-            for tool_call in response.get("tool_calls", [])
-            if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-        ]
-        tool_calls = new_search_tool_calls(
-            state,
-            requested_tool_calls,
-            limit=remaining_search_call_count(state),
-        )
         answer = response.get("content") or ""
-
-        if requested_tool_calls and state.get("tool_call_count", 0) >= MAX_TOOL_CALLS and not answer:
-            answer = (
-                "I could not find enough support in the selected PDF pages after the maximum number of searches. "
-                "Ask your teacher for the exact worksheet, page, or problem text, or paste the relevant part here."
-            )
 
         return {
             "answer": answer,
@@ -189,7 +171,7 @@ def build_pdf_rag_graph(
                 reasoning_effort=final_reasoning_effort,
             ),
             "input_token_breakdown": input_token_breakdown,
-            "tool_calls": tool_calls,
+            "tool_calls": [],
         }
 
     graph = StateGraph(PdfRagState)
@@ -1613,12 +1595,10 @@ async def run_pdf_rag_agent_stream(
             final_messages = await asyncio.to_thread(build_multimodal_final_messages, state)
             state["input_token_breakdown"] = build_input_token_breakdown(state, final_messages)
             final_model = state.get("model") or DEFAULT_OPENROUTER_MODEL
-            final_reasoning_effort = state.get("reasoning_effort")
+            final_reasoning_effort = ROUTER_REASONING_EFFORT
             response = await client.chat(
                 model=final_model,
                 messages=final_messages,
-                tools=[SEARCH_PDF_PAGES_TOOL],
-                tool_choice="auto",
                 temperature=state.get("temperature", 0.4),
                 max_tokens=state.get("max_tokens"),
                 reasoning_effort=final_reasoning_effort,
@@ -1635,16 +1615,7 @@ async def run_pdf_rag_agent_stream(
                 model=final_model,
                 reasoning_effort=final_reasoning_effort,
             )
-            requested_tool_calls = [
-                tool_call
-                for tool_call in response.get("tool_calls", [])
-                if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-            ]
-            state["tool_calls"] = new_search_tool_calls(
-                state,
-                requested_tool_calls,
-                limit=remaining_search_call_count(state),
-            )
+            state["tool_calls"] = []
 
         if not state["tool_calls"]:
             await finish_active_problem_context_prefetch(state)
@@ -1726,12 +1697,10 @@ async def run_pdf_rag_agent_stream(
                 "type": "step",
             }
             final_model = state.get("model") or DEFAULT_OPENROUTER_MODEL
-            final_reasoning_effort = state.get("reasoning_effort")
+            final_reasoning_effort = ROUTER_REASONING_EFFORT
             response = await client.chat(
                 model=final_model,
                 messages=final_messages,
-                tools=[SEARCH_PDF_PAGES_TOOL],
-                tool_choice="auto",
                 temperature=state.get("temperature", 0.4),
                 max_tokens=state.get("max_tokens"),
                 reasoning_effort=final_reasoning_effort,
@@ -1748,16 +1717,7 @@ async def run_pdf_rag_agent_stream(
                 model=final_model,
                 reasoning_effort=final_reasoning_effort,
             )
-            requested_tool_calls = [
-                tool_call
-                for tool_call in response.get("tool_calls", [])
-                if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-            ]
-            state["tool_calls"] = new_search_tool_calls(
-                state,
-                requested_tool_calls,
-                limit=remaining_search_call_count(state),
-            )
+            state["tool_calls"] = []
 
             if not state["tool_calls"]:
                 await finish_active_problem_context_prefetch(state)

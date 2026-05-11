@@ -22,6 +22,7 @@ MAX_TOOL_CALLS = 8
 MAX_PARALLEL_SEARCHES = 3
 MAX_RETRIEVED_WINDOWS = 5
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini"
+ROUTER_REASONING_EFFORT = "low"
 
 
 def build_pdf_rag_graph(
@@ -43,7 +44,7 @@ def build_pdf_rag_graph(
             tool_choice="auto",
             temperature=state.get("temperature", 0.4),
             max_tokens=state.get("max_tokens"),
-            reasoning_effort=state.get("reasoning_effort"),
+            reasoning_effort=ROUTER_REASONING_EFFORT,
         )
         tool_calls = new_search_tool_calls(
             state,
@@ -103,35 +104,17 @@ def build_pdf_rag_graph(
         response = await client.chat(
             model=state.get("model") or DEFAULT_OPENROUTER_MODEL,
             messages=messages,
-            tools=[SEARCH_PDF_PAGES_TOOL],
-            tool_choice="auto",
             temperature=state.get("temperature", 0.4),
             max_tokens=state.get("max_tokens"),
-            reasoning_effort=state.get("reasoning_effort"),
-        )
-        requested_tool_calls = [
-            tool_call
-            for tool_call in response.get("tool_calls", [])
-            if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-        ]
-        tool_calls = new_search_tool_calls(
-            state,
-            requested_tool_calls,
-            limit=remaining_search_call_count(state),
+            reasoning_effort=ROUTER_REASONING_EFFORT,
         )
         answer = response.get("content") or ""
-
-        if requested_tool_calls and state.get("tool_call_count", 0) >= MAX_TOOL_CALLS and not answer:
-            answer = (
-                "I could not find enough support in the selected PDF pages after the maximum number of searches. "
-                "Ask your teacher for the exact worksheet, page, or problem text, or paste the relevant part here."
-            )
 
         return {
             "answer": answer,
             "finish_reason": response.get("finish_reason") or "",
             "stage_history": append_stage(state, "openrouter_answer_with_pages"),
-            "tool_calls": tool_calls,
+            "tool_calls": [],
         }
 
     graph = StateGraph(PdfRagState)
@@ -1247,7 +1230,7 @@ async def run_pdf_rag_agent_stream(
             tool_choice="auto",
             temperature=state.get("temperature", 0.4),
             max_tokens=state.get("max_tokens"),
-            reasoning_effort=state.get("reasoning_effort"),
+            reasoning_effort=ROUTER_REASONING_EFFORT,
         )
         state["answer"] = response.get("content") or ""
         state["finish_reason"] = response.get("finish_reason") or ""
@@ -1337,25 +1320,14 @@ async def run_pdf_rag_agent_stream(
             response = await client.chat(
                 model=model or DEFAULT_OPENROUTER_MODEL,
                 messages=await asyncio.to_thread(build_multimodal_final_messages, state),
-                tools=[SEARCH_PDF_PAGES_TOOL],
-                tool_choice="auto",
                 temperature=state.get("temperature", 0.4),
                 max_tokens=state.get("max_tokens"),
-                reasoning_effort=state.get("reasoning_effort"),
+                reasoning_effort=ROUTER_REASONING_EFFORT,
             )
             state["answer"] = response.get("content") or ""
             state["finish_reason"] = response.get("finish_reason") or ""
             state["stage_history"] = append_stage(state, "openrouter_answer_with_pages")
-            requested_tool_calls = [
-                tool_call
-                for tool_call in response.get("tool_calls", [])
-                if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-            ]
-            state["tool_calls"] = new_search_tool_calls(
-                state,
-                requested_tool_calls,
-                limit=remaining_search_call_count(state),
-            )
+            state["tool_calls"] = []
 
             if not state["tool_calls"]:
                 yield {"payload": pdf_rag_response_from_state(state), "type": "final"}

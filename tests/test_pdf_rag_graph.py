@@ -449,7 +449,9 @@ async def test_router_is_low_reasoning_and_final_uses_configured_default_model()
     assert client.calls[0]["model"] == "openai/gpt-5.4-mini"
     assert client.calls[0]["reasoning_effort"] == "low"
     assert client.calls[1]["model"] == "openai/gpt-5.4-mini"
-    assert client.calls[1]["reasoning_effort"] == "high"
+    assert client.calls[1]["reasoning_effort"] == "low"
+    assert "tools" not in client.calls[1]
+    assert "tool_choice" not in client.calls[1]
     assert response["tokenUsage"]["actual"] == {
         "input_tokens": 34,
         "output_tokens": 10,
@@ -457,7 +459,7 @@ async def test_router_is_low_reasoning_and_final_uses_configured_default_model()
         "total_tokens": 49,
     }
     assert response["tokenUsage"]["calls"][0]["reasoningEffort"] == "low"
-    assert response["tokenUsage"]["calls"][1]["reasoningEffort"] == "high"
+    assert response["tokenUsage"]["calls"][1]["reasoningEffort"] == "low"
     assert response["langGraphTrace"]["modelCallUsage"] == response["tokenUsage"]["calls"]
 
 
