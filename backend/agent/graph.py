@@ -1475,8 +1475,12 @@ async def execute_parsed_searches(
             for query, top_k, retrieval_reason in parsed_searches
         ]
     )
-    pages = [page for search_result in results for page in search_result]
-    diagnostics = search_result_diagnostics(parsed_searches, results, state=state)
+    filtered_results = [
+        filter_search_result_for_retrieval_reason(search_result, retrieval_reason, state=state)
+        for (_query, _top_k, retrieval_reason), search_result in zip(parsed_searches, results)
+    ]
+    pages = [page for search_result in filtered_results for page in search_result]
+    diagnostics = search_result_diagnostics(parsed_searches, filtered_results, state=state)
     reason_history = [
         {
             "query": query,
@@ -1484,9 +1488,48 @@ async def execute_parsed_searches(
             "result_count": len(search_result),
             "timestamp": utc_timestamp(),
         }
-        for (query, _top_k, retrieval_reason), search_result in zip(parsed_searches, results)
+        for (query, _top_k, retrieval_reason), search_result in zip(parsed_searches, filtered_results)
     ]
     return [query for query, _top_k, _reason in parsed_searches], pages, diagnostics, reason_history
+
+
+def filter_search_result_for_retrieval_reason(
+    pages: list[dict[str, Any]],
+    retrieval_reason: str,
+    *,
+    state: PdfRagState | None = None,
+) -> list[dict[str, Any]]:
+    if retrieval_reason != "needed_example_page" or not state or len(pages) <= 1:
+        return pages
+
+    active = active_metadata_record_from_memory(normalize_chat_retrieval_memory(state.get("chat_retrieval_memory")))
+    if not active:
+        return pages
+
+    filtered = [page for page in pages if not same_problem_source_page(page, active)]
+    return filtered or pages
+
+
+def same_problem_source_page(page: dict[str, Any], active: dict[str, Any]) -> bool:
+    if not isinstance(page, dict) or not isinstance(active, dict):
+        return False
+
+    page_doc = str(page.get("doc_id") or page.get("docId") or page.get("materialId") or "")
+    active_doc = str(active.get("doc_id") or active.get("docId") or active.get("materialId") or "")
+    page_start = int(page.get("page_start") or page.get("pageStart") or 0)
+    active_start = int(active.get("page_start") or active.get("pageStart") or 0)
+    page_end = int(page.get("page_end") or page.get("pageEnd") or page_start)
+    active_end = int(active.get("page_end") or active.get("pageEnd") or active_start)
+
+    if page_doc and active_doc and page_doc == active_doc and page_start == active_start and page_end == active_end:
+        return True
+
+    page_numbers = {str(number).upper() for number in page.get("problem_numbers") or page.get("problemNumbers") or []}
+    active_numbers = {
+        str(number).upper()
+        for number in active.get("problem_numbers") or active.get("problemNumbers") or []
+    }
+    return bool(page_numbers and active_numbers and page_numbers.intersection(active_numbers))
 
 
 def search_result_diagnostics(
@@ -3066,12 +3109,26 @@ def page_context_records_for_state(state: PdfRagState) -> list[dict[str, Any]]:
     pages_for_context = list(state.get("retrieved_pages", []))
     decision = state.get("retrieval_decision") or {}
 
-    if decision.get("memory_used"):
+    if decision.get("memory_used") and should_prepend_active_metadata_to_page_context(decision):
         active = active_metadata_record_from_memory(normalize_chat_retrieval_memory(state.get("chat_retrieval_memory")))
         if active:
             pages_for_context = [active, *pages_for_context]
 
     return deduplicate_retrieved_windows(pages_for_context)
+
+
+def should_prepend_active_metadata_to_page_context(decision: dict[str, Any]) -> bool:
+    if decision.get("retrieval_reason") == "needed_example_page":
+        return False
+
+    searches = decision.get("searches")
+    if isinstance(searches, list) and any(
+        isinstance(search, dict) and search.get("retrieval_reason") == "needed_example_page"
+        for search in searches
+    ):
+        return False
+
+    return True
 
 
 def append_stage(state: PdfRagState, stage: str) -> list[str]:

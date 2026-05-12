@@ -228,6 +228,50 @@ def test_exact_problem_lookup_overrides_misclassified_example_reason() -> None:
     assert query == "find problem 3.12"
 
 
+def test_example_follow_up_does_not_prepend_active_problem_page() -> None:
+    active_page = ocr_page(page_start=98, page_end=98, problem_numbers=["2.14"])
+    example_page = ocr_page(
+        chunk_text="Example 2.8.17. Use rank-nullity to compare dimensions.",
+        page_start=99,
+        page_end=99,
+        problem_numbers=[],
+        retrieval_mode="vector",
+    )
+    state = {
+        "chat_retrieval_memory": {"active_metadata": active_page},
+        "retrieval_decision": {
+            "memory_used": True,
+            "retrieval_reason": "needed_example_page",
+            "searches": [{"query": "worked example rank nullity", "retrieval_reason": "needed_example_page"}],
+        },
+        "retrieved_pages": [example_page],
+    }
+
+    pages = graph_module.page_context_records_for_state(state)
+
+    assert pages == [example_page]
+
+
+def test_example_search_filters_active_problem_page_when_alternatives_exist() -> None:
+    active_page = ocr_page(page_start=98, page_end=98, problem_numbers=["2.14"])
+    example_page = ocr_page(
+        chunk_text="Example 2.8.17. Use rank-nullity to compare dimensions.",
+        page_start=99,
+        page_end=99,
+        problem_numbers=[],
+        retrieval_mode="vector",
+    )
+    state = {"chat_retrieval_memory": {"active_metadata": active_page}}
+
+    pages = graph_module.filter_search_result_for_retrieval_reason(
+        [active_page, example_page],
+        "needed_example_page",
+        state=state,
+    )
+
+    assert pages == [example_page]
+
+
 def test_tutor_decision_can_return_one_search_per_distinct_need() -> None:
     decision = graph_module.parse_tutor_decision_response(
         {
