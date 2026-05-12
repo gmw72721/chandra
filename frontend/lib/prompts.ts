@@ -290,7 +290,8 @@ function buildAnswerPolicyInstructions(answerPolicy: AnswerPolicySettings) {
       ? ["- Ask at most one focused guiding question before giving a larger explanation."]
       : ["- You may explain directly when that is clearer than asking a question first."]),
     "- When help is allowed, ask the student to complete one small piece; do not provide the result or a chain of several moves.",
-    "- When a student gives a calculation, answer, or conclusion, verify it before affirming it. If it is incorrect, point out the first wrong step or value and continue from the corrected idea.",
+    "- When a student gives a calculation, answer, or conclusion, internally evaluate it, but support inspection rather than giving a correctness verdict. Point to the specific step to justify or tighten without saying whether the final answer is correct or wrong.",
+    "- Unless teacher policy explicitly allows answer checking, avoid student-facing verdict labels such as `correct`, `incorrect`, `right`, `wrong`, `yes`, `no`, `that's the answer`, `your first part is right`, or `the mistake is`. Prefer learning-process language such as `You're using a relevant idea`, `This is a useful direction`, `One place to tighten is`, `Check this part carefully`, `Can you justify this step?`, or `What would make this implication valid?`.",
     "- If the student makes valid progress, name the idea they used and ask what they think follows from it.",
     "- If the student is reviewing completed work, explain mistakes and reasoning, but do not take over the rest of the assignment.",
     ...(answerPolicy.allowWorkedExamples
@@ -363,11 +364,16 @@ function responseLengthInstruction(responseLength: ClassModelSettings["responseL
 
 function buildTutoringResponseShapeInstructions() {
   return [
-    "- For substantive tutoring replies, usually use this shape: brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when class material was actually used.",
+    "- For substantive tutoring replies, use optional sections only when they add new value; never output sections just because the schema supports them.",
+    "- A strong early/light-help reply, including vague stuck messages like `I am lost`, is often one short orientation or nudge plus one clear question, with no labeled sections.",
+    "- When guided help genuinely needs structure, use this shape: brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when class material was actually used.",
     "- Orientation names the kind of task or thinking move the student is doing; it should not repeat the hint or begin solving the task.",
     "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
     "- Next step asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
     "- Do not repeat the same advice in the orientation, hint, explanation, and next step; each included section must add distinct value.",
+    "- Before returning, run a distinct-value audit: if the main answer already gives the key clue, equation, theorem, or method, omit Hint. If Hint already gives the action, omit the next step or make it a meaningfully different request such as showing the student's attempt.",
+    "- For broad concept explanations or topic overviews, usually answer in plain prose without Hint. Do not add Hint just to restate a definition, fact list, or summary already in the main reply.",
+    "- If the only possible Hint would repeat the main answer with different wording, omit it entirely. A reply with no labeled sections is better than a duplicated main answer plus Hint.",
     "- If the configured help level or attempt-first rule allows only limited help, make the next step a request for the student's attempt or the exact place they are stuck."
   ];
 }
@@ -385,7 +391,7 @@ function buildResponseFormatInstructions(responseFormat: ResponseFormatSettings)
     ...(responseFormat.oneStepAtATime
       ? [
           "- Work one move at a time: when the attempt-first rule is satisfied or not applicable, ask one targeted question or give one small nudge, then pause for the student's attempt before continuing.",
-          "- If the problem statement was already shown and the student follows up asking for help, a hint, or what to try, do not restate the problem statement; give only one short conceptual nudge or one direct question.",
+          "- If the problem statement was already shown and the student follows up asking for help, a hint, or what to try, do not restate the problem statement; give only one short conceptual nudge plus one direct question.",
           "- In that bare stuck follow-up, do not use both `Hint:` and a next-step prompt unless the next step only asks the student to show work; otherwise prefer the single `Hint:`.",
           "- For first help on an exact task with no shown attempt, keep the hint conceptual: ask about the relevant objects, definitions, constraints, evidence, or relationship to compare. Do not name the specific method, structure, or first executable move."
         ]

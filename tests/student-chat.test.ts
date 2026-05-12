@@ -13,6 +13,7 @@ import { resolveStudentChatClassId, StudentChatScopeError } from "../frontend/li
 import { assistantMessageBlocks } from "../frontend/lib/chat-message-format.ts";
 import { buildChatContextMemory } from "../frontend/lib/chat-context-memory.ts";
 import { normalizeTutorResponse } from "../frontend/lib/tutor-response.ts";
+import { buildUnderstandingState, safeUnderstandingReasons } from "../frontend/lib/understanding-state.ts";
 
 const repoRoot = process.cwd();
 
@@ -1305,8 +1306,12 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(routeSource, /first call search_pdf_pages/);
   assert.match(routeSource, /quick_response/);
   assert.match(routeSource, /OCR metadata records/);
-  assert.match(routeSource, /Verify student calculations before affirming them/);
-  assert.match(promptSource, /verify it before affirming it/);
+  assert.match(routeSource, /support inspection rather than giving a correctness verdict/);
+  assert.match(promptSource, /support inspection rather than giving a correctness verdict/);
+  assert.match(routeSource, /avoid student-facing verdict labels/);
+  assert.match(promptSource, /avoid student-facing verdict labels/);
+  assert.match(routeSource, /One place to tighten is/);
+  assert.match(promptSource, /What would make this implication valid/);
   assert.match(routeSource, /source-text lookup/);
   assert.match(routeSource, /quote the requested visible source item exactly/);
   assert.match(routeSource, /ask what they tried or where they are stuck/);
@@ -1320,6 +1325,14 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(routeSource, /Do not reveal the full solution, final answer, final artifact/);
   assert.match(promptSource, /ask what they tried or where they are stuck/);
   assert.match(promptSource, /brief orientation sentence plus one conceptual hint/);
+  assert.match(promptSource, /use optional sections only when they add new value/);
+  assert.match(promptSource, /never output sections just because the schema supports them/);
+  assert.match(promptSource, /vague stuck messages like `I am lost`/);
+  assert.match(promptSource, /one short orientation or nudge plus one clear question/);
+  assert.match(promptSource, /if the main answer already gives the key clue, equation, theorem, or method, omit Hint/);
+  assert.match(promptSource, /If Hint already gives the action, omit the next step/);
+  assert.match(promptSource, /broad concept explanations or topic overviews, usually answer in plain prose without Hint/);
+  assert.match(promptSource, /duplicated main answer plus Hint/);
   assert.match(promptSource, /specific problem, page, or passage, treat it as source lookup/);
   assert.match(promptSource, /For problem-statement lookup, first identify the exact academic exercise\/question\/task statement/);
   assert.match(routeSource, /Before using `Problem:`/);
@@ -1348,8 +1361,17 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(routeSource, /Default to one clean answer plus useful optional sections/);
   assert.match(routeSource, /Choose the student-facing order of the answer and sections/);
   assert.match(routeSource, /Use `Hint:` when the student is stuck or asks how to start/);
-  assert.match(routeSource, /prefer one short `Hint:` and leave `nextStep` empty/);
+  assert.match(routeSource, /use optional sections only when they add new value/);
+  assert.match(routeSource, /never output sections just because the schema supports them/);
+  assert.match(routeSource, /vague stuck messages like `I am lost`/);
+  assert.match(routeSource, /main answer already gives the key clue, equation, theorem, or method, omit `Hint:`/);
+  assert.match(routeSource, /If `Hint:` already gives the action, omit `nextStep`/);
+  assert.match(routeSource, /broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`/);
+  assert.match(routeSource, /duplicated main answer plus `Hint:`/);
+  assert.match(routeSource, /use at most one nudge plus one question/);
+  assert.match(routeSource, /prefer one concise reply or one short `Hint:` and leave `nextStep` empty/);
   assert.match(routeSource, /Use `Check your work:` only when the student shows work/);
+  assert.match(routeSource, /Keep it neutral and process-focused/);
   assert.match(routeSource, /1-2 is often enough, and 3-4 is fine/);
   assert.match(routeSource, /Do not write `Source:`, `Sources:`/);
   assert.match(routeSource, /Do not write `Answer:`, `Question:`/);
@@ -1359,6 +1381,10 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(promptSource, /unrelated code/);
   assert.match(graphSource, /tutor decision step/);
   assert.match(graphSource, /bare stuck\/start follow-up/);
+  assert.match(graphSource, /Depth 1 uses one short answer or Hint plus one question, especially for vague stuck messages like `I am lost`/);
+  assert.match(graphSource, /answer already gives the key clue, equation, theorem, or method, omit hint/);
+  assert.match(graphSource, /If hint already gives the action, omit nextStep/);
+  assert.match(graphSource, /never output sections just because the schema supports them/);
   assert.match(graphSource, /PostgreSQL OCR metadata/);
   assert.match(graphSource, /bare numbered references like `problem 2\.14`/);
   assert.match(graphSource, /follow-ups to prior source-backed answers/);
@@ -1421,4 +1447,122 @@ test("student context saves the exact problem before falling back to page OCR", 
   assert.match(studentSource, /const problem: NonNullable<ChatContextMemory\["currentProblem"\]> \| undefined = activeProblemNumber \|\| problemText/);
   assert.match(studentSource, /extractProblemTextFromPageOcr\(pageOcrText, activeProblemNumber\)/);
   assert.match(studentSource, /function extractProblemTextFromPageOcr/);
+});
+
+test("student understanding helper is empty before active problem and initializes at level zero", () => {
+  assert.equal(buildUnderstandingState([]), null);
+  assert.equal(
+    buildUnderstandingState([
+      {
+        id: "assistant-placeholder",
+        role: "assistant",
+        content: "What are you working on?",
+        createdAt: "2026-05-12T00:00:00.000Z",
+        langGraphTrace: {
+          problemUnderstandingState: {
+            activeProblemId: "unknown",
+            understandingLevel: 0,
+            updatedAt: "2026-05-12T00:00:00.000Z"
+          },
+          searchQueries: [],
+          selectedPages: [],
+          stages: [],
+          toolCallCount: 0
+        }
+      }
+    ]),
+    null
+  );
+
+  const state = buildUnderstandingState([
+    {
+      id: "assistant-1",
+      role: "assistant",
+      content: "Problem 3.9...",
+      createdAt: "2026-05-12T00:00:00.000Z",
+      langGraphTrace: {
+        problemUnderstandingState: {
+          activeProblemId: "problem-3-9",
+          understandingLevel: 0,
+          lastHintSummary: "Chandra has not seen your work yet.",
+          updatedAt: "2026-05-12T00:00:00.000Z"
+        },
+        searchQueries: [],
+        selectedPages: [],
+        stages: [],
+        toolCallCount: 0
+      }
+    }
+  ]);
+
+  assert.equal(state?.level, 0);
+  assert.deepEqual(state?.reasons, ["Chandra has not seen your work yet."]);
+});
+
+test("student understanding reasons stay process-focused and safe", () => {
+  assert.deepEqual(
+    safeUnderstandingReasons(
+      {
+        activeProblemId: "problem-setup",
+        understandingLevel: 2,
+        conceptsUnderstood: ["the main object in the problem"],
+        knownConfusions: ["the key justification"],
+        lastHintSummary: "Your answer is correct.",
+        lastStudentAttemptSummary: "You showed an attempt, but the key justification is still missing."
+      },
+      2
+    ),
+    [
+      "You identified the main object in the problem.",
+      "A next point to clarify is the key justification.",
+      "You showed an attempt, but the key justification is still missing."
+    ]
+  );
+
+  const closeState = buildUnderstandingState([
+    {
+      id: "assistant-close",
+      role: "assistant",
+      content: "Check your notation.",
+      createdAt: "2026-05-12T00:00:00.000Z",
+      langGraphTrace: {
+        problemUnderstandingState: {
+          activeProblemId: "problem-close",
+          understandingLevel: 4,
+          reasons: ["You are close and mostly need cleanup."],
+          updatedAt: "2026-05-12T00:00:00.000Z"
+        },
+        searchQueries: [],
+        selectedPages: [],
+        stages: [],
+        toolCallCount: 0
+      }
+    }
+  ]);
+
+  assert.equal(closeState?.level, 4);
+  assert.deepEqual(closeState?.reasons, ["You are close and mostly need cleanup."]);
+});
+
+test("student understanding UI sits beside knowledge and keeps safe copy", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+
+  assert.ok(studentSource.indexOf("<KnowledgeIconButton") < studentSource.indexOf("<UnderstandingLevelButton"));
+  assert.match(studentSource, /disabled=\{!hasState\}/);
+  assert.match(studentSource, /data-understanding-level=\{state\?\.level\}/);
+  assert.match(studentSource, /title="Understanding"/);
+  assert.match(studentSource, /Chandra estimates how much support you need for this problem\./);
+  assert.match(studentSource, /This is not a grade\./);
+  const popoverSource = studentSource.slice(
+    studentSource.indexOf("const UnderstandingPopover"),
+    studentSource.indexOf("function knowledgeRoleFromSectionKind")
+  );
+  assert.doesNotMatch(popoverSource, /\b(?:correct|incorrect|answer)\b/i);
+  assert.match(styles, /\.student-understanding-control/);
+  assert.match(styles, /\.student-understanding-popover/);
+  assert.match(styles, /data-understanding-level="0"/);
+  assert.match(styles, /data-understanding-level="4"/);
+  assert.match(styles, /#0b66a0/);
+  assert.match(styles, /#65d68c/);
 });

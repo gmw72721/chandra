@@ -481,6 +481,7 @@ export type TutorTrace = {
   knowledgeItems?: KnowledgeItem[];
   memoryUsed?: boolean;
   modelCallUsage?: TutorModelCallUsage[];
+  problemUnderstandingState?: TutorProblemUnderstandingState;
   retrievalDecision?: Record<string, unknown>;
   retrievalReason?: string;
   searchQueries: string[];
@@ -497,6 +498,32 @@ export type TutorTrace = {
   }>;
   stages: string[];
   toolCallCount: number;
+  tutorPlan?: Record<string, unknown>;
+};
+
+export type UnderstandingLevel = 0 | 1 | 2 | 3 | 4;
+
+export type UnderstandingState = {
+  activeProblemId: string;
+  level: UnderstandingLevel;
+  reasons: string[];
+  lastUpdatedAt: Date;
+};
+
+export type TutorProblemUnderstandingState = {
+  activeProblemId?: string;
+  understandingLevel?: number;
+  level?: number;
+  reasons?: string[];
+  conceptsUnderstood?: string[];
+  completedSteps?: string[];
+  currentStep?: string;
+  currentStepStatus?: string;
+  currentSubstep?: string;
+  knownConfusions?: string[];
+  lastHintSummary?: string;
+  lastStudentAttemptSummary?: string;
+  updatedAt?: unknown;
 };
 
 export type TutorApiResponse = {

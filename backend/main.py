@@ -1140,7 +1140,8 @@ def build_core_tutor_instructions(
         *tutor_behavior_lines(policy_title),
         *answer_policy_lines(answer_policy),
         "- When the attempt-first rule is satisfied or not applicable, ask the student to complete one small piece; do not provide the result or a chain of several moves.",
-        "- When a student gives a calculation, answer, or conclusion, verify it before affirming it. If it is incorrect, point out the first wrong step or value and continue from the corrected idea.",
+        "- When a student gives a calculation, answer, or conclusion, internally evaluate it, but support inspection rather than giving a correctness verdict. Point to the specific step to justify or tighten without saying whether the final answer is correct or wrong.",
+        "- Unless teacher policy explicitly allows answer checking, avoid student-facing verdict labels such as `correct`, `incorrect`, `right`, `wrong`, `yes`, `no`, `that's the answer`, `your first part is right`, or `the mistake is`. Prefer learning-process language such as `You're using a relevant idea`, `This is a useful direction`, `One place to tighten is`, `Check this part carefully`, `Can you justify this step?`, or `What would make this implication valid?`.",
         "",
         "Tutoring response shape:",
         *tutoring_response_shape_lines(),
@@ -1241,11 +1242,16 @@ def response_length_style_line(response_length: str) -> str:
 
 def tutoring_response_shape_lines() -> list[str]:
     return [
-        "- For substantive tutoring replies, usually use this shape: brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when class material was actually used.",
+        "- For substantive tutoring replies, use optional sections only when they add new value; never output sections just because the schema supports them.",
+        "- A strong early/light-help reply, including vague stuck messages like `I am lost`, is often one short orientation or nudge plus one clear question, with no labeled sections.",
+        "- When guided help genuinely needs structure, use this shape: brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when class material was actually used.",
         "- Orientation names the kind of task or thinking move the student is doing; it should not repeat the hint or begin solving the task.",
         "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
         "- Next step asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
         "- Do not repeat the same advice in the orientation, hint, explanation, and next step; each included section must add distinct value.",
+        "- Before returning, run a distinct-value audit: if the main answer already gives the key clue, equation, theorem, or method, omit Hint. If Hint already gives the action, omit nextStep or make it a meaningfully different request such as showing the student's attempt.",
+        "- For broad concept explanations or topic overviews, usually answer in plain prose without Hint. Do not add Hint just to restate a definition, fact list, or summary already in the main reply.",
+        "- If the only possible Hint would repeat the main answer with different wording, omit it entirely. A reply with no labeled sections is better than a duplicated main answer plus Hint.",
         "- If the configured help level or attempt-first rule allows only limited help, make the next step a request for the student's attempt or the exact place they are stuck.",
     ]
 
@@ -1259,7 +1265,7 @@ def tutor_behavior_lines(policy_title: str) -> list[str]:
     if policy_title == "Check my work":
         return [
             "- Tutor behavior mode: Check my work.",
-            "- First evaluate the student's shown work, then identify the first uncertain or incorrect step.",
+            "- First evaluate the student's shown work internally, then identify the first step to justify or tighten without using direct correctness labels unless answer checking is explicitly allowed.",
         ]
     if policy_title == "Exam review":
         return [

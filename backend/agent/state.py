@@ -39,6 +39,8 @@ class PdfRagState(TypedDict):
     retrieval_decision: NotRequired[dict[str, Any]]
     retrieval_reason: NotRequired[str]
     retrieval_reason_history: NotRequired[list[dict[str, Any]]]
+    tutor_plan: NotRequired[dict[str, Any]]
+    problem_understanding_state: NotRequired[dict[str, Any]]
     failed_searches_skipped: NotRequired[list[str]]
     selected_metadata_records: NotRequired[list[dict[str, Any]]]
     structured_output_override: NotRequired[dict[str, Any]]

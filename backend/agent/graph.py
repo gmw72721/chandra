@@ -108,6 +108,21 @@ STRUCTURED_LABEL_TO_KEY = {
     "your next step": "nextStep",
     "question": "nextStep",
 }
+TUTOR_STUDENT_INTENTS = {
+    "vague_help",
+    "specific_question",
+    "showed_work",
+    "unclear_attempt",
+    "asks_for_next_step",
+    "asks_for_solution",
+    "asks_for_explanation",
+    "verification",
+}
+ANSWER_SEEKING_RISKS = {"low", "medium", "high"}
+CURRENT_STEP_STATUSES = {"not_started", "in_progress", "completed", "unclear"}
+TUTOR_DECISION_DEFAULT_MAX_TOKENS = 700
+TUTOR_DECISION_MAX_TOKENS = 900
+TUTOR_DECISION_LENGTH_RETRY_MAX_TOKENS = TUTOR_DECISION_MAX_TOKENS * 2
 NORMALIZE_SEARCH_QUERY_RE = re.compile(r"[^a-z0-9]+")
 PAGE_LOCATOR_RE = re.compile(r"\b(?:page|pg\.?|p\.)\s*\d")
 REQUESTED_CONTEXT_MARKER_PATTERNS = (
@@ -195,13 +210,7 @@ def build_pdf_rag_graph(
 
     async def decide_retrieval_need(state: PdfRagState) -> dict[str, Any]:
         heuristic = build_retrieval_decision(state)
-        response = await client.chat(
-            model=state.get("model") or DEFAULT_OPENROUTER_MODEL,
-            messages=build_tutor_decision_messages(state, heuristic),
-            temperature=state.get("temperature", 0.4),
-            max_tokens=min(int(state.get("max_tokens") or 700), 900),
-            reasoning_effort=ROUTER_REASONING_EFFORT,
-        )
+        response = await call_tutor_decision_model(client, state, heuristic)
         decision = parse_tutor_decision_response(response, heuristic)
         decision = enforce_initial_source_lookup_search(decision, state)
         decision = enforce_referenced_problem_dependency_search(decision, state)
@@ -211,10 +220,12 @@ def build_pdf_rag_graph(
             "answer": answer,
             "failed_searches_skipped": decision.get("failed_searches_skipped") or [],
             "finish_reason": response.get("finish_reason") or "",
+            "problem_understanding_state": state_after_tutor_plan(state, decision.get("tutorPlan")),
             "retrieval_decision": decision,
             "retrieval_reason": decision.get("retrieval_reason") or "",
             "stage_history": append_stage(state, "decide_retrieval_need"),
             "structured_output_override": decision.get("structuredOutput") if not decision.get("needs_search") else None,
+            "tutor_plan": decision.get("tutorPlan") or {},
             "token_usage": add_token_usage(state.get("token_usage"), response.get("usage")),
             "token_usage_by_call": append_model_call_usage(
                 state,
@@ -302,11 +313,16 @@ def build_pdf_rag_graph(
         }
 
     async def save_chat_retrieval_memory_node(state: PdfRagState) -> dict[str, Any]:
+        state = {
+            **state,
+            "problem_understanding_state": state_after_tutor_plan(state, state.get("tutor_plan")),
+        }
         next_memory = build_next_chat_retrieval_memory(state)
         await asyncio.to_thread(save_chat_retrieval_memory, next_memory, snapshot_side_effect_value(state))
         return {
             "chat_retrieval_memory": next_memory,
             "knowledge_items": next_memory.get("knowledge_items") or [],
+            "problem_understanding_state": state.get("problem_understanding_state") or {},
             "stage_history": append_stage(state, "save_chat_retrieval_memory"),
         }
 
@@ -398,7 +414,7 @@ def build_retrieval_decision(state: PdfRagState) -> dict[str, Any]:
         retrieval_reason=reason,
         query=query,
         top_k=top_k,
-        memory_used=False,
+        memory_used=bool(active_record),
         active_record=active_record,
     )
 
@@ -427,6 +443,12 @@ def retrieval_decision(
         "note": note,
         "query": query,
         "retrieval_reason": normalize_retrieval_reason(retrieval_reason, query=query) if retrieval_reason else "",
+        "tutorPlan": default_tutor_plan_for_message(
+            latest_message_content_from_query_or_record(query, active_record),
+            active_record=active_record,
+            needs_retrieval=needs_search,
+            retrieval_reason=retrieval_reason,
+        ),
         "top_k": max(1, min(int(top_k or 5), MAX_RETRIEVED_WINDOWS)),
     }
 
@@ -500,6 +522,7 @@ def build_tutor_decision_messages(state: PdfRagState, heuristic: dict[str, Any])
     active_metadata = active_metadata_record_from_memory(memory)
     latest_message = latest_student_message_content(state.get("messages", []))
     compact_history = compact_recent_chat_history(state.get("messages", []), limit=8)
+    understanding_state = current_problem_understanding_state(state, memory=memory, active_record=active_metadata)
     payload = {
         "active_metadata": active_metadata,
         "answer_policy": state.get("answer_policy") or {},
@@ -507,10 +530,12 @@ def build_tutor_decision_messages(state: PdfRagState, heuristic: dict[str, Any])
         "failed_searches": memory.get("failed_searches", [])[:8],
         "heuristic": heuristic,
         "latest_student_message": latest_message,
+        "problem_understanding_state": understanding_state,
         "source_usage": state.get("source_usage") or {},
     }
     system = (
-        "You are Chandra's tutor decision step. Make exactly one decision and return only JSON. "
+        "You are Chandra's first tutor LLM step, the tutor decision step: plan tutoring, update problem understanding, and decide whether retrieval is needed. Return only JSON. "
+        "Return valid JSON only. If any string contains LaTeX commands, escape each backslash as `\\\\`, or use plain text in this decision response. "
         "Use the student message, recent chat, active OCR metadata, failed searches, and teacher policy. "
         "Treat the provided heuristic as the default plan; override it only when the payload gives stronger evidence. "
         "If the active metadata is enough for a hint, clarification, answer-shopping refusal, or simple next nudge, answer now. "
@@ -524,22 +549,52 @@ def build_tutor_decision_messages(state: PdfRagState, heuristic: dict[str, Any])
         "Build searches from the student's exact words plus locator/source terms such as assignment, worksheet, problem, exercise, question, prompt, page, section, and title. "
         "Use one search per distinct need, at most three total, and only include needs that would actually help this student: exact task/source lookup, method/concept support, and worked/similar example. "
         "Run complementary needs together by returning searches as an array; do not create trivial variants of the same search. "
-        "For find-similar-example requests, set retrieval_reason to needed_example_page and build search_query from topic/method words, distinctive symbols, class source type, and section/chapter context rather than only the assigned problem number. "
+        "For find-similar-example requests such as `show me an example`, `give me an example`, `is there a similar example`, or `worked example`, set needs_search true and retrieval_reason to needed_example_page unless a clearly different example is already present in active_metadata. Do not answer these requests with a worked-example refusal; search class OCR metadata for a similar example first. "
+        "For find-similar-example requests, build search_query from topic/method words, distinctive symbols, class source type, and section/chapter context rather than only the assigned problem number. "
         "Use terms such as worked example, example, textbook reading, lecture notes, method, and the concept name; avoid problem/page locators like `problem 2.14` unless you are only identifying the surrounding section. "
+        "Also produce a tutorPlan. The tutorPlan is internal planning for progressive disclosure and the final answer must obey it. "
+        "Decide studentIntent from: vague_help, specific_question, showed_work, unclear_attempt, asks_for_next_step, asks_for_solution, asks_for_explanation, verification. "
+        "Decide nextHelpDepth from 1, 2, 3, 4 using problem_understanding_state, current message, previous hints, attempts, repeated stuck signals, teacher policy, shown work, active context, and answer-shopping risk. "
+        "Decide stateUpdates.understandingLevel from evidence in the student's latest work, not from turn count and not by incrementing one level at a time. "
+        "The level may jump by more than 1 in a single update when the student's message shows stronger understanding. "
+        "Understanding rubric: 0 = problem loaded, no student understanding observed yet; 1 = needs first nudge or little/no useful work shown; 2 = understands setup but is missing the core idea; 3 = understands the core idea but needs execution help; 4 = solution-ready, mostly needs verification or minor cleanup. "
+        "Examples: `help me` with no work -> level 1; identifying relevant objects or definitions but missing the key idea -> level 2; a coherent proof attempt with one conceptual flaw -> level 2; right strategy with algebra or notation mistakes -> level 3; basically correct with minor typos or cleanup -> level 4. "
+        "Allowed jumps include 0->2, 0->3, 0->4, 1->3, and 1->4. Do not require 0->1->2->3->4 across multiple turns. "
+        "Specific calibration: in a rank proof, if the student correctly proves rank(KL) <= rank(K), understands rank/image reasoning, but incorrectly claims im(KL) is contained in im(L), set understandingLevel to 2, not 1. "
+        "Track the active problem and the current mathematical step explicitly. A currentStep is the mathematical move currently being understood or completed; a currentSubstep is a smaller question inside that same move. "
+        "Do not advance currentStep to a later problem step until the student has completed it or shown understanding. If the student asks for the next step while currentStepStatus is not completed, stay on currentStep and make currentSubstep smaller. "
+        "For example, do not move from computing L(2e1 - 3e2) to computing L^2(2e1 - 3e2) until the first expression is understood; instead split L(2e1 - 3e2) = 2L(e1) - 3L(e2) into pieces such as 2L(e1), -3L(e2), then combining terms. "
+        "Repeated stuck signals include `next step?`, `what now?`, `I don't get it`, repeated wrong answers, empty replies, or tiny unclear answers. On repeated stuck signals, do not repeat lastHintSummary; scaffold a smaller currentSubstep inside the same currentStep. "
+        "If the student gives a tiny or unclear answer like `2?`, classify it as unclear_attempt, explain only the expected answer form or type without revealing the value they should get, and ask one smaller sub-question for the active currentStep. "
+        "If the student asks `is this right?`, `am I right?`, or asks for validation, internally evaluate the work but do not give a direct correctness verdict unless teacher policy explicitly allows answer checking. "
+        "Avoid student-facing correctness labels such as `correct`, `incorrect`, `right`, `wrong`, `yes`, `no`, `that's the answer`, `your first part is right`, or `the mistake is`. Use learning-process language instead: name the useful idea, point to the step to inspect, ask what would justify it, or ask a diagnostic question. "
+        "You own tutor state updates in this first step: set stateUpdates.understandingLevel, stateUpdates.lastHelpDepth, stateUpdates.answerSeekingRisk, stateUpdates.currentStep, stateUpdates.currentStepStatus, and concise lastHintSummary/lastStudentAttemptSummary when applicable. "
+        "If the student showed work, update attemptsCount, conceptsUnderstood, knownConfusions, and lastStudentAttemptSummary. If this is a stuck/help signal, update hintsGiven or repeatedStuckSignals as appropriate. "
+        "Depth 1 means one light hint and one targeted question; no full route, no multiple methods, no proof skeleton, no worked algebra. "
+        "Depth 2 means a guided hint with one clear next action, still not the whole solution. "
+        "Depth 3 means one worked step only, then stop and ask the student to continue. "
+        "Depth 4 is a full explanation and is allowed only when teacher policy permits and the student explicitly asks for it or full-teaching mode is clearly enabled. "
+        "First vague help with no work is usually depth 1. Repeated stuck after a light hint may become depth 2. Shown work gets targeted feedback, usually depth 2 or 3. Direct answer-seeking without effort lowers depth. "
+        "If lastHintSummary overlaps with your planned hint, reframe or slightly escalate instead of repeating it. Retrieved context grounds the response but must not increase help depth by itself. "
         "JSON shape: {\"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, "
         "\"search_query\": string, \"searches\": [{\"query\": string, \"retrieval_reason\": string, \"top_k\": number}], \"help_level\": string, \"student_response\": string, \"memory_used\": boolean, "
+        "\"tutorPlan\": {\"activeProblemId\": string, \"studentIntent\": string, \"needsRetrieval\": boolean, \"retrievalReason\": string, \"currentUnderstandingLevel\": number, \"nextHelpDepth\": number, \"answerSeekingRisk\": \"low|medium|high\", \"currentStep\": string, \"currentSubstep\": string, \"currentStepStatus\": \"not_started|in_progress|completed|unclear\", \"currentStepCompleted\": boolean, \"responseStrategy\": string, \"shouldAskQuestion\": boolean, \"shouldGiveWorkedStep\": boolean, \"shouldAvoidFullSolution\": boolean, \"stateUpdates\": object}, "
         "\"structuredOutput\": {\"sections\": object, \"sectionOrder\": array, \"metadata\": object}}. "
         "Allowed section keys are answer, problem, hint, explanation, formula, example, checkWork, sourceNote, nextStep. "
         "Use sections intelligently instead of following a fixed template: include only the sections that help this turn, choose "
         "their order in sectionOrder, and put each idea in the section where it belongs. Decide the order by what the student "
         "needs first: task text/context, then the direct answer, then supporting rule/concept/example/check, with nextStep last. "
-        "For substantive tutoring replies, usually use this shape: brief orientation, one targeted hint, one concrete next step, "
-        "and an optional source/context note only when class material was actually used. Orientation names the task type without "
-        "repeating the hint; hint gives one key idea tied to the student's task; nextStep asks for one small, checkable action. "
-        "Do not repeat the same advice across answer, hint, explanation, and nextStep. "
+        "For substantive tutoring replies, shape sections according to tutorPlan.nextHelpDepth, not a fixed template. "
+        "Depth 1 uses one short answer or Hint plus one question, especially for vague stuck messages like `I am lost`; do not include redundant Hint and nextStep. "
+        "Depth 2 may use Hint and one nextStep. Depth 3 may use one worked step in answer or explanation plus a nextStep. Depth 4 may use explanation/check sections when policy allows. "
+        "Orientation names the task type without repeating the hint; hint gives one key idea tied to the student's task; nextStep asks for one small, checkable action. "
+        "Do not repeat the same advice across answer, hint, explanation, and nextStep. If answer already gives the key clue, equation, theorem, or method, omit hint. If hint already gives the action, omit nextStep or make nextStep a meaningfully different request such as showing the student's attempt. "
+        "For broad concept explanations or topic overviews, usually answer in plain prose without hint. Do not add hint just to restate a definition, fact list, or summary already in the main reply. "
+        "If the only possible hint would repeat the main answer with different wording, omit it entirely. A reply with no labeled sections is better than a duplicated main answer plus hint. "
         "For a bare stuck/start follow-up after the problem statement was already shown, keep structuredOutput short: at most one "
         "brief answer sentence plus one conceptual hint, or one request for the student's attempted step. Do not include both hint "
         "and nextStep unless nextStep only asks the student to show work. "
+        "For repeated stuck follow-ups, the nextStep is allowed to be a smaller sub-question inside the same currentStep; do not use it to advance to a later mathematical step. "
         "Before using the problem section, classify the candidate text: use problem only for the exact academic exercise, question, "
         "or task statement from the student, active metadata, or retrieved source. Never put `You said...`, lookup/checking status, "
         "clarifying questions, requests for a page/title/textbook, source notes, offers, hints, or next steps in problem; put those "
@@ -554,7 +609,8 @@ def build_tutor_decision_messages(state: PdfRagState, heuristic: dict[str, Any])
         "or a clarification. Do not invent source facts before retrieval. Also say what you are checking next in a short "
         "plain sentence in the answer or sourceNote section, while the search runs. Do not put retrieval status, page lookup, "
         "or source lookup progress in problem or nextStep. "
-        "When needs_search is false, structuredOutput is the complete student-facing reply."
+        "When needs_search is false, structuredOutput is the complete student-facing reply. "
+        "For follow-ups that depend on active_metadata or prior selected source context, set memory_used true."
     )
     return [
         {"role": "system", "content": system},
@@ -608,6 +664,16 @@ def parse_tutor_decision_response(response: dict[str, Any], fallback: dict[str, 
             parsed = dict(fallback)
 
     searches = normalize_decision_searches(parsed, fallback)
+    if should_force_example_search(parsed, fallback):
+        parsed = {
+            **parsed,
+            "can_answer_now": False,
+            "needs_search": True,
+            "retrieval_reason": "needed_example_page",
+            "search_query": fallback.get("query") or parsed.get("search_query") or parsed.get("query") or "",
+            "student_response": "",
+        }
+        searches = normalize_decision_searches(parsed, fallback)
     needs_search = bool(parsed.get("needs_search")) and bool(searches)
     first_search = searches[0] if needs_search else {}
     query = str(first_search.get("query") or "").strip()
@@ -617,6 +683,12 @@ def parse_tutor_decision_response(response: dict[str, Any], fallback: dict[str, 
     active_page = fallback.get("active_page")
     active_problem_numbers = fallback.get("active_problem_numbers") or []
     top_k = int(first_search.get("top_k") or parsed.get("top_k") or fallback.get("top_k") or 5)
+    tutor_plan = normalize_tutor_plan(
+        parsed.get("tutorPlan") or parsed.get("tutor_plan") or fallback.get("tutorPlan"),
+        fallback=fallback,
+        needs_search=needs_search,
+        retrieval_reason=retrieval_reason,
+    )
 
     structured_output = normalize_backend_structured_output(parsed.get("structuredOutput") or parsed.get("structured_output"))
     if needs_search:
@@ -646,8 +718,192 @@ def parse_tutor_decision_response(response: dict[str, Any], fallback: dict[str, 
         "searches": searches if needs_search else [],
         "structuredOutput": structured_output,
         "student_response": student_response,
+        "tutorPlan": tutor_plan,
         "top_k": max(1, min(top_k, MAX_RETRIEVED_WINDOWS)),
     }
+
+
+def should_force_example_search(parsed: dict[str, Any], fallback: dict[str, Any]) -> bool:
+    if fallback.get("retrieval_reason") != "needed_example_page" or not fallback.get("needs_search"):
+        return False
+
+    if parsed.get("needs_search"):
+        return False
+
+    # A find-example follow-up needs class OCR retrieval even when active problem
+    # metadata is already available; otherwise the tutor may refuse instead of
+    # looking for a different source example.
+    return bool(fallback.get("query"))
+
+
+def latest_message_content_from_query_or_record(query: str, active_record: dict[str, Any] | None) -> str:
+    query_text = str(query or "").strip()
+    if query_text:
+        return query_text
+
+    return str((active_record or {}).get("ocr_text") or (active_record or {}).get("chunk_text") or "").strip()
+
+
+def default_tutor_plan_for_message(
+    message: str,
+    *,
+    active_record: dict[str, Any] | None,
+    needs_retrieval: bool,
+    retrieval_reason: str,
+) -> dict[str, Any]:
+    intent = classify_student_intent(message)
+    risk = "high" if intent == "asks_for_solution" else "low"
+    depth = 1
+    if intent in {"specific_question", "asks_for_next_step"}:
+        depth = 2
+    if intent in {"showed_work", "verification"}:
+        depth = 2
+    if intent == "asks_for_explanation":
+        depth = 2
+    if intent == "asks_for_solution":
+        depth = 1
+
+    return {
+        "activeProblemId": active_problem_id_from_record(active_record),
+        "studentIntent": intent,
+        "needsRetrieval": bool(needs_retrieval),
+        "retrievalReason": normalize_retrieval_reason(retrieval_reason, query=message) if retrieval_reason else "",
+        "currentUnderstandingLevel": 0,
+        "nextHelpDepth": depth,
+        "answerSeekingRisk": risk,
+        "currentStep": "",
+        "currentSubstep": "",
+        "currentStepStatus": "not_started",
+        "currentStepCompleted": False,
+        "responseStrategy": "Use progressive disclosure and keep the student doing the next small piece.",
+        "shouldAskQuestion": depth <= 2,
+        "shouldGiveWorkedStep": depth >= 3,
+        "shouldAvoidFullSolution": depth < 4,
+        "stateUpdates": {},
+    }
+
+
+def classify_student_intent(message: str) -> str:
+    normalized = normalize_search_query(message)
+    if answer_shopping_intent(message):
+        return "asks_for_solution"
+    if looks_like_student_attempt(message):
+        return "showed_work"
+    if re.search(r"\b(?:check|verify|is this right|am i right|correct)\b", normalized):
+        return "verification"
+    if re.search(r"\b(?:full explanation|explain|why|how come|walk me through)\b", normalized):
+        return "asks_for_explanation"
+    if re.search(r"\b(?:next step|what next|what now|what should i do next|where do i go)\b", normalized):
+        return "asks_for_next_step"
+    if simple_hint_or_next_step_intent(message) or re.fullmatch(r"(?:help|help me|stuck|i m stuck|im stuck|idk|lost|confused)", normalized):
+        return "vague_help"
+    return "specific_question"
+
+
+def looks_like_student_attempt(message: str) -> bool:
+    normalized = normalize_search_query(message)
+    return bool(
+        re.search(r"\b(?:i tried|i got|my work|so far|i think|i did|here is|here's|because|therefore|then i)\b", normalized)
+        or re.search(r"(?:=|<|>|\\frac|\\cdot|\\begin|∫|→|=>)", message)
+    )
+
+
+def normalize_tutor_plan(
+    value: Any,
+    *,
+    fallback: dict[str, Any],
+    needs_search: bool,
+    retrieval_reason: str,
+) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    fallback_plan = fallback.get("tutorPlan") if isinstance(fallback.get("tutorPlan"), dict) else {}
+    active_problem_id = str(
+        raw.get("activeProblemId")
+        or raw.get("active_problem_id")
+        or fallback_plan.get("activeProblemId")
+        or active_problem_id_from_fallback(fallback)
+    ).strip()
+    student_intent = str(raw.get("studentIntent") or raw.get("student_intent") or fallback_plan.get("studentIntent") or "specific_question")
+    if student_intent not in TUTOR_STUDENT_INTENTS:
+        student_intent = "specific_question"
+    risk = str(raw.get("answerSeekingRisk") or raw.get("answer_seeking_risk") or fallback_plan.get("answerSeekingRisk") or "low").lower()
+    if risk not in ANSWER_SEEKING_RISKS:
+        risk = "low"
+    current_step_status = normalize_current_step_status(
+        raw.get("currentStepStatus") or raw.get("current_step_status") or fallback_plan.get("currentStepStatus")
+    )
+    current_level = clamp_int(
+        raw.get("currentUnderstandingLevel")
+        or raw.get("current_understanding_level")
+        or fallback_plan.get("currentUnderstandingLevel"),
+        minimum=0,
+        maximum=4,
+        default=0,
+    )
+    next_depth = clamp_int(
+        raw.get("nextHelpDepth") or raw.get("next_help_depth") or fallback_plan.get("nextHelpDepth"),
+        minimum=1,
+        maximum=4,
+        default=1,
+    )
+    state_updates = raw.get("stateUpdates") or raw.get("state_updates")
+    if not isinstance(state_updates, dict):
+        state_updates = {}
+
+    return {
+        "activeProblemId": active_problem_id,
+        "studentIntent": student_intent,
+        "needsRetrieval": bool(raw.get("needsRetrieval", raw.get("needs_retrieval", needs_search))),
+        "retrievalReason": str(raw.get("retrievalReason") or raw.get("retrieval_reason") or retrieval_reason or "").strip(),
+        "currentUnderstandingLevel": current_level,
+        "nextHelpDepth": next_depth,
+        "answerSeekingRisk": risk,
+        "currentStep": str(raw.get("currentStep") or raw.get("current_step") or fallback_plan.get("currentStep") or "").strip()[:300],
+        "currentSubstep": str(raw.get("currentSubstep") or raw.get("current_substep") or fallback_plan.get("currentSubstep") or "").strip()[:300],
+        "currentStepStatus": current_step_status,
+        "currentStepCompleted": bool(raw.get("currentStepCompleted", raw.get("current_step_completed", current_step_status == "completed"))),
+        "responseStrategy": str(raw.get("responseStrategy") or raw.get("response_strategy") or fallback_plan.get("responseStrategy") or "").strip(),
+        "shouldAskQuestion": bool(raw.get("shouldAskQuestion", raw.get("should_ask_question", next_depth <= 2))),
+        "shouldGiveWorkedStep": bool(raw.get("shouldGiveWorkedStep", raw.get("should_give_worked_step", next_depth >= 3))),
+        "shouldAvoidFullSolution": bool(raw.get("shouldAvoidFullSolution", raw.get("should_avoid_full_solution", next_depth < 4))),
+        "stateUpdates": normalize_problem_understanding_state_updates(state_updates),
+    }
+
+
+def active_problem_id_from_fallback(fallback: dict[str, Any]) -> str:
+    numbers = " ".join(str(number) for number in fallback.get("active_problem_numbers") or [])
+    material_id = str(fallback.get("active_material_id") or "").strip()
+    page = str(fallback.get("active_page") or "").strip()
+    raw = " ".join(part for part in [material_id, page, numbers] if part)
+    if raw:
+        return stable_problem_id(raw)
+    return "unknown"
+
+
+def active_problem_id_from_record(record: dict[str, Any] | None) -> str:
+    if not record:
+        return "unknown"
+    numbers = " ".join(str(number) for number in record.get("problem_numbers") or [])
+    text = str(record.get("ocr_text") or record.get("chunk_text") or "")
+    raw = " ".join(
+        part
+        for part in [
+            str(record.get("doc_id") or ""),
+            str(record.get("printed_page_start") or record.get("page_start") or ""),
+            numbers,
+            text[:300],
+        ]
+        if part
+    )
+    return stable_problem_id(raw) if raw else "unknown"
+
+
+def clamp_int(value: Any, *, minimum: int, maximum: int, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
 
 
 def normalize_decision_searches(parsed: dict[str, Any], fallback: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1204,7 +1460,20 @@ def parse_json_object_from_text(text: str) -> dict[str, Any] | None:
         value = json.loads(candidate)
         return value if isinstance(value, dict) else None
     except Exception:
+        repaired_candidate = escape_invalid_json_backslashes(candidate)
+
+    if repaired_candidate == candidate:
         return None
+
+    try:
+        value = json.loads(repaired_candidate)
+        return value if isinstance(value, dict) else None
+    except Exception:
+        return None
+
+
+def escape_invalid_json_backslashes(candidate: str) -> str:
+    return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", candidate)
 
 
 def compact_recent_chat_history(messages: list[dict[str, Any]], *, limit: int) -> list[dict[str, str]]:
@@ -1330,7 +1599,12 @@ def source_material_signal(message: str) -> bool:
 
 def simple_hint_or_next_step_intent(message: str) -> bool:
     normalized = normalize_search_query(message)
-    return bool(re.search(r"\b(?:hint|nudge|stuck|help|next|what now|what should i try|how do i start)\b", normalized))
+    return bool(
+        re.search(
+            r"\b(?:hint|nudge|stuck|help|lost|confused|next|what now|what should i try|how do i start)\b",
+            normalized,
+        )
+    )
 
 
 def answer_shopping_intent(message: str) -> bool:
@@ -1388,10 +1662,240 @@ def normalize_chat_retrieval_memory(value: Any) -> dict[str, Any]:
         "active_page_asset": source.get("active_page_asset") if isinstance(source.get("active_page_asset"), dict) else None,
         "failed_searches": source.get("failed_searches") if isinstance(source.get("failed_searches"), list) else [],
         "knowledge_items": source.get("knowledge_items") if isinstance(source.get("knowledge_items"), list) else [],
+        "problem_understanding_states": source.get("problem_understanding_states")
+        if isinstance(source.get("problem_understanding_states"), dict)
+        else {},
         "reason_history": source.get("reason_history") if isinstance(source.get("reason_history"), list) else [],
         "retrieved_metadata": source.get("retrieved_metadata") if isinstance(source.get("retrieved_metadata"), list) else [],
         "updated_at": source.get("updated_at"),
     }
+
+
+def current_problem_understanding_state(
+    state: PdfRagState,
+    *,
+    memory: dict[str, Any] | None = None,
+    active_record: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    memory = normalize_chat_retrieval_memory(memory or state.get("chat_retrieval_memory"))
+    active_record = active_record or active_metadata_record_from_memory(memory)
+    active_problem_id = active_problem_id_for_state(state, active_record=active_record)
+    states = memory.get("problem_understanding_states") if isinstance(memory.get("problem_understanding_states"), dict) else {}
+    existing = states.get(active_problem_id) if isinstance(states, dict) else None
+    return normalize_problem_understanding_state(
+        existing if isinstance(existing, dict) else {},
+        state=state,
+        active_problem_id=active_problem_id,
+    )
+
+
+def active_problem_id_for_state(state: PdfRagState, *, active_record: dict[str, Any] | None = None) -> str:
+    context = state.get("active_problem_context")
+    if isinstance(context, dict) and context.get("problem_id"):
+        return str(context.get("problem_id"))
+
+    if active_record:
+        return active_problem_id_from_record(active_record)
+
+    memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
+    memory_record = active_metadata_record_from_memory(memory)
+    if memory_record:
+        return active_problem_id_from_record(memory_record)
+
+    latest_problem = problem_text_fallback_from_messages(state.get("messages", []))
+    return stable_problem_id(latest_problem) if latest_problem else "unknown"
+
+
+def normalize_problem_understanding_state(
+    value: dict[str, Any],
+    *,
+    state: PdfRagState,
+    active_problem_id: str,
+) -> dict[str, Any]:
+    now = utc_timestamp()
+    return {
+        "chatId": str(value.get("chatId") or value.get("chat_id") or state.get("conversation_id") or ""),
+        "activeProblemId": str(value.get("activeProblemId") or value.get("active_problem_id") or active_problem_id or "unknown"),
+        "understandingLevel": clamp_int(value.get("understandingLevel") or value.get("understanding_level"), minimum=0, maximum=4, default=0),
+        "attemptsCount": clamp_int(value.get("attemptsCount") or value.get("attempts_count"), minimum=0, maximum=999, default=0),
+        "hintsGiven": clamp_int(value.get("hintsGiven") or value.get("hints_given"), minimum=0, maximum=999, default=0),
+        "lastHelpDepth": clamp_int(value.get("lastHelpDepth") or value.get("last_help_depth"), minimum=1, maximum=4, default=1),
+        "conceptsUnderstood": compact_string_list(value.get("conceptsUnderstood") or value.get("concepts_understood"), limit=12),
+        "knownConfusions": compact_string_list(value.get("knownConfusions") or value.get("known_confusions"), limit=12),
+        "repeatedStuckSignals": clamp_int(value.get("repeatedStuckSignals") or value.get("repeated_stuck_signals"), minimum=0, maximum=999, default=0),
+        "answerSeekingRisk": normalize_answer_seeking_risk(value.get("answerSeekingRisk") or value.get("answer_seeking_risk")),
+        **({"currentStep": str(value.get("currentStep") or value.get("current_step")).strip()[:300]} if str(value.get("currentStep") or value.get("current_step") or "").strip() else {}),
+        **({"currentSubstep": str(value.get("currentSubstep") or value.get("current_substep")).strip()[:300]} if str(value.get("currentSubstep") or value.get("current_substep") or "").strip() else {}),
+        "currentStepStatus": normalize_current_step_status(value.get("currentStepStatus") or value.get("current_step_status")),
+        "completedSteps": compact_string_list(value.get("completedSteps") or value.get("completed_steps"), limit=12),
+        **({"lastHintSummary": str(value.get("lastHintSummary") or value.get("last_hint_summary")).strip()[:300]} if str(value.get("lastHintSummary") or value.get("last_hint_summary") or "").strip() else {}),
+        **({"lastStudentAttemptSummary": str(value.get("lastStudentAttemptSummary") or value.get("last_student_attempt_summary")).strip()[:300]} if str(value.get("lastStudentAttemptSummary") or value.get("last_student_attempt_summary") or "").strip() else {}),
+        "updatedAt": str(value.get("updatedAt") or value.get("updated_at") or now),
+    }
+
+
+def normalize_problem_understanding_state_updates(value: dict[str, Any]) -> dict[str, Any]:
+    key_map = {
+        "understandingLevel": "understandingLevel",
+        "understanding_level": "understandingLevel",
+        "attemptsCount": "attemptsCount",
+        "attempts_count": "attemptsCount",
+        "hintsGiven": "hintsGiven",
+        "hints_given": "hintsGiven",
+        "lastHelpDepth": "lastHelpDepth",
+        "last_help_depth": "lastHelpDepth",
+        "conceptsUnderstood": "conceptsUnderstood",
+        "concepts_understood": "conceptsUnderstood",
+        "knownConfusions": "knownConfusions",
+        "known_confusions": "knownConfusions",
+        "repeatedStuckSignals": "repeatedStuckSignals",
+        "repeated_stuck_signals": "repeatedStuckSignals",
+        "answerSeekingRisk": "answerSeekingRisk",
+        "answer_seeking_risk": "answerSeekingRisk",
+        "currentStep": "currentStep",
+        "current_step": "currentStep",
+        "currentSubstep": "currentSubstep",
+        "current_substep": "currentSubstep",
+        "currentStepStatus": "currentStepStatus",
+        "current_step_status": "currentStepStatus",
+        "completedSteps": "completedSteps",
+        "completed_steps": "completedSteps",
+        "lastHintSummary": "lastHintSummary",
+        "last_hint_summary": "lastHintSummary",
+        "lastStudentAttemptSummary": "lastStudentAttemptSummary",
+        "last_student_attempt_summary": "lastStudentAttemptSummary",
+    }
+    updates: dict[str, Any] = {}
+    for key, raw in value.items():
+        normalized_key = key_map.get(str(key))
+        if not normalized_key:
+            continue
+        if normalized_key in {"understandingLevel"}:
+            updates[normalized_key] = clamp_int(raw, minimum=0, maximum=4, default=0)
+        elif normalized_key in {"attemptsCount", "hintsGiven", "repeatedStuckSignals"}:
+            updates[normalized_key] = clamp_int(raw, minimum=0, maximum=999, default=0)
+        elif normalized_key == "lastHelpDepth":
+            updates[normalized_key] = clamp_int(raw, minimum=1, maximum=4, default=1)
+        elif normalized_key in {"conceptsUnderstood", "knownConfusions"}:
+            updates[normalized_key] = compact_string_list(raw, limit=12)
+        elif normalized_key == "answerSeekingRisk":
+            updates[normalized_key] = normalize_answer_seeking_risk(raw)
+        elif normalized_key == "currentStepStatus":
+            updates[normalized_key] = normalize_current_step_status(raw)
+        elif normalized_key == "completedSteps":
+            updates[normalized_key] = compact_string_list(raw, limit=12)
+        else:
+            text = str(raw or "").strip()
+            if text:
+                updates[normalized_key] = text[:300]
+    return updates
+
+
+def state_after_tutor_plan(state: PdfRagState, tutor_plan: Any) -> dict[str, Any]:
+    current = current_problem_understanding_state(state)
+    plan = tutor_plan if isinstance(tutor_plan, dict) else {}
+    updates = plan.get("stateUpdates") if isinstance(plan.get("stateUpdates"), dict) else {}
+    next_state = {**current, **normalize_problem_understanding_state_updates(updates)}
+    depth = clamp_int(plan.get("nextHelpDepth"), minimum=1, maximum=4, default=next_state.get("lastHelpDepth") or 1)
+    intent = str(plan.get("studentIntent") or "")
+    risk = normalize_answer_seeking_risk(plan.get("answerSeekingRisk") or next_state.get("answerSeekingRisk"))
+    source_lookup_only = tutor_plan_is_source_lookup_only(plan)
+
+    next_state["lastHelpDepth"] = depth
+    next_state["answerSeekingRisk"] = risk
+    if "currentStep" not in updates and str(plan.get("currentStep") or "").strip():
+        next_state["currentStep"] = str(plan.get("currentStep") or "").strip()[:300]
+    if "currentSubstep" not in updates and str(plan.get("currentSubstep") or "").strip():
+        next_state["currentSubstep"] = str(plan.get("currentSubstep") or "").strip()[:300]
+    if "currentStepStatus" not in updates and str(plan.get("currentStepStatus") or "").strip():
+        next_state["currentStepStatus"] = normalize_current_step_status(plan.get("currentStepStatus"))
+    if "hintsGiven" not in updates and depth in {1, 2, 3} and not source_lookup_only:
+        next_state["hintsGiven"] = max(int(next_state.get("hintsGiven") or 0), int(current.get("hintsGiven") or 0) + 1)
+    if "attemptsCount" not in updates and intent == "showed_work":
+        next_state["attemptsCount"] = max(int(next_state.get("attemptsCount") or 0), int(current.get("attemptsCount") or 0) + 1)
+    if "repeatedStuckSignals" not in updates and intent in {"vague_help", "asks_for_next_step", "unclear_attempt"} and int(current.get("hintsGiven") or 0) > 0:
+        next_state["repeatedStuckSignals"] = max(
+            int(next_state.get("repeatedStuckSignals") or 0),
+            int(current.get("repeatedStuckSignals") or 0) + 1,
+        )
+    next_state["activeProblemId"] = str(plan.get("activeProblemId") or next_state.get("activeProblemId") or "unknown")
+    next_state["updatedAt"] = utc_timestamp()
+    return next_state
+
+
+def sync_problem_understanding_state_to_active_context(
+    state: PdfRagState,
+    active_problem_context: dict[str, Any] | None,
+) -> None:
+    active_problem_id = str((active_problem_context or {}).get("problem_id") or "").strip()
+    if not active_problem_id:
+        return
+
+    current = state.get("problem_understanding_state") if isinstance(state.get("problem_understanding_state"), dict) else {}
+    plan = state.get("tutor_plan") if isinstance(state.get("tutor_plan"), dict) else {}
+    if tutor_plan_is_source_lookup_only(plan):
+        previous = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
+        previous_states = (
+            previous.get("problem_understanding_states")
+            if isinstance(previous.get("problem_understanding_states"), dict)
+            else {}
+        )
+        source = previous_states.get(active_problem_id) if isinstance(previous_states, dict) else {}
+        current = source if isinstance(source, dict) else {}
+    else:
+        current = {**current, "activeProblemId": active_problem_id}
+
+    state["problem_understanding_state"] = normalize_problem_understanding_state(
+        current,
+        state=state,
+        active_problem_id=active_problem_id,
+    )
+
+
+def tutor_plan_is_source_lookup_only(plan: dict[str, Any]) -> bool:
+    return (
+        bool(plan.get("needsRetrieval"))
+        and str(plan.get("retrievalReason") or "") in {"student_requested_problem", "student_changed_problem"}
+        and str(plan.get("studentIntent") or "") not in {
+            "vague_help",
+            "showed_work",
+            "asks_for_next_step",
+            "asks_for_solution",
+            "asks_for_explanation",
+            "verification",
+        }
+    )
+
+
+def compact_string_list(value: Any, *, limit: int) -> list[str]:
+    if isinstance(value, str):
+        items = re.split(r",|;", value)
+    else:
+        items = value if isinstance(value, list) else []
+    compacted: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip()
+        key = normalize_search_query(text)
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        compacted.append(text[:120])
+        if len(compacted) >= limit:
+            break
+    return compacted
+
+
+def normalize_answer_seeking_risk(value: Any) -> str:
+    risk = str(value or "low").strip().lower()
+    return risk if risk in ANSWER_SEEKING_RISKS else "low"
+
+
+def normalize_current_step_status(value: Any) -> str:
+    status = str(value or "not_started").strip().lower().replace("-", "_").replace(" ", "_")
+    if status == "complete":
+        status = "completed"
+    return status if status in CURRENT_STEP_STATUSES else "not_started"
 
 
 def new_search_tool_calls(
@@ -2079,6 +2583,16 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
         ),
         "Student-uploaded files may be attached as file parts and represented as Knowledge items with extracted OCR text or summaries. Treat them as the student's attempt only when their usedAs label is student_attempt.",
         f"Retrieval decision trace for internal use only: {compact_json_dumps(decision)}",
+        f"TutorPlan for internal use only: {compact_json_dumps(state.get('tutor_plan') or decision.get('tutorPlan') or {})}",
+        f"Current problem understanding state for internal use only: {compact_json_dumps(state.get('problem_understanding_state') or current_problem_understanding_state(state))}",
+        "Tutor planning contract: obey TutorPlan.nextHelpDepth in the student-facing response. The first LLM already decided understandingLevel, lastHelpDepth, summaries, and help depth; do not revise those fields.",
+        "Current-step contract: obey TutorPlan.currentStep/currentSubstep and the current problem understanding state. Do not advance to a later mathematical step until currentStepStatus is completed or the student has shown understanding. If the student asks for the next step but the current step is incomplete, make the currentSubstep smaller inside the same currentStep.",
+        "Repeated-stuck contract: if repeatedStuckSignals is positive, the student gives a tiny unclear answer like `2?`, or TutorPlan.studentIntent is unclear_attempt/asks_for_next_step while the current step is incomplete, do not repeat the previous hint wording. Explain only the expected answer form or type if needed, without revealing the value the student should get, then ask one smaller sub-question inside the active currentStep.",
+        "Validation contract: when the student asks whether their work is right, internally evaluate it but do not give a direct correctness verdict unless teacher policy explicitly allows answer checking. Avoid `correct`, `incorrect`, `right`, `wrong`, `yes`, `no`, `that's the answer`, `your first part is right`, and `the mistake is` as student-facing verdicts. Use neutral process language such as `You're using a relevant idea`, `This is a useful direction`, `One place to tighten is`, `Check this part carefully`, `Can you justify this step?`, or `What would make this implication valid?`.",
+        "Depth 1 response: one conceptual nudge and one question; no full route, no multiple methods, no proof skeleton, no worked algebra unless extremely small.",
+        "Depth 2 response: a guided hint, possibly naming the relevant object or theorem, with one clear next action; still leave the main work to the student.",
+        "Depth 3 response: one worked step only, why it is valid, then stop and ask the student to continue.",
+        "Depth 4 response: full explanation only if teacher policy allows and the student explicitly asked for it or an allowed full-teaching mode is active.",
         "Knowledge source-use contract: each Knowledge item separates what the source is (`kind`) from how Chandra used it (`usedAs`). Use `usedAs`, not file type alone, to decide whether it is the active problem, problem source, supporting context, theorem/definition/example reference, or student attempt.",
         "Source lookup contract: when the latest student message is only a problem/exercise/question/page number or asks to find, read, quote, show, identify, locate, or restate a source item, your job is extraction, not tutoring. First locate the exact visible item in the selected page asset or OCR metadata, then return that item without solving it.",
         "When selected page assets or OCR metadata are present, never ask the student for a page image, textbook title, homework title, or pasted problem before using those selected records. Ask for more source detail only after you have checked the selected records and they do not contain the requested item.",
@@ -2087,7 +2601,7 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
         "Specific problem/page/passage wording requests are source lookup: quote the visible text exactly when allowed, without solving it or asking for an attempt first.",
         "Selected OCR metadata and attached selected PDFs are the source of truth for this call. Do not request or infer raw storage paths, chunk IDs, or Firebase/GCS locations.",
         "If the student supplied only a problem/page/item number and selected page assets or OCR metadata are present, use those selected class records first; do not ask for the page image, textbook title, or homework title before using the selected metadata.",
-        "If the student is following up after a problem statement was already shown and asks for help, a hint, or what to try, do not restate the problem statement or include a `Problem:` section again.",
+        "If the student is following up after a problem statement was already shown and asks for help, says they are lost/confused/stuck, asks for a hint, or asks what to try, do not restate the problem statement or include a `Problem:` section again.",
         "If the student wants help on an exact graded-looking task and has not shown work, ask what they tried or where they are stuck.",
         "For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short: at most one brief orientation sentence plus one conceptual hint or one request for the student's attempted step.",
         "Before an attempt, do not provide task-specific next steps, intermediate values, thesis claims, code, solution structure, or submission-ready wording unless the student explicitly wants concept explanation or source lookup.",
@@ -2103,7 +2617,7 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
         "For conceptual method questions, teach the pattern using selected textbook, reading, and example OCR metadata in the class wording.",
         f"{final_citation_instruction(source_usage)}",
         f"{final_example_boundary_instruction(answer_policy)}",
-        "Verify student calculations before affirming them. If something is wrong, point out the first wrong step or value.",
+        "When students show work or ask for validation, internally evaluate it, but support inspection rather than giving a correctness verdict. Point to the specific step to justify or tighten without saying whether the final answer is correct or wrong.",
         "When help is allowed, ask the student to complete one small piece; do not provide the result or a chain of several moves.",
         f"{final_unclear_source_instruction(source_usage)}",
         "Use printed_page_start as the document page number when available. page_start and page_end are source PDF page indexes.",
@@ -2115,12 +2629,12 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
             "a fixed template, and include only sections that add value. Decide the order by why the student needs each part: task text/context first, "
             "then the direct reply, then supporting rule, concept, example, or work check, with the immediate action last. Put each idea in its natural section: problem text in `Problem:`, "
             "formulas or symbolic rules in `Formula:`, conceptual reasoning in `Why this works:`, similar-but-different practice in `Example:`, "
-            "source/context notes in `sourceNote`, and evaluation of shown student work in `Check your work:`. For substantive tutoring replies, usually include a brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when class material was actually used. Orientation names the kind of task or thinking move without repeating the hint; `Hint:` gives one key idea tied to the exact student task; `nextStep` asks for one small, checkable student action. Before using `Problem:`, classify the candidate text and use that section only for the found or student-supplied academic exercise/question/task statement, "
+            "source/context notes in `sourceNote`, and neutral review of shown student work in `Check your work:`. Use optional sections only when they add new value; never output sections just because the schema supports them. For guided tutoring replies, include a brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when each part has a different job. Orientation names the kind of task or thinking move without repeating the hint; `Hint:` gives one key idea tied to the exact student task; `nextStep` asks for one small, checkable student action. If the main answer already gives the key clue, equation, theorem, or method, omit `Hint:`. If `Hint:` already gives the action, omit `nextStep` or make it a meaningfully different request such as showing the student's attempt. For broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`; if `Hint:` would restate a definition, fact list, or summary already in the main reply, omit it entirely. Before using `Problem:`, classify the candidate text and use that section only for the found or student-supplied academic exercise/question/task statement, "
             "not for an issue/error, status update, clarification, or source lookup progress. If you use `Problem:`, put only the problem statement there and place `problem` first in sectionOrder; never put `You said...`, offers, hints, next steps, "
             "attempt requests, requests for source details, source context, or commentary inside that section. For bare stuck follow-ups, do not use both `Hint:` and `nextStep` unless `nextStep` only asks the student to show work; otherwise prefer one short `Hint:` and leave `nextStep` empty. Use `Hint:` for one short nudge or leading question, usually one sentence, "
             "not definitions, citations, offers, or multiple ideas. Use `Why this works:` for concept reasoning, but do not include "
             "offers, attempt requests, or workflow prompts; put those in the final direct question/next action. Keep the final direct question/next action to a concrete request or action, not a hint-style leading question. Use `Formula:` only for formulas, equations, symbolic rules, or a very short rule name; never include explanatory prose, source/page notes, examples, filled-in task values, hints, or why/when commentary in `Formula:`. If there is a special-case formula, include only the symbolic special-case line in `Formula:` and explain the condition elsewhere. Use `Example:` only for a similar "
-            "different problem, and `Check your work:` only when responding to a student attempt. Before returning, audit that no `Hint:` text is inside the next action, no prose is inside `Formula:`, and no offers are inside `Why this works:`. Do not write `Answer:`, `Question:`, "
+            "different problem, and `Check your work:` only when responding to a student attempt; keep it neutral, with prompts like `One place to tighten is...`, not verdict labels. Before returning, audit that no `Hint:` text is inside the next action, no prose is inside `Formula:`, and no offers are inside `Why this works:`. Do not write `Answer:`, `Question:`, "
             "`Next step:`, `Your next step:`, `Source:`, or `Sources:`; end with one unlabeled direct question when helpful."
         ),
         "For simple greetings or check-ins, reply naturally in one short chat message and ask what course problem or concept the student wants to work on.",
@@ -3145,6 +3659,44 @@ async def close_owned_openrouter_client(client: Any, owns_client: bool) -> None:
         return
 
 
+def tutor_decision_max_tokens(state: PdfRagState) -> int:
+    configured = nonnegative_int(state.get("max_tokens")) or TUTOR_DECISION_DEFAULT_MAX_TOKENS
+    return min(configured, TUTOR_DECISION_MAX_TOKENS)
+
+
+def provider_stopped_for_length(response: dict[str, Any]) -> bool:
+    finish_reason = str(response.get("finish_reason") or "").strip().lower()
+    return finish_reason in {"length", "max_tokens", "max_output_tokens"}
+
+
+async def call_tutor_decision_model(
+    client: Any,
+    state: PdfRagState,
+    heuristic: dict[str, Any],
+) -> dict[str, Any]:
+    model = state.get("model") or DEFAULT_OPENROUTER_MODEL
+    messages = build_tutor_decision_messages(state, heuristic)
+    max_tokens = tutor_decision_max_tokens(state)
+    response = await client.chat(
+        model=model,
+        messages=messages,
+        temperature=state.get("temperature", 0.4),
+        max_tokens=max_tokens,
+        reasoning_effort=ROUTER_REASONING_EFFORT,
+    )
+
+    if provider_stopped_for_length(response) and max_tokens < TUTOR_DECISION_LENGTH_RETRY_MAX_TOKENS:
+        response = await client.chat(
+            model=model,
+            messages=messages,
+            temperature=state.get("temperature", 0.4),
+            max_tokens=min(max_tokens * 2, TUTOR_DECISION_LENGTH_RETRY_MAX_TOKENS),
+            reasoning_effort=ROUTER_REASONING_EFFORT,
+        )
+
+    return response
+
+
 async def run_pdf_rag_agent(
     *,
     messages: list[dict[str, Any]],
@@ -3206,6 +3758,8 @@ async def run_pdf_rag_agent(
         "retrieval_reason_history": [],
         "selected_metadata_records": [],
         "structured_output_override": {},
+        "tutor_plan": {},
+        "problem_understanding_state": {},
         "token_usage": empty_token_usage(),
         "token_usage_by_call": [],
     }
@@ -3304,6 +3858,8 @@ async def run_pdf_rag_agent_stream(
         "retrieval_reason_history": [],
         "selected_metadata_records": [],
         "structured_output_override": {},
+        "tutor_plan": {},
+        "problem_understanding_state": {},
         "token_usage": empty_token_usage(),
         "token_usage_by_call": [],
     }
@@ -3313,18 +3869,14 @@ async def run_pdf_rag_agent_stream(
         state["chat_retrieval_memory"] = await asyncio.to_thread(read_chat_retrieval_memory, snapshot_side_effect_value(state))
         state["stage_history"] = append_stage(state, "load_chat_retrieval_memory")
         heuristic = build_retrieval_decision(state)
-        response = await client.chat(
-            model=state.get("model") or DEFAULT_OPENROUTER_MODEL,
-            messages=build_tutor_decision_messages(state, heuristic),
-            temperature=state.get("temperature", 0.4),
-            max_tokens=min(int(state.get("max_tokens") or 700), 900),
-            reasoning_effort=ROUTER_REASONING_EFFORT,
-        )
+        response = await call_tutor_decision_model(client, state, heuristic)
         decision = parse_tutor_decision_response(response, heuristic)
         decision = enforce_initial_source_lookup_search(decision, state)
         decision = enforce_referenced_problem_dependency_search(decision, state)
         decision = suppress_repeated_failed_search_decision(decision, state)
         state["retrieval_decision"] = decision
+        state["tutor_plan"] = decision.get("tutorPlan") or {}
+        state["problem_understanding_state"] = state_after_tutor_plan(state, state.get("tutor_plan"))
         state["retrieval_reason"] = decision.get("retrieval_reason") or ""
         state["failed_searches_skipped"] = decision.get("failed_searches_skipped") or []
         if decision.get("structuredOutput") and not decision.get("needs_search"):
@@ -3468,6 +4020,7 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
     preliminary_sources = sources_for_answer(state, raw_answer)
     problem_context = parse_problem_context_from_answer(raw_answer, state, preliminary_sources)
     active_problem_context = update_active_problem_context(problem_context, state)
+    sync_problem_understanding_state_to_active_context(state, active_problem_context)
     state["used_page_assets"] = page_assets_for_memory_from_answer(state, raw_answer)
     answer_without_context = remove_problem_context_from_student_text(raw_answer).strip()
     answer = suppress_repeated_problem_section_for_followup(answer_without_context, state)
@@ -3485,6 +4038,7 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
         else structured_tutor_output_from_answer(answer, state, sources)
     )
     structured_output = suppress_structured_problem_section_for_followup(structured_output, state)
+    structured_output = suppress_depth_one_over_scaffolding(structured_output, state)
     gate = answer_leak_gate(
         answer=answer,
         structured_output=structured_output,
@@ -3535,12 +4089,17 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
             active_problem_context=active_problem_context,
         )
 
+    if should_neutralize_validation_feedback(state):
+        answer = neutralize_validation_verdicts(answer)
+        structured_output = neutralize_structured_validation_verdicts(structured_output)
+
     active_problem_text = str(((structured_output.get("sections") or {}).get("problem") if isinstance(structured_output, dict) else "") or "")
     state["knowledge_items"] = knowledge_items_from_state(
         state,
         active_problem_text=active_problem_text or str((active_problem_context or {}).get("problem_text") or ""),
         previous_items=state.get("knowledge_items") or (state.get("chat_retrieval_memory") or {}).get("knowledge_items", []),
     )
+    persist_final_tutor_memory(state)
 
     return {
         "content": answer,
@@ -3553,6 +4112,8 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
             "memoryUsed": bool((state.get("retrieval_decision") or {}).get("memory_used")),
             "retrievalDecision": state.get("retrieval_decision") or {},
             "retrievalReason": (state.get("retrieval_decision") or {}).get("retrieval_reason") or state.get("retrieval_reason") or "",
+            "tutorPlan": state.get("tutor_plan") or {},
+            "problemUnderstandingState": state.get("problem_understanding_state") or {},
             "knowledgeItems": state.get("knowledge_items") or [],
             "selectedMetadataRecords": state.get("selected_metadata_records") or [],
             "searchQueries": state.get("search_queries") or [],
@@ -3610,6 +4171,93 @@ def suppress_structured_problem_section_for_followup(
         updated["sectionOrder"] = next_order
 
     return updated
+
+
+def suppress_depth_one_over_scaffolding(
+    structured_output: dict[str, Any],
+    state: PdfRagState,
+) -> dict[str, Any]:
+    tutor_plan = state.get("tutor_plan") if isinstance(state.get("tutor_plan"), dict) else {}
+    if clamp_int(tutor_plan.get("nextHelpDepth"), minimum=1, maximum=4, default=2) != 1:
+        return structured_output
+
+    sections = structured_output.get("sections")
+    if not isinstance(sections, dict) or not sections.get("hint") or not sections.get("nextStep"):
+        return structured_output
+
+    next_step = str(sections.get("nextStep") or "")
+    if asks_for_student_attempt_only(next_step):
+        return structured_output
+
+    next_sections = dict(sections)
+    next_sections.pop("nextStep", None)
+    raw_order = structured_output.get("sectionOrder")
+    next_order = [key for key in raw_order if key != "nextStep"] if isinstance(raw_order, list) else []
+
+    return {
+        **structured_output,
+        "sections": next_sections,
+        **({"sectionOrder": next_order} if isinstance(raw_order, list) else {}),
+    }
+
+
+def asks_for_student_attempt_only(text: str) -> bool:
+    normalized = normalize_search_query(text)
+    return bool(
+        re.search(r"\b(?:show|share|send|tell)\b", normalized)
+        and re.search(r"\b(?:your work|what you tried|attempt|thinking|where you are stuck|where you got stuck)\b", normalized)
+    )
+
+
+def should_neutralize_validation_feedback(state: PdfRagState) -> bool:
+    latest_message = latest_student_message_content(state.get("messages", []))
+    normalized = normalize_search_query(latest_message)
+    if not normalized:
+        return False
+
+    return bool(
+        re.search(
+            r"\b(?:is this right|am i right|is that right|is this correct|am i correct|check my work|check this|does this work|is my work)\b",
+            normalized,
+        )
+    )
+
+
+def neutralize_structured_validation_verdicts(structured_output: dict[str, Any]) -> dict[str, Any]:
+    sections = structured_output.get("sections")
+    if not isinstance(sections, dict):
+        return structured_output
+
+    next_sections = {
+        key: neutralize_validation_verdicts(value) if key != "problem" else value
+        for key, value in sections.items()
+    }
+    return {**structured_output, "sections": next_sections}
+
+
+def neutralize_validation_verdicts(text: str) -> str:
+    rewritten = str(text or "")
+    replacements = [
+        (r"^\s*yes[,.!:\s]+", ""),
+        (r"^\s*no[,.!:\s]+", ""),
+        (r"\bthat(?:'s| is) correct[.!]?", "This uses a relevant idea."),
+        (r"\bthat(?:'s| is) incorrect[.!]?", "Check this part carefully."),
+        (r"\bnot quite[.!]?", "Check this part carefully."),
+        (r"\byour first part is right\b", "Your first part uses a relevant idea"),
+        (r"\bthe first part is right\b", "The first part uses a relevant idea"),
+        (r"\bthe second part is right\b", "The second part uses a relevant idea"),
+        (r"\byour second part is right\b", "Your second part uses a relevant idea"),
+        (r"\bthe mistake is\b", "One place to inspect is"),
+        (r"\byour missing step is\b", "One place to tighten is"),
+        (r"\blooks right\s*:", "A useful direction:"),
+        (r"\bfirst issue\s*:", "One place to inspect:"),
+        (r"\bwhat to fix\s*:", "One place to tighten:"),
+    ]
+    for pattern, replacement in replacements:
+        rewritten = re.sub(pattern, replacement, rewritten, flags=re.IGNORECASE)
+
+    rewritten = re.sub(r"\s+", " ", rewritten).strip()
+    return rewritten
 
 
 def should_suppress_problem_section_for_followup(state: PdfRagState) -> bool:
@@ -3816,6 +4464,21 @@ def remove_problem_context_from_student_text(answer: str) -> str:
         without_referenced_sources,
         flags=re.IGNORECASE | re.DOTALL,
     ).strip()
+
+
+def persist_final_tutor_memory(state: PdfRagState) -> None:
+    if not isinstance(state.get("problem_understanding_state"), dict):
+        return
+
+    next_memory = build_next_chat_retrieval_memory(state)
+    state["chat_retrieval_memory"] = next_memory
+    state["knowledge_items"] = next_memory.get("knowledge_items") or state.get("knowledge_items") or []
+    schedule_best_effort_side_effect(
+        "chat_retrieval_memory_final_tutor_state_persisted",
+        save_chat_retrieval_memory,
+        next_memory,
+        state,
+    )
 
 
 def update_active_problem_context(problem_context: dict[str, Any], state: PdfRagState) -> dict[str, Any] | None:
@@ -4189,6 +4852,20 @@ def build_next_chat_retrieval_memory(state: PdfRagState) -> dict[str, Any]:
         memory_state,
         previous_items=previous.get("knowledge_items", []),
     )
+    understanding_state = state.get("problem_understanding_state")
+    if not isinstance(understanding_state, dict) or not understanding_state.get("activeProblemId"):
+        understanding_state = state_after_tutor_plan(state, state.get("tutor_plan"))
+    active_problem_id = str(understanding_state.get("activeProblemId") or active_problem_id_for_state(state, active_record=active))
+    problem_understanding_states = (
+        previous.get("problem_understanding_states")
+        if isinstance(previous.get("problem_understanding_states"), dict)
+        else {}
+    )
+    if active_problem_id and active_problem_id.lower() not in {"unknown", "none", "null", "n/a"}:
+        problem_understanding_states = {
+            **problem_understanding_states,
+            active_problem_id: understanding_state,
+        }
     reason_history = compact_memory_list(
         [
             *previous.get("reason_history", []),
@@ -4212,6 +4889,7 @@ def build_next_chat_retrieval_memory(state: PdfRagState) -> dict[str, Any]:
             "active_page_asset": page_asset_memory_from_record(active),
             "failed_searches": failed_searches,
             "knowledge_items": knowledge_items,
+            "problem_understanding_states": problem_understanding_states,
             "reason_history": reason_history,
             "retrieved_metadata": compact_memory_list([*records, *previous.get("retrieved_metadata", [])], limit=8),
             "updated_at": utc_timestamp(),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 import pytest
@@ -311,6 +312,640 @@ def test_tutor_decision_can_return_one_search_per_distinct_need() -> None:
     assert len(graph_module.retrieval_decision_tool_calls(decision)) == 3
 
 
+def test_decision_json_with_latex_backslashes_is_parsed_not_surfaced() -> None:
+    content = (
+        '{"can_answer_now":true,"needs_search":false,"retrieval_reason":"","search_query":"",'
+        '"searches":[],"help_level":"guiding_question",'
+        '"student_response":"Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2]$.",'
+        '"memory_used":true,'
+        '"structuredOutput":{"hint":"Use $\\operatorname{span}(S)$, not the raw list.",'
+        '"nextStep":"Can you make $1$, $x$, and $x^2$?"},'
+        '"sectionOrder":["hint","nextStep"],"metadata":{"problem":"1.7"}}'
+    )
+
+    decision = graph_module.parse_tutor_decision_response(
+        {"content": content},
+        {},
+    )
+
+    assert decision["needs_search"] is False
+    assert decision["student_response"] == "Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2]$."
+    assert decision["structuredOutput"]["sections"]["hint"] == "Use $\\operatorname{span}(S)$, not the raw list."
+    assert not decision["student_response"].startswith("{")
+
+
+def test_example_request_cannot_be_downgraded_to_no_search_refusal() -> None:
+    fallback = graph_module.retrieval_decision(
+        decision_source="search_required",
+        needs_search=True,
+        retrieval_reason="needed_example_page",
+        query="worked example textbook reading notes method OCR metadata ACME VOL 1 show me an example",
+        active_record=ocr_page(title="ACME VOL 1"),
+        memory_used=False,
+    )
+
+    decision = graph_module.parse_tutor_decision_response(
+        {
+            "content": json.dumps(
+                {
+                    "can_answer_now": True,
+                    "needs_search": False,
+                    "help_level": "refusal_with_hint",
+                    "student_response": "I can't give a worked example here.",
+                }
+            )
+        },
+        fallback,
+    )
+
+    assert decision["needs_search"] is True
+    assert decision["can_answer_now"] is False
+    assert decision["retrieval_reason"] == "needed_example_page"
+    assert decision["student_response"] == "I'm looking for a relevant class example."
+    assert decision["searches"] == [
+        {
+            "query": "worked example textbook reading notes method OCR metadata ACME VOL 1 show me an example",
+            "retrieval_reason": "needed_example_page",
+            "top_k": 5,
+        }
+    ]
+
+
+def test_decision_prompt_passes_retrieval_memory_and_policy_but_not_pdf_assets() -> None:
+    state = {
+        "answer_policy": {"requireAttemptBeforeAnswer": True},
+        "chat_retrieval_memory": {
+            "active_metadata": ocr_page(title="ACME VOL 1", problem_numbers=["1.7"]),
+            "failed_searches": [{"query": "missing example"}],
+        },
+        "messages": [
+            {"role": "assistant", "content": "Problem 1.7. Which sets span F[x;2]?"},
+            {"role": "user", "content": "what's next"},
+        ],
+        "page_assets": [{"file_data_url": "data:application/pdf;base64,abc"}],
+        "source_usage": {"useClassMaterialsFirst": True},
+    }
+    heuristic = graph_module.build_retrieval_decision(state)
+
+    messages = graph_module.build_tutor_decision_messages(state, heuristic)
+    payload = json.loads(messages[-1]["content"])
+
+    assert payload["active_metadata"]["title"] == "ACME VOL 1"
+    assert payload["active_metadata"]["problem_numbers"] == ["1.7"]
+    assert payload["failed_searches"] == [{"query": "missing example"}]
+    assert payload["answer_policy"] == {"requireAttemptBeforeAnswer": True}
+    assert payload["source_usage"] == {"useClassMaterialsFirst": True}
+    assert payload["latest_student_message"] == "what's next"
+    assert "file_data_url" not in messages[-1]["content"]
+
+
+def test_example_followup_marks_active_metadata_memory_used() -> None:
+    decision = graph_module.build_retrieval_decision(
+        {
+            "chat_retrieval_memory": {
+                "active_metadata": ocr_page(title="ACME VOL 1", problem_numbers=["1.7"]),
+            },
+            "messages": [{"role": "user", "content": "show me an example"}],
+        }
+    )
+
+    assert decision["needs_search"] is True
+    assert decision["retrieval_reason"] == "needed_example_page"
+    assert decision["memory_used"] is True
+    assert decision["active_problem_numbers"] == ["1.7"]
+
+
+def test_first_llm_prompt_owns_tutor_plan_and_state_updates() -> None:
+    state = {
+        "answer_policy": {"refuseAnswerOnlyRequests": True},
+        "chat_retrieval_memory": {
+            "active_metadata": ocr_page(
+                chunk_text=(
+                    "Problem 3.9. Prove that a rotation (2.17) in R^2 is an "
+                    "orthonormal transformation with respect to the usual inner product."
+                ),
+                problem_numbers=["3.9"],
+            ),
+        },
+        "messages": [
+            {
+                "role": "assistant",
+                "content": (
+                    "Problem 3.9. Prove that a rotation (2.17) in R^2 is an "
+                    "orthonormal transformation with respect to the usual inner product."
+                ),
+            },
+            {"role": "user", "content": "help me"},
+        ],
+    }
+    heuristic = graph_module.build_retrieval_decision(state)
+
+    messages = graph_module.build_tutor_decision_messages(state, heuristic)
+    payload = json.loads(messages[-1]["content"])
+    system_prompt = messages[0]["content"]
+
+    assert "tutorPlan" in system_prompt
+    assert "You own tutor state updates in this first step" in system_prompt
+    assert "stateUpdates.understandingLevel" in system_prompt
+    assert payload["problem_understanding_state"]["activeProblemId"] != ""
+    assert payload["latest_student_message"] == "help me"
+
+
+def test_first_vague_help_plan_depth_one_updates_understanding_state() -> None:
+    active = ocr_page(
+        chunk_text=(
+            "Problem 3.9. Prove that a rotation (2.17) in R^2 is an "
+            "orthonormal transformation with respect to the usual inner product."
+        ),
+        problem_numbers=["3.9"],
+    )
+    fallback = graph_module.retrieval_decision(
+        decision_source="chat_memory",
+        needs_search=False,
+        retrieval_reason="",
+        query="",
+        active_record=active,
+        memory_used=True,
+    )
+    problem_id = fallback["tutorPlan"]["activeProblemId"]
+
+    decision = graph_module.parse_tutor_decision_response(
+        {
+            "content": json.dumps(
+                {
+                    "can_answer_now": True,
+                    "memory_used": True,
+                    "needs_search": False,
+                    "student_response": (
+                        "To prove the rotation is orthonormal, focus on the columns of the rotation matrix. "
+                        "What are the two columns of the rotation matrix in (2.17), and what are their lengths?"
+                    ),
+                    "tutorPlan": {
+                        "activeProblemId": problem_id,
+                        "studentIntent": "vague_help",
+                        "needsRetrieval": False,
+                        "currentUnderstandingLevel": 0,
+                        "nextHelpDepth": 1,
+                        "answerSeekingRisk": "low",
+                        "responseStrategy": "Give one light nudge about columns and ask one targeted question.",
+                        "shouldAskQuestion": True,
+                        "shouldGiveWorkedStep": False,
+                        "shouldAvoidFullSolution": True,
+                        "stateUpdates": {
+                            "understandingLevel": 1,
+                            "lastHelpDepth": 1,
+                            "hintsGiven": 1,
+                            "lastHintSummary": "Focused the student on rotation matrix columns and their lengths.",
+                        },
+                    },
+                }
+            )
+        },
+        fallback,
+    )
+    state = {
+        "chat_retrieval_memory": {"active_metadata": active},
+        "conversation_id": "conv-3-9",
+        "messages": [{"role": "user", "content": "help me"}],
+        "retrieval_decision": decision,
+        "tutor_plan": decision["tutorPlan"],
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, decision["tutorPlan"])
+
+    assert decision["tutorPlan"]["nextHelpDepth"] == 1
+    assert understanding["understandingLevel"] == 1
+    assert understanding["lastHelpDepth"] == 1
+    assert understanding["hintsGiven"] == 1
+    assert "columns" in understanding["lastHintSummary"]
+    assert "directly verify" not in decision["student_response"]
+    assert "<Ru" not in decision["student_response"]
+
+
+def test_repeated_stuck_plan_can_escalate_to_depth_two() -> None:
+    active = ocr_page(problem_numbers=["3.9"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    previous_state = {
+        "chatId": "conv-repeat",
+        "activeProblemId": problem_id,
+        "understandingLevel": 1,
+        "attemptsCount": 0,
+        "hintsGiven": 1,
+        "lastHelpDepth": 1,
+        "conceptsUnderstood": [],
+        "knownConfusions": [],
+        "repeatedStuckSignals": 0,
+        "answerSeekingRisk": "low",
+        "lastHintSummary": "Focused on the columns of the rotation matrix.",
+        "updatedAt": "2026-05-12T00:00:00+00:00",
+    }
+    state = {
+        "conversation_id": "conv-repeat",
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "problem_understanding_states": {problem_id: previous_state},
+        },
+        "messages": [{"role": "user", "content": "I still don't get it"}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "vague_help",
+        "nextHelpDepth": 2,
+        "answerSeekingRisk": "low",
+        "stateUpdates": {
+            "understandingLevel": 2,
+            "lastHelpDepth": 2,
+            "hintsGiven": 2,
+            "repeatedStuckSignals": 1,
+            "lastHintSummary": "Guided the student to test column lengths and their dot product.",
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["repeatedStuckSignals"] == 1
+    assert understanding["hintsGiven"] == 2
+    assert understanding["lastHelpDepth"] == 2
+    assert understanding["understandingLevel"] == 2
+
+
+def test_decision_prompt_uses_evidence_based_understanding_levels() -> None:
+    state = {
+        "chat_retrieval_memory": {
+            "active_metadata": ocr_page(problem_numbers=["2.14"]),
+        },
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "I proved rank(KL) <= rank(K) because im(KL) is inside im(K), "
+                    "so I think im(KL) is inside im(L) too."
+                ),
+            }
+        ],
+    }
+    heuristic = graph_module.build_retrieval_decision(state)
+
+    messages = graph_module.build_tutor_decision_messages(state, heuristic)
+    system_prompt = messages[0]["content"]
+
+    assert "not from turn count and not by incrementing one level at a time" in system_prompt
+    assert "The level may jump by more than 1 in a single update" in system_prompt
+    assert "0 = problem loaded, no student understanding observed yet" in system_prompt
+    assert "1 = needs first nudge or little/no useful work shown" in system_prompt
+    assert "2 = understands setup but is missing the core idea" in system_prompt
+    assert "3 = understands the core idea but needs execution help" in system_prompt
+    assert "4 = solution-ready, mostly needs verification or minor cleanup" in system_prompt
+    assert "Allowed jumps include 0->2, 0->3, 0->4, 1->3, and 1->4" in system_prompt
+    assert "incorrectly claims im(KL) is contained in im(L), set understandingLevel to 2, not 1" in system_prompt
+
+
+def test_understanding_level_updates_can_jump_from_zero_based_on_evidence() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    state = {
+        "conversation_id": "conv-jump-zero",
+        "chat_retrieval_memory": {"active_metadata": active},
+        "messages": [{"role": "user", "content": "Here is my proof attempt..."}],
+    }
+
+    level_two = graph_module.state_after_tutor_plan(
+        state,
+        {
+            "activeProblemId": problem_id,
+            "studentIntent": "showed_work",
+            "nextHelpDepth": 2,
+            "answerSeekingRisk": "low",
+            "stateUpdates": {
+                "understandingLevel": 2,
+                "lastStudentAttemptSummary": "Student identified image/rank setup but missed the core inclusion.",
+            },
+        },
+    )
+    level_three = graph_module.state_after_tutor_plan(
+        state,
+        {
+            "activeProblemId": problem_id,
+            "studentIntent": "showed_work",
+            "nextHelpDepth": 2,
+            "answerSeekingRisk": "low",
+            "stateUpdates": {
+                "understandingLevel": 3,
+                "lastStudentAttemptSummary": "Student had the right strategy but made execution mistakes.",
+            },
+        },
+    )
+    level_four = graph_module.state_after_tutor_plan(
+        state,
+        {
+            "activeProblemId": problem_id,
+            "studentIntent": "showed_work",
+            "nextHelpDepth": 2,
+            "answerSeekingRisk": "low",
+            "stateUpdates": {
+                "understandingLevel": 4,
+                "lastStudentAttemptSummary": "Student was essentially correct with minor cleanup remaining.",
+            },
+        },
+    )
+
+    assert level_two["understandingLevel"] == 2
+    assert level_three["understandingLevel"] == 3
+    assert level_four["understandingLevel"] == 4
+
+
+def test_understanding_level_can_jump_from_one_to_four() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    state = {
+        "conversation_id": "conv-jump-one",
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "problem_understanding_states": {
+                problem_id: {
+                    "activeProblemId": problem_id,
+                    "understandingLevel": 1,
+                    "hintsGiven": 1,
+                    "lastHintSummary": "Asked the student to connect rank to image.",
+                    "updatedAt": "2026-05-12T00:00:00+00:00",
+                }
+            },
+        },
+        "messages": [{"role": "user", "content": "Actually, im(KL) is a subspace of im(K), so rank(KL) <= rank(K)."}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "showed_work",
+        "nextHelpDepth": 2,
+        "answerSeekingRisk": "low",
+        "stateUpdates": {
+            "understandingLevel": 4,
+            "lastStudentAttemptSummary": "Student corrected the image containment and has only cleanup remaining.",
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["understandingLevel"] == 4
+    assert understanding["attemptsCount"] == 1
+
+
+def test_rank_image_wrong_target_space_is_level_two_not_one() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    state = {
+        "conversation_id": "conv-rank-regression",
+        "chat_retrieval_memory": {"active_metadata": active},
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "Since im(KL) is all outputs K(Lv), those are outputs of K, so rank(KL) <= rank(K). "
+                    "For rank(KL) <= rank(L), I think im(KL) is inside im(L)."
+                ),
+            }
+        ],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "showed_work",
+        "nextHelpDepth": 2,
+        "answerSeekingRisk": "low",
+        "stateUpdates": {
+            "understandingLevel": 2,
+            "conceptsUnderstood": ["rank/image reasoning", "image containment for rank(KL) <= rank(K)"],
+            "knownConfusions": ["target space for im(KL) versus im(L)"],
+            "lastStudentAttemptSummary": "Student used image reasoning well but chose the wrong containment for the second inequality.",
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["understandingLevel"] == 2
+    assert "rank/image reasoning" in understanding["conceptsUnderstood"]
+    assert "target space for im(KL) versus im(L)" in understanding["knownConfusions"]
+
+
+def test_decision_prompt_tracks_current_step_and_substep_for_repeated_stuck() -> None:
+    active = ocr_page(
+        chunk_text=(
+            "Problem 2.17. Let L(e1)=e1+2e2 and L(e2)=2e1-e2. "
+            "Compute L(2e1-3e2) and then L^2(2e1-3e2)."
+        ),
+        problem_numbers=["2.17"],
+    )
+    problem_id = graph_module.active_problem_id_from_record(active)
+    state = {
+        "conversation_id": "conv-2-17",
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "problem_understanding_states": {
+                problem_id: {
+                    "activeProblemId": problem_id,
+                    "understandingLevel": 1,
+                    "hintsGiven": 2,
+                    "repeatedStuckSignals": 1,
+                    "currentStep": "Compute L(2e1 - 3e2) using linearity.",
+                    "currentSubstep": "Substitute L(e1) and L(e2).",
+                    "currentStepStatus": "in_progress",
+                    "lastHintSummary": "Use linearity, substitute L(e1) and L(e2), then expand.",
+                    "updatedAt": "2026-05-12T00:00:00+00:00",
+                }
+            },
+        },
+        "messages": [
+            {"role": "assistant", "content": "Use linearity, substitute L(e1) and L(e2), then expand."},
+            {"role": "user", "content": "give me the next step!"},
+        ],
+    }
+    heuristic = graph_module.build_retrieval_decision(state)
+
+    messages = graph_module.build_tutor_decision_messages(state, heuristic)
+    payload = json.loads(messages[-1]["content"])
+    system_prompt = messages[0]["content"]
+
+    assert payload["problem_understanding_state"]["currentStep"] == "Compute L(2e1 - 3e2) using linearity."
+    assert payload["problem_understanding_state"]["currentStepStatus"] == "in_progress"
+    assert "Do not advance currentStep to a later problem step" in system_prompt
+    assert "make currentSubstep smaller" in system_prompt
+    assert "tiny or unclear answer like `2?`" in system_prompt
+    assert "explain only the expected answer form or type without revealing the value they should get" in system_prompt
+    assert "do not move from computing L(2e1 - 3e2) to computing L^2(2e1 - 3e2)" in system_prompt
+    assert "2L(e1), -3L(e2), then combining terms" in system_prompt
+
+
+def test_unclear_attempt_keeps_current_step_and_counts_repeated_stuck() -> None:
+    active = ocr_page(problem_numbers=["2.17"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    previous_state = {
+        "chatId": "conv-unclear",
+        "activeProblemId": problem_id,
+        "understandingLevel": 1,
+        "attemptsCount": 0,
+        "hintsGiven": 2,
+        "lastHelpDepth": 2,
+        "currentStep": "Compute L(2e1 - 3e2) using linearity.",
+        "currentSubstep": "Find 2L(e1).",
+        "currentStepStatus": "in_progress",
+        "repeatedStuckSignals": 1,
+        "lastHintSummary": "Asked the student to compute 2L(e1).",
+        "updatedAt": "2026-05-12T00:00:00+00:00",
+    }
+    state = {
+        "conversation_id": "conv-unclear",
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "problem_understanding_states": {problem_id: previous_state},
+        },
+        "messages": [{"role": "user", "content": "2?"}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "unclear_attempt",
+        "nextHelpDepth": 2,
+        "answerSeekingRisk": "low",
+        "currentStep": "Compute L(2e1 - 3e2) using linearity.",
+        "currentSubstep": "Find 2L(e1).",
+        "currentStepStatus": "unclear",
+        "stateUpdates": {
+            "understandingLevel": 1,
+            "lastStudentAttemptSummary": "Student gave a tiny unclear answer, `2?`, without a vector expression.",
+            "lastHintSummary": "Clarified that the expected answer is a vector expression for 2L(e1).",
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["currentStep"] == "Compute L(2e1 - 3e2) using linearity."
+    assert understanding["currentSubstep"] == "Find 2L(e1)."
+    assert understanding["currentStepStatus"] == "unclear"
+    assert understanding["repeatedStuckSignals"] == 2
+    assert "vector expression" in understanding["lastStudentAttemptSummary"]
+
+
+def test_completed_current_step_can_be_recorded_before_advancing() -> None:
+    active = ocr_page(problem_numbers=["2.17"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    state = {
+        "conversation_id": "conv-complete-step",
+        "chat_retrieval_memory": {"active_metadata": active},
+        "messages": [{"role": "user", "content": "I got -4e1 + 7e2"}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "showed_work",
+        "nextHelpDepth": 2,
+        "answerSeekingRisk": "low",
+        "currentStep": "Compute L^2(2e1 - 3e2).",
+        "currentStepStatus": "in_progress",
+        "stateUpdates": {
+            "understandingLevel": 3,
+            "currentStep": "Compute L^2(2e1 - 3e2).",
+            "currentStepStatus": "in_progress",
+            "completedSteps": ["Computed L(2e1 - 3e2)."],
+            "lastStudentAttemptSummary": "Student completed the first transformation expression.",
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["currentStep"] == "Compute L^2(2e1 - 3e2)."
+    assert understanding["currentStepStatus"] == "in_progress"
+    assert understanding["completedSteps"] == ["Computed L(2e1 - 3e2)."]
+    assert understanding["attemptsCount"] == 1
+
+
+def test_answer_seeking_plan_stays_low_depth_under_restricted_policy() -> None:
+    active = ocr_page(problem_numbers=["3.9"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    state = {
+        "conversation_id": "conv-answer-seeking",
+        "answer_policy": {"refuseAnswerOnlyRequests": True},
+        "chat_retrieval_memory": {"active_metadata": active},
+        "messages": [{"role": "user", "content": "just give me the answer"}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "asks_for_solution",
+        "nextHelpDepth": 1,
+        "answerSeekingRisk": "high",
+        "stateUpdates": {
+            "understandingLevel": 1,
+            "lastHelpDepth": 1,
+            "answerSeekingRisk": "high",
+            "lastHintSummary": "Refused answer-only request and asked for current thinking.",
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["answerSeekingRisk"] == "high"
+    assert understanding["lastHelpDepth"] == 1
+    assert graph_module.classify_student_intent("just give me the answer") == "asks_for_solution"
+
+
+def test_loaded_problem_context_initializes_understanding_level_zero() -> None:
+    problem_text = "Problem 3.9. Prove that a rotation in R^2 is orthonormal."
+    active_context = {
+        "problem_id": graph_module.stable_problem_id(problem_text),
+        "problem_text": problem_text,
+    }
+    state = {
+        "conversation_id": "conv-load-problem",
+        "chat_retrieval_memory": {},
+        "problem_understanding_state": {
+            "activeProblemId": "unknown",
+            "understandingLevel": 3,
+            "hintsGiven": 4,
+        },
+        "tutor_plan": {
+            "studentIntent": "specific_question",
+            "needsRetrieval": True,
+            "retrievalReason": "student_requested_problem",
+            "nextHelpDepth": 1,
+        },
+    }
+
+    graph_module.sync_problem_understanding_state_to_active_context(state, active_context)
+
+    understanding = state["problem_understanding_state"]
+    assert understanding["activeProblemId"] == active_context["problem_id"]
+    assert understanding["understandingLevel"] == 0
+    assert understanding["hintsGiven"] == 0
+
+
+def test_help_plan_state_survives_active_problem_id_sync() -> None:
+    problem_text = "Problem 3.9. Prove that a rotation in R^2 is orthonormal."
+    active_context = {
+        "problem_id": graph_module.stable_problem_id(problem_text),
+        "problem_text": problem_text,
+    }
+    state = {
+        "conversation_id": "conv-help-problem",
+        "chat_retrieval_memory": {},
+        "problem_understanding_state": {
+            "activeProblemId": "requested-problem-3-9",
+            "understandingLevel": 1,
+            "hintsGiven": 1,
+            "lastHintSummary": "Focused the student on the columns.",
+        },
+        "tutor_plan": {
+            "studentIntent": "vague_help",
+            "needsRetrieval": True,
+            "retrievalReason": "student_requested_problem",
+            "nextHelpDepth": 1,
+        },
+    }
+
+    graph_module.sync_problem_understanding_state_to_active_context(state, active_context)
+
+    understanding = state["problem_understanding_state"]
+    assert understanding["activeProblemId"] == active_context["problem_id"]
+    assert understanding["understandingLevel"] == 1
+    assert understanding["hintsGiven"] == 1
+    assert "columns" in understanding["lastHintSummary"]
+
+
 @pytest.mark.asyncio
 async def test_parallel_distinct_searches_execute_concurrently() -> None:
     class ConcurrentRetriever:
@@ -598,6 +1233,134 @@ def test_problem_section_location_note_is_split_out() -> None:
     assert structured["sections"]["answer"] == "That's the exact Exercise 2.18 on printed page 80"
 
 
+def test_lost_followup_suppresses_repeated_problem_section() -> None:
+    structured = {
+        "sections": {
+            "problem": "1.7. For each set below, decide which sets span F[x;2].",
+            "answer": "You're working on a spanning problem.",
+            "hint": "Check whether the set can generate 1, x, and x^2.",
+        },
+        "sectionOrder": ["problem", "answer", "hint"],
+        "metadata": {},
+    }
+
+    suppressed = graph_module.suppress_structured_problem_section_for_followup(
+        structured,
+        {"messages": [{"role": "user", "content": "im lost"}]},
+    )
+
+    assert "problem" not in suppressed["sections"]
+    assert suppressed["sectionOrder"] == ["answer", "hint"]
+
+
+def test_depth_one_structured_output_drops_extra_next_step_card() -> None:
+    structured = {
+        "sections": {
+            "answer": "Start with the object the problem is about.",
+            "hint": "Focus on the columns of the rotation matrix.",
+            "nextStep": "Compute the dot product of the two transformed generic vectors.",
+        },
+        "sectionOrder": ["answer", "hint", "nextStep"],
+        "metadata": {},
+    }
+
+    suppressed = graph_module.suppress_depth_one_over_scaffolding(
+        structured,
+        {"tutor_plan": {"nextHelpDepth": 1}},
+    )
+
+    assert suppressed["sections"] == {
+        "answer": "Start with the object the problem is about.",
+        "hint": "Focus on the columns of the rotation matrix.",
+    }
+    assert suppressed["sectionOrder"] == ["answer", "hint"]
+
+
+DIRECT_VALIDATION_VERDICT_RE = re.compile(
+    r"\b(?:correct|incorrect|right|wrong|yes|no)\b|that's the answer|your first part is right|the mistake is|not quite",
+    re.IGNORECASE,
+)
+
+
+def assert_no_direct_validation_verdict(text: str) -> None:
+    assert not DIRECT_VALIDATION_VERDICT_RE.search(text)
+
+
+def test_validation_request_neutralizes_partially_correct_verdict_language() -> None:
+    response = graph_module.pdf_rag_response_from_state(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "I proved rank(KL) <= rank(K), then said im(KL) is inside im(L). Is this right?",
+                }
+            ],
+            "answer": "Yes, the first part is right. Your missing step is to connect KL to the image of L.",
+            "retrieval_decision": {},
+            "retrieved_pages": [],
+            "page_assets": [],
+        }
+    )
+
+    content = response["content"]
+    assert_no_direct_validation_verdict(content)
+    assert "uses a relevant idea" in content
+
+
+def test_validation_request_neutralizes_flaw_without_wrong_label() -> None:
+    response = graph_module.pdf_rag_response_from_state(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "I think im(KL) is contained in im(L), so rank(KL) <= rank(L). Is this right?",
+                }
+            ],
+            "answer": "Not quite. The mistake is comparing im(KL) directly with im(L).",
+            "retrieval_decision": {},
+            "retrieved_pages": [],
+            "page_assets": [],
+        }
+    )
+
+    content = response["content"]
+    assert_no_direct_validation_verdict(content)
+    assert "Check this part carefully" in content
+    assert "One place to inspect" in content
+
+
+def test_validation_request_neutralizes_near_correct_structured_output() -> None:
+    response = graph_module.pdf_rag_response_from_state(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "I wrote im(KL)=K(im L), then used dimension. Is this correct?",
+                }
+            ],
+            "answer": "That is correct. Polish the notation around im L.",
+            "retrieval_decision": {},
+            "retrieved_pages": [],
+            "page_assets": [],
+            "structured_output_override": {
+                "sections": {
+                    "answer": "That is correct. Polish the notation around im L.",
+                    "checkWork": "Looks right: tighten the notation around im L.",
+                },
+                "sectionOrder": ["answer", "checkWork"],
+                "metadata": {},
+            },
+        }
+    )
+
+    content = response["content"]
+    structured_text = json.dumps(response["structuredOutput"]["sections"])
+    assert_no_direct_validation_verdict(content)
+    assert_no_direct_validation_verdict(structured_text)
+    assert "This uses a relevant idea" in content
+    assert "A useful direction" in structured_text
+
+
 @pytest.mark.asyncio
 async def test_active_problem_metadata_reuses_context_without_search() -> None:
     graph_module._CHAT_RETRIEVAL_MEMORY_CACHE["conv-memory"] = {
@@ -638,6 +1401,72 @@ async def test_active_problem_metadata_reuses_context_without_search() -> None:
     assert response["langGraphTrace"]["decisionSource"] == "chat_memory"
     assert response["langGraphTrace"]["memoryUsed"] is True
     assert response["langGraphTrace"]["selectedMetadataRecords"][0]["ocr_provider"] == "google-document-ai"
+
+
+@pytest.mark.asyncio
+async def test_final_prompt_obeys_first_llm_help_depth_without_state_revision() -> None:
+    graph_module._CHAT_RETRIEVAL_MEMORY_CACHE["conv-final-plan"] = {
+        "active_metadata": ocr_page(problem_numbers=["3.9"]),
+    }
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": True,
+                        "memory_used": True,
+                        "needs_search": False,
+                        "student_response": "Hint: focus on the columns.",
+                        "tutorPlan": {
+                            "activeProblemId": graph_module.active_problem_id_from_record(ocr_page(problem_numbers=["3.9"])),
+                            "studentIntent": "vague_help",
+                            "needsRetrieval": False,
+                            "currentUnderstandingLevel": 0,
+                            "nextHelpDepth": 1,
+                            "answerSeekingRisk": "low",
+                            "responseStrategy": "Give one light hint and one question.",
+                            "shouldAskQuestion": True,
+                            "shouldGiveWorkedStep": False,
+                            "shouldAvoidFullSolution": True,
+                            "stateUpdates": {
+                                "understandingLevel": 1,
+                                "lastHelpDepth": 1,
+                                "hintsGiven": 1,
+                                "lastHintSummary": "Asked about rotation matrix columns.",
+                            },
+                        },
+                    }
+                )
+            },
+            {
+                "content": (
+                    "Hint: Focus on the two columns of the rotation matrix. What are their lengths?\n\n"
+                    "Problem context:\n"
+                    "relation: same_problem\n"
+                    "confidence: medium"
+                )
+            },
+        ]
+    )
+
+    response = await run_pdf_rag_agent(
+        class_id="class-linear",
+        conversation_id="conv-final-plan",
+        messages=[{"role": "user", "content": "help me"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        page_asset_builder=lambda pages, *, max_total_pages: _return_async([pages[0]]),
+        professor_id="teacher-1",
+        retriever=FakeRetriever([]),
+    )
+
+    final_prompt = json.dumps(client.calls[1]["messages"][-1]["content"])
+    assert "TutorPlan for internal use only" in final_prompt
+    assert "do not revise those fields" in final_prompt
+    assert "Tutor state update" not in final_prompt
+    assert response["langGraphTrace"]["tutorPlan"]["nextHelpDepth"] == 1
+    assert response["langGraphTrace"]["problemUnderstandingState"]["understandingLevel"] == 1
+    assert response["langGraphTrace"]["problemUnderstandingState"]["lastHelpDepth"] == 1
 
 
 @pytest.mark.asyncio
@@ -1326,3 +2155,71 @@ async def test_streaming_matches_non_streaming_retrieval_decision() -> None:
     assert events[-1]["type"] == "final"
     assert events[-1]["payload"]["content"] == "Try naming what the inequality is comparing."
     assert events[-1]["payload"]["langGraphTrace"]["decisionSource"] == "student_message"
+
+
+@pytest.mark.asyncio
+async def test_retries_tutor_decision_with_double_tokens_after_length_stop() -> None:
+    decision = {
+        "can_answer_now": True,
+        "memory_used": False,
+        "needs_search": False,
+        "student_response": "Use the image of the composed map: every output of KL is K(something).",
+    }
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": '{"can_answer_now":true,"needs_search":false,"student_response":"Use',
+                "finish_reason": "length",
+                "usage": {"completion_tokens": 397},
+            },
+            {"content": json.dumps(decision), "finish_reason": "stop"},
+        ]
+    )
+
+    response = await run_pdf_rag_agent(
+        class_id="class-linear",
+        messages=[{"role": "user", "content": "I think im(KL) is inside im(L)."}],
+        model="openai/gpt-4.1-mini",
+        max_tokens=900,
+        openrouter_client=client,
+        professor_id="teacher-1",
+        retriever=FakeRetriever([]),
+    )
+
+    assert [call["max_tokens"] for call in client.calls] == [900, 1800]
+    assert response["content"] == decision["student_response"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_retries_tutor_decision_with_double_tokens_after_length_stop() -> None:
+    decision = {
+        "can_answer_now": True,
+        "memory_used": False,
+        "needs_search": False,
+        "student_response": "Use the image of the composed map: every output of KL is K(something).",
+    }
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": '{"can_answer_now":true,"needs_search":false,"student_response":"Use',
+                "finish_reason": "length",
+                "usage": {"completion_tokens": 397},
+            },
+            {"content": json.dumps(decision), "finish_reason": "stop"},
+        ]
+    )
+    events = [
+        event
+        async for event in run_pdf_rag_agent_stream(
+            class_id="class-linear",
+            messages=[{"role": "user", "content": "I think im(KL) is inside im(L)."}],
+            model="openai/gpt-4.1-mini",
+            max_tokens=900,
+            openrouter_client=client,
+            professor_id="teacher-1",
+            retriever=FakeRetriever([]),
+        )
+    ]
+
+    assert [call["max_tokens"] for call in client.calls] == [900, 1800]
+    assert events[-1]["payload"]["content"] == decision["student_response"]

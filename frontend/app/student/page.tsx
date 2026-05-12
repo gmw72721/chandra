@@ -29,6 +29,7 @@ import {
 import { subscribeToClass, type TeacherClass } from "@/lib/classes";
 import { capitalizeLabel, coerceDate, formatConversationDate } from "@/lib/display-format";
 import { knowledgeUiColorToken } from "@/lib/knowledge-memory";
+import { buildUnderstandingState } from "@/lib/understanding-state";
 import type {
   ChatContextMemory,
   ChatMessage,
@@ -42,6 +43,7 @@ import type {
   StudentFeedbackRating,
   TutorApiResponse,
   TutorInputTokenSection,
+  UnderstandingState,
   UsageSummary
 } from "@/lib/types";
 
@@ -140,7 +142,7 @@ type FeedbackModalState = {
   messageId?: string | null;
   promptReason?: StudentFeedbackPromptReason;
 };
-type HeaderDropdown = "context" | "feedback" | "usage" | null;
+type HeaderDropdown = "context" | "feedback" | "understanding" | "usage" | null;
 
 export default function StudentPage() {
   return (
@@ -356,6 +358,7 @@ export function StudentWorkspace() {
   const usageSummary = useMemo(() => usageSummaryFromStatus(aiUsageStatus), [aiUsageStatus]);
   const chatContextMemory = useMemo(() => buildChatContextMemory(messages), [messages]);
   const knowledgeLines = useMemo(() => buildKnowledgeLines(messages), [messages]);
+  const understandingState = useMemo(() => buildUnderstandingState(messages), [messages]);
   const latestKnowledgeMessageId = useMemo(() => latestKnowledgeAssistantMessageId(messages), [messages]);
   const previousKnowledgeKeysRef = useRef<string[] | null>(null);
   const [knowledgeAnimationLines, setKnowledgeAnimationLines] = useState<KnowledgeAnimationLine[]>([]);
@@ -1538,6 +1541,23 @@ export function StudentWorkspace() {
                   ) : null}
                 </div>
                 <div className="student-header-control-wrap">
+                  <UnderstandingLevelButton
+                    isExpanded={openHeaderDropdown === "understanding"}
+                    state={understandingState}
+                    onClick={() =>
+                      setOpenHeaderDropdown((currentDropdown) =>
+                        currentDropdown === "understanding" ? null : "understanding"
+                      )
+                    }
+                  />
+                  {openHeaderDropdown === "understanding" && understandingState ? (
+                    <UnderstandingPopover
+                      id="student-understanding-popover"
+                      state={understandingState}
+                    />
+                  ) : null}
+                </div>
+                <div className="student-header-control-wrap">
                   <button
                     aria-label="Feedback"
                     aria-controls="student-feedback-popover"
@@ -2575,6 +2595,7 @@ function KnowledgeIconButton({
       onClick={onClick}
     >
       <KnowledgeStackIcon animationLines={animationLines} isActive={isActive} recentItems={recentItems} />
+      <span className="student-header-control-label">Knowledge</span>
     </button>
   );
 }
@@ -2633,6 +2654,71 @@ function KnowledgeStackIcon({
     </svg>
   );
 }
+
+function UnderstandingLevelButton({
+  isExpanded,
+  onClick,
+  state
+}: {
+  isExpanded: boolean;
+  onClick: () => void;
+  state: UnderstandingState | null;
+}) {
+  const hasState = Boolean(state);
+
+  return (
+    <button
+      aria-label="Understanding"
+      aria-controls="student-understanding-popover"
+      aria-expanded={hasState ? isExpanded : false}
+      className={`student-header-control student-understanding-control${hasState ? " is-active" : ""}`}
+      data-understanding-level={state?.level}
+      disabled={!hasState}
+      title="Understanding"
+      type="button"
+      onClick={onClick}
+    >
+      <span aria-hidden="true" className="student-understanding-level">
+        {state?.level ?? ""}
+      </span>
+      <span className="student-header-control-label">Understanding</span>
+    </button>
+  );
+}
+
+const UnderstandingPopover = memo(function UnderstandingPopover({
+  id,
+  state
+}: {
+  id: string;
+  state: UnderstandingState;
+}) {
+  return (
+    <section
+      aria-label="Understanding"
+      className="student-header-popover student-understanding-popover"
+      id={id}
+      role="region"
+    >
+      <div className="student-context-popover-heading">
+        <h2>Understanding</h2>
+        <span>Level {state.level}</span>
+      </div>
+      <p className="student-understanding-subtitle">
+        Chandra estimates how much support you need for this problem.
+      </p>
+      <div className="student-popover-section">
+        <h3>Why it changed</h3>
+        <ul className="student-understanding-reasons">
+          {state.reasons.map((reason) => (
+            <li key={reason}>{reason}</li>
+          ))}
+        </ul>
+      </div>
+      <p className="student-understanding-note">This is not a grade.</p>
+    </section>
+  );
+});
 
 function knowledgeRoleFromSectionKind(kind: string): KnowledgeItemRole {
   if (kind === "example") {

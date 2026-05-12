@@ -19438,9 +19438,71 @@ button.student-row[aria-pressed="true"] {
 }
 
 .student-knowledge-control {
-  width: 42px;
   min-width: 42px;
-  padding: 0;
+  padding: 0 10px;
+}
+
+.student-understanding-control {
+  --understanding-accent: #667085;
+  --understanding-accent-soft: #f2f4f7;
+  --understanding-accent-ring: rgba(102, 112, 133, 0.24);
+  min-width: 34px;
+  padding: 0 8px;
+}
+
+.student-understanding-control[data-understanding-level="0"] {
+  --understanding-accent: #667085;
+  --understanding-accent-soft: #f2f4f7;
+  --understanding-accent-ring: rgba(102, 112, 133, 0.24);
+}
+
+.student-understanding-control[data-understanding-level="1"] {
+  --understanding-accent: #0b66a0;
+  --understanding-accent-soft: #edf6fd;
+  --understanding-accent-ring: rgba(11, 102, 160, 0.26);
+}
+
+.student-understanding-control[data-understanding-level="2"] {
+  --understanding-accent: #9a6200;
+  --understanding-accent-soft: #fff6df;
+  --understanding-accent-ring: rgba(154, 98, 0, 0.28);
+}
+
+.student-understanding-control[data-understanding-level="3"] {
+  --understanding-accent: #6d43bf;
+  --understanding-accent-soft: #f4efff;
+  --understanding-accent-ring: rgba(109, 67, 191, 0.26);
+}
+
+.student-understanding-control[data-understanding-level="4"] {
+  --understanding-accent: #167c3d;
+  --understanding-accent-soft: #ecf8f0;
+  --understanding-accent-ring: rgba(22, 124, 61, 0.26);
+}
+
+.student-understanding-control:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.student-understanding-level {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  border-radius: 999px;
+  color: #667085;
+  font-size: 0.74rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.student-understanding-control.is-active .student-understanding-level {
+  border-color: var(--understanding-accent-ring);
+  background: var(--understanding-accent-soft);
+  color: var(--understanding-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--understanding-accent-ring) 62%, transparent);
 }
 
 .student-knowledge-control .knowledge-stack-icon {
@@ -19582,14 +19644,6 @@ button.student-row[aria-pressed="true"] {
   opacity: 1;
 }
 
-.student-knowledge-control:hover .student-header-control-label,
-.student-knowledge-control:focus-visible .student-header-control-label,
-.student-knowledge-control[aria-expanded="true"] .student-header-control-label {
-  max-width: 0;
-  margin-left: 0;
-  opacity: 0;
-}
-
 .student-header-usage-percent {
   display: inline-block;
   margin-left: 8px;
@@ -19633,6 +19687,10 @@ button.student-row[aria-pressed="true"] {
 
 .student-usage-popover {
   width: min(320px, calc(100vw - 32px));
+}
+
+.student-understanding-popover {
+  width: min(300px, calc(100vw - 32px));
 }
 
 .student-feedback-popover {
@@ -19690,7 +19748,10 @@ button.student-row[aria-pressed="true"] {
 
 .student-popover-section p,
 .student-popover-empty,
+.student-understanding-subtitle,
+.student-understanding-note,
 .student-context-source-list,
+.student-understanding-reasons,
 .student-usage-costs {
   color: #344054;
   font-size: 0.84rem;
@@ -19724,9 +19785,20 @@ button.student-row[aria-pressed="true"] {
 
 .student-context-problem-list,
 .student-context-source-list,
+.student-understanding-reasons,
 .student-usage-costs {
   display: grid;
   gap: 6px;
+}
+
+.student-understanding-reasons {
+  padding-left: 18px;
+}
+
+.student-understanding-note {
+  border-top: 1px solid rgba(15, 23, 42, 0.1);
+  padding-top: 10px;
+  font-weight: 750;
 }
 
 .student-context-problem-card {
@@ -20037,6 +20109,53 @@ button.student-row[aria-pressed="true"] {
   background: var(--theme-primary-soft);
 }
 
+.student-workspace-shell[data-appearance="dark"] .student-understanding-control {
+  --understanding-accent: #a8b2c7;
+  --understanding-accent-soft: rgba(151, 166, 199, 0.14);
+  --understanding-accent-ring: rgba(151, 166, 199, 0.28);
+}
+
+.student-workspace-shell[data-appearance="dark"] .student-understanding-control[data-understanding-level="0"] {
+  --understanding-accent: #a8b2c7;
+  --understanding-accent-soft: rgba(151, 166, 199, 0.14);
+  --understanding-accent-ring: rgba(151, 166, 199, 0.28);
+}
+
+.student-workspace-shell[data-appearance="dark"] .student-understanding-control[data-understanding-level="1"] {
+  --understanding-accent: #67c3ff;
+  --understanding-accent-soft: rgba(103, 195, 255, 0.15);
+  --understanding-accent-ring: rgba(103, 195, 255, 0.34);
+}
+
+.student-workspace-shell[data-appearance="dark"] .student-understanding-control[data-understanding-level="2"] {
+  --understanding-accent: #f4c76b;
+  --understanding-accent-soft: rgba(244, 199, 107, 0.15);
+  --understanding-accent-ring: rgba(244, 199, 107, 0.34);
+}
+
+.student-workspace-shell[data-appearance="dark"] .student-understanding-control[data-understanding-level="3"] {
+  --understanding-accent: #b59cff;
+  --understanding-accent-soft: rgba(181, 156, 255, 0.15);
+  --understanding-accent-ring: rgba(181, 156, 255, 0.34);
+}
+
+.student-workspace-shell[data-appearance="dark"] .student-understanding-control[data-understanding-level="4"] {
+  --understanding-accent: #65d68c;
+  --understanding-accent-soft: rgba(101, 214, 140, 0.15);
+  --understanding-accent-ring: rgba(101, 214, 140, 0.34);
+}
+
+.student-workspace-shell[data-appearance="dark"] .student-understanding-level {
+  border-color: rgba(151, 166, 199, 0.28);
+  color: var(--text-secondary);
+}
+
+.student-workspace-shell[data-appearance="dark"] .student-understanding-control.is-active .student-understanding-level {
+  border-color: var(--understanding-accent-ring);
+  background: var(--understanding-accent-soft);
+  color: var(--understanding-accent);
+}
+
 .student-workspace-shell[data-appearance="dark"] .student-header-control:disabled .student-header-control-icon {
   stroke: var(--text-muted);
 }
@@ -20065,6 +20184,9 @@ button.student-row[aria-pressed="true"] {
 .student-workspace-shell[data-appearance="dark"] .student-context-source-list,
 .student-workspace-shell[data-appearance="dark"] .student-context-problem-card small,
 .student-workspace-shell[data-appearance="dark"] .student-context-problem-text.is-muted,
+.student-workspace-shell[data-appearance="dark"] .student-understanding-subtitle,
+.student-workspace-shell[data-appearance="dark"] .student-understanding-note,
+.student-workspace-shell[data-appearance="dark"] .student-understanding-reasons,
 .student-workspace-shell[data-appearance="dark"] .student-usage-costs,
 .student-workspace-shell[data-appearance="dark"] .student-feedback-message {
   color: var(--text-secondary);
