@@ -162,6 +162,10 @@ env:
     secret: DATABASE_URL
     availability:
       - RUNTIME
+  - variable: CLOUD_SQL_POSTGRES_SSL_MODE
+    value: disable
+    availability:
+      - RUNTIME
   - variable: CLOUD_SQL_POSTGRES_POOL_MAX
     value: "5"
     availability:
