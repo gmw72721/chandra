@@ -154,7 +154,7 @@ Both services log `event`, `route`, `method`, `status`, `latencyMs`, `requestId`
 Health endpoints:
 
 ```text
-GET /api/health      # Next.js runtime config, backend reachability, Firebase, OpenRouter, embeddings, Better Stack config
+GET /api/health      # Next.js runtime config, backend reachability, Postgres, PDF OCR tables, Firebase Auth/Admin, Storage, OpenRouter, embeddings, Better Stack config
 GET /health          # FastAPI liveness
 GET /health/deep     # FastAPI Firebase Admin, Firestore, OpenRouter, Gemini embeddings, Better Stack config
 ```
@@ -164,7 +164,8 @@ Recommended Better Stack uptime monitors:
 - Frontend HTTP monitor: `https://<frontend-domain>/api/health`, alert on non-2xx or JSON `status != "ok"`.
 - Backend HTTP monitor: `https://<backend-domain>/health`, alert on non-2xx.
 - Backend deep HTTP monitor: `https://<backend-domain>/health/deep`, run less frequently, for example every 5 minutes, and alert when any dependency is `down` or `missing_config`.
-- Firebase/Firestore: use `/health/deep` `firebaseAdmin` and `firestore` dependency statuses plus Google Cloud/Firebase service alerts for Firestore errors and quota.
+- Postgres/Cloud SQL: use `/api/health` `postgres` and `pdfOcrSearchTables` dependency statuses plus Cloud SQL alerts.
+- Firebase: use `/api/health` `firebaseAdmin` and `firebaseStorage`, `/health/deep` `firebaseAdmin`/`firestore`, and Google Cloud/Firebase service alerts.
 - OpenRouter: use `/health/deep` `openrouter` status and OpenRouter dashboard/API-key quota alerts.
 - Embeddings: use `/health/deep` `embeddings` status and Google/Gemini API quota/error alerts.
 

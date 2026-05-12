@@ -111,7 +111,8 @@ class OpenRouterClient:
                     headers=self._headers,
                     json=payload,
                 )
-                if response.status_code not in {429, 500, 502, 503, 504} or attempt >= self.max_retries:
+                status_code = getattr(response, "status_code", 200)
+                if status_code not in {429, 500, 502, 503, 504} or attempt >= self.max_retries:
                     return response
 
                 await asyncio.sleep(openrouter_retry_delay(response, attempt))

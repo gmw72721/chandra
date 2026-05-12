@@ -26,25 +26,16 @@ export async function POST(request: Request) {
 
     validateTutorKnowledgeFile(file);
     const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
-    const buffer = Buffer.from(await file.arrayBuffer());
 
     if (isPdf) {
-      const { PDFParse } = await import("pdf-parse");
-      const parser = new PDFParse({ data: buffer });
-
-      try {
-        const result = await parser.getText();
-        const text = result.text.trim();
-        assertTutorKnowledgeTextWithinLimit(text, "Extracted material text");
-        return NextResponse.json({
-          fileName: file.name,
-          text
-        });
-      } finally {
-        await parser.destroy();
-      }
+      return NextResponse.json({
+        extractionMode: "google-document-ai-on-save",
+        fileName: file.name,
+        text: ""
+      });
     }
 
+    const buffer = Buffer.from(await file.arrayBuffer());
     const text = buffer.toString("utf8").trim();
     assertTutorKnowledgeTextWithinLimit(text, "Extracted material text");
     return NextResponse.json({

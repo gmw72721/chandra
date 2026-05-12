@@ -3,6 +3,6 @@
   "dependencies": ["."],
   "env": ".env.local",
   "graphs": {
-    "pdf_rag": "agent.langgraph_app:graph"
+    "pdf_rag": "backend.agent.langgraph_app:graph"
   }
 }

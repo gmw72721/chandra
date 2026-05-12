@@ -1,22 +1,37 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import lru_cache
 import hashlib
 import json
 import logging
 import os
 import re
+import threading
+import time
 from typing import Any
 
 import httpx
 from langgraph.graph import END, START, StateGraph
 
-from backend.agent.openrouter_client import OpenRouterClient, encode_file_as_data_url
+from backend.agent.openrouter_client import OpenRouterClient
+from backend.agent.knowledge import (
+    build_llm_knowledge_context_package,
+    infer_pdf_page_used_as,
+    knowledge_items_from_state,
+    knowledge_ui_color_token,
+)
 from backend.agent.state import PdfRagState
-from backend.agent.tools import SEARCH_PDF_PAGES_TOOL, parse_search_pdf_pages_arguments, search_pdf_pages
-from backend.internal_next import internal_next_base_url
+from backend.agent.tools import (
+    ALLOWED_RETRIEVAL_REASONS,
+    SEARCH_PDF_PAGES_TOOL,
+    normalize_query_for_retrieval_reason,
+    normalize_retrieval_reason,
+    parse_search_pdf_pages_arguments,
+    search_pdf_pages,
+)
+from backend.internal_next import internal_next_base_url, reusable_async_client
 from backend.retrieval.pdf_page_assets import MAX_TOTAL_PAGES, fetch_pdf_page_assets_via_next
 from backend.retrieval.pdf_retriever import (
     PdfRetriever,
@@ -35,9 +50,14 @@ ROUTER_REASONING_EFFORT = "low"
 ANSWER_LEAK_GUARD_MAX_TOKENS = 180
 ANSWER_LEAK_GUARD_TEXT_LIMIT = 220
 ANSWER_LEAK_GUARD_PROBLEM_LIMIT = 360
-MAX_PARALLEL_ASSET_ENCODERS = 4
 _SHARED_CLIENT_GRAPH_CACHE: dict[int, Any] = {}
 _ACTIVE_PROBLEM_CONTEXT_CACHE: dict[str, dict[str, Any]] = {}
+_CHAT_RETRIEVAL_MEMORY_CACHE: dict[str, dict[str, Any]] = {}
+_AI_USAGE_ADJUSTMENT_CLIENT: httpx.AsyncClient | None = None
+_CONVERSATION_DOCUMENT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_CONVERSATION_DOCUMENT_LOCKS: dict[str, threading.Lock] = {}
+_CONVERSATION_DOCUMENT_CACHE_LOCK = threading.Lock()
+_CONVERSATION_DOCUMENT_CACHE_TTL_SECONDS = 5.0
 logger = logging.getLogger(__name__)
 ANSWER_LEAK_FALLBACK_RESPONSE = (
     "I can't give the full answer here, but I can help you take the next step. "
@@ -56,6 +76,102 @@ STRUCTURED_SECTION_ORDER = [
     ("checkWork", "Check your work"),
     ("nextStep", "Next step"),
 ]
+OPTIONAL_STRUCTURED_SECTION_LABELS = (
+    "hint",
+    "small hint",
+    "problem",
+    "why this works",
+    "explanation",
+    "formula",
+    "formulas",
+    "example",
+    "similar example",
+    "check your work",
+    "check work",
+    "next step",
+    "your next step",
+    "question",
+)
+STRUCTURED_LABEL_TO_KEY = {
+    "problem": "problem",
+    "hint": "hint",
+    "small hint": "hint",
+    "why this works": "explanation",
+    "explanation": "explanation",
+    "formula": "formula",
+    "formulas": "formula",
+    "example": "example",
+    "similar example": "example",
+    "check your work": "checkWork",
+    "check work": "checkWork",
+    "next step": "nextStep",
+    "your next step": "nextStep",
+    "question": "nextStep",
+}
+NORMALIZE_SEARCH_QUERY_RE = re.compile(r"[^a-z0-9]+")
+PAGE_LOCATOR_RE = re.compile(r"\b(?:page|pg\.?|p\.)\s*\d")
+REQUESTED_CONTEXT_MARKER_PATTERNS = (
+    re.compile(r"\b(?:section|sec\.?|sect\.?)\s+\d+(?:\.\d+)*[a-z]?\b"),
+    re.compile(r"\b(?:chapter|ch\.?)\s+\d+(?:\.\d+)*[a-z]?\b"),
+    re.compile(r"\bworksheet\s+\d+[a-z]?\b"),
+    re.compile(r"\bhomework\s+\d+[a-z]?\b"),
+    re.compile(r"\bassignment\s+\d+[a-z]?\b"),
+    re.compile(r"\bproblem\s+set\s+\d+[a-z]?\b"),
+    re.compile(r"\bquiz\s+\d+[a-z]?\b"),
+    re.compile(r"\bexam\s+\d+[a-z]?\b"),
+)
+PROBLEM_SOURCE_RE = re.compile(
+    r"\b(?:homework|worksheet|assignment|problem set|practice problems|practice problem|problem pdf|quiz|exam)\b"
+)
+PROBLEM_SOURCE_NUMBER_RE = re.compile(r"\b(?:problem|exercise|question)\s+\d{1,3}[a-z]?\b")
+METHOD_SOURCE_RE = re.compile(
+    r"\b(?:textbook|reading|readings|chapter|notes|lecture|worked example|example|definition|theorem|formula|method|rule)\b"
+)
+METHOD_SOURCE_CONTEXT_RE = re.compile(r"\b(?:textbook|reading|readings|notes|lecture)\b")
+PROBLEM_STATEMENT_ITEM_START_PATTERN = (
+    "assume|calculate|compute|consider|define|describe|determine|evaluate|explain|find|"
+    "for|given|if|let|prove|recall|show|solve|suppose|use|verify|what|when|where|"
+    "which|why|write"
+)
+CONCRETE_MATH_PROBLEM_PATTERNS = (
+    re.compile(r"\blim\s*\("),
+    re.compile(r"\blim\s*[a-z]\s*(?:->|→|\\to)"),
+    re.compile(r"\bint\s*\("),
+    re.compile(r"∫"),
+    re.compile(r"\bderivative\b"),
+    re.compile(r"\bdifferentiate\b"),
+    re.compile(r"\bintegral\b"),
+    re.compile(r"\bsolve\b"),
+    re.compile(r"\bf\([a-z0-9_+\-\s]+\)"),
+    re.compile(r"\b[a-z]\s*=\s*[-+*/^(). 0-9a-z]+"),
+)
+CONCRETE_MATH_OPERATOR_RE = re.compile(r"(?:->|→|=|\+|-|\*|/|\^|√|\\frac|\\sqrt)")
+SEARCH_REASON_EXACT_MARKERS = (
+    "task",
+    "problem",
+    "page",
+    "worksheet",
+    "assignment",
+    "prompt",
+    "section",
+    "chapter",
+    "exercise",
+    "quiz",
+    "exam",
+    "number",
+)
+SEARCH_REASON_METHOD_MARKERS = (
+    "method",
+    "formula",
+    "theorem",
+    "definition",
+    "rule",
+    "example",
+    "substitution",
+    "derivative",
+    "integral",
+    "solve",
+)
 
 
 def build_pdf_rag_graph(
@@ -70,51 +186,49 @@ def build_pdf_rag_graph(
     build_assets = page_asset_builder or fetch_pdf_page_assets_via_next
     search_retriever = retriever
 
-    async def openrouter_agent(state: PdfRagState) -> dict[str, Any]:
+    async def load_chat_retrieval_memory(state: PdfRagState) -> dict[str, Any]:
+        memory = await asyncio.to_thread(read_chat_retrieval_memory, snapshot_side_effect_value(state))
+        return {
+            "chat_retrieval_memory": memory,
+            "stage_history": append_stage(state, "load_chat_retrieval_memory"),
+        }
+
+    async def decide_retrieval_need(state: PdfRagState) -> dict[str, Any]:
+        heuristic = build_retrieval_decision(state)
         response = await client.chat(
-            model=ROUTER_MODEL,
-            messages=build_router_messages(state),
-            tools=[SEARCH_PDF_PAGES_TOOL],
-            tool_choice="auto",
+            model=state.get("model") or DEFAULT_OPENROUTER_MODEL,
+            messages=build_tutor_decision_messages(state, heuristic),
             temperature=state.get("temperature", 0.4),
-            max_tokens=state.get("max_tokens"),
+            max_tokens=min(int(state.get("max_tokens") or 700), 900),
             reasoning_effort=ROUTER_REASONING_EFFORT,
         )
-        tool_calls = new_search_tool_calls(
-            state,
-            [
-                tool_call
-                for tool_call in response.get("tool_calls", [])
-                if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-            ],
-            limit=remaining_search_call_count(state),
-        )
-        if (
-            not tool_calls
-            and not state.get("retrieved_pages")
-            and state.get("tool_call_count", 0) == 0
-        ):
-            forced_tool_call = forced_initial_search_tool_call(state)
-            tool_calls = [forced_tool_call] if forced_tool_call else []
-
+        decision = parse_tutor_decision_response(response, heuristic)
+        decision = enforce_initial_source_lookup_search(decision, state)
+        decision = enforce_referenced_problem_dependency_search(decision, state)
+        decision = suppress_repeated_failed_search_decision(decision, state)
+        answer = str(decision.get("student_response") or "").strip() if not decision.get("needs_search") else ""
         return {
-            "answer": "",
+            "answer": answer,
+            "failed_searches_skipped": decision.get("failed_searches_skipped") or [],
             "finish_reason": response.get("finish_reason") or "",
-            "stage_history": append_stage(state, "openrouter_agent"),
+            "retrieval_decision": decision,
+            "retrieval_reason": decision.get("retrieval_reason") or "",
+            "stage_history": append_stage(state, "decide_retrieval_need"),
+            "structured_output_override": decision.get("structuredOutput") if not decision.get("needs_search") else None,
             "token_usage": add_token_usage(state.get("token_usage"), response.get("usage")),
             "token_usage_by_call": append_model_call_usage(
                 state,
                 response.get("usage"),
-                stage="openrouter_agent",
-                purpose="router",
-                model=ROUTER_MODEL,
+                stage="decide_retrieval_need",
+                purpose="tutor_decision",
+                model=state.get("model") or DEFAULT_OPENROUTER_MODEL,
                 reasoning_effort=ROUTER_REASONING_EFFORT,
             ),
-            "tool_calls": tool_calls,
+            "tool_calls": retrieval_decision_tool_calls(decision),
         }
 
-    async def search_pdf_pages_node(state: PdfRagState) -> dict[str, Any]:
-        new_search_queries, new_pages, new_diagnostics = await execute_search_tool_calls(
+    async def search_ocr_metadata(state: PdfRagState) -> dict[str, Any]:
+        new_search_queries, new_pages, new_diagnostics, new_reasons = await execute_search_tool_calls(
             state,
             state.get("tool_calls", []),
             retriever=search_retriever,
@@ -129,20 +243,33 @@ def build_pdf_rag_graph(
             "tool_call_count": state.get("tool_call_count", 0) + len(new_search_queries),
             "retrieval_confidence": retrieval_confidence_from_pages(retrieved_pages, retrieval_diagnostics),
             "sources": sources_from_pages(retrieved_pages),
-            "stage_history": append_stage(state, "search_pdf_pages"),
+            "stage_history": append_stage(state, "search_ocr_metadata"),
             "search_queries": [*state.get("search_queries", []), *new_search_queries],
             "retrieval_diagnostics": retrieval_diagnostics,
+            "retrieval_reason_history": [
+                *state.get("retrieval_reason_history", []),
+                *new_reasons,
+            ],
             "tool_calls": [],
         }
 
-    async def fetch_or_render_pdf_pages_node(state: PdfRagState) -> dict[str, Any]:
-        page_assets = await build_assets(state.get("retrieved_pages", []), max_total_pages=MAX_TOTAL_PAGES)
+    async def prepare_metadata_context(state: PdfRagState) -> dict[str, Any]:
+        pages_for_context = page_context_records_for_state(state)
+        page_assets = (
+            normalize_metadata_page_assets(
+                await build_assets(pages_for_context, max_total_pages=MAX_TOTAL_PAGES),
+                pages_for_context,
+            )
+            if pages_for_context
+            else []
+        )
         return {
             "page_assets": page_assets,
-            "stage_history": append_stage(state, "fetch_or_render_pdf_pages"),
+            "selected_metadata_records": selected_metadata_records(page_assets),
+            "stage_history": append_stage(state, "prepare_metadata_context"),
         }
 
-    async def openrouter_answer_with_pages(state: PdfRagState) -> dict[str, Any]:
+    async def answer_with_policy(state: PdfRagState) -> dict[str, Any]:
         messages = await asyncio.to_thread(build_multimodal_final_messages, state)
         await maybe_adjust_ai_usage_reservation(state, messages)
         input_token_breakdown = build_input_token_breakdown(state, messages)
@@ -160,12 +287,12 @@ def build_pdf_rag_graph(
         return {
             "answer": answer,
             "finish_reason": response.get("finish_reason") or "",
-            "stage_history": append_stage(state, "openrouter_answer_with_pages"),
+            "stage_history": append_stage(state, "answer_with_policy"),
             "token_usage": add_token_usage(state.get("token_usage"), response.get("usage")),
             "token_usage_by_call": append_model_call_usage(
                 state,
                 response.get("usage"),
-                stage="openrouter_answer_with_pages",
+                stage="answer_with_policy",
                 purpose="final_answer",
                 model=final_model,
                 reasoning_effort=final_reasoning_effort,
@@ -174,30 +301,43 @@ def build_pdf_rag_graph(
             "tool_calls": [],
         }
 
+    async def save_chat_retrieval_memory_node(state: PdfRagState) -> dict[str, Any]:
+        next_memory = build_next_chat_retrieval_memory(state)
+        await asyncio.to_thread(save_chat_retrieval_memory, next_memory, snapshot_side_effect_value(state))
+        return {
+            "chat_retrieval_memory": next_memory,
+            "knowledge_items": next_memory.get("knowledge_items") or [],
+            "stage_history": append_stage(state, "save_chat_retrieval_memory"),
+        }
+
     graph = StateGraph(PdfRagState)
-    graph.add_node("openrouter_agent", openrouter_agent)
-    graph.add_node("search_pdf_pages", search_pdf_pages_node)
-    graph.add_node("fetch_or_render_pdf_pages", fetch_or_render_pdf_pages_node)
-    graph.add_node("openrouter_answer_with_pages", openrouter_answer_with_pages)
-    graph.add_edge(START, "openrouter_agent")
+    graph.add_node("load_chat_retrieval_memory", load_chat_retrieval_memory)
+    graph.add_node("decide_retrieval_need", decide_retrieval_need)
+    graph.add_node("search_ocr_metadata", search_ocr_metadata)
+    graph.add_node("prepare_metadata_context", prepare_metadata_context)
+    graph.add_node("answer_with_policy", answer_with_policy)
+    graph.add_node("save_chat_retrieval_memory", save_chat_retrieval_memory_node)
+    graph.add_edge(START, "load_chat_retrieval_memory")
+    graph.add_edge("load_chat_retrieval_memory", "decide_retrieval_need")
     graph.add_conditional_edges(
-        "openrouter_agent",
-        route_after_router,
+        "decide_retrieval_need",
+        route_after_retrieval_decision,
         {
-            "search_pdf_pages": "search_pdf_pages",
-            "openrouter_answer_with_pages": "openrouter_answer_with_pages",
+            "search_ocr_metadata": "search_ocr_metadata",
+            "prepare_metadata_context": "prepare_metadata_context",
         },
     )
-    graph.add_edge("search_pdf_pages", "fetch_or_render_pdf_pages")
-    graph.add_edge("fetch_or_render_pdf_pages", "openrouter_answer_with_pages")
+    graph.add_edge("search_ocr_metadata", "prepare_metadata_context")
     graph.add_conditional_edges(
-        "openrouter_answer_with_pages",
-        route_after_answer,
+        "prepare_metadata_context",
+        route_after_metadata_context,
         {
-            "search_pdf_pages": "search_pdf_pages",
-            END: END,
+            "answer_with_policy": "answer_with_policy",
+            "save_chat_retrieval_memory": "save_chat_retrieval_memory",
         },
     )
+    graph.add_edge("answer_with_policy", "save_chat_retrieval_memory")
+    graph.add_edge("save_chat_retrieval_memory", END)
     return graph.compile()
 
 
@@ -212,6 +352,1046 @@ def cached_pdf_rag_graph_for_shared_client(client: OpenRouterClient | Any):
         _SHARED_CLIENT_GRAPH_CACHE[cache_key] = cached_graph
 
     return cached_graph
+
+
+def build_retrieval_decision(state: PdfRagState) -> dict[str, Any]:
+    message = latest_student_message_content(state.get("messages", []))
+    memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
+    active_record = active_metadata_record_from_memory(memory)
+    query = focused_ocr_search_query(message, memory)
+    skipped_failed = []
+    normalized_query = normalize_search_query(query)
+    failed_queries = {
+        normalize_search_query(str(item.get("query") or ""))
+        for item in memory.get("failed_searches", [])
+        if isinstance(item, dict)
+    }
+
+    if normalized_query and normalized_query in failed_queries:
+        skipped_failed.append(query)
+        return retrieval_decision(
+            decision_source="chat_memory" if active_record else "student_message",
+            needs_search=False,
+            retrieval_reason="previous_search_failed",
+            query=query,
+            memory_used=bool(active_record),
+            active_record=active_record,
+            failed_searches_skipped=skipped_failed,
+            note="Skipped repeated failed OCR metadata search.",
+        )
+
+    if can_answer_from_chat_retrieval_memory(message, active_record):
+        return retrieval_decision(
+            decision_source="chat_memory",
+            needs_search=False,
+            retrieval_reason="",
+            query="",
+            memory_used=True,
+            active_record=active_record,
+        )
+
+    reason = retrieval_reason_for_message(message, memory)
+    top_k = 1 if reason in {"student_requested_problem", "student_changed_problem"} else MAX_RETRIEVED_WINDOWS
+    return retrieval_decision(
+        decision_source="search_required",
+        needs_search=True,
+        retrieval_reason=reason,
+        query=query,
+        top_k=top_k,
+        memory_used=False,
+        active_record=active_record,
+    )
+
+
+def retrieval_decision(
+    *,
+    decision_source: str,
+    needs_search: bool,
+    retrieval_reason: str,
+    query: str,
+    memory_used: bool,
+    active_record: dict[str, Any] | None,
+    top_k: int = 5,
+    failed_searches_skipped: list[str] | None = None,
+    note: str = "",
+) -> dict[str, Any]:
+    active_problem_numbers = active_record.get("problem_numbers") if active_record else []
+    return {
+        "active_material_id": active_record.get("doc_id") if active_record else None,
+        "active_page": active_record.get("printed_page_start") or active_record.get("page_start") if active_record else None,
+        "active_problem_numbers": active_problem_numbers or [],
+        "decision_source": decision_source,
+        "failed_searches_skipped": failed_searches_skipped or [],
+        "memory_used": memory_used,
+        "needs_search": needs_search,
+        "note": note,
+        "query": query,
+        "retrieval_reason": normalize_retrieval_reason(retrieval_reason, query=query) if retrieval_reason else "",
+        "top_k": max(1, min(int(top_k or 5), MAX_RETRIEVED_WINDOWS)),
+    }
+
+
+def retrieval_decision_tool_calls(decision: dict[str, Any]) -> list[dict[str, Any]]:
+    if not decision.get("needs_search"):
+        return []
+
+    searches = decision_searches(decision)
+
+    return [
+        {
+            "id": f"retrieval_decision_search_{index + 1}",
+            "type": "function",
+            "function": {
+                "name": "search_pdf_pages",
+                "arguments": json.dumps(search),
+            },
+        }
+        for index, search in enumerate(searches)
+    ]
+
+
+def decision_searches(decision: dict[str, Any]) -> list[dict[str, Any]]:
+    searches = decision.get("searches")
+    if isinstance(searches, list):
+        valid_searches = [
+            search for search in searches if isinstance(search, dict) and str(search.get("query") or "").strip()
+        ]
+        if valid_searches:
+            return valid_searches
+
+    query = str(decision.get("query") or decision.get("search_query") or "").strip()
+    if not query:
+        return []
+
+    retrieval_reason = normalize_retrieval_reason(
+        decision.get("retrieval_reason") or "student_requested_problem",
+        query=query,
+    )
+    return [
+        {
+            "query": normalize_query_for_retrieval_reason(query, retrieval_reason),
+            "retrieval_reason": retrieval_reason,
+            "top_k": max(1, min(int(decision.get("top_k") or 5), MAX_RETRIEVED_WINDOWS)),
+        }
+    ]
+
+
+def route_after_retrieval_decision(state: PdfRagState) -> str:
+    decision = state.get("retrieval_decision") or {}
+    if decision.get("needs_search") and state.get("tool_calls"):
+        return "search_ocr_metadata"
+    return "prepare_metadata_context"
+
+
+def route_after_metadata_context(state: PdfRagState) -> str:
+    decision = state.get("retrieval_decision") or {}
+    if (
+        str(state.get("answer") or "").strip()
+        and not decision.get("needs_search")
+        and not (decision.get("memory_used") and state.get("page_assets"))
+        and not state.get("student_attachment_files")
+    ):
+        return "save_chat_retrieval_memory"
+    return "answer_with_policy"
+
+
+def build_tutor_decision_messages(state: PdfRagState, heuristic: dict[str, Any]) -> list[dict[str, Any]]:
+    memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
+    active_metadata = active_metadata_record_from_memory(memory)
+    latest_message = latest_student_message_content(state.get("messages", []))
+    compact_history = compact_recent_chat_history(state.get("messages", []), limit=8)
+    payload = {
+        "active_metadata": active_metadata,
+        "answer_policy": state.get("answer_policy") or {},
+        "chat_history": compact_history,
+        "failed_searches": memory.get("failed_searches", [])[:8],
+        "heuristic": heuristic,
+        "latest_student_message": latest_message,
+        "source_usage": state.get("source_usage") or {},
+    }
+    system = (
+        "You are Chandra's tutor decision step. Make exactly one decision and return only JSON. "
+        "Use the student message, recent chat, active OCR metadata, failed searches, and teacher policy. "
+        "Treat the provided heuristic as the default plan; override it only when the payload gives stronger evidence. "
+        "If the active metadata is enough for a hint, clarification, answer-shopping refusal, or simple next nudge, answer now. "
+        "Search only when exact PostgreSQL OCR metadata is needed. Do not search just to give a basic hint. "
+        "For a bare number, problem/exercise/question locator, page locator, source title, or request to find/read/quote/show a source item, "
+        "set needs_search true unless active_metadata already contains the exact requested item. Do not answer with a request for the page image, "
+        "worksheet title, textbook title, or pasted text before searching available class OCR metadata. "
+        "For source-text lookup, search the exact task/page first and stop at lookup; do not request method/example pages unless the student asks for help solving. "
+        "Allowed retrieval_reason values are: student_requested_problem, needed_supporting_page, needed_example_page, "
+        "student_changed_problem, previous_search_failed. For requested problems, do not request examples. "
+        "Build searches from the student's exact words plus locator/source terms such as assignment, worksheet, problem, exercise, question, prompt, page, section, and title. "
+        "Use one search per distinct need, at most three total, and only include needs that would actually help this student: exact task/source lookup, method/concept support, and worked/similar example. "
+        "Run complementary needs together by returning searches as an array; do not create trivial variants of the same search. "
+        "For find-similar-example requests, set retrieval_reason to needed_example_page and build search_query from topic/method words, distinctive symbols, class source type, and section/chapter context rather than only the assigned problem number. "
+        "Use terms such as worked example, example, textbook reading, lecture notes, method, and the concept name; avoid problem/page locators like `problem 2.14` unless you are only identifying the surrounding section. "
+        "JSON shape: {\"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, "
+        "\"search_query\": string, \"searches\": [{\"query\": string, \"retrieval_reason\": string, \"top_k\": number}], \"help_level\": string, \"student_response\": string, \"memory_used\": boolean, "
+        "\"structuredOutput\": {\"sections\": object, \"sectionOrder\": array, \"metadata\": object}}. "
+        "Allowed section keys are answer, problem, hint, explanation, formula, example, checkWork, sourceNote, nextStep. "
+        "Use sections intelligently instead of following a fixed template: include only the sections that help this turn, choose "
+        "their order in sectionOrder, and put each idea in the section where it belongs. Decide the order by what the student "
+        "needs first: task text/context, then the direct answer, then supporting rule/concept/example/check, with nextStep last. "
+        "For substantive tutoring replies, usually use this shape: brief orientation, one targeted hint, one concrete next step, "
+        "and an optional source/context note only when class material was actually used. Orientation names the task type without "
+        "repeating the hint; hint gives one key idea tied to the student's task; nextStep asks for one small, checkable action. "
+        "Do not repeat the same advice across answer, hint, explanation, and nextStep. "
+        "For a bare stuck/start follow-up after the problem statement was already shown, keep structuredOutput short: at most one "
+        "brief answer sentence plus one conceptual hint, or one request for the student's attempted step. Do not include both hint "
+        "and nextStep unless nextStep only asks the student to show work. "
+        "Before using the problem section, classify the candidate text: use problem only for the exact academic exercise, question, "
+        "or task statement from the student, active metadata, or retrieved source. Never put `You said...`, lookup/checking status, "
+        "clarifying questions, requests for a page/title/textbook, source notes, offers, hints, or next steps in problem; put those "
+        "in answer or sourceNote, or leave structuredOutput empty if a plain response is enough. "
+        "When needs_search is true, do not ask the student to send, upload, type, paste, or share a page image, screenshot, "
+        "photo, textbook name, homework title, worksheet title, exact source, or problem text in student_response or structuredOutput; the search is already checking "
+        "available class OCR metadata. For requested problem/source lookups, if you include an interim student_response, use "
+        "a short search-status sentence such as `I'm checking the class materials for that problem.` and do not include a nextStep. Leave structuredOutput "
+        "empty unless it contains actual task text already provided by the student or active metadata. If the search is for a bare numbered problem, do not ask for the page/title/text while the lookup runs. "
+        "When needs_search is true, structuredOutput may still contain a useful immediate student-facing response from the "
+        "student message, active metadata, or chat history, such as the problem statement, a conceptual hint, a relevant formula, "
+        "or a clarification. Do not invent source facts before retrieval. Also say what you are checking next in a short "
+        "plain sentence in the answer or sourceNote section, while the search runs. Do not put retrieval status, page lookup, "
+        "or source lookup progress in problem or nextStep. "
+        "When needs_search is false, structuredOutput is the complete student-facing reply."
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": compact_json_dumps(payload)},
+    ]
+
+
+def parse_tutor_decision_response(response: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    content = str(response.get("content") or "").strip()
+    parsed = parse_json_object_from_text(content)
+
+    if not parsed:
+        tool_calls = [
+            tool_call
+            for tool_call in response.get("tool_calls", []) or []
+            if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
+        ]
+        if tool_calls:
+            searches = [
+                {
+                    "query": query,
+                    "retrieval_reason": reason,
+                    "top_k": top_k,
+                }
+                for query, top_k, reason in (
+                    parse_search_pdf_pages_arguments((tool_call.get("function") or {}).get("arguments"))
+                    for tool_call in tool_calls[:MAX_PARALLEL_SEARCHES]
+                )
+            ]
+            first_search = searches[0]
+            parsed = {
+                "can_answer_now": False,
+                "memory_used": False,
+                "needs_search": True,
+                "retrieval_reason": first_search["retrieval_reason"],
+                "search_query": first_search["query"],
+                "searches": searches,
+                "student_response": "",
+                "top_k": first_search["top_k"],
+            }
+        elif content:
+            parsed = {
+                "can_answer_now": True,
+                "memory_used": bool(fallback.get("memory_used")),
+                "needs_search": False,
+                "retrieval_reason": "",
+                "search_query": "",
+                "student_response": content,
+            }
+        else:
+            parsed = dict(fallback)
+
+    searches = normalize_decision_searches(parsed, fallback)
+    needs_search = bool(parsed.get("needs_search")) and bool(searches)
+    first_search = searches[0] if needs_search else {}
+    query = str(first_search.get("query") or "").strip()
+    retrieval_reason = str(first_search.get("retrieval_reason") or "") if needs_search else ""
+    decision_source = "search_required" if needs_search else ("chat_memory" if parsed.get("memory_used") else "student_message")
+    active_material_id = fallback.get("active_material_id")
+    active_page = fallback.get("active_page")
+    active_problem_numbers = fallback.get("active_problem_numbers") or []
+    top_k = int(first_search.get("top_k") or parsed.get("top_k") or fallback.get("top_k") or 5)
+
+    structured_output = normalize_backend_structured_output(parsed.get("structuredOutput") or parsed.get("structured_output"))
+    if needs_search:
+        structured_output = suppress_retrieval_status_next_step(structured_output)
+    student_response = str(parsed.get("student_response") or "").strip()
+    if structured_output and not student_response:
+        student_response = structured_output_to_text(structured_output)
+    if needs_search and asks_for_pasted_problem_or_source(student_response):
+        student_response = ""
+    if needs_search and not student_response:
+        student_response = fallback_quick_retrieval_response(retrieval_reason)
+
+    return {
+        **fallback,
+        "active_material_id": active_material_id,
+        "active_page": active_page,
+        "active_problem_numbers": active_problem_numbers,
+        "can_answer_now": bool(parsed.get("can_answer_now")) and not needs_search,
+        "decision_source": decision_source,
+        "failed_searches_skipped": parsed.get("failed_searches_skipped") or fallback.get("failed_searches_skipped") or [],
+        "help_level": str(parsed.get("help_level") or ""),
+        "memory_used": bool(parsed.get("memory_used") or fallback.get("memory_used")),
+        "needs_search": needs_search,
+        "query": query,
+        "retrieval_reason": retrieval_reason,
+        "search_query": query,
+        "searches": searches if needs_search else [],
+        "structuredOutput": structured_output,
+        "student_response": student_response,
+        "top_k": max(1, min(top_k, MAX_RETRIEVED_WINDOWS)),
+    }
+
+
+def normalize_decision_searches(parsed: dict[str, Any], fallback: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_searches = parsed.get("searches")
+    candidates: list[dict[str, Any]] = []
+
+    if isinstance(raw_searches, list):
+        for item in raw_searches:
+            if isinstance(item, str):
+                candidates.append({"query": item})
+            elif isinstance(item, dict):
+                candidates.append(item)
+
+    raw_search_queries = parsed.get("search_queries")
+    if isinstance(raw_search_queries, list):
+        for item in raw_search_queries:
+            if isinstance(item, str):
+                candidates.append({"query": item})
+            elif isinstance(item, dict):
+                candidates.append(item)
+
+    if not candidates:
+        query = str(parsed.get("search_query") or parsed.get("query") or fallback.get("query") or "").strip()
+        if query:
+            candidates.append(
+                {
+                    "query": query,
+                    "retrieval_reason": parsed.get("retrieval_reason") or fallback.get("retrieval_reason"),
+                    "top_k": parsed.get("top_k") or fallback.get("top_k"),
+                }
+            )
+
+    searches: list[dict[str, Any]] = []
+    seen_needs: set[str] = set()
+    seen_queries: set[str] = set()
+
+    for candidate in candidates:
+        query = str(candidate.get("query") or candidate.get("search_query") or "").strip()
+        if not query:
+            continue
+
+        retrieval_reason = normalize_retrieval_reason(
+            candidate.get("retrieval_reason") or parsed.get("retrieval_reason") or fallback.get("retrieval_reason"),
+            query=query,
+        )
+        query = normalize_query_for_retrieval_reason(query, retrieval_reason)
+        normalized_query = normalize_search_query(query)
+        need_key = search_need_key(retrieval_reason)
+
+        if not normalized_query or normalized_query in seen_queries or need_key in seen_needs:
+            continue
+
+        top_k = candidate.get("top_k") or parsed.get("top_k") or fallback.get("top_k")
+        parsed_top_k = int(top_k) if isinstance(top_k, int) and top_k > 0 else default_top_k_for_retrieval_reason(retrieval_reason)
+
+        searches.append(
+            {
+                "query": query,
+                "retrieval_reason": retrieval_reason,
+                "top_k": max(1, min(parsed_top_k, MAX_RETRIEVED_WINDOWS)),
+            }
+        )
+        seen_needs.add(need_key)
+        seen_queries.add(normalized_query)
+
+        if len(searches) >= MAX_PARALLEL_SEARCHES:
+            break
+
+    return searches
+
+
+def search_need_key(retrieval_reason: str) -> str:
+    if retrieval_reason in {"student_requested_problem", "student_changed_problem"}:
+        return "exact_task"
+    return retrieval_reason
+
+
+def default_top_k_for_retrieval_reason(retrieval_reason: str) -> int:
+    if retrieval_reason in {"student_requested_problem", "student_changed_problem"}:
+        return 1
+    return MAX_RETRIEVED_WINDOWS
+
+
+def fallback_quick_retrieval_response(retrieval_reason: str) -> str:
+    if retrieval_reason in {"student_requested_problem", "student_changed_problem"}:
+        return "I'm checking the class materials for that problem."
+
+    if retrieval_reason == "needed_example_page":
+        return "I'm looking for a relevant class example."
+
+    return "I'm checking the class materials for the relevant page."
+
+
+def normalize_backend_structured_output(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+
+    sections_value = value.get("sections")
+    if not isinstance(sections_value, dict):
+        sections_value = value
+
+    known = {name for name, _label in STRUCTURED_SECTION_ORDER}
+    sections: dict[str, str] = {}
+    for key in known:
+        text = coerce_structured_section_text(sections_value.get(key))
+        if text:
+            sections[key] = text
+
+    if not sections:
+        return None
+
+    repair_misplaced_problem_section(sections)
+    suppress_duplicated_structured_sections(sections)
+
+    raw_order = value.get("sectionOrder") or value.get("section_order") or sections_value.get("sectionOrder")
+    order = [str(item) for item in raw_order] if isinstance(raw_order, list) else []
+    section_order = normalized_structured_section_order(order, sections, include_answer_first=False)
+    metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    return {
+        "sections": sections,
+        **({"sectionOrder": section_order} if section_order else {}),
+        "metadata": {
+            "hintLevel": metadata.get("hintLevel") if metadata.get("hintLevel") in {"none", "small_hint", "guided_step", "worked_example", "refusal"} else "guided_step",
+            "sourceConfidence": metadata.get("sourceConfidence") if metadata.get("sourceConfidence") in {"high", "medium", "low"} else "low",
+            "studentActionNeeded": metadata.get("studentActionNeeded") if metadata.get("studentActionNeeded") in {"none", "show_attempt", "try_next_step", "answer_question", "review_source", "paste_problem", "ask_teacher"} else "try_next_step",
+            "mode": metadata.get("mode") if metadata.get("mode") in {"guided_problem_solving", "socratic", "check_work", "reading_helper", "exam_review", "source_lookup", "direct_answer_refusal", "clarification", "off_topic_redirect"} else "guided_problem_solving",
+        },
+    }
+
+
+def repair_misplaced_problem_section(sections: dict[str, str]) -> None:
+    problem = str(sections.get("problem") or "").strip()
+    if not problem or looks_like_academic_problem_section(problem):
+        return
+
+    answer = str(sections.get("answer") or "").strip()
+    if not answer:
+        sections["answer"] = problem
+    elif normalize_search_query(answer) != normalize_search_query(problem):
+        sections["answer"] = f"{answer}\n\n{problem}"
+
+    sections.pop("problem", None)
+
+
+def looks_like_academic_problem_section(text: str) -> bool:
+    normalized = normalize_search_query(text)
+    if not normalized:
+        return False
+
+    if looks_like_retrieval_status_text(text) or asks_for_pasted_problem_or_source(text):
+        return False
+
+    if re.search(
+        r"\b(?:you said|which problem|what problem|page or textbook|textbook name|class materials?|checking|looking|locating|searching)\b",
+        normalized,
+    ):
+        return False
+
+    task_pattern = problem_statement_item_start_pattern()
+    has_task_verb = bool(re.search(rf"\b(?:{task_pattern})\b", text, flags=re.IGNORECASE))
+    starts_with_task = bool(re.match(rf"\s*(?:{task_pattern})\b", text, flags=re.IGNORECASE))
+    has_problem_marker = bool(
+        re.search(r"\b(?:problem|exercise|question|ex\.?)\s*\d", text, flags=re.IGNORECASE)
+        or re.search(r"(?<![\d.])\d{1,3}\s*\.\s*\d{1,3}[a-z]?(?!\s*\.\s*\d)", text, flags=re.IGNORECASE)
+    )
+    has_math_signal = bool(re.search(r"(\\|=|<|>|\^|_|∫|√|\$|\bmatrix\b|\boperator\b|\bfunction\b)", text))
+    word_count = len(re.findall(r"[A-Za-z0-9]+", text))
+
+    return word_count >= 4 and has_task_verb and (has_problem_marker or has_math_signal or starts_with_task)
+
+
+def suppress_retrieval_status_next_step(structured_output: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not structured_output:
+        return structured_output
+
+    sections = structured_output.get("sections")
+    if not isinstance(sections, dict):
+        return structured_output
+
+    next_step = str(sections.get("nextStep") or "").strip()
+    if not next_step or not (looks_like_retrieval_status_text(next_step) or asks_for_pasted_problem_or_source(next_step)):
+        return structured_output
+
+    next_sections = dict(sections)
+    next_sections.pop("nextStep", None)
+    raw_order = structured_output.get("sectionOrder")
+    next_order = [key for key in raw_order if key != "nextStep"] if isinstance(raw_order, list) else []
+
+    return {
+        **structured_output,
+        "sections": next_sections,
+        **({"sectionOrder": next_order} if isinstance(raw_order, list) else {}),
+    }
+
+
+def suppress_duplicated_structured_sections(sections: dict[str, str]) -> None:
+    hint = str(sections.get("hint") or "").strip()
+    if hint and section_repeats_earlier_content(hint, [sections.get("answer"), sections.get("explanation")]):
+        sections.pop("hint", None)
+
+    next_step = str(sections.get("nextStep") or "").strip()
+    if not next_step:
+        return
+
+    if looks_like_retrieval_status_text(next_step) or section_repeats_earlier_content(
+        next_step,
+        [sections.get("answer"), sections.get("hint"), sections.get("explanation"), sections.get("checkWork")],
+    ):
+        sections.pop("nextStep", None)
+
+
+def section_repeats_earlier_content(section_content: str, previous_sections: list[str | None]) -> bool:
+    return any(
+        is_repeated_section_content(previous_content, section_content)
+        for previous_content in previous_sections
+        if previous_content
+    )
+
+
+def is_repeated_section_content(previous_content: str, section_content: str) -> bool:
+    normalized_previous = normalize_comparable_section_text(previous_content)
+    normalized_section = normalize_comparable_section_text(section_content)
+    if not normalized_section:
+        return False
+
+    return (
+        normalized_previous == normalized_section
+        or (
+            len(normalized_section) >= 24
+            and (normalized_previous.endswith(normalized_section) or normalized_section in normalized_previous)
+        )
+        or has_high_meaningful_token_overlap(normalized_previous, normalized_section)
+    )
+
+
+SECTION_TOKEN_STOP_WORDS = {
+    "about",
+    "again",
+    "because",
+    "before",
+    "could",
+    "first",
+    "from",
+    "have",
+    "into",
+    "just",
+    "next",
+    "that",
+    "their",
+    "then",
+    "there",
+    "this",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "would",
+    "your",
+}
+
+
+def has_high_meaningful_token_overlap(previous_content: str, section_content: str) -> bool:
+    if len(section_content) < 28:
+        return False
+
+    previous_tokens = set(meaningful_section_tokens(previous_content))
+    section_tokens = meaningful_section_tokens(section_content)
+    if len(section_tokens) < 3 or not previous_tokens:
+        return False
+
+    shared_count = sum(1 for token in section_tokens if token in previous_tokens)
+    return shared_count / len(section_tokens) >= 0.75
+
+
+def meaningful_section_tokens(value: str) -> list[str]:
+    return [
+        token
+        for token in re.findall(r"[a-z0-9]+", value.lower())
+        if len(token) > 2 and token not in SECTION_TOKEN_STOP_WORDS
+    ]
+
+
+def normalize_comparable_section_text(value: str) -> str:
+    text = re.sub(
+        r"^\s*(?:\*\*)?(?:answer|hint|source note|your next step|next step)(?:\*\*)?\s*:\s*",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return re.sub(r"[.!?]+$", "", text)
+
+
+def looks_like_retrieval_status_text(text: str) -> bool:
+    normalized = normalize_search_query(text)
+    return bool(
+        re.search(r"\b(?:checking|locating|looking|searching|finding)\b", normalized)
+        and re.search(r"\b(?:problem|exercise|question|page|source|textbook|homework|worksheet|class material|materials)\b", normalized)
+    ) or bool(re.search(r"\bplease wait\b.*\b(?:locate|search|find|checking)\b", normalized))
+
+
+def coerce_structured_section_text(value: Any) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        text = value.strip()
+        text_match = re.fullmatch(r"\{\s*['\"]text['\"]\s*:\s*(['\"])(.*?)\1\s*\}", text, flags=re.DOTALL)
+        return text_match.group(2).strip() if text_match else text
+
+    if isinstance(value, dict):
+        for key in ("text", "content", "value", "message"):
+            if key in value:
+                return coerce_structured_section_text(value.get(key))
+        return ""
+
+    return str(value).strip()
+
+
+def structured_output_to_text(structured_output: dict[str, Any]) -> str:
+    sections = structured_output.get("sections") if isinstance(structured_output.get("sections"), dict) else {}
+    order = structured_output.get("sectionOrder") if isinstance(structured_output.get("sectionOrder"), list) else []
+    seen: set[str] = set()
+    parts: list[str] = []
+    for key in normalized_structured_section_order([str(item) for item in order], sections, include_answer_first=True):
+        if key in seen:
+            continue
+        seen.add(key)
+        text = str(sections.get(key) or "").strip()
+        if text:
+            label = next((label for name, label in STRUCTURED_SECTION_ORDER if name == key), "")
+            parts.append(f"{label + ': ' if label else ''}{text}")
+    return "\n\n".join(parts).strip()
+
+
+def suppress_repeated_failed_search_decision(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
+    if not decision.get("needs_search"):
+        return decision
+
+    searches = decision_searches(decision)
+    if not searches:
+        return decision
+
+    memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
+    failed_queries = {
+        normalize_search_query(str(item.get("query") or ""))
+        for item in memory.get("failed_searches", [])
+        if isinstance(item, dict)
+    }
+    skipped_queries = [
+        str(search.get("query") or "").strip()
+        for search in searches
+        if normalize_search_query(str(search.get("query") or "")) in failed_queries
+    ]
+    remaining_searches = [
+        search
+        for search in searches
+        if normalize_search_query(str(search.get("query") or "")) not in failed_queries
+    ]
+
+    if not skipped_queries:
+        return decision
+
+    if remaining_searches:
+        first_search = remaining_searches[0]
+        return {
+            **decision,
+            "failed_searches_skipped": [*decision.get("failed_searches_skipped", []), *skipped_queries],
+            "query": first_search.get("query") or "",
+            "retrieval_reason": first_search.get("retrieval_reason") or "",
+            "search_query": first_search.get("query") or "",
+            "searches": remaining_searches,
+            "top_k": first_search.get("top_k") or MAX_RETRIEVED_WINDOWS,
+        }
+
+    return {
+        **decision,
+        "decision_source": "chat_memory",
+        "failed_searches_skipped": [*decision.get("failed_searches_skipped", []), *skipped_queries],
+        "memory_used": bool(active_metadata_record_from_memory(memory)),
+        "needs_search": False,
+        "query": "",
+        "retrieval_reason": "previous_search_failed",
+        "search_query": "",
+        "searches": [],
+        "student_response": (
+            str(decision.get("student_response") or "").strip()
+            or "I could not find that exact source in the class OCR metadata yet. Paste the text or share the exact worksheet/page, and I can help from there."
+        ),
+        "tool_calls": [],
+    }
+
+
+def enforce_referenced_problem_dependency_search(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
+    if decision.get("needs_search"):
+        return decision
+
+    source_usage = state.get("source_usage")
+    if isinstance(source_usage, dict) and source_usage.get("useClassMaterialsFirst") is False:
+        return decision
+
+    memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
+    active_record = active_metadata_record_from_memory(memory)
+    latest_message = latest_student_message_content(state.get("messages", []))
+    missing_numbers = referenced_problem_numbers_needed_for_followup(latest_message, active_record, memory)
+
+    if not missing_numbers:
+        return decision
+
+    query = referenced_problem_dependency_search_query(active_record, missing_numbers)
+    return {
+        **decision,
+        "can_answer_now": False,
+        "decision_source": "search_required",
+        "memory_used": True,
+        "needs_search": True,
+        "note": "Active problem references another exercise; fetching the referenced exercise before answering.",
+        "query": query,
+        "retrieval_reason": "needed_supporting_page",
+        "search_query": query,
+        "student_response": "I'm checking the referenced exercise in the class materials.",
+        "structuredOutput": None,
+        "top_k": min(MAX_RETRIEVED_WINDOWS, max(1, len(missing_numbers) + 1)),
+    }
+
+
+def referenced_problem_numbers_needed_for_followup(
+    message: str,
+    active_record: dict[str, Any] | None,
+    memory: dict[str, Any],
+) -> list[str]:
+    if not active_record:
+        return []
+
+    if not asks_for_help_with_active_problem(message):
+        return []
+
+    if student_changed_problem(message, active_record):
+        return []
+
+    active_numbers = {str(number).upper() for number in active_record.get("problem_numbers") or []}
+    if not active_numbers:
+        return []
+
+    active_text = str(active_record.get("ocr_text") or active_record.get("chunk_text") or "")
+    if not content_has_requested_problem_number(active_text, active_numbers):
+        return []
+
+    referenced_numbers = {
+        number.upper()
+        for number in problem_numbers_from_text(active_text)
+        if number.upper() not in active_numbers
+    }
+
+    missing_numbers = [
+        number
+        for number in sorted(referenced_numbers, key=problem_number_sort_key)
+        if not retrieval_memory_has_explicit_problem_number(memory, number)
+    ]
+    return missing_numbers
+
+
+def asks_for_help_with_active_problem(message: str) -> bool:
+    normalized = normalize_search_query(message)
+    if not normalized:
+        return False
+
+    return bool(
+        simple_hint_or_next_step_intent(message)
+        or re.search(
+            r"\b(?:this|that|it|same problem|work through|walk through|start|begin|explain|yes|yeah|yep|sure|please)\b",
+            normalized,
+        )
+    )
+
+
+def retrieval_memory_has_explicit_problem_number(memory: dict[str, Any], problem_number: str) -> bool:
+    target = problem_number.upper()
+    records = [
+        memory.get("active_metadata"),
+        *(memory.get("retrieved_metadata") or []),
+    ]
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        record_numbers = {str(number).upper() for number in record.get("problem_numbers") or []}
+        if target in record_numbers:
+            return True
+
+    return False
+
+
+def problem_number_sort_key(problem_number: str) -> tuple[int, ...]:
+    parts = re.findall(r"\d+", problem_number)
+    return tuple(int(part) for part in parts) or (0,)
+
+
+def referenced_problem_dependency_search_query(active_record: dict[str, Any] | None, problem_numbers: list[str]) -> str:
+    title = str((active_record or {}).get("title") or "").strip()
+    material_hint = f" {title}" if title else ""
+    number_text = " ".join(problem_numbers)
+    return f"find exact referenced exercise problem {number_text}{material_hint}".strip()
+
+
+def enforce_initial_source_lookup_search(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
+    if decision.get("needs_search"):
+        return decision
+
+    if state.get("tool_call_count", 0) != 0 or state.get("retrieved_pages") or state.get("page_assets"):
+        return decision
+
+    forced_tool_call = forced_initial_search_tool_call(state)
+    if not forced_tool_call:
+        return decision
+
+    try:
+        query, top_k, retrieval_reason = parse_search_pdf_pages_arguments(
+            (forced_tool_call.get("function") or {}).get("arguments")
+        )
+    except Exception:
+        return decision
+
+    student_response = str(decision.get("student_response") or "").strip()
+    if asks_for_pasted_problem_or_source(student_response):
+        student_response = ""
+
+    return {
+        **decision,
+        "can_answer_now": False,
+        "decision_source": "search_required",
+        "memory_used": False,
+        "needs_search": True,
+        "query": query,
+        "retrieval_reason": retrieval_reason,
+        "search_query": query,
+        "student_response": student_response or fallback_quick_retrieval_response(retrieval_reason),
+        "structuredOutput": None,
+        "top_k": top_k,
+    }
+
+
+def parse_json_object_from_text(text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+
+    candidate = text.strip()
+    if not candidate.startswith("{"):
+        match = re.search(r"\{[\s\S]*\}", candidate)
+        candidate = match.group(0) if match else candidate
+
+    try:
+        value = json.loads(candidate)
+        return value if isinstance(value, dict) else None
+    except Exception:
+        return None
+
+
+def compact_recent_chat_history(messages: list[dict[str, Any]], *, limit: int) -> list[dict[str, str]]:
+    compacted: list[dict[str, str]] = []
+    for message in messages[-limit:]:
+        role = str(message.get("role") or "")
+        if role == "system":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = " ".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+        else:
+            text = ""
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > 700:
+            text = text[:700].rsplit(" ", 1)[0].strip()
+        compacted.append({"role": role, "content": text})
+    return compacted
+
+
+def can_answer_from_student_message(message: str) -> bool:
+    normalized = normalize_search_query(message)
+    if not normalized:
+        return True
+
+    if re.fullmatch(r"(hi|hello|hey|thanks|thank you|ok|okay|cool|got it|yes|no|yep|nope)[!. ]*", message.strip(), re.I):
+        return True
+
+    if answer_shopping_intent(message):
+        return True
+
+    if simple_hint_or_next_step_intent(message) and not explicit_source_lookup_intent(message):
+        return True
+
+    if not source_material_signal(message) and not looks_like_concrete_math_problem(message):
+        return True
+
+    return False
+
+
+def can_answer_from_chat_retrieval_memory(message: str, active_record: dict[str, Any] | None) -> bool:
+    if not active_record:
+        return False
+
+    if student_changed_problem(message, active_record):
+        return False
+
+    if explicit_source_lookup_intent(message) and problem_numbers_from_text(message):
+        return active_record_matches_message(active_record, message)
+
+    if simple_hint_or_next_step_intent(message) or answer_shopping_intent(message):
+        return True
+
+    if re.search(r"\b(?:this|that|it|same problem|the problem|where was it|what page)\b", message, re.I):
+        return True
+
+    return False
+
+
+def retrieval_reason_for_message(message: str, memory: dict[str, Any]) -> str:
+    active_record = active_metadata_record_from_memory(memory)
+
+    if active_record and student_changed_problem(message, active_record):
+        return "student_changed_problem"
+
+    normalized = normalize_search_query(message)
+    if re.search(r"\b(?:example|worked example|similar problem)\b", normalized):
+        return "needed_example_page"
+
+    if active_record and re.search(r"\b(?:why|explain|method|formula|theorem|reading|textbook|notes)\b", normalized):
+        return "needed_supporting_page"
+
+    if (
+        problem_numbers_from_text(message)
+        or explicit_page_numbers_from_text(message)
+        or explicit_source_lookup_intent(message)
+        or looks_like_numbered_task_locator(message)
+    ):
+        return "student_requested_problem"
+
+    return "needed_supporting_page"
+
+
+def focused_ocr_search_query(message: str, memory: dict[str, Any]) -> str:
+    compact_message = re.sub(r"\s+", " ", message).strip()
+    if len(compact_message) > 260:
+        compact_message = compact_message[:260].rsplit(" ", 1)[0].strip()
+
+    active_record = active_metadata_record_from_memory(memory)
+    title = str((active_record or {}).get("title") or "").strip()
+    reason = retrieval_reason_for_message(message, memory)
+
+    if reason == "student_requested_problem" or reason == "student_changed_problem":
+        return f"find exact problem page OCR metadata {compact_message}".strip()
+
+    if reason == "needed_example_page":
+        return f"worked example textbook reading notes method OCR metadata {title} {compact_message}".strip()
+
+    return f"textbook reading notes method OCR metadata {title} {compact_message}".strip()
+
+
+def explicit_source_lookup_intent(message: str) -> bool:
+    normalized = normalize_search_query(message)
+    return bool(
+        re.search(
+            r"\b(?:find|where|locate|which page|what page|pull up|quote|read|show me|problem|exercise|question|worksheet|assignment|pdf|page)\b",
+            normalized,
+        )
+    )
+
+
+def source_material_signal(message: str) -> bool:
+    normalized = normalize_search_query(message)
+    return bool(
+        re.search(
+            r"\b(?:pdf|worksheet|assignment|homework|problem set|textbook|reading|notes|page|problem|exercise|question|example|class material|source)\b",
+            normalized,
+        )
+    )
+
+
+def simple_hint_or_next_step_intent(message: str) -> bool:
+    normalized = normalize_search_query(message)
+    return bool(re.search(r"\b(?:hint|nudge|stuck|help|next|what now|what should i try|how do i start)\b", normalized))
+
+
+def answer_shopping_intent(message: str) -> bool:
+    return bool(re.search(r"\b(?:just give|give me the answer|final answer|what is the answer|solve it for me)\b", message, re.I))
+
+
+def student_changed_problem(message: str, active_record: dict[str, Any]) -> bool:
+    message_problem_numbers = problem_numbers_from_text(message)
+    if not message_problem_numbers:
+        return False
+
+    active_problem_numbers = {str(number).upper() for number in active_record.get("problem_numbers") or []}
+    if not active_problem_numbers:
+        return False
+
+    return not {number.upper() for number in message_problem_numbers}.intersection(active_problem_numbers)
+
+
+def active_record_matches_message(active_record: dict[str, Any], message: str) -> bool:
+    message_problem_numbers = {number.upper() for number in problem_numbers_from_text(message)}
+    if message_problem_numbers:
+        active_problem_numbers = {str(number).upper() for number in active_record.get("problem_numbers") or []}
+        return bool(message_problem_numbers.intersection(active_problem_numbers))
+
+    message_pages = explicit_page_numbers_from_text(message)
+    if message_pages:
+        page_start = int(active_record.get("printed_page_start") or active_record.get("page_start") or 0)
+        page_end = int(active_record.get("printed_page_end") or active_record.get("page_end") or page_start)
+        return any(page_start <= page <= page_end for page in message_pages)
+
+    return True
+
+
+def active_metadata_record_from_memory(memory: dict[str, Any]) -> dict[str, Any] | None:
+    active = memory.get("active_metadata")
+    if isinstance(active, dict) and (active.get("ocr_text") or active.get("chunk_text")):
+        return dict(active)
+
+    records = memory.get("retrieved_metadata")
+    if isinstance(records, list):
+        for record in records:
+            if isinstance(record, dict) and (record.get("ocr_text") or record.get("chunk_text")):
+                return dict(record)
+
+    return None
+
+
+def normalize_chat_retrieval_memory(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "active_metadata": source.get("active_metadata") if isinstance(source.get("active_metadata"), dict) else None,
+        "active_pdf_material": source.get("active_pdf_material") if isinstance(source.get("active_pdf_material"), dict) else None,
+        "active_problem": source.get("active_problem") if isinstance(source.get("active_problem"), dict) else None,
+        "active_page": source.get("active_page") if isinstance(source.get("active_page"), dict) else None,
+        "active_page_asset": source.get("active_page_asset") if isinstance(source.get("active_page_asset"), dict) else None,
+        "failed_searches": source.get("failed_searches") if isinstance(source.get("failed_searches"), list) else [],
+        "knowledge_items": source.get("knowledge_items") if isinstance(source.get("knowledge_items"), list) else [],
+        "reason_history": source.get("reason_history") if isinstance(source.get("reason_history"), list) else [],
+        "retrieved_metadata": source.get("retrieved_metadata") if isinstance(source.get("retrieved_metadata"), list) else [],
+        "updated_at": source.get("updated_at"),
+    }
 
 
 def new_search_tool_calls(
@@ -247,7 +1427,7 @@ async def execute_search_tool_calls(
     retriever: PdfRetriever | None,
     class_id: str | None,
     professor_id: str | None,
-) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     parsed_searches = parse_search_tool_call_batch(state, tool_calls)
     return await execute_parsed_searches(
         parsed_searches,
@@ -261,25 +1441,26 @@ async def execute_search_tool_calls(
 def parse_search_tool_call_batch(
     state: PdfRagState,
     tool_calls: list[dict[str, Any]],
-) -> list[tuple[str, int]]:
+) -> list[tuple[str, int, str]]:
     remaining_calls = remaining_search_call_count(state)
+    filtered_tool_calls = new_search_tool_calls(state, tool_calls, limit=remaining_calls)
     return [
         parse_search_pdf_pages_arguments((tool_call.get("function") or {}).get("arguments"))
-        for tool_call in tool_calls[:remaining_calls]
+        for tool_call in filtered_tool_calls
     ]
 
 
 async def execute_parsed_searches(
-    parsed_searches: list[tuple[str, int]],
+    parsed_searches: list[tuple[str, int, str]],
     *,
     state: PdfRagState | None = None,
     retriever: PdfRetriever | None,
     class_id: str | None,
     professor_id: str | None,
-) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
 
     if not parsed_searches:
-        return [], [], []
+        return [], [], [], []
 
     results = await asyncio.gather(
         *[
@@ -289,17 +1470,27 @@ async def execute_parsed_searches(
                 retriever=retriever,
                 class_id=class_id,
                 professor_id=professor_id,
+                retrieval_reason=retrieval_reason,
             )
-            for query, top_k in parsed_searches
+            for query, top_k, retrieval_reason in parsed_searches
         ]
     )
     pages = [page for search_result in results for page in search_result]
     diagnostics = search_result_diagnostics(parsed_searches, results, state=state)
-    return [query for query, _top_k in parsed_searches], pages, diagnostics
+    reason_history = [
+        {
+            "query": query,
+            "retrieval_reason": retrieval_reason,
+            "result_count": len(search_result),
+            "timestamp": utc_timestamp(),
+        }
+        for (query, _top_k, retrieval_reason), search_result in zip(parsed_searches, results)
+    ]
+    return [query for query, _top_k, _reason in parsed_searches], pages, diagnostics, reason_history
 
 
 def search_result_diagnostics(
-    parsed_searches: list[tuple[str, int]],
+    parsed_searches: list[tuple[str, int, str]],
     result_batches: list[list[dict[str, Any]]],
     *,
     state: PdfRagState | None = None,
@@ -307,7 +1498,7 @@ def search_result_diagnostics(
     latest_message = latest_student_message_content(state.get("messages", [])) if state else ""
     diagnostics: list[dict[str, Any]] = []
 
-    for (query, _top_k), pages in zip(parsed_searches, result_batches):
+    for (query, _top_k, _retrieval_reason), pages in zip(parsed_searches, result_batches):
         diagnostic = diagnose_search_result(query, pages, latest_message)
 
         if diagnostic:
@@ -343,8 +1534,9 @@ def diagnose_search_result(
             suggested_next_query(query, latest_student_message, "wrong section/title", context_markers),
         )
 
-    has_problem_page = any(page_looks_like_problem_source(page) for page in pages)
-    has_method_page = any(page_looks_like_method_source(page) for page in pages)
+    page_texts = [page_diagnostic_text(page) for page in pages]
+    has_problem_page = any(diagnostic_text_looks_like_problem_source(text) for text in page_texts)
+    has_method_page = any(diagnostic_text_looks_like_method_source(text) for text in page_texts)
 
     if query_has_method_intent(query) and has_problem_page and not has_method_page:
         return retrieval_diagnostic(
@@ -403,28 +1595,22 @@ def query_has_exact_problem_intent(query: str) -> bool:
 
 
 def page_looks_like_problem_source(page: dict[str, Any]) -> bool:
-    text = page_diagnostic_text(page)
-    return bool(
-        re.search(
-            r"\b(?:homework|worksheet|assignment|problem set|practice problems|practice problem|problem pdf|quiz|exam)\b",
-            text,
-        )
-        or re.search(r"\b(?:problem|exercise|question)\s+\d{1,3}[a-z]?\b", text)
-    )
+    return diagnostic_text_looks_like_problem_source(page_diagnostic_text(page))
 
 
 def page_looks_like_method_source(page: dict[str, Any]) -> bool:
-    text = page_diagnostic_text(page)
+    return diagnostic_text_looks_like_method_source(page_diagnostic_text(page))
 
-    if page_looks_like_problem_source(page) and not re.search(r"\b(?:textbook|reading|readings|notes|lecture)\b", text):
+
+def diagnostic_text_looks_like_problem_source(text: str) -> bool:
+    return bool(PROBLEM_SOURCE_RE.search(text) or PROBLEM_SOURCE_NUMBER_RE.search(text))
+
+
+def diagnostic_text_looks_like_method_source(text: str) -> bool:
+    if diagnostic_text_looks_like_problem_source(text) and not METHOD_SOURCE_CONTEXT_RE.search(text):
         return False
 
-    return bool(
-        re.search(
-            r"\b(?:textbook|reading|readings|chapter|notes|lecture|worked example|example|definition|theorem|formula|method|rule)\b",
-            text,
-        )
-    )
+    return bool(METHOD_SOURCE_RE.search(text))
 
 
 def pages_include_exact_problem_match(query: str, pages: list[dict[str, Any]]) -> bool:
@@ -453,28 +1639,18 @@ def pages_include_exact_problem_match(query: str, pages: list[dict[str, Any]]) -
 
 
 def explicit_page_numbers_from_text(text: str) -> set[int]:
-    if not re.search(r"\b(?:page|pg\.?|p\.)\s*\d", text.lower()):
+    if not PAGE_LOCATOR_RE.search(text.lower()):
         return set()
 
     return page_numbers_from_text(text)
 
 
 def requested_context_markers(query: str) -> list[str]:
-    patterns = [
-        r"\b(?:section|sec\.?|sect\.?)\s+\d+(?:\.\d+)*[a-z]?\b",
-        r"\b(?:chapter|ch\.?)\s+\d+(?:\.\d+)*[a-z]?\b",
-        r"\bworksheet\s+\d+[a-z]?\b",
-        r"\bhomework\s+\d+[a-z]?\b",
-        r"\bassignment\s+\d+[a-z]?\b",
-        r"\bproblem\s+set\s+\d+[a-z]?\b",
-        r"\bquiz\s+\d+[a-z]?\b",
-        r"\bexam\s+\d+[a-z]?\b",
-    ]
     lowered_query = query.lower()
     markers: list[str] = []
 
-    for pattern in patterns:
-        markers.extend(match.group(0) for match in re.finditer(pattern, lowered_query))
+    for pattern in REQUESTED_CONTEXT_MARKER_PATTERNS:
+        markers.extend(match.group(0) for match in pattern.finditer(lowered_query))
 
     return markers
 
@@ -574,6 +1750,8 @@ def page_raw_diagnostic_text(page: dict[str, Any]) -> str:
             "section",
             "chunk_text",
             "chunkText",
+            "ocr_text",
+            "ocrText",
             "content",
         )
     )
@@ -595,7 +1773,7 @@ def search_reason_from_tool_call(tool_call: dict[str, Any]) -> str:
         raw_arguments = (tool_call.get("function") or {}).get("arguments")
         parsed = raw_arguments if isinstance(raw_arguments, dict) else json.loads(raw_arguments or "{}")
         query = str(parsed.get("query") or "")
-        reason = str(parsed.get("student_reason") or parsed.get("reason") or "")
+        reason = str(parsed.get("retrieval_reason") or parsed.get("reason") or "")
         return five_word_search_reason(reason, query)
     except Exception:
         return five_word_search_reason("", search_query_from_tool_call(tool_call))
@@ -608,24 +1786,11 @@ def five_word_search_reason(reason: str, query: str) -> str:
         return " ".join(words)
 
     normalized_query = query.lower()
-    exact_markers = ["task", "problem", "page", "worksheet", "assignment", "prompt", "section", "chapter", "exercise", "quiz", "exam", "number"]
-    method_markers = [
-        "method",
-        "formula",
-        "theorem",
-        "definition",
-        "rule",
-        "example",
-        "substitution",
-        "derivative",
-        "integral",
-        "solve",
-    ]
 
-    if any(marker in normalized_query for marker in exact_markers):
+    if any(marker in normalized_query for marker in SEARCH_REASON_EXACT_MARKERS):
         return "Checking exact task and page"
 
-    if any(marker in normalized_query for marker in method_markers):
+    if any(marker in normalized_query for marker in SEARCH_REASON_METHOD_MARKERS):
         return "Finding method and example pages"
 
     return "Searching class PDFs for support"
@@ -633,28 +1798,15 @@ def five_word_search_reason(reason: str, query: str) -> str:
 
 def search_query_from_tool_call(tool_call: dict[str, Any]) -> str:
     try:
-        query, _top_k = parse_search_pdf_pages_arguments((tool_call.get("function") or {}).get("arguments"))
+        query, _top_k, _retrieval_reason = parse_search_pdf_pages_arguments((tool_call.get("function") or {}).get("arguments"))
         return query
     except Exception:
         return ""
 
 
+@lru_cache(maxsize=4096)
 def normalize_search_query(query: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", query.lower()).split())
-
-
-def route_after_router(state: PdfRagState) -> str:
-    if state.get("tool_calls") and state.get("tool_call_count", 0) < MAX_TOOL_CALLS:
-        return "search_pdf_pages"
-
-    return "openrouter_answer_with_pages"
-
-
-def route_after_answer(state: PdfRagState) -> str:
-    if state.get("tool_calls") and state.get("tool_call_count", 0) < MAX_TOOL_CALLS:
-        return "search_pdf_pages"
-
-    return END
+    return " ".join(NORMALIZE_SEARCH_QUERY_RE.sub(" ", query.lower()).split())
 
 
 def build_router_messages(state: PdfRagState) -> list[dict[str, Any]]:
@@ -673,8 +1825,10 @@ def build_router_messages(state: PdfRagState) -> list[dict[str, Any]]:
                 "exercise, or question numbers; bare numbered references like `problem 2.14`; pasted concrete tasks "
                 "when a source match may matter; and follow-ups to prior source-backed answers.\n\n"
                 "Answer directly only for greetings, simple self-contained questions, and clearly course-related "
-                "questions that do not need PDF context. If unsure whether a class PDF could materially help, call "
-                "search_pdf_pages with a focused query and exactly five words in student_reason."
+                "questions that do not need PDF context. If unsure whether class PDF OCR metadata could materially help, call "
+                "search_pdf_pages with a focused query and retrieval_reason. For find-similar-example requests, use "
+                "retrieval_reason needed_example_page and search topic/method/example terms instead of only the assigned "
+                "problem number."
             ),
         }
     ]
@@ -784,20 +1938,8 @@ def latest_student_message_content(messages: list[dict[str, Any]]) -> str:
 
 def looks_like_concrete_math_problem(message: str) -> bool:
     normalized = message.lower()
-    math_markers = [
-        r"\blim\s*\(",
-        r"\blim\s*[a-z]\s*(?:->|→|\\to)",
-        r"\bint\s*\(",
-        r"∫",
-        r"\bderivative\b",
-        r"\bdifferentiate\b",
-        r"\bintegral\b",
-        r"\bsolve\b",
-        r"\bf\([a-z0-9_+\-\s]+\)",
-        r"\b[a-z]\s*=\s*[-+*/^(). 0-9a-z]+",
-    ]
-    has_math_marker = any(re.search(pattern, normalized) for pattern in math_markers)
-    has_operator = bool(re.search(r"(?:->|→|=|\+|-|\*|/|\^|√|\\frac|\\sqrt)", message))
+    has_math_marker = any(pattern.search(normalized) for pattern in CONCRETE_MATH_PROBLEM_PATTERNS)
+    has_operator = bool(CONCRETE_MATH_OPERATOR_RE.search(message))
     has_number = bool(re.search(r"\d", message))
 
     return has_number and (has_math_marker or has_operator)
@@ -805,9 +1947,12 @@ def looks_like_concrete_math_problem(message: str) -> bool:
 
 def looks_like_numbered_task_locator(message: str) -> bool:
     normalized = normalize_search_query(message)
+    stripped = message.strip()
 
     return bool(
         problem_numbers_from_text(message)
+        or re.fullmatch(r"\d{1,3}\s*\.\s*\d{1,3}[a-z]?", stripped, flags=re.IGNORECASE)
+        or re.fullmatch(r"\d{1,3}\s+\d{1,3}[a-z]?", normalized)
         or re.search(r"\b(?:problem|exercise|question|number|no)\s+\d{1,3}", normalized)
     )
 
@@ -822,7 +1967,8 @@ def forced_exact_problem_search_tool_call(state: PdfRagState) -> dict[str, Any]:
             "arguments": json.dumps(
                 {
                     "query": query,
-                    "student_reason": "Checking exact task and page",
+                    "retrieval_reason": "student_requested_problem",
+                    "top_k": 1,
                 }
             ),
         },
@@ -850,7 +1996,8 @@ def forced_textbook_section_search_tool_call(state: PdfRagState) -> dict[str, An
             "arguments": json.dumps(
                 {
                     "query": query,
-                    "student_reason": "Finding textbook section reading pages",
+                    "retrieval_reason": "needed_supporting_page",
+                    "top_k": MAX_RETRIEVED_WINDOWS,
                 }
             ),
         },
@@ -866,70 +2013,93 @@ def forced_textbook_section_search_query(message: str) -> str:
 
 
 def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
-    """Build the multimodal answer/search-again call with only selected page assets."""
+    """Build the final answer call with selected page assets and OCR metadata."""
 
-    base_messages = list(state["messages"])
+    base_messages = state["messages"]
     answer_policy = normalize_answer_policy_state(state.get("answer_policy"))
     source_usage = normalize_source_usage_state(state.get("source_usage"))
     selected_context = compact_selected_page_context(state)
+    knowledge_context = build_llm_knowledge_context_package(state)
     has_selected_pages = bool(state.get("page_assets") or state.get("retrieved_pages"))
+    has_student_attachment_files = bool(state.get("student_attachment_files"))
+    decision = state.get("retrieval_decision") or {}
     instruction_lines = [
         (
-            "Use only the selected PDF pages below."
-            if has_selected_pages
-            else "No PDF pages were selected. Answer directly only for greetings or simple self-contained course questions; otherwise call search_pdf_pages with a sharper query."
+            "Use the clean Knowledge context package, selected OCR metadata, and any selected PDF file parts attached to this call. The PDFs are relevant source files for the selected Knowledge items, not permission to use unrelated course material."
+            if has_selected_pages or has_student_attachment_files
+            else "No page asset or OCR metadata was selected. Answer directly only for greetings, simple hints, clarification, or self-contained course questions."
         ),
         (
             "Give a source-backed reply with enough detail for the requested response length."
-            if has_selected_pages
+            if has_selected_pages or has_student_attachment_files
             else "If you answer directly, keep it concise and course-focused."
         ),
+        "Student-uploaded files may be attached as file parts and represented as Knowledge items with extracted OCR text or summaries. Treat them as the student's attempt only when their usedAs label is student_attempt.",
+        f"Retrieval decision trace for internal use only: {compact_json_dumps(decision)}",
+        "Knowledge source-use contract: each Knowledge item separates what the source is (`kind`) from how Chandra used it (`usedAs`). Use `usedAs`, not file type alone, to decide whether it is the active problem, problem source, supporting context, theorem/definition/example reference, or student attempt.",
+        "Source lookup contract: when the latest student message is only a problem/exercise/question/page number or asks to find, read, quote, show, identify, locate, or restate a source item, your job is extraction, not tutoring. First locate the exact visible item in the selected page asset or OCR metadata, then return that item without solving it.",
+        "When selected page assets or OCR metadata are present, never ask the student for a page image, textbook title, homework title, or pasted problem before using those selected records. Ask for more source detail only after you have checked the selected records and they do not contain the requested item.",
+        "Problem extraction procedure: match requested printed page, PDF page, problem number, exercise number, question number, or exact quoted words; copy the visible block beginning at that marker; stop before the next same-level numbered item, heading, or unrelated problem. Prefer the attached page/PDF if it conflicts with OCR; use OCR only when the visible asset is unreadable.",
+        "For exact problem/exercise/question/prompt lookup, put only the extracted task statement in `Problem:` and leave hints, attempts, method steps, offers, and nextStep empty unless the student separately asks for solving help.",
         "Specific problem/page/passage wording requests are source lookup: quote the visible text exactly when allowed, without solving it or asking for an attempt first.",
-        "Selected pages can orient you, but they do not override attempt-first rules.",
+        "Selected OCR metadata and attached selected PDFs are the source of truth for this call. Do not request or infer raw storage paths, chunk IDs, or Firebase/GCS locations.",
+        "If the student supplied only a problem/page/item number and selected page assets or OCR metadata are present, use those selected class records first; do not ask for the page image, textbook title, or homework title before using the selected metadata.",
+        "If the student is following up after a problem statement was already shown and asks for help, a hint, or what to try, do not restate the problem statement or include a `Problem:` section again.",
         "If the student wants help on an exact graded-looking task and has not shown work, ask what they tried or where they are stuck.",
+        "For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short: at most one brief orientation sentence plus one conceptual hint or one request for the student's attempted step.",
         "Before an attempt, do not provide task-specific next steps, intermediate values, thesis claims, code, solution structure, or submission-ready wording unless the student explicitly wants concept explanation or source lookup.",
+        "For first help on an exact task with no shown attempt, keep the hint conceptual: ask about the relevant objects, definitions, constraints, evidence, or relationship to compare. Do not name the specific method, structure, or first executable move.",
         "Follow-ups like `I still need help`, `yes`, `tell me more`, or `explain like I am 5` are not attempts. Keep the help conceptual or use a clearly different similar example.",
         "Do not give a full solution, final answer, or a chain of multiple intermediate steps for the student's exact task before they show work.",
-        "If selected pages are insufficient or mismatched, call search_pdf_pages again with a genuinely new, sharper query. You may make up to 3 calls total, and every call must include student_reason with exactly five words.",
+        "This final answer call cannot search again. If selected page assets and OCR metadata are insufficient or mismatched, say what exact source, page, problem, or pasted text is needed.",
         "For ambiguous numbered locators, preserve plausible page, section, and problem interpretations in separate focused searches.",
-        "For textbook section or chapter requests, make sure the pages match the requested reading marker, not just a worksheet with the same number. If mismatched, search again with `textbook reading`, the exact marker, and topic words.",
+        "For textbook section or chapter requests, make sure the selected OCR metadata matches the requested reading marker, not just a worksheet with the same number.",
         "If the student explicitly asks where, which page, find, identify, or locate a task, question, exercise, or problem, answer with the assignment or source location only.",
         f"{final_direct_answer_instruction(answer_policy)}",
-        "For solving-help questions, location-only pages are not enough. Before helping with the next move, make sure the pages include textbook, reading, notes, or worked-example support for the method.",
-        "For conceptual method questions, teach the pattern using selected textbook, reading, and example pages in the class wording.",
+        "For solving-help questions, location-only OCR metadata is not enough for detailed method teaching. Give a small conceptual nudge unless selected metadata includes textbook, reading, notes, or worked-example support.",
+        "For conceptual method questions, teach the pattern using selected textbook, reading, and example OCR metadata in the class wording.",
         f"{final_citation_instruction(source_usage)}",
         f"{final_example_boundary_instruction(answer_policy)}",
         "Verify student calculations before affirming them. If something is wrong, point out the first wrong step or value.",
-        "When help is allowed, give one small nudge or one targeted question, not the exact next move.",
+        "When help is allowed, ask the student to complete one small piece; do not provide the result or a chain of several moves.",
         f"{final_unclear_source_instruction(source_usage)}",
-        "Use printed_page_start as the document page number. page_start and page_end are internal render indexes only.",
+        "Use printed_page_start as the document page number when available. page_start and page_end are source PDF page indexes.",
         "For task-location answers, use a concise shape like `That item is Problem/Question N in Section X, on printed page P of Title.`",
-        "For exercise/question/task lookup by number, exercise, page, or title, put the found exercise/question/task statement in a separate `Problem:` section and quote the full visible problem statement exactly. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. When returning the problem, only return the problem directly in that section; do not include location/source context, offers, hints, next steps, attempt requests, or commentary inside `Problem:`. Put any brief offer or attempt request outside `Problem:` in the main answer or final direct question. Do not repeat the same problem text again in the unlabeled main reply.",
+        "For exercise/question/task lookup by number, exercise, page, or title, first decide whether you have the exact academic exercise/question/task statement. Only then put that statement in a separate `Problem:` section and quote the full visible problem statement exactly. For bare numbered requests like `2.24`, inspect the attached page asset and OCR metadata yourself; if the page lists unlabeled numbered items such as `2.24. Find ...`, extract the matching numbered block until the next problem/item starts. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. When returning the problem, only return the problem directly in that section; do not include `You said...`, lookup/checking status, requests for a page/title/textbook, location/source context, offers, hints, next steps, attempt requests, or commentary inside `Problem:`. Put any brief location note, offer, clarification, or attempt request outside `Problem:` in the main answer or final direct question. Do not repeat the same problem text again in the unlabeled main reply.",
         "Do not restate long task text the student already supplied unless needed for clarity.",
         (
-            "Structured section labels: when useful, choose the order that best supports this specific reply instead of following "
-            "a fixed template. Use `Problem:` only for the found academic exercise/question/task statement the student is working on, "
-            "not for an issue/error. If you use `Problem:`, put only the problem statement there; never put offers, hints, next steps, "
-            "attempt requests, source context, or commentary inside that section. Use `Hint:` for one short nudge or leading question, usually one sentence, "
+            "Structured section labels: when useful, choose the exact sectionOrder that best supports this specific reply instead of following "
+            "a fixed template, and include only sections that add value. Decide the order by why the student needs each part: task text/context first, "
+            "then the direct reply, then supporting rule, concept, example, or work check, with the immediate action last. Put each idea in its natural section: problem text in `Problem:`, "
+            "formulas or symbolic rules in `Formula:`, conceptual reasoning in `Why this works:`, similar-but-different practice in `Example:`, "
+            "source/context notes in `sourceNote`, and evaluation of shown student work in `Check your work:`. For substantive tutoring replies, usually include a brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when class material was actually used. Orientation names the kind of task or thinking move without repeating the hint; `Hint:` gives one key idea tied to the exact student task; `nextStep` asks for one small, checkable student action. Before using `Problem:`, classify the candidate text and use that section only for the found or student-supplied academic exercise/question/task statement, "
+            "not for an issue/error, status update, clarification, or source lookup progress. If you use `Problem:`, put only the problem statement there and place `problem` first in sectionOrder; never put `You said...`, offers, hints, next steps, "
+            "attempt requests, requests for source details, source context, or commentary inside that section. For bare stuck follow-ups, do not use both `Hint:` and `nextStep` unless `nextStep` only asks the student to show work; otherwise prefer one short `Hint:` and leave `nextStep` empty. Use `Hint:` for one short nudge or leading question, usually one sentence, "
             "not definitions, citations, offers, or multiple ideas. Use `Why this works:` for concept reasoning, but do not include "
-            "offers, attempt requests, or workflow prompts; put those in the final direct question/next action. Keep the final direct question/next action to a concrete request or action, not a hint-style leading question. Use `Formula:` only for formulas, equations, symbolic rules, or a very short rule name; never include explanatory prose, source/page notes, examples, substitutions, hints, or why/when commentary in `Formula:`. If there is a special-case formula, include only the symbolic special-case line in `Formula:` and explain the condition elsewhere. Use `Example:` only for a similar "
+            "offers, attempt requests, or workflow prompts; put those in the final direct question/next action. Keep the final direct question/next action to a concrete request or action, not a hint-style leading question. Use `Formula:` only for formulas, equations, symbolic rules, or a very short rule name; never include explanatory prose, source/page notes, examples, filled-in task values, hints, or why/when commentary in `Formula:`. If there is a special-case formula, include only the symbolic special-case line in `Formula:` and explain the condition elsewhere. Use `Example:` only for a similar "
             "different problem, and `Check your work:` only when responding to a student attempt. Before returning, audit that no `Hint:` text is inside the next action, no prose is inside `Formula:`, and no offers are inside `Why this works:`. Do not write `Answer:`, `Question:`, "
             "`Next step:`, `Your next step:`, `Source:`, or `Sources:`; end with one unlabeled direct question when helpful."
         ),
         "For simple greetings or check-ins, reply naturally in one short chat message and ask what course problem or concept the student wants to work on.",
         "Use optional labeled sections freely when they improve scanability or learning; 1-2 is often enough, and 3-4 is fine when the reply naturally has multiple useful parts.",
         "Use `$...$` or `$$...$$`; do not use `\\(...\\)`, `\\[...\\]`, or plain bracketed math.",
-        "Do not use unrelated pages or outside knowledge.",
+        "Do not use unrelated OCR metadata, whole-course OCR, raw storage paths, chunk IDs, Firebase/GCS paths, or outside knowledge.",
         (
             "Internal-only academic task tracking: At the end you may add a `Problem context:` block for the backend only. "
             "In this block, problem means the exercise/question/task the student is working on, not an error or issue. "
             "Use newline-separated `key: value` fields with keys relation, problem, expected_answer, source_type, "
-            "source_document_id, source_page, source_chunk_id, confidence. Allowed relation values: same_problem, "
+            "source_document_id, source_page, confidence. Allowed relation values: same_problem, "
             "different_problem, unknown. Allowed source_type values: assignment_question, pdf, uploaded_image, "
             "conversation_extracted, unknown. Allowed confidence values: low, medium, high. Include expected_answer "
             "only when it is explicit in assignment data, an answer key, or a provided source."
         ),
+        (
+            "Internal-only source tracking: At the end, add a `Referenced sources:` block for the backend only when you used selected OCR/PDF pages. "
+            "List one used source per line as `doc_id: <selected doc_id>; page: <printed_page_start or page_start>; reason: <brief use>`. "
+            "Only include pages you actually used in the student-facing answer. If you did not use any selected page, omit this block."
+        ),
         "Before sending the student-facing reply, privately check intent, page fit, policy, citations, and privacy. If needed, fix the reply once.",
+        f"Clean Knowledge context package:\n{compact_json_dumps(knowledge_context)}",
         f"Selected page metadata:\n{compact_json_dumps(selected_context)}",
     ]
     content: list[dict[str, Any]] = [
@@ -940,9 +2110,10 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
     ]
 
     content.extend(encoded_page_asset_content_parts(state.get("page_assets", [])))
+    content.extend(encoded_student_attachment_content_parts(state.get("student_attachment_files", [])))
 
     return [
-        *base_messages,
+        latest_student_message_for_final_call(base_messages),
         {
             "role": "user",
             "content": content,
@@ -952,6 +2123,19 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
 
 def compact_json_dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ": "))
+
+
+def latest_student_message_for_final_call(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keep the final model call focused on the latest student turn."""
+
+    for message in reversed(messages):
+        if message.get("role") in {"user", "student"}:
+            return {
+                "role": "user",
+                "content": str(message.get("content") or ""),
+            }
+
+    return {"role": "user", "content": ""}
 
 
 def compact_selected_page_context(state: PdfRagState) -> dict[str, Any]:
@@ -964,13 +2148,22 @@ def compact_selected_page_context(state: PdfRagState) -> dict[str, Any]:
     ]
 
     return {
+        "decision": state.get("retrieval_decision") or {},
+        "failedSkipped": state.get("failed_searches_skipped") or [],
         "search": {"used": state.get("tool_call_count", 0), "max": MAX_TOOL_CALLS},
         "pages": [
             {
                 "d": asset.get("doc_id"),
+                "m": asset.get("retrieval_mode"),
                 "t": asset.get("title"),
                 "pp": printed_page_label(asset),
                 "mt": asset.get("material_type"),
+                "pn": asset.get("problem_numbers") or [],
+                "ocr": {
+                    "provider": asset.get("ocr_provider"),
+                    "source": asset.get("ocr_source"),
+                    "confidence": asset.get("ocr_confidence"),
+                },
                 "sc": round(float(asset.get("score") or 0.0), 3),
             }
             for asset in state.get("page_assets", [])
@@ -1009,47 +2202,210 @@ def compact_retrieval_diagnostics(diagnostics: list[dict[str, Any]]) -> list[dic
         )
     return compacted
 
+def normalize_metadata_page_assets(
+    assets: list[dict[str, Any]],
+    source_pages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep only OCR metadata fields needed by the final model and trace."""
+
+    pages_by_key = {metadata_page_key(page): page for page in source_pages if isinstance(page, dict)}
+    normalized_assets: list[dict[str, Any]] = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+
+        source_page = pages_by_key.get(metadata_page_key(asset), {})
+        normalized_assets.append(
+            {
+                "chunk_text": metadata_value(asset, source_page, "chunk_text", "chunkText", "ocr_text", "ocrText"),
+                "citation_label": asset.get("citation_label") or source_page.get("citation_label"),
+                "doc_id": str(metadata_value(asset, source_page, "doc_id", "docId", "materialId") or ""),
+                "material_type": str(metadata_value(asset, source_page, "material_type", "materialType") or ""),
+                "ocr_confidence": metadata_value(asset, source_page, "ocr_confidence", "ocrConfidence"),
+                "ocr_provider": str(metadata_value(asset, source_page, "ocr_provider", "ocrProvider") or ""),
+                "ocr_source": str(metadata_value(asset, source_page, "ocr_source", "ocrSource") or ""),
+                "ocr_text": metadata_value(asset, source_page, "ocr_text", "ocrText", "chunk_text", "chunkText"),
+                "page_end": metadata_value(asset, source_page, "page_end", "pageEnd", "pageNumber"),
+                "page_start": metadata_value(asset, source_page, "page_start", "pageStart", "pageNumber"),
+                "full_pdf_bucket": str(metadata_value(asset, source_page, "full_pdf_bucket", "fullPdfBucket") or ""),
+                "full_pdf_path": str(metadata_value(asset, source_page, "full_pdf_path", "fullPdfPath") or ""),
+                "full_pdf_uri": str(metadata_value(asset, source_page, "full_pdf_uri", "fullPdfUri") or ""),
+                "full_pdf_mime_type": str(metadata_value(asset, source_page, "full_pdf_mime_type", "fullPdfMimeType") or "application/pdf"),
+                "full_pdf_size_bytes": metadata_value(asset, source_page, "full_pdf_size_bytes", "fullPdfSizeBytes", "full_pdf_size", "fullPdfSize"),
+                "full_pdf_sha256": str(metadata_value(asset, source_page, "full_pdf_sha256", "fullPdfSha256") or ""),
+                "full_pdf_data_url": asset.get("full_pdf_data_url") or asset.get("fullPdfDataUrl"),
+                "full_pdf_file_name": asset.get("full_pdf_file_name") or asset.get("fullPdfFileName"),
+                "full_pdf_skipped_reason": str(metadata_value(asset, source_page, "full_pdf_skipped_reason", "fullPdfSkippedReason") or ""),
+                "page_asset_bucket": str(metadata_value(asset, source_page, "page_asset_bucket", "pageAssetBucket") or ""),
+                "page_asset_path": str(metadata_value(asset, source_page, "page_asset_path", "pageAssetPath") or ""),
+                "page_asset_uri": str(metadata_value(asset, source_page, "page_asset_uri", "pageAssetUri") or ""),
+                "printed_page_end": metadata_value(asset, source_page, "printed_page_end", "printedPageEnd"),
+                "printed_page_start": metadata_value(asset, source_page, "printed_page_start", "printedPageStart"),
+                "problem_numbers": metadata_value(asset, source_page, "problem_numbers", "problemNumbers") or [],
+                "retrieval_mode": str(metadata_value(asset, source_page, "retrieval_mode", "retrievalMode") or ""),
+                "retrieval_reason": str(metadata_value(asset, source_page, "retrieval_reason", "retrievalReason") or ""),
+                "score": metadata_value(asset, source_page, "score"),
+                "class_id": str(metadata_value(asset, source_page, "class_id", "classId") or ""),
+                "professor_id": str(metadata_value(asset, source_page, "professor_id", "professorId") or ""),
+                "file_data_url": asset.get("file_data_url"),
+                "file_name": asset.get("file_name"),
+                "image_url": asset.get("image_url"),
+                "images": asset.get("images") if isinstance(asset.get("images"), list) else [],
+                "page_asset_checksum_sha256": str(metadata_value(asset, source_page, "page_asset_checksum_sha256", "pageAssetChecksumSha256") or ""),
+                "page_asset_mime_type": str(metadata_value(asset, source_page, "page_asset_mime_type", "pageAssetMimeType") or ""),
+                "page_asset_size_bytes": metadata_value(asset, source_page, "page_asset_size_bytes", "pageAssetSizeBytes"),
+                "page_asset_storage_bucket": str(metadata_value(asset, source_page, "page_asset_storage_bucket", "pageAssetStorageBucket") or ""),
+                "page_asset_storage_path": str(metadata_value(asset, source_page, "page_asset_storage_path", "pageAssetStoragePath") or ""),
+                "storage_bucket": str(metadata_value(asset, source_page, "storage_bucket", "storageBucket") or ""),
+                "storage_path": str(metadata_value(asset, source_page, "storage_path", "storagePath") or ""),
+                "title": str(metadata_value(asset, source_page, "title") or "Untitled PDF"),
+            }
+        )
+
+    return normalized_assets
+
+
+def metadata_page_key(page: dict[str, Any]) -> tuple[str, int, int]:
+    page_start = nonnegative_int(page.get("page_start") or page.get("pageStart") or page.get("pageNumber"))
+    page_end = nonnegative_int(page.get("page_end") or page.get("pageEnd") or page_start)
+    return (
+        str(page.get("doc_id") or page.get("docId") or page.get("materialId") or ""),
+        page_start,
+        page_end or page_start,
+    )
+
+
+def metadata_value(primary: dict[str, Any], fallback: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = primary.get(key)
+        if value not in (None, ""):
+            return value
+
+    for key in keys:
+        value = fallback.get(key)
+        if value not in (None, ""):
+            return value
+
+    return None
+
+
 def encoded_page_asset_content_parts(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    encoding_jobs = page_asset_encoding_jobs(assets)
+    content_parts: list[dict[str, Any]] = []
+    attached_full_pdf_keys: set[str] = set()
 
-    if len(encoding_jobs) > 1:
-        with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ASSET_ENCODERS, len(encoding_jobs))) as executor:
-            encoded_jobs = list(executor.map(encode_page_asset_job, encoding_jobs))
-    else:
-        encoded_jobs = [encode_page_asset_job(job) for job in encoding_jobs]
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
 
-    return [content_part for content_part in encoded_jobs if content_part]
+        full_pdf_data_url = str(asset.get("full_pdf_data_url") or "").strip()
+        full_pdf_key = str(asset.get("doc_id") or asset.get("full_pdf_sha256") or asset.get("full_pdf_file_name") or "").strip()
+        if full_pdf_data_url and full_pdf_key and full_pdf_key not in attached_full_pdf_keys:
+            content_parts.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": asset.get("full_pdf_file_name") or f"{asset.get('doc_id') or 'source'}.pdf",
+                        "file_data": full_pdf_data_url,
+                    },
+                }
+            )
+            attached_full_pdf_keys.add(full_pdf_key)
+
+        image_url = asset.get("image_url")
+        if isinstance(image_url, dict) and image_url.get("url"):
+            content_parts.append({"type": "image_url", "image_url": image_url})
+
+        file_data_url = str(asset.get("file_data_url") or "").strip()
+        if file_data_url:
+            content_parts.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": asset.get("file_name") or f"{asset.get('doc_id') or 'pdf'}-page-{asset.get('page_start') or 'unknown'}.pdf",
+                        "file_data": file_data_url,
+                    },
+                }
+            )
+
+        content_parts.append(encoded_page_asset_ocr_part(asset, str(asset.get("ocr_text") or asset.get("chunk_text") or "").strip()))
+
+    return content_parts
+
+
+def encoded_student_attachment_content_parts(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    content_parts: list[dict[str, Any]] = []
+
+    for index, file_payload in enumerate(files, start=1):
+        if not isinstance(file_payload, dict):
+            continue
+
+        data_url = str(file_payload.get("dataUrl") or file_payload.get("data_url") or "").strip()
+        extracted_text = str(
+            file_payload.get("ocrText")
+            or file_payload.get("ocr_text")
+            or file_payload.get("extractedText")
+            or file_payload.get("extracted_text")
+            or ""
+        ).strip()
+        summary = str(file_payload.get("summary") or file_payload.get("description") or "").strip()
+        if not extracted_text and not summary:
+            if not data_url:
+                continue
+
+        file_name = str(file_payload.get("fileName") or file_payload.get("file_name") or f"student-upload-{index}.pdf")
+        mime_type = str(file_payload.get("mimeType") or file_payload.get("mime_type") or "application/pdf")
+        content_parts.append(
+            {
+                "type": "text",
+                "text": (
+                    "Student upload Knowledge item (usedAs: student_attempt):\n"
+                    f"{compact_json_dumps({'index': index, 'fileName': file_name, 'mimeType': mime_type, 'summary': summary})}\n\n"
+                    "Extracted text:\n"
+                    f"{extracted_text[:3000]}"
+                ),
+            }
+        )
+        if data_url:
+            content_parts.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": file_name,
+                        "file_data": data_url,
+                    },
+                }
+            )
+
+    return content_parts
 
 
 def page_asset_encoding_jobs(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
+    attached_full_pdf_keys: set[str] = set()
 
     for asset in assets:
-        for image_path in asset.get("images") or []:
-            jobs.append(
-                {
-                    "kind": "image",
-                    "path": image_path,
-                }
-            )
+        full_pdf_data_url = str(asset.get("full_pdf_data_url") or "").strip()
+        full_pdf_key = str(asset.get("doc_id") or asset.get("full_pdf_sha256") or asset.get("full_pdf_file_name") or "").strip()
+        if full_pdf_data_url and full_pdf_key and full_pdf_key not in attached_full_pdf_keys:
+            jobs.append({"asset": asset, "kind": "full_pdf_file", "file_data_url": full_pdf_data_url})
+            attached_full_pdf_keys.add(full_pdf_key)
 
-        if asset.get("file"):
-            jobs.append(
-                {
-                    "doc_id": asset.get("doc_id"),
-                    "kind": "file",
-                    "path": asset["file"],
-                }
-            )
+        image_url = asset.get("image_url")
+        if isinstance(image_url, dict) and image_url.get("url"):
+            jobs.append({"asset": asset, "kind": "image_url", "image_url": image_url})
 
-        if asset.get("file_data_url"):
-            jobs.append(
-                {
-                    "data_url": asset["file_data_url"],
-                    "doc_id": asset.get("doc_id"),
-                    "kind": "file_data_url",
-                }
-            )
+        file_data_url = str(asset.get("file_data_url") or "").strip()
+        if file_data_url:
+            jobs.append({"asset": asset, "kind": "file", "file_data_url": file_data_url})
+
+        ocr_text = str(asset.get("ocr_text") or asset.get("chunk_text") or "").strip()
+        jobs.append(
+            {
+                "asset": asset,
+                "kind": "ocr_text",
+                "text": ocr_text,
+            }
+        )
 
     return jobs
 
@@ -1057,31 +2413,77 @@ def page_asset_encoding_jobs(assets: list[dict[str, Any]]) -> list[dict[str, Any
 def encode_page_asset_job(job: dict[str, Any]) -> dict[str, Any] | None:
     kind = job.get("kind")
 
-    if kind == "image":
+    if kind == "ocr_text":
+        asset = job.get("asset") if isinstance(job.get("asset"), dict) else {}
+        return encoded_page_asset_ocr_part(asset, str(job.get("text") or ""))
+
+    if kind == "image_url":
         return {
             "type": "image_url",
-            "image_url": {"url": encode_file_as_data_url(job["path"], "image/png")},
+            "image_url": job.get("image_url"),
         }
 
-    if kind in {"file", "file_data_url"}:
-        file_data = (
-            encode_file_as_data_url(job["path"], "application/pdf")
-            if kind == "file"
-            else str(job.get("data_url") or "")
-        )
-
-        if not file_data:
-            return None
-
+    if kind == "file":
+        asset = job.get("asset") if isinstance(job.get("asset"), dict) else {}
         return {
             "type": "file",
             "file": {
-                "filename": f"{job.get('doc_id') or 'selected-pages'}.pdf",
-                "file_data": file_data,
+                "filename": asset.get("file_name") or f"{asset.get('doc_id') or 'pdf'}-page-{asset.get('page_start') or 'unknown'}.pdf",
+                "file_data": job.get("file_data_url"),
+            },
+        }
+
+    if kind == "full_pdf_file":
+        asset = job.get("asset") if isinstance(job.get("asset"), dict) else {}
+        return {
+            "type": "file",
+            "file": {
+                "filename": asset.get("full_pdf_file_name") or f"{asset.get('doc_id') or 'source'}.pdf",
+                "file_data": job.get("file_data_url"),
             },
         }
 
     return None
+
+
+def encoded_page_asset_ocr_part(asset: dict[str, Any], ocr_text: str) -> dict[str, Any]:
+    used_as = infer_selected_page_used_as(asset)
+    metadata = {
+        "docId": asset.get("doc_id"),
+        "title": asset.get("title"),
+        "materialType": asset.get("material_type"),
+        "pageStart": asset.get("page_start"),
+        "pageEnd": asset.get("page_end"),
+        "printedPage": printed_page_label(asset),
+        "printedPageStart": asset.get("printed_page_start"),
+        "printedPageEnd": asset.get("printed_page_end"),
+        "problemNumbers": asset.get("problem_numbers") or [],
+        "ocrConfidence": asset.get("ocr_confidence"),
+        "ocrProvider": asset.get("ocr_provider"),
+        "ocrSource": asset.get("ocr_source"),
+        "retrievalMode": asset.get("retrieval_mode"),
+        "retrievalReason": asset.get("retrieval_reason"),
+        "score": asset.get("score"),
+        "fullPdfSkippedReason": asset.get("full_pdf_skipped_reason"),
+        "pageAssetMimeType": asset.get("page_asset_mime_type"),
+        "pageAssetSizeBytes": asset.get("page_asset_size_bytes"),
+        "pageAssetChecksumSha256": asset.get("page_asset_checksum_sha256"),
+        "usedAs": used_as,
+        "uiColor": knowledge_ui_color_token(used_as),
+    }
+    return {
+        "type": "text",
+        "text": (
+            "Selected OCR page/problem metadata:\n"
+            f"{compact_json_dumps(metadata)}\n\n"
+            "OCR text:\n"
+            f"{ocr_text}"
+        ),
+    }
+
+
+def infer_selected_page_used_as(asset: dict[str, Any]) -> str:
+    return infer_pdf_page_used_as(asset)
 
 
 def normalize_answer_policy_state(value: Any) -> dict[str, bool]:
@@ -1210,7 +2612,14 @@ def sources_for_answer(state: PdfRagState, answer: str) -> list[dict[str, Any]]:
     assets = state.get("page_assets") or []
 
     if assets:
-        referenced_assets = [asset for asset in assets if answer_references_asset(answer, asset)]
+        model_referenced_assets = page_assets_referenced_by_model(answer, assets)
+        if model_referenced_assets:
+            return sources_from_page_assets(model_referenced_assets)
+
+        normalized_answer = answer.lower()
+        referenced_assets = [
+            asset for asset in assets if answer_references_asset_normalized(normalized_answer, asset)
+        ]
 
         if referenced_assets:
             return sources_from_page_assets(referenced_assets)
@@ -1220,8 +2629,118 @@ def sources_for_answer(state: PdfRagState, answer: str) -> list[dict[str, Any]]:
     return sources_from_pages(state.get("retrieved_pages", []), limit=1)
 
 
-def answer_references_asset(answer: str, asset: dict[str, Any]) -> bool:
+def page_assets_for_memory_from_answer(state: PdfRagState, answer: str) -> list[dict[str, Any]]:
+    assets = state.get("page_assets") or []
+    if not assets:
+        return []
+
+    model_referenced_assets = page_assets_referenced_by_model(answer, assets)
+    if model_referenced_assets:
+        return model_referenced_assets
+
     normalized_answer = answer.lower()
+    referenced_assets = [
+        asset for asset in assets if answer_references_asset_normalized(normalized_answer, asset)
+    ]
+    if referenced_assets:
+        return referenced_assets
+
+    return assets[:1]
+
+
+def page_assets_referenced_by_model(answer: str, assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    references = referenced_source_records_from_answer(answer)
+    if not references:
+        return []
+
+    matched: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for reference in references:
+        asset = find_referenced_page_asset(reference, assets)
+        if not asset:
+            continue
+
+        page_number = nonnegative_int(asset.get("printed_page_start")) or nonnegative_int(asset.get("page_start"))
+        key = (str(asset.get("doc_id") or ""), page_number)
+        if key in seen:
+            continue
+
+        seen.add(key)
+        matched.append(asset)
+
+    return matched
+
+
+def find_referenced_page_asset(reference: dict[str, Any], assets: list[dict[str, Any]]) -> dict[str, Any] | None:
+    reference_doc_id = str(reference.get("doc_id") or "").strip()
+    reference_page = nonnegative_int(reference.get("page"))
+
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+
+        asset_doc_id = str(asset.get("doc_id") or "").strip()
+        if reference_doc_id and asset_doc_id and reference_doc_id != asset_doc_id:
+            continue
+
+        printed_start = nonnegative_int(asset.get("printed_page_start"))
+        printed_end = nonnegative_int(asset.get("printed_page_end")) or printed_start
+        page_start = nonnegative_int(asset.get("page_start"))
+        page_end = nonnegative_int(asset.get("page_end")) or page_start
+        page_matches = (
+            not reference_page
+            or (printed_start and printed_start <= reference_page <= printed_end)
+            or (page_start and page_start <= reference_page <= page_end)
+        )
+
+        if page_matches:
+            return asset
+
+    return None
+
+
+def referenced_source_records_from_answer(answer: str) -> list[dict[str, Any]]:
+    block = referenced_sources_block(answer)
+    if not block:
+        return []
+
+    records: list[dict[str, Any]] = []
+    for raw_line in block.splitlines():
+        line = raw_line.strip().lstrip("-*").strip()
+        if not line:
+            continue
+
+        fields: dict[str, str] = {}
+        for part in re.split(r";|\|", line):
+            key, separator, value = part.partition(":")
+            if not separator:
+                continue
+
+            normalized_key = normalize_search_query(key).replace(" ", "_")
+            fields[normalized_key] = value.strip()
+
+        doc_id = fields.get("doc_id") or fields.get("docid") or fields.get("source_document_id")
+        page = fields.get("page") or fields.get("printed_page") or fields.get("page_number")
+        if doc_id or page:
+            records.append({"doc_id": doc_id or "", "page": nonnegative_int(page)})
+
+    return records
+
+
+def referenced_sources_block(answer: str) -> str:
+    match = re.search(
+        r"(?:^|\n)\s*Referenced sources\s*:\s*(?P<body>.*?)(?=(?:\n\s*Problem context\s*:)|\Z)",
+        answer or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return match.group("body").strip() if match else ""
+
+
+def answer_references_asset(answer: str, asset: dict[str, Any]) -> bool:
+    return answer_references_asset_normalized(answer.lower(), asset)
+
+
+def answer_references_asset_normalized(normalized_answer: str, asset: dict[str, Any]) -> bool:
     title = str(asset.get("title") or "").lower()
     citation_label = str(asset.get("citation_label") or "").lower()
     page_start = int(asset.get("page_start") or 0)
@@ -1258,11 +2777,24 @@ def answer_references_asset(answer: str, asset: dict[str, Any]) -> bool:
 
 def answer_or_page_fallback(state: PdfRagState) -> str:
     answer = normalize_answer_against_selected_pages(state, (state.get("answer") or "").strip())
+    problem_lookup_fallback = problem_statement_lookup_fallback(state, answer)
+    if problem_lookup_fallback:
+        return problem_lookup_fallback
+
     if answer:
+        fallback = page_asset_lookup_request_fallback(state, answer)
+        if fallback:
+            return fallback
         return answer
 
-    top_assets = sorted(state.get("page_assets", []), key=lambda asset: float(asset.get("score") or 0.0), reverse=True)
-    sources = sources_from_page_assets(top_assets[:1], limit=1) or sources_from_pages(
+    return strongest_page_location_fallback(state)
+
+
+def strongest_page_location_fallback(state: PdfRagState) -> str:
+    assets = state.get("page_assets", [])
+    top_asset = max(assets, key=lambda asset: float(asset.get("score") or 0.0), default=None)
+    sources = sources_from_page_assets([top_asset], limit=1) if top_asset else []
+    sources = sources or sources_from_pages(
         state.get("retrieved_pages", []),
         limit=1,
     )
@@ -1283,12 +2815,157 @@ def answer_or_page_fallback(state: PdfRagState) -> str:
     )
 
 
+def page_asset_lookup_request_fallback(state: PdfRagState, answer: str) -> str:
+    if not asks_for_pasted_problem_or_source(answer):
+        return ""
+
+    decision = state.get("retrieval_decision") or {}
+    if decision.get("retrieval_reason") not in {"student_requested_problem", "student_changed_problem"}:
+        return ""
+
+    assets = state.get("page_assets") or []
+    if not assets:
+        return ""
+
+    if any(answer_references_asset(answer, asset) for asset in assets):
+        return ""
+
+    return strongest_page_location_fallback(state)
+
+
 def normalize_answer_against_selected_pages(state: PdfRagState, answer: str) -> str:
     if not answer:
         return ""
 
     answer = collapse_repeated_problem_location_answer(answer)
     return answer.strip()
+
+
+def problem_statement_lookup_fallback(state: PdfRagState, answer: str) -> str:
+    latest_message = latest_student_message_content(state.get("messages", []))
+    requested_numbers = requested_problem_numbers_for_lookup(latest_message)
+    if not requested_numbers or not bare_numbered_source_lookup(latest_message):
+        return ""
+
+    if extract_labeled_section(answer, ["problem"]):
+        return ""
+
+    if answer and not problem_lookup_answer_needs_repair(answer, requested_numbers):
+        return ""
+
+    problem_text = selected_problem_statement_text(state, requested_numbers)
+    if not problem_text:
+        return ""
+
+    return f"Problem:\n{problem_text}"
+
+
+def problem_lookup_answer_needs_repair(answer: str, requested_numbers: set[str]) -> bool:
+    if not answer.strip():
+        return True
+
+    if asks_for_pasted_problem_or_source(answer):
+        return True
+
+    if not content_has_requested_problem_number(answer, requested_numbers):
+        return True
+
+    normalized = normalize_search_query(answer)
+    return bool(
+        re.search(
+            r"\b(?:good way to start|hint|try this|try to|where you got stuck|what you tried|"
+            r"show your work|small nudge|next step)\b",
+            normalized,
+        )
+    )
+
+
+def bare_numbered_source_lookup(message: str) -> bool:
+    stripped = message.strip()
+    return bool(
+        re.fullmatch(r"(?:problem|exercise|question|number|no\.?)?\s*\d{1,3}\s*\.\s*\d{1,3}[a-z]?\s*", stripped, flags=re.IGNORECASE)
+        or re.fullmatch(r"(?:problem|exercise|question|number|no\.?)\s+\d{1,3}[a-z]?\s*", stripped, flags=re.IGNORECASE)
+    )
+
+
+def requested_problem_numbers_for_lookup(message: str) -> set[str]:
+    numbers = set(problem_numbers_from_text(message))
+    bare_dotted = re.fullmatch(r"(?:problem|exercise|question|number|no\.?)?\s*(\d{1,3})\s*\.\s*(\d{1,3}[a-z]?)\s*", message.strip(), flags=re.IGNORECASE)
+    if bare_dotted:
+        numbers.add(f"{bare_dotted.group(1)}.{bare_dotted.group(2)}".upper())
+
+    bare_number = re.fullmatch(r"(?:problem|exercise|question|number|no\.?)\s+(\d{1,3}[a-z]?)\s*", message.strip(), flags=re.IGNORECASE)
+    if bare_number:
+        numbers.add(bare_number.group(1).upper())
+
+    return numbers
+
+
+def selected_problem_statement_text(state: PdfRagState, requested_numbers: set[str]) -> str:
+    for record in [*state.get("page_assets", []), *state.get("retrieved_pages", [])]:
+        text = str(record.get("ocr_text") or record.get("chunk_text") or record.get("content") or "").strip()
+        if not text:
+            continue
+
+        extracted = extract_problem_statement_from_text(text, requested_numbers)
+        if extracted:
+            return extracted
+
+    return ""
+
+
+def extract_problem_statement_from_text(text: str, requested_numbers: set[str]) -> str:
+    normalized_text = re.sub(r"\r\n?", "\n", text).strip()
+    for number in sorted(requested_numbers, key=len, reverse=True):
+        start_match = problem_statement_start_match(normalized_text, number)
+        if not start_match:
+            continue
+
+        following = normalized_text[start_match.end() :]
+        next_match = next_problem_statement_match(following)
+        end = start_match.end() + next_match.start() if next_match else min(len(normalized_text), start_match.end() + 900)
+        statement = normalized_text[start_match.start() : end].strip()
+        return clean_extracted_problem_statement(statement)
+
+    return ""
+
+
+def problem_statement_start_match(text: str, number: str) -> re.Match[str] | None:
+    escaped_number = re.escape(number).replace(r"\.", r"\s*\.\s*")
+    labeled_match = re.search(
+        rf"\b(?:problem|exercise|question|ex\.?)\s*{escaped_number}\b[\).:]?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if labeled_match:
+        return labeled_match
+
+    item_start = problem_statement_item_start_pattern()
+    return re.search(
+        rf"(?<![\d.]){escaped_number}(?!\s*\.\s*\d)\s*(?:[\).:]\s*|\s+)(?=(?:{item_start})\b)",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
+def next_problem_statement_match(text: str) -> re.Match[str] | None:
+    item_start = problem_statement_item_start_pattern()
+    return re.search(
+        rf"\n\s*(?:(?:problem|exercise|question|ex\.?)\s*\d{{1,3}}(?:\s*\.\s*\d{{1,3}}[a-z]?)?\b|"
+        rf"(?<![\d.])\d{{1,3}}\s*\.\s*\d{{1,3}}[a-z]?(?!\s*\.\s*\d)\s*(?:[\).:]\s*|\s+)(?=(?:{item_start})\b))",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
+def problem_statement_item_start_pattern() -> str:
+    return PROBLEM_STATEMENT_ITEM_START_PATTERN
+
+
+def clean_extracted_problem_statement(statement: str) -> str:
+    cleaned = re.sub(r"\n{3,}", "\n\n", statement)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    return cleaned.strip()
 
 
 def top_scored_page_asset(state: PdfRagState) -> dict[str, Any] | None:
@@ -1385,6 +3062,18 @@ def deduplicate_retrieved_windows(pages: list[dict[str, Any]]) -> list[dict[str,
     return unique_pages
 
 
+def page_context_records_for_state(state: PdfRagState) -> list[dict[str, Any]]:
+    pages_for_context = list(state.get("retrieved_pages", []))
+    decision = state.get("retrieval_decision") or {}
+
+    if decision.get("memory_used"):
+        active = active_metadata_record_from_memory(normalize_chat_retrieval_memory(state.get("chat_retrieval_memory")))
+        if active:
+            pages_for_context = [active, *pages_for_context]
+
+    return deduplicate_retrieved_windows(pages_for_context)
+
+
 def append_stage(state: PdfRagState, stage: str) -> list[str]:
     return [*state.get("stage_history", []), stage]
 
@@ -1410,6 +3099,7 @@ async def run_pdf_rag_agent(
     ai_usage_reservation: dict[str, Any] | None = None,
     source_usage: dict[str, Any] | None = None,
     student_profile_context: dict[str, Any] | None = None,
+    student_attachment_files: list[dict[str, Any]] | None = None,
     class_id: str | None = None,
     conversation_id: str | None = None,
     latest_student_message_id: str | None = None,
@@ -1443,6 +3133,7 @@ async def run_pdf_rag_agent(
         "ai_usage_reservation": ai_usage_reservation or {},
         "source_usage": source_usage,
         "student_profile_context": student_profile_context or {},
+        "student_attachment_files": student_attachment_files or [],
         "class_id": class_id,
         "conversation_id": conversation_id,
         "latest_student_message_id": latest_student_message_id,
@@ -1452,6 +3143,12 @@ async def run_pdf_rag_agent(
         "sources": [],
         "retrieval_confidence": "low",
         "retrieval_diagnostics": [],
+        "chat_retrieval_memory": {},
+        "knowledge_items": [],
+        "failed_searches_skipped": [],
+        "retrieval_reason_history": [],
+        "selected_metadata_records": [],
+        "structured_output_override": {},
         "token_usage": empty_token_usage(),
         "token_usage_by_call": [],
     }
@@ -1498,6 +3195,7 @@ async def run_pdf_rag_agent_stream(
     ai_usage_reservation: dict[str, Any] | None = None,
     source_usage: dict[str, Any] | None = None,
     student_profile_context: dict[str, Any] | None = None,
+    student_attachment_files: list[dict[str, Any]] | None = None,
     class_id: str | None = None,
     conversation_id: str | None = None,
     latest_student_message_id: str | None = None,
@@ -1533,6 +3231,7 @@ async def run_pdf_rag_agent_stream(
         "ai_usage_reservation": ai_usage_reservation or {},
         "source_usage": source_usage,
         "student_profile_context": student_profile_context or {},
+        "student_attachment_files": student_attachment_files or [],
         "class_id": class_id,
         "conversation_id": conversation_id,
         "latest_student_message_id": latest_student_message_id,
@@ -1542,157 +3241,126 @@ async def run_pdf_rag_agent_stream(
         "sources": [],
         "retrieval_confidence": "low",
         "retrieval_diagnostics": [],
+        "chat_retrieval_memory": {},
+        "knowledge_items": [],
+        "failed_searches_skipped": [],
+        "retrieval_reason_history": [],
+        "selected_metadata_records": [],
+        "structured_output_override": {},
         "token_usage": empty_token_usage(),
         "token_usage_by_call": [],
     }
     start_active_problem_context_prefetch(state)
 
     try:
+        state["chat_retrieval_memory"] = await asyncio.to_thread(read_chat_retrieval_memory, snapshot_side_effect_value(state))
+        state["stage_history"] = append_stage(state, "load_chat_retrieval_memory")
+        heuristic = build_retrieval_decision(state)
         response = await client.chat(
-            model=ROUTER_MODEL,
-            messages=build_router_messages(state),
-            tools=[SEARCH_PDF_PAGES_TOOL],
-            tool_choice="auto",
+            model=state.get("model") or DEFAULT_OPENROUTER_MODEL,
+            messages=build_tutor_decision_messages(state, heuristic),
             temperature=state.get("temperature", 0.4),
-            max_tokens=state.get("max_tokens"),
+            max_tokens=min(int(state.get("max_tokens") or 700), 900),
             reasoning_effort=ROUTER_REASONING_EFFORT,
         )
-        state["answer"] = ""
+        decision = parse_tutor_decision_response(response, heuristic)
+        decision = enforce_initial_source_lookup_search(decision, state)
+        decision = enforce_referenced_problem_dependency_search(decision, state)
+        decision = suppress_repeated_failed_search_decision(decision, state)
+        state["retrieval_decision"] = decision
+        state["retrieval_reason"] = decision.get("retrieval_reason") or ""
+        state["failed_searches_skipped"] = decision.get("failed_searches_skipped") or []
+        if decision.get("structuredOutput") and not decision.get("needs_search"):
+            state["structured_output_override"] = decision.get("structuredOutput")
         state["finish_reason"] = response.get("finish_reason") or ""
-        state["stage_history"] = append_stage(state, "openrouter_agent")
+        state["stage_history"] = append_stage(state, "decide_retrieval_need")
         state["token_usage"] = add_token_usage(state.get("token_usage"), response.get("usage"))
         state["token_usage_by_call"] = append_model_call_usage(
             state,
             response.get("usage"),
-            stage="openrouter_agent",
-            purpose="router",
-            model=ROUTER_MODEL,
+            stage="decide_retrieval_need",
+            purpose="tutor_decision",
+            model=state.get("model") or DEFAULT_OPENROUTER_MODEL,
             reasoning_effort=ROUTER_REASONING_EFFORT,
         )
-        state["tool_calls"] = new_search_tool_calls(
-            state,
-            [
-                tool_call
-                for tool_call in response.get("tool_calls", [])
-                if (tool_call.get("function") or {}).get("name") == "search_pdf_pages"
-            ],
-            limit=remaining_search_call_count(state),
-        )
-        if (
-            not state["tool_calls"]
-            and not state.get("retrieved_pages")
-            and state.get("tool_call_count", 0) == 0
-        ):
-            forced_tool_call = forced_initial_search_tool_call(state)
-            state["tool_calls"] = [forced_tool_call] if forced_tool_call else []
+        state["tool_calls"] = retrieval_decision_tool_calls(decision)
 
-        if not state["tool_calls"]:
-            yield {
-                "message": "Preparing a course-focused response.",
-                "stage": "preparing_answer",
-                "type": "step",
-            }
-            final_messages = await asyncio.to_thread(build_multimodal_final_messages, state)
-            state["input_token_breakdown"] = build_input_token_breakdown(state, final_messages)
-            final_model = state.get("model") or DEFAULT_OPENROUTER_MODEL
-            final_reasoning_effort = ROUTER_REASONING_EFFORT
-            response = await client.chat(
-                model=final_model,
-                messages=final_messages,
-                temperature=state.get("temperature", 0.4),
-                max_tokens=state.get("max_tokens"),
-                reasoning_effort=final_reasoning_effort,
-            )
-            state["answer"] = response.get("content") or ""
-            state["finish_reason"] = response.get("finish_reason") or ""
-            state["stage_history"] = append_stage(state, "openrouter_answer_with_pages")
-            state["token_usage"] = add_token_usage(state.get("token_usage"), response.get("usage"))
-            state["token_usage_by_call"] = append_model_call_usage(
-                state,
-                response.get("usage"),
-                stage="openrouter_answer_with_pages",
-                purpose="final_answer",
-                model=final_model,
-                reasoning_effort=final_reasoning_effort,
-            )
-            state["tool_calls"] = []
-
-        if not state["tool_calls"]:
-            await finish_active_problem_context_prefetch(state)
-            state["answer"] = await apply_leak_guard_with_model(
-                state=state,
-                answer=state.get("answer") or "",
-                openrouter_client=client,
-            )
-            yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
-            return
-
-        while state.get("tool_calls") and state.get("tool_call_count", 0) < MAX_TOOL_CALLS:
-            parsed_searches = parse_search_tool_call_batch(state, state.get("tool_calls", []))
-            new_search_queries = [query for query, _top_k in parsed_searches]
-            search_number_start = state.get("tool_call_count", 0) + 1
-            search_numbers = list(range(search_number_start, search_number_start + len(new_search_queries)))
-            search_entries = [
-                {
-                    "description": search_reason_from_tool_call(tool_call),
-                    "query": query,
-                    "searchNumber": search_number,
+        if state["tool_calls"]:
+            immediate_response = str(decision.get("student_response") or "").strip()
+            if immediate_response:
+                normalized_model_call_usage = normalize_model_call_usage_list(state.get("token_usage_by_call"))
+                yield {
+                    "message": immediate_response,
+                    "langGraphTrace": {
+                        "finishReason": state.get("finish_reason") or "",
+                        "inputTokenBreakdown": normalize_input_token_breakdown(state.get("input_token_breakdown")),
+                        "modelCallUsage": normalized_model_call_usage,
+                        "searchQueries": state.get("search_queries") or [],
+                        "selectedPages": selected_page_trace(state.get("page_assets", [])),
+                        "stages": state.get("stage_history") or [],
+                        "toolCallCount": state.get("tool_call_count") or 0,
+                    },
+                    "structuredOutput": decision.get("structuredOutput"),
+                    "tokenUsage": {
+                        "actual": normalize_token_usage(state.get("token_usage")),
+                        "calls": normalized_model_call_usage,
+                    },
+                    "stage": "retrieval_decision",
+                    "type": "quick_response",
                 }
-                for tool_call, query, search_number in zip(
-                    state.get("tool_calls", []),
-                    new_search_queries,
-                    search_numbers,
-                )
-            ]
 
+            parsed_searches = parse_search_tool_call_batch(state, state.get("tool_calls", []))
+            new_search_queries = [query for query, _top_k, _reason in parsed_searches]
             yield {
-                "message": (
-                    search_entries[0]["description"] if len(search_entries) == 1 else search_batch_message(new_search_queries)
-                ),
+                "message": "Checking class materials...",
                 "queries": new_search_queries,
-                "searches": search_entries,
-                "searchNumbers": search_numbers,
-                "stage": "searching_pages",
+                "searches": [
+                    {
+                        "query": query,
+                        "retrievalReason": reason,
+                        "searchNumber": index + 1,
+                    }
+                    for index, (query, _top_k, reason) in enumerate(parsed_searches)
+                ],
+                "searchNumbers": list(range(1, len(new_search_queries) + 1)),
+                "stage": "searching_ocr_metadata",
                 "type": "search_batch",
             }
-            _queries, new_pages, new_diagnostics = await execute_parsed_searches(
+            _queries, new_pages, new_diagnostics, new_reasons = await execute_parsed_searches(
                 parsed_searches,
                 state=state,
                 retriever=search_retriever,
                 class_id=class_id,
                 professor_id=professor_id,
             )
-
             state["retrieved_pages"] = deduplicate_retrieved_windows([*state.get("retrieved_pages", []), *new_pages])
             state["retrieval_diagnostics"] = [*state.get("retrieval_diagnostics", []), *new_diagnostics]
+            state["retrieval_reason_history"] = [*state.get("retrieval_reason_history", []), *new_reasons]
             state["tool_call_count"] = state.get("tool_call_count", 0) + len(new_search_queries)
-            state["retrieval_confidence"] = retrieval_confidence_from_pages(
-                state["retrieved_pages"],
-                state["retrieval_diagnostics"],
-            )
+            state["retrieval_confidence"] = retrieval_confidence_from_pages(state["retrieved_pages"], state["retrieval_diagnostics"])
             state["sources"] = sources_from_pages(state["retrieved_pages"])
-            state["stage_history"] = append_stage(state, "search_pdf_pages")
+            state["stage_history"] = append_stage(state, "search_ocr_metadata")
             state["search_queries"] = [*state.get("search_queries", []), *new_search_queries]
             state["tool_calls"] = []
 
-            yield {
-                "message": "Opening the PDF pages I found.",
-                "stage": "opening_pages",
-                "type": "step",
-            }
-            state["page_assets"] = await build_assets(state.get("retrieved_pages", []), max_total_pages=MAX_TOTAL_PAGES)
-            state["stage_history"] = append_stage(state, "fetch_or_render_pdf_pages")
-            yield {
-                "message": "Checking the selected pages against your question.",
-                "stage": "reading_pages",
-                "type": "step",
-            }
+        pages_for_context = page_context_records_for_state(state)
+        state["page_assets"] = (
+            normalize_metadata_page_assets(
+                await build_assets(pages_for_context, max_total_pages=MAX_TOTAL_PAGES),
+                pages_for_context,
+            )
+            if pages_for_context
+            else []
+        )
+        state["selected_metadata_records"] = selected_metadata_records(state["page_assets"])
+        state["stage_history"] = append_stage(state, "prepare_metadata_context")
 
+        if state.get("page_assets") or state.get("student_attachment_files"):
             final_messages = await asyncio.to_thread(build_multimodal_final_messages, state)
             await maybe_adjust_ai_usage_reservation(state, final_messages)
             state["input_token_breakdown"] = build_input_token_breakdown(state, final_messages)
             yield {
-                "message": "Preparing a helpful response.",
+                "message": "Writing a helpful next step...",
                 "stage": "preparing_answer",
                 "type": "step",
             }
@@ -1707,34 +3375,26 @@ async def run_pdf_rag_agent_stream(
             )
             state["answer"] = response.get("content") or ""
             state["finish_reason"] = response.get("finish_reason") or ""
-            state["stage_history"] = append_stage(state, "openrouter_answer_with_pages")
+            state["stage_history"] = append_stage(state, "answer_with_policy")
             state["token_usage"] = add_token_usage(state.get("token_usage"), response.get("usage"))
             state["token_usage_by_call"] = append_model_call_usage(
                 state,
                 response.get("usage"),
-                stage="openrouter_answer_with_pages",
+                stage="answer_with_policy",
                 purpose="final_answer",
                 model=final_model,
                 reasoning_effort=final_reasoning_effort,
             )
-            state["tool_calls"] = []
+        else:
+            state["answer"] = str(decision.get("student_response") or state.get("answer") or "").strip()
+            if not state["answer"]:
+                state["answer"] = "Tell me what part you tried or where you got stuck, and I’ll give you a small nudge."
 
-            if not state["tool_calls"]:
-                await finish_active_problem_context_prefetch(state)
-                state["answer"] = await apply_leak_guard_with_model(
-                    state=state,
-                    answer=state.get("answer") or "",
-                    openrouter_client=client,
-                )
-                yield {"payload": pdf_rag_response_from_state(state), "type": "final"}
-                return
-
-        if not state.get("answer"):
-            state["answer"] = (
-                "I could not find enough support in the selected PDF pages after the maximum number of searches. "
-                "Ask your teacher for the exact worksheet, page, or problem text, or paste the relevant part here."
-            )
-
+        state["used_page_assets"] = page_assets_for_memory_from_answer(state, state.get("answer") or "")
+        state["chat_retrieval_memory"] = build_next_chat_retrieval_memory(state)
+        state["knowledge_items"] = state["chat_retrieval_memory"].get("knowledge_items") or []
+        await asyncio.to_thread(save_chat_retrieval_memory, state["chat_retrieval_memory"], snapshot_side_effect_value(state))
+        state["stage_history"] = append_stage(state, "save_chat_retrieval_memory")
         await finish_active_problem_context_prefetch(state)
         state["answer"] = await apply_leak_guard_with_model(
             state=state,
@@ -1751,15 +3411,23 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
     preliminary_sources = sources_for_answer(state, raw_answer)
     problem_context = parse_problem_context_from_answer(raw_answer, state, preliminary_sources)
     active_problem_context = update_active_problem_context(problem_context, state)
-    answer = remove_problem_context_from_student_text(raw_answer).strip()
+    state["used_page_assets"] = page_assets_for_memory_from_answer(state, raw_answer)
+    answer_without_context = remove_problem_context_from_student_text(raw_answer).strip()
+    answer = suppress_repeated_problem_section_for_followup(answer_without_context, state)
     if not answer:
         fallback_state = dict(state)
         fallback_state["answer"] = ""
         answer = answer_or_page_fallback(fallback_state)  # type: ignore[arg-type]
 
-    sources = sources_for_answer(state, answer)
+    sources = preliminary_sources
     retrieval_confidence = normalize_retrieval_confidence(state.get("retrieval_confidence"))
-    structured_output = structured_tutor_output_from_answer(answer, state, sources)
+    structured_output = (
+        state.get("structured_output_override")
+        if isinstance(state.get("structured_output_override"), dict)
+        and isinstance((state.get("structured_output_override") or {}).get("sections"), dict)
+        else structured_tutor_output_from_answer(answer, state, sources)
+    )
+    structured_output = suppress_structured_problem_section_for_followup(structured_output, state)
     gate = answer_leak_gate(
         answer=answer,
         structured_output=structured_output,
@@ -1810,9 +3478,26 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
             active_problem_context=active_problem_context,
         )
 
+    active_problem_text = str(((structured_output.get("sections") or {}).get("problem") if isinstance(structured_output, dict) else "") or "")
+    state["knowledge_items"] = knowledge_items_from_state(
+        state,
+        active_problem_text=active_problem_text or str((active_problem_context or {}).get("problem_text") or ""),
+        previous_items=state.get("knowledge_items") or (state.get("chat_retrieval_memory") or {}).get("knowledge_items", []),
+    )
+
     return {
         "content": answer,
         "langGraphTrace": {
+            "activeMaterialId": (state.get("retrieval_decision") or {}).get("active_material_id"),
+            "activePage": (state.get("retrieval_decision") or {}).get("active_page"),
+            "activeProblemNumbers": (state.get("retrieval_decision") or {}).get("active_problem_numbers") or [],
+            "decisionSource": (state.get("retrieval_decision") or {}).get("decision_source"),
+            "failedSearchesSkipped": state.get("failed_searches_skipped") or [],
+            "memoryUsed": bool((state.get("retrieval_decision") or {}).get("memory_used")),
+            "retrievalDecision": state.get("retrieval_decision") or {},
+            "retrievalReason": (state.get("retrieval_decision") or {}).get("retrieval_reason") or state.get("retrieval_reason") or "",
+            "knowledgeItems": state.get("knowledge_items") or [],
+            "selectedMetadataRecords": state.get("selected_metadata_records") or [],
             "searchQueries": state.get("search_queries") or [],
             "selectedPages": selected_page_trace(state.get("page_assets", [])),
             "stages": state.get("stage_history") or [],
@@ -1831,6 +3516,69 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
             "calls": normalize_model_call_usage_list(state.get("token_usage_by_call")),
         },
     }
+
+
+def suppress_repeated_problem_section_for_followup(answer: str, state: PdfRagState) -> str:
+    if not should_suppress_problem_section_for_followup(state):
+        return answer
+
+    if not extract_labeled_section(answer, ["problem"]):
+        return answer
+
+    cleaned = remove_labeled_sections(answer, ["problem"]).strip()
+    return cleaned or answer
+
+
+def suppress_structured_problem_section_for_followup(
+    structured_output: dict[str, Any],
+    state: PdfRagState,
+) -> dict[str, Any]:
+    if not should_suppress_problem_section_for_followup(state):
+        return structured_output
+
+    sections = structured_output.get("sections")
+    if not isinstance(sections, dict) or not sections.get("problem"):
+        return structured_output
+
+    next_sections = dict(sections)
+    next_sections.pop("problem", None)
+    raw_order = structured_output.get("sectionOrder")
+    next_order = [key for key in raw_order if key != "problem"] if isinstance(raw_order, list) else []
+
+    updated = {
+        **structured_output,
+        "sections": next_sections,
+    }
+    if isinstance(raw_order, list):
+        updated["sectionOrder"] = next_order
+
+    return updated
+
+
+def should_suppress_problem_section_for_followup(state: PdfRagState) -> bool:
+    latest_message = latest_student_message_content(state.get("messages", []))
+    if not latest_message:
+        return False
+
+    if problem_numbers_from_text(latest_message) or explicit_page_numbers_from_text(latest_message):
+        return False
+
+    if explicit_source_text_request(latest_message):
+        return False
+
+    return simple_hint_or_next_step_intent(latest_message) or bool(
+        re.search(r"\b(?:yes|yeah|yep|this|that|it|same problem|the problem)\b", latest_message, flags=re.IGNORECASE)
+    )
+
+
+def explicit_source_text_request(message: str) -> bool:
+    normalized = normalize_search_query(message)
+    return bool(
+        re.search(
+            r"\b(?:find|where|locate|which page|what page|pull up|quote|read|show me|copy|restate|what does|what says)\b",
+            normalized,
+        )
+    )
 
 
 def parse_problem_context_from_answer(
@@ -1999,10 +3747,16 @@ def nullable_problem_context_value(value: Any) -> str | None:
 
 
 def remove_problem_context_from_student_text(answer: str) -> str:
+    without_referenced_sources = re.sub(
+        r"(?:^|\n)\s*Referenced sources\s*:.*?(?=(?:\n\s*Problem context\s*:)|\Z)",
+        "",
+        answer or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     return re.sub(
         r"(?:^|\n)\s*Problem context\s*:.*\s*$",
         "",
-        answer or "",
+        without_referenced_sources,
         flags=re.IGNORECASE | re.DOTALL,
     ).strip()
 
@@ -2194,6 +3948,7 @@ def save_active_problem_context(context: dict[str, Any], state: PdfRagState) -> 
     cache_key = problem_context_cache_key(state)
     if cache_key:
         _ACTIVE_PROBLEM_CONTEXT_CACHE[cache_key] = dict(context)
+    invalidate_conversation_document_cache(state)
 
     schedule_best_effort_side_effect(
         "conversation_problem_context_persisted",
@@ -2217,27 +3972,260 @@ def problem_context_cache_key(state: PdfRagState) -> str:
 
 
 def read_active_problem_context_from_firestore(state: PdfRagState) -> dict[str, Any] | None:
+    data = read_conversation_document_data(state)
+    context = data.get("activeKnowledgeContext") or data.get("activeProblemContext")
+    return dict(context) if isinstance(context, dict) and context.get("problem_text") else None
+
+
+def conversation_document_cache_key(state: PdfRagState | dict[str, Any]) -> str:
+    conversation_id = str(state.get("conversation_id") or "").strip()
+    class_id = str(state.get("class_id") or "").strip()
+    return f"{class_id}:{conversation_id}" if class_id and conversation_id else ""
+
+
+def conversation_document_lock(cache_key: str) -> threading.Lock:
+    with _CONVERSATION_DOCUMENT_CACHE_LOCK:
+        lock = _CONVERSATION_DOCUMENT_LOCKS.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _CONVERSATION_DOCUMENT_LOCKS[cache_key] = lock
+        return lock
+
+
+def cached_conversation_document_data(cache_key: str) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _CONVERSATION_DOCUMENT_CACHE_LOCK:
+        cached = _CONVERSATION_DOCUMENT_CACHE.get(cache_key)
+        if cached and now - cached[0] <= _CONVERSATION_DOCUMENT_CACHE_TTL_SECONDS:
+            return dict(cached[1])
+    return None
+
+
+def cache_conversation_document_data(cache_key: str, data: dict[str, Any]) -> None:
+    with _CONVERSATION_DOCUMENT_CACHE_LOCK:
+        _CONVERSATION_DOCUMENT_CACHE[cache_key] = (time.monotonic(), dict(data))
+
+
+def invalidate_conversation_document_cache(state: PdfRagState | dict[str, Any]) -> None:
+    cache_key = conversation_document_cache_key(state)
+    if not cache_key:
+        return
+
+    with _CONVERSATION_DOCUMENT_CACHE_LOCK:
+        _CONVERSATION_DOCUMENT_CACHE.pop(cache_key, None)
+
+
+def read_conversation_document_data(state: PdfRagState | dict[str, Any]) -> dict[str, Any]:
+    cache_key = conversation_document_cache_key(state)
+    if not cache_key:
+        return {}
+
+    cached = cached_conversation_document_data(cache_key)
+    if cached is not None:
+        return cached
+
+    lock = conversation_document_lock(cache_key)
+    with lock:
+        cached = cached_conversation_document_data(cache_key)
+        if cached is not None:
+            return cached
+
+        conversation_id = str(state.get("conversation_id") or "").strip()
+        class_id = str(state.get("class_id") or "").strip()
+        try:
+            from backend.main import firebase_db
+
+            snapshot = (
+                firebase_db()
+                .collection("classes")
+                .document(class_id)
+                .collection("conversations")
+                .document(conversation_id)
+                .get()
+            )
+            data = snapshot.to_dict() if getattr(snapshot, "exists", False) else {}
+        except Exception:
+            return {}
+
+        normalized_data = dict(data or {}) if isinstance(data, dict) else {}
+        cache_conversation_document_data(cache_key, normalized_data)
+        return normalized_data
+
+
+def chat_retrieval_memory_cache_key(state: PdfRagState) -> str:
+    conversation_id = str(state.get("conversation_id") or "").strip()
+    if conversation_id:
+        return conversation_id
+
+    class_id = str(state.get("class_id") or "").strip()
+    student_id = str(state.get("student_id") or "").strip()
+    return f"{class_id}:{student_id}" if class_id and student_id else ""
+
+
+def read_chat_retrieval_memory(state: PdfRagState) -> dict[str, Any]:
+    cache_key = chat_retrieval_memory_cache_key(state)
+    if cache_key and cache_key in _CHAT_RETRIEVAL_MEMORY_CACHE:
+        return normalize_chat_retrieval_memory(_CHAT_RETRIEVAL_MEMORY_CACHE[cache_key])
+
     conversation_id = str(state.get("conversation_id") or "").strip()
     class_id = str(state.get("class_id") or "").strip()
     if not conversation_id or not class_id:
-        return None
+        return normalize_chat_retrieval_memory({})
+
+    data = read_conversation_document_data(state)
+    memory = normalize_chat_retrieval_memory((data or {}).get("knowledgeMemory") or (data or {}).get("retrievalMemory"))
+    if cache_key:
+        _CHAT_RETRIEVAL_MEMORY_CACHE[cache_key] = dict(memory)
+    return memory
+
+
+def save_chat_retrieval_memory(memory: dict[str, Any], state: PdfRagState) -> None:
+    normalized = normalize_chat_retrieval_memory(memory)
+    cache_key = chat_retrieval_memory_cache_key(state)
+    if cache_key:
+        _CHAT_RETRIEVAL_MEMORY_CACHE[cache_key] = dict(normalized)
+    invalidate_conversation_document_cache(state)
+
+    conversation_id = str(state.get("conversation_id") or "").strip()
+    class_id = str(state.get("class_id") or "").strip()
+    if not conversation_id or not class_id:
+        return
 
     try:
         from backend.main import firebase_db
 
-        snapshot = (
+        (
             firebase_db()
             .collection("classes")
             .document(class_id)
             .collection("conversations")
             .document(conversation_id)
-            .get()
+            .set({"knowledgeMemory": normalized, "retrievalMemory": normalized}, merge=True)
         )
-        data = snapshot.to_dict() if getattr(snapshot, "exists", False) else {}
-        context = (data or {}).get("activeProblemContext")
-        return dict(context) if isinstance(context, dict) and context.get("problem_text") else None
-    except Exception:
+    except Exception as error:
+        logger.warning(
+            "chat_retrieval_memory_storage_skipped",
+            extra={"conversation_id": conversation_id, "error": str(error)},
+        )
+
+
+def build_next_chat_retrieval_memory(state: PdfRagState) -> dict[str, Any]:
+    previous = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
+    used_page_assets = state.get("used_page_assets")
+    if not isinstance(used_page_assets, list):
+        used_page_assets = page_assets_for_memory_from_answer(state, state.get("answer") or "")
+    records = selected_metadata_records(used_page_assets)
+    active = records[0] if records else active_metadata_record_from_memory(previous)
+    decision = state.get("retrieval_decision") or {}
+    new_failed_searches = [
+        {
+            "query": query,
+            "retrieval_reason": reason.get("retrieval_reason") if isinstance(reason, dict) else decision.get("retrieval_reason"),
+            "timestamp": utc_timestamp(),
+        }
+        for query, reason in zip(state.get("search_queries", []), state.get("retrieval_reason_history", []))
+        if not state.get("retrieved_pages")
+    ]
+    failed_searches = compact_memory_list([*previous.get("failed_searches", []), *new_failed_searches], limit=12)
+    memory_state = {**state, "page_assets": used_page_assets, "used_page_assets": used_page_assets}
+    knowledge_items = knowledge_items_from_state(
+        memory_state,
+        previous_items=previous.get("knowledge_items", []),
+    )
+    reason_history = compact_memory_list(
+        [
+            *previous.get("reason_history", []),
+            *state.get("retrieval_reason_history", []),
+            {
+                "decision_source": decision.get("decision_source"),
+                "memory_used": decision.get("memory_used"),
+                "retrieval_reason": decision.get("retrieval_reason"),
+                "timestamp": utc_timestamp(),
+            },
+        ],
+        limit=12,
+    )
+
+    return normalize_chat_retrieval_memory(
+        {
+            "active_metadata": active,
+            "active_pdf_material": pdf_material_memory_from_record(active),
+            "active_problem": problem_memory_from_record(active),
+            "active_page": page_memory_from_record(active),
+            "active_page_asset": page_asset_memory_from_record(active),
+            "failed_searches": failed_searches,
+            "knowledge_items": knowledge_items,
+            "reason_history": reason_history,
+            "retrieved_metadata": compact_memory_list([*records, *previous.get("retrieved_metadata", [])], limit=8),
+            "updated_at": utc_timestamp(),
+        }
+    )
+
+
+def pdf_material_memory_from_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
         return None
+    return {
+        "material_id": record.get("doc_id"),
+        "material_type": record.get("material_type"),
+        "full_pdf_bucket": record.get("full_pdf_bucket"),
+        "full_pdf_path": record.get("full_pdf_path"),
+        "full_pdf_uri": record.get("full_pdf_uri"),
+        "storage_bucket": record.get("storage_bucket"),
+        "storage_path": record.get("storage_path"),
+        "title": record.get("title"),
+    }
+
+
+def problem_memory_from_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
+        return None
+    return {
+        "problem_numbers": record.get("problem_numbers") or [],
+        "text": record.get("ocr_text") or record.get("chunk_text"),
+    }
+
+
+def page_memory_from_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
+        return None
+    return {
+        "page_end": record.get("page_end"),
+        "page_start": record.get("page_start"),
+        "printed_page_end": record.get("printed_page_end"),
+        "printed_page_start": record.get("printed_page_start"),
+    }
+
+
+def page_asset_memory_from_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
+        return None
+    return {
+        "bucket": record.get("page_asset_bucket") or record.get("page_asset_storage_bucket"),
+        "checksum_sha256": record.get("page_asset_checksum_sha256"),
+        "mime_type": record.get("page_asset_mime_type"),
+        "path": record.get("page_asset_path") or record.get("page_asset_storage_path"),
+        "size_bytes": record.get("page_asset_size_bytes"),
+        "storage_bucket": record.get("page_asset_storage_bucket"),
+        "storage_path": record.get("page_asset_storage_path"),
+        "uri": record.get("page_asset_uri"),
+    }
+
+
+def compact_memory_list(items: list[Any], *, limit: int) -> list[Any]:
+    compacted: list[Any] = []
+    seen: set[str] = set()
+    for item in items:
+        if not item:
+            continue
+        key = json.dumps(item, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        compacted.append(item)
+        if len(compacted) >= limit:
+            break
+    return compacted
 
 
 def save_active_problem_context_to_firestore(context: dict[str, Any], state: PdfRagState) -> None:
@@ -2255,7 +4243,7 @@ def save_active_problem_context_to_firestore(context: dict[str, Any], state: Pdf
             .document(class_id)
             .collection("conversations")
             .document(conversation_id)
-            .set({"activeProblemContext": context}, merge=True)
+            .set({"activeKnowledgeContext": context, "activeProblemContext": context}, merge=True)
         )
     except Exception as error:
         logger.warning(
@@ -2896,10 +4884,10 @@ def build_input_token_breakdown(state: PdfRagState, final_messages: list[dict[st
         role = str(message.get("role") or "unknown")
         add_debug_text_section(
             sections,
-            id=f"router.message.{index}.{role}",
-            label=f"Router message {index}: {role}",
-            stage="openrouter_agent",
-            purpose="router",
+            id=f"retrieval_decision.message.{index}.{role}",
+            label=f"Retrieval decision message {index}: {role}",
+            stage="decide_retrieval_need",
+            purpose="tutor_decision",
             kind="message",
             text=message.get("content"),
         )
@@ -2911,7 +4899,7 @@ def build_input_token_breakdown(state: PdfRagState, final_messages: list[dict[st
             sections,
             message=message,
             index=index,
-            stage="openrouter_answer_with_pages",
+            stage="answer_with_policy",
             purpose="final_answer",
             label_prefix="Final history",
         )
@@ -2935,13 +4923,14 @@ def build_input_token_breakdown(state: PdfRagState, final_messages: list[dict[st
             sections,
             id="final.instructions.text",
             label="Final instructions text",
-            stage="openrouter_answer_with_pages",
+            stage="answer_with_policy",
             purpose="final_answer",
             kind="instructions",
             text=final_content,
         )
 
     add_page_asset_debug_sections(sections, state.get("page_assets", []), final_history_count=final_history_count)
+    add_student_attachment_debug_sections(sections, state.get("student_attachment_files", []))
     return normalize_input_token_breakdown(sections)
 
 
@@ -2955,7 +4944,7 @@ def add_final_instruction_sections(sections: list[dict[str, Any]], *, text: str,
             sections,
             id=f"final.instructions.{text_part_index}.{index}",
             label=f"Final instruction {index}: {debug_label_excerpt(sentence)}",
-            stage="openrouter_answer_with_pages",
+            stage="answer_with_policy",
             purpose="final_answer",
             kind="instruction",
             text=sentence,
@@ -2965,10 +4954,10 @@ def add_final_instruction_sections(sections: list[dict[str, Any]], *, text: str,
         add_debug_text_section(
             sections,
             id=f"final.selected_page_metadata.{text_part_index}",
-            label="Final selected page metadata JSON",
-            stage="openrouter_answer_with_pages",
+            label="Final retrieved OCR metadata JSON",
+            stage="answer_with_policy",
             purpose="final_answer",
-            kind="selected_page_metadata",
+            kind="retrieved_ocr_metadata",
             text=metadata_text,
         )
 
@@ -3103,32 +5092,53 @@ def add_page_asset_debug_sections(
         page_end = nonnegative_int(asset.get("printed_page_end")) or nonnegative_int(asset.get("page_end")) or page_start
         page_label = f"page {page_start}" if page_start == page_end else f"pages {page_start}-{page_end}"
         asset_label = f"PDF {asset_index}: {title}, {page_label}"
+        ocr_text = str(asset.get("ocr_text") or asset.get("chunk_text") or "").strip()
 
-        for image_index, image_path in enumerate(asset.get("images") or [], start=1):
+        if ocr_text:
             sections.append(
                 {
-                    "characters": 0,
-                    "detail": str(image_path),
-                    "estimatedTokens": 900,
-                    "id": f"final.pdf.{asset_index}.image.{image_index}",
-                    "kind": "pdf_image",
-                    "label": f"{asset_label} image {image_index}",
+                    "characters": len(ocr_text),
+                    "detail": f"{asset_label} OCR text",
+                    "estimatedTokens": estimate_text_tokens_from_characters(len(ocr_text)),
+                    "id": f"final.ocr_metadata.{asset_index}.ocr_text",
+                    "kind": "ocr_text",
+                    "label": f"{asset_label} OCR text",
                     "purpose": "final_answer",
-                    "stage": "openrouter_answer_with_pages",
+                    "stage": "answer_with_policy",
                 }
             )
 
-        if asset.get("file") or asset.get("file_data_url"):
+        if asset.get("file_data_url") or asset.get("image_url"):
+            size_bytes = nonnegative_int(asset.get("page_asset_size_bytes"))
             sections.append(
                 {
                     "characters": 0,
-                    "detail": str(asset.get("file") or "inline PDF data"),
-                    "estimatedTokens": 1200,
-                    "id": f"final.pdf.{asset_index}.file",
-                    "kind": "pdf_file",
-                    "label": f"{asset_label} mini-PDF file",
+                    "detail": f"{asset_label} page asset",
+                    "estimatedTokens": 0,
+                    "id": f"final.page_asset.{asset_index}",
+                    "kind": "pdf_page_asset",
+                    "label": f"{asset_label} page asset",
                     "purpose": "final_answer",
-                    "stage": "openrouter_answer_with_pages",
+                    "stage": "answer_with_policy",
+                    "bytes": size_bytes,
+                    "mimeType": asset.get("page_asset_mime_type"),
+                }
+            )
+
+        if asset.get("full_pdf_data_url"):
+            size_bytes = nonnegative_int(asset.get("full_pdf_size_bytes"))
+            sections.append(
+                {
+                    "characters": 0,
+                    "detail": f"{title} full PDF attachment",
+                    "estimatedTokens": 0,
+                    "id": f"final.full_pdf_asset.{asset_index}",
+                    "kind": "full_pdf_asset",
+                    "label": f"{title} full PDF",
+                    "purpose": "final_answer",
+                    "stage": "answer_with_policy",
+                    "bytes": size_bytes,
+                    "mimeType": asset.get("full_pdf_mime_type"),
                 }
             )
 
@@ -3158,7 +5168,29 @@ def add_debug_text_section(
             "purpose": purpose,
             "stage": stage,
         }
-    )
+            )
+
+
+def add_student_attachment_debug_sections(sections: list[dict[str, Any]], files: list[dict[str, Any]]) -> None:
+    for index, file_payload in enumerate(files, start=1):
+        if not isinstance(file_payload, dict):
+            continue
+
+        file_name = str(file_payload.get("fileName") or file_payload.get("file_name") or f"student-upload-{index}.pdf")
+        sections.append(
+            {
+                "characters": 0,
+                "detail": f"Student uploaded PDF: {file_name}",
+                "estimatedTokens": 0,
+                "id": f"final.student_attachment.{index}",
+                "kind": "student_pdf_attachment",
+                "label": f"Student PDF {index}: {file_name}",
+                "purpose": "final_answer",
+                "stage": "answer_with_policy",
+                "bytes": nonnegative_int(file_payload.get("fileSize") or file_payload.get("file_size")),
+                "mimeType": file_payload.get("mimeType") or file_payload.get("mime_type"),
+            }
+        )
 
 
 def estimate_text_tokens_from_characters(characters: int) -> int:
@@ -3227,19 +5259,22 @@ async def maybe_adjust_ai_usage_reservation(state: PdfRagState, final_messages: 
         return
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(
-                f"{internal_next_base_url('AI usage adjustment')}/api/internal/ai-usage/reservations/{reservation_id}/adjust",
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Chandra-Internal-Secret": shared_secret,
-                },
-                json={
-                    "estimatedTokens": estimated_tokens,
-                    "studentId": reservation.get("studentId") or reservation.get("student_id"),
-                },
-            )
+        client = ai_usage_adjustment_http_client()
+        response = await client.post(
+            f"{internal_next_base_url('AI usage adjustment')}/api/internal/ai-usage/reservations/{reservation_id}/adjust",
+            headers={
+                "Content-Type": "application/json",
+                "X-Chandra-Internal-Secret": shared_secret,
+            },
+            json={
+                "estimatedTokens": estimated_tokens,
+                "studentId": reservation.get("studentId") or reservation.get("student_id"),
+            },
+        )
     except Exception as error:
+        if isinstance(error, (httpx.TransportError, httpx.TimeoutException)):
+            await close_ai_usage_adjustment_http_client()
+
         logger.warning(
             "ai_usage_reservation_adjustment_failed",
             extra={
@@ -3272,6 +5307,27 @@ async def maybe_adjust_ai_usage_reservation(state: PdfRagState, final_messages: 
     reservation["estimatedTokens"] = estimated_tokens
 
 
+def ai_usage_adjustment_http_client() -> httpx.AsyncClient:
+    global _AI_USAGE_ADJUSTMENT_CLIENT
+
+    _AI_USAGE_ADJUSTMENT_CLIENT = reusable_async_client(_AI_USAGE_ADJUSTMENT_CLIENT, timeout=20.0)
+    return _AI_USAGE_ADJUSTMENT_CLIENT
+
+
+async def close_ai_usage_adjustment_http_client() -> None:
+    global _AI_USAGE_ADJUSTMENT_CLIENT
+
+    client = _AI_USAGE_ADJUSTMENT_CLIENT
+    _AI_USAGE_ADJUSTMENT_CLIENT = None
+    if client is None or not hasattr(client, "aclose"):
+        return
+
+    try:
+        await client.aclose()
+    except Exception:
+        return
+
+
 def estimate_pdf_rag_request_tokens(state: PdfRagState, final_messages: list[dict[str, Any]]) -> int:
     actual_so_far = normalize_token_usage(state.get("token_usage"))["total_tokens"]
     final_input_tokens = estimate_provider_messages_tokens(final_messages)
@@ -3281,8 +5337,12 @@ def estimate_pdf_rag_request_tokens(state: PdfRagState, final_messages: list[dic
 
 
 def estimate_provider_messages_tokens(messages: list[dict[str, Any]]) -> int:
-    text_characters = sum(estimate_content_text_characters(message.get("content")) for message in messages)
-    asset_tokens = sum(estimate_content_asset_tokens(message.get("content")) for message in messages)
+    text_characters = 0
+    asset_tokens = 0
+    for message in messages:
+        content = message.get("content")
+        text_characters += estimate_content_text_characters(content)
+        asset_tokens += estimate_content_asset_tokens(content)
 
     return max(1, (text_characters + 3) // 4 + asset_tokens + 600)
 
@@ -3459,24 +5519,8 @@ def structured_tutor_output_from_answer(
         next_question=next_question,
     )
 
-    optional_section_labels = [
-        "hint",
-        "small hint",
-        "problem",
-        "why this works",
-        "explanation",
-        "formula",
-        "formulas",
-        "example",
-        "similar example",
-        "check your work",
-        "check work",
-        "next step",
-        "your next step",
-        "question",
-    ]
-    parsed_section_order = extract_structured_section_order(structured_answer, optional_section_labels)
-    section_answer = remove_labeled_sections(structured_answer, optional_section_labels)
+    parsed_section_order = extract_structured_section_order(structured_answer, OPTIONAL_STRUCTURED_SECTION_LABELS)
+    section_answer = remove_labeled_sections(structured_answer, OPTIONAL_STRUCTURED_SECTION_LABELS)
     if problem:
         problem, problem_followup = split_problem_section_followup(problem)
         if problem_followup and not section_answer:
@@ -3508,6 +5552,8 @@ def structured_tutor_output_from_answer(
 
     if next_question:
         sections["nextStep"] = next_question
+
+    suppress_duplicated_structured_sections(sections)
     section_order = normalized_structured_section_order(
         parsed_section_order,
         sections,
@@ -3561,8 +5607,14 @@ def asks_for_pasted_problem_or_source(answer: str) -> bool:
     normalized = answer.lower()
     return bool(
         re.search(r"\bpaste\s+(the\s+)?(exact\s+)?(problem|question|source|text|worksheet)\b", normalized)
-        or re.search(r"\bsend\s+(the\s+)?(exact\s+)?(problem|question|source|text|worksheet)\b", normalized)
-        or re.search(r"\bshare\s+(the\s+)?(exact\s+)?(problem|question|source|text|worksheet|page)\b", normalized)
+        or re.search(r"\btype\s+(the\s+)?(full\s+|exact\s+)?(problem|question|source|text|worksheet)(\s+text)?\b", normalized)
+        or re.search(r"\bsend\s+(the\s+)?(full\s+|exact\s+)?(problem|question|source|text|worksheet|page|photo|image|screenshot)(\s+(text|photo|image|screenshot))?\b", normalized)
+        or re.search(
+            r"\b(?:send|upload)\s+(?:me\s+)?(?:the\s+)?(?:textbook|homework|worksheet|page|source).{0,40}"
+            r"\b(?:title|photo|page|name|image|screenshot|text)\b",
+            normalized,
+        )
+        or re.search(r"\bshare\s+(the\s+)?(full\s+|exact\s+)?(problem|question|source|text|worksheet|page|photo|image|screenshot)(\s+(text|photo|image|screenshot))?\b", normalized)
     )
 
 
@@ -3696,53 +5748,55 @@ def is_short_greeting_answer(answer: str) -> bool:
     return all(word.lower().strip("'") in {"there", "again", "student"} or word[:1].isupper() for word in words[1:])
 
 
-def extract_labeled_section(answer: str, labels: list[str]) -> str:
-    label_pattern = "|".join(re.escape(label) for label in labels)
-    match = re.search(
-        rf"(?:^|\n|(?<=[.!?])\s+)(?:\*\*)?(?:{label_pattern})(?:\*\*)?\s*:\s*(?:\*\*)?\s*(.+?)(?=(?:\n|(?<=[.!?])\s+)\s*(?:\*\*)?[A-Z][A-Za-z ]{{2,32}}(?:\*\*)?\s*:|\Z)",
-        answer,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+def extract_labeled_section(answer: str, labels: list[str] | tuple[str, ...]) -> str:
+    match = labeled_section_pattern(tuple(labels)).search(answer)
     return clean_labeled_section_text(match.group(1)) if match else ""
 
 
-def remove_labeled_sections(answer: str, labels: list[str]) -> str:
-    label_pattern = "|".join(re.escape(label) for label in labels)
-    return re.sub(
-        rf"(?:^|\n|(?<=[.!?])\s+)(?:\*\*)?(?:{label_pattern})(?:\*\*)?\s*:\s*(?:\*\*)?\s*.+?(?=(?:\n|(?<=[.!?])\s+)\s*(?:\*\*)?[A-Z][A-Za-z ]{{2,32}}(?:\*\*)?\s*:|\Z)",
-        "\n",
-        answer,
-        flags=re.IGNORECASE | re.DOTALL,
-    ).strip()
+def remove_labeled_sections(answer: str, labels: list[str] | tuple[str, ...]) -> str:
+    return labeled_section_removal_pattern(tuple(labels)).sub("\n", answer).strip()
 
 
-def extract_structured_section_order(answer: str, labels: list[str]) -> list[str]:
-    label_to_key = {
-        "problem": "problem",
-        "hint": "hint",
-        "small hint": "hint",
-        "why this works": "explanation",
-        "explanation": "explanation",
-        "formula": "formula",
-        "formulas": "formula",
-        "example": "example",
-        "similar example": "example",
-        "check your work": "checkWork",
-        "check work": "checkWork",
-        "next step": "nextStep",
-        "your next step": "nextStep",
-        "question": "nextStep",
-    }
-    label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
-    matches = re.finditer(rf"(?im)^\s*(?:\*\*)?({label_pattern})(?:\*\*)?\s*:", answer)
+def extract_structured_section_order(answer: str, labels: list[str] | tuple[str, ...]) -> list[str]:
+    matches = structured_section_order_pattern(tuple(labels)).finditer(answer)
     ordered_keys: list[str] = []
 
     for match in matches:
-        section_key = label_to_key.get(match.group(1).strip().lower())
+        section_key = STRUCTURED_LABEL_TO_KEY.get(match.group(1).strip().lower())
         if section_key and section_key not in ordered_keys:
             ordered_keys.append(section_key)
 
     return ordered_keys
+
+
+@lru_cache(maxsize=64)
+def escaped_label_pattern(labels: tuple[str, ...], *, sort_by_length: bool = False) -> str:
+    ordered_labels = sorted(labels, key=len, reverse=True) if sort_by_length else labels
+    return "|".join(re.escape(label) for label in ordered_labels)
+
+
+@lru_cache(maxsize=64)
+def labeled_section_pattern(labels: tuple[str, ...]) -> re.Pattern[str]:
+    label_pattern = escaped_label_pattern(labels)
+    return re.compile(
+        rf"(?:^|\n|(?<=[.!?])\s+)(?:\*\*)?(?:{label_pattern})(?:\*\*)?\s*:\s*(?:\*\*)?\s*(.+?)(?=(?:\n|(?<=[.!?])\s+)\s*(?:\*\*)?[A-Z][A-Za-z ]{{2,32}}(?:\*\*)?\s*:|\Z)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+
+@lru_cache(maxsize=64)
+def labeled_section_removal_pattern(labels: tuple[str, ...]) -> re.Pattern[str]:
+    label_pattern = escaped_label_pattern(labels)
+    return re.compile(
+        rf"(?:^|\n|(?<=[.!?])\s+)(?:\*\*)?(?:{label_pattern})(?:\*\*)?\s*:\s*(?:\*\*)?\s*.+?(?=(?:\n|(?<=[.!?])\s+)\s*(?:\*\*)?[A-Z][A-Za-z ]{{2,32}}(?:\*\*)?\s*:|\Z)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+
+@lru_cache(maxsize=64)
+def structured_section_order_pattern(labels: tuple[str, ...]) -> re.Pattern[str]:
+    label_pattern = escaped_label_pattern(labels, sort_by_length=True)
+    return re.compile(rf"^\s*(?:\*\*)?({label_pattern})(?:\*\*)?\s*:", flags=re.IGNORECASE | re.MULTILINE)
 
 
 def normalized_structured_section_order(
@@ -3752,17 +5806,36 @@ def normalized_structured_section_order(
     include_answer_first: bool,
 ) -> list[str]:
     fallback_order = [section_name for section_name, _ in STRUCTURED_SECTION_ORDER]
-    ordered_keys = [
+    candidate_keys = [
         *(["answer"] if include_answer_first and sections.get("answer") else []),
         *parsed_order,
         *fallback_order,
     ]
+    leading_keys = [
+        section_name
+        for section_name in ("problem", "answer")
+        if sections.get(section_name)
+    ]
+    trailing_keys = [
+        section_name
+        for section_name in ("nextStep",)
+        if sections.get(section_name)
+    ]
     section_order: list[str] = []
 
-    for section_key in ordered_keys:
+    for section_key in leading_keys:
         if section_key in section_order or not sections.get(section_key):
             continue
         section_order.append(section_key)
+
+    for section_key in candidate_keys:
+        if section_key in section_order or section_key in trailing_keys or not sections.get(section_key):
+            continue
+        section_order.append(section_key)
+
+    for section_key in trailing_keys:
+        if section_key not in section_order:
+            section_order.append(section_key)
 
     return section_order
 
@@ -3776,7 +5849,11 @@ def clean_labeled_section_text(text: str) -> str:
 
 def split_problem_section_followup(problem: str) -> tuple[str, str]:
     match = re.search(
-        r"\s+(If you want,?\s+.+|I can help you\s+.+|Want to\s+.+|Send me\s+.+|Show me\s+.+|What have you\s+.+|Where do you\s+.+)$",
+        r"\s+("
+        r"(?:That(?:'|\u2019)s|This is|It(?:'|\u2019)s)\s+(?:the\s+)?(?:exact\s+)?(?:problem|exercise|question)\b.+\b(?:page|printed\s+page|source|textbook|worksheet)\b.+|"
+        r"(?:You can find|I found)\s+.+\b(?:page|printed\s+page|source|textbook|worksheet)\b.+|"
+        r"If you (?:want|can),?\s+.+|I can help you\s+.+|Want to\s+.+|Send me\s+.+|Show me\s+.+|What have you\s+.+|Where do you\s+.+"
+        r")$",
         problem,
         flags=re.IGNORECASE,
     )
@@ -3884,6 +5961,81 @@ def selected_page_trace(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if asset.get("printed_page_end") is not None:
             page_trace["printedPageEnd"] = asset.get("printed_page_end")
 
+        if asset.get("problem_numbers"):
+            page_trace["problemNumbers"] = asset.get("problem_numbers")
+
+        if asset.get("ocr_confidence") is not None:
+            page_trace["ocrConfidence"] = asset.get("ocr_confidence")
+
+        if asset.get("ocr_provider"):
+            page_trace["ocrProvider"] = asset.get("ocr_provider")
+
+        if asset.get("ocr_source"):
+            page_trace["ocrSource"] = asset.get("ocr_source")
+
+        if asset.get("retrieval_mode"):
+            page_trace["retrievalMode"] = asset.get("retrieval_mode")
+
+        if asset.get("retrieval_reason"):
+            page_trace["retrievalReason"] = asset.get("retrieval_reason")
+
+        if asset.get("page_asset_storage_path"):
+            page_trace["pageAsset"] = {
+                "checksumSha256": asset.get("page_asset_checksum_sha256"),
+                "mimeType": asset.get("page_asset_mime_type"),
+                "pageAssetBucket": asset.get("page_asset_bucket"),
+                "pageAssetPath": asset.get("page_asset_path"),
+                "pageAssetUri": asset.get("page_asset_uri"),
+                "sizeBytes": asset.get("page_asset_size_bytes"),
+                "storageBucket": asset.get("page_asset_storage_bucket"),
+                "storagePath": asset.get("page_asset_storage_path"),
+            }
+
         selected_pages.append(page_trace)
 
     return selected_pages
+
+
+def selected_metadata_records(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for asset in assets:
+        records.append(
+            {
+                "chunk_text": asset.get("chunk_text"),
+                "class_id": asset.get("class_id"),
+                "doc_id": asset.get("doc_id"),
+                "material_type": asset.get("material_type"),
+                "ocr_confidence": asset.get("ocr_confidence"),
+                "ocr_provider": asset.get("ocr_provider"),
+                "ocr_source": asset.get("ocr_source"),
+                "ocr_text": asset.get("ocr_text") or asset.get("chunk_text"),
+                "page_end": asset.get("page_end"),
+                "page_start": asset.get("page_start"),
+                "full_pdf_bucket": asset.get("full_pdf_bucket"),
+                "full_pdf_path": asset.get("full_pdf_path"),
+                "full_pdf_uri": asset.get("full_pdf_uri"),
+                "full_pdf_mime_type": asset.get("full_pdf_mime_type"),
+                "full_pdf_size_bytes": asset.get("full_pdf_size_bytes"),
+                "full_pdf_sha256": asset.get("full_pdf_sha256"),
+                "full_pdf_skipped_reason": asset.get("full_pdf_skipped_reason"),
+                "page_asset_bucket": asset.get("page_asset_bucket"),
+                "page_asset_path": asset.get("page_asset_path"),
+                "page_asset_uri": asset.get("page_asset_uri"),
+                "page_asset_checksum_sha256": asset.get("page_asset_checksum_sha256"),
+                "page_asset_mime_type": asset.get("page_asset_mime_type"),
+                "page_asset_size_bytes": asset.get("page_asset_size_bytes"),
+                "page_asset_storage_bucket": asset.get("page_asset_storage_bucket"),
+                "page_asset_storage_path": asset.get("page_asset_storage_path"),
+                "printed_page_end": asset.get("printed_page_end"),
+                "printed_page_start": asset.get("printed_page_start"),
+                "professor_id": asset.get("professor_id"),
+                "problem_numbers": asset.get("problem_numbers") or [],
+                "retrieval_mode": asset.get("retrieval_mode"),
+                "retrieval_reason": asset.get("retrieval_reason"),
+                "score": asset.get("score"),
+                "storage_bucket": asset.get("storage_bucket"),
+                "storage_path": asset.get("storage_path"),
+                "title": asset.get("title"),
+            }
+        )
+    return records

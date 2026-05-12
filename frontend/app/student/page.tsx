@@ -28,8 +28,12 @@ import {
 } from "@/lib/chat-message-format";
 import { subscribeToClass, type TeacherClass } from "@/lib/classes";
 import { capitalizeLabel, coerceDate, formatConversationDate } from "@/lib/display-format";
+import { knowledgeUiColorToken } from "@/lib/knowledge-memory";
 import type {
+  ChatContextMemory,
   ChatMessage,
+  KnowledgeItem,
+  KnowledgeUiColorToken,
   MessageAttachment,
   StudentAiUsageStatus,
   StudentConversationSummary,
@@ -37,7 +41,8 @@ import type {
   StudentFeedbackPromptReason,
   StudentFeedbackRating,
   TutorApiResponse,
-  TutorInputTokenSection
+  TutorInputTokenSection,
+  UsageSummary
 } from "@/lib/types";
 
 type ChatProgress = {
@@ -48,12 +53,29 @@ type ChatProgress = {
 type ChatProgressSearch = {
   description: string;
   query: string;
+  retrievalReason?: string;
   searchNumber?: number;
 };
 
 type ChatStreamEvent =
   | { message: string; stage: string; type: "step" }
-  | { description?: string; message: string; query: string; searchNumber: number; stage: string; type: "search" }
+  | {
+      debugInfo?: TutorApiResponse["debugInfo"];
+      langGraphTrace?: TutorApiResponse["langGraphTrace"];
+      message: string;
+      stage: string;
+      structuredOutput?: TutorApiResponse["structuredOutput"];
+      type: "quick_response";
+    }
+  | {
+      description?: string;
+      message: string;
+      query: string;
+      retrievalReason?: string;
+      searchNumber: number;
+      stage: string;
+      type: "search";
+    }
   | {
       message: string;
       queries: string[];
@@ -100,6 +122,17 @@ const teacherPreviewDebugStorageKey = "chandra.teacherPreviewDebugMode";
 const welcomeMessageId = "welcome";
 
 type StudentMainView = "chat" | "settings";
+type KnowledgeItemRole = "definition" | "example" | "page" | "problem" | "source" | "student_upload" | "theorem";
+type KnowledgeLine = {
+  colorToken: KnowledgeUiColorToken;
+  key: string;
+  role: KnowledgeItemRole;
+};
+type KnowledgeAnimationLine = {
+  colorToken: KnowledgeUiColorToken;
+  delayMs: number;
+  id: string;
+};
 type FeedbackModalState = {
   conversationId?: string;
   defaultComment: string;
@@ -107,6 +140,7 @@ type FeedbackModalState = {
   messageId?: string | null;
   promptReason?: StudentFeedbackPromptReason;
 };
+type HeaderDropdown = "context" | "feedback" | "usage" | null;
 
 export default function StudentPage() {
   return (
@@ -146,9 +180,17 @@ export function StudentWorkspace() {
   const [conversationMessagesError, setConversationMessagesError] = useState("");
   const [themePreferenceError, setThemePreferenceError] = useState("");
   const [isSavingThemePreference, setIsSavingThemePreference] = useState(false);
+  const [themePreferencePreview, setThemePreferencePreview] = useState<{
+    appearance?: unknown;
+    themeColor?: unknown;
+  } | null>(null);
   const [accountDisplayName, setAccountDisplayName] = useState<string | null>(null);
+  const [accountEmailDraft, setAccountEmailDraft] = useState<string | null>(null);
   const [accountUsername, setAccountUsername] = useState<string | null>(null);
   const [accountSettingsError, setAccountSettingsError] = useState("");
+  const [currentAccountPassword, setCurrentAccountPassword] = useState("");
+  const [newAccountPassword, setNewAccountPassword] = useState("");
+  const [confirmAccountPassword, setConfirmAccountPassword] = useState("");
   const [deleteAccountPassword, setDeleteAccountPassword] = useState("");
   const [isSavingAccountSettings, setIsSavingAccountSettings] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
@@ -159,6 +201,8 @@ export function StudentWorkspace() {
   const [studentClassesError, setStudentClassesError] = useState("");
   const [aiUsageStatus, setAiUsageStatus] = useState<StudentAiUsageStatus | null>(null);
   const [aiUsageError, setAiUsageError] = useState("");
+  const [openHeaderDropdown, setOpenHeaderDropdown] = useState<HeaderDropdown>(null);
+  const headerActionsRef = useRef<HTMLDivElement | null>(null);
   const [isSwitchingClass, setIsSwitchingClass] = useState(false);
   const [conversationSummaries, setConversationSummaries] = useState<StudentConversationSummary[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState("");
@@ -274,13 +318,17 @@ export function StudentWorkspace() {
   );
   const activeAppearance = useMemo(
     () =>
-      normalizeTeacherClassAppearance(profile?.appearance ?? activeClass?.appearance ?? defaultTeacherClassAppearance),
-    [activeClass?.appearance, profile?.appearance]
+      normalizeTeacherClassAppearance(
+        themePreferencePreview?.appearance ?? profile?.appearance ?? activeClass?.appearance ?? defaultTeacherClassAppearance
+      ),
+    [activeClass?.appearance, profile?.appearance, themePreferencePreview?.appearance]
   );
   const activeThemeColor = useMemo(
     () =>
-      normalizeTeacherClassThemeColor(profile?.themeColor ?? activeClass?.themeColor ?? defaultTeacherClassThemeColor),
-    [activeClass?.themeColor, profile?.themeColor]
+      normalizeTeacherClassThemeColor(
+        themePreferencePreview?.themeColor ?? profile?.themeColor ?? activeClass?.themeColor ?? defaultTeacherClassThemeColor
+      ),
+    [activeClass?.themeColor, profile?.themeColor, themePreferencePreview?.themeColor]
   );
   const className = activeClass?.name ?? (activeCourseId ? "Saved class" : "Class needed");
   const classSection = activeClass?.section ?? (activeCourseId ? "Student chat" : "Enter your class code");
@@ -302,8 +350,15 @@ export function StudentWorkspace() {
   );
   const accountName = profile?.displayName ?? user?.displayName ?? "Student";
   const accountEmail = profile?.email ?? user?.email ?? "";
+  const accountEmailValue = accountEmailDraft ?? accountEmail;
   const accountUsernameValue = profile?.username ?? accountEmail;
   const accountLastSignInAt = user?.metadata.lastSignInTime ?? "";
+  const usageSummary = useMemo(() => usageSummaryFromStatus(aiUsageStatus), [aiUsageStatus]);
+  const chatContextMemory = useMemo(() => buildChatContextMemory(messages), [messages]);
+  const knowledgeLines = useMemo(() => buildKnowledgeLines(messages), [messages]);
+  const latestKnowledgeMessageId = useMemo(() => latestKnowledgeAssistantMessageId(messages), [messages]);
+  const previousKnowledgeKeysRef = useRef<string[] | null>(null);
+  const [knowledgeAnimationLines, setKnowledgeAnimationLines] = useState<KnowledgeAnimationLine[]>([]);
   const { isUploadingAttachment, readyComposerAttachments } = useMemo(() => {
     const readyAttachments: ComposerAttachment[] = [];
     let hasUploadInFlight = false;
@@ -318,6 +373,37 @@ export function StudentWorkspace() {
 
     return { isUploadingAttachment: hasUploadInFlight, readyComposerAttachments: readyAttachments };
   }, [composerAttachments]);
+
+  useEffect(() => {
+    const currentKeys = knowledgeLines.map((item) => item.key);
+    const previousKeys = previousKnowledgeKeysRef.current;
+
+    if (!previousKeys) {
+      previousKnowledgeKeysRef.current = currentKeys;
+      return;
+    }
+
+    const previousKeySet = new Set(previousKeys);
+    const addedItems = knowledgeLines.filter((item) => !previousKeySet.has(item.key));
+    previousKnowledgeKeysRef.current = currentKeys;
+
+    if (!addedItems.length) {
+      return;
+    }
+
+    const animationId = Date.now();
+    const lines = addedItems.slice(-5).map((item, index) => ({
+      colorToken: item.colorToken,
+      delayMs: index * 82,
+      id: `${item.key}-${animationId}-${index}`
+    }));
+
+    setKnowledgeAnimationLines(lines);
+    const timeout = window.setTimeout(() => setKnowledgeAnimationLines([]), 780 + lines.length * 82);
+
+    return () => window.clearTimeout(timeout);
+  }, [knowledgeLines]);
+
   const canSendMessage = Boolean(
     activeCourseId &&
       !isSending &&
@@ -330,6 +416,41 @@ export function StudentWorkspace() {
   useEffect(() => {
     resizeStudentComposerTextarea(draftTextareaRef.current);
   }, [draft]);
+
+  useEffect(() => {
+    if (!openHeaderDropdown) {
+      return;
+    }
+
+    function closeOpenHeaderDropdown() {
+      setOpenHeaderDropdown(null);
+      if (openHeaderDropdown === "feedback" && !isSendingFeedback) {
+        setFeedbackModal(null);
+      }
+    }
+
+    function handleDocumentPointerDown(event: PointerEvent) {
+      if (headerActionsRef.current?.contains(event.target as Node)) {
+        return;
+      }
+
+      closeOpenHeaderDropdown();
+    }
+
+    function handleDocumentKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        closeOpenHeaderDropdown();
+      }
+    }
+
+    document.addEventListener("pointerdown", handleDocumentPointerDown);
+    document.addEventListener("keydown", handleDocumentKeyDown);
+
+    return () => {
+      document.removeEventListener("pointerdown", handleDocumentPointerDown);
+      document.removeEventListener("keydown", handleDocumentKeyDown);
+    };
+  }, [isSendingFeedback, openHeaderDropdown]);
 
   useEffect(() => {
     if (!isTeacherPreview) {
@@ -659,6 +780,7 @@ export function StudentWorkspace() {
       markFeedbackPromptShown(activeCourseId, nextFeedback.conversationId);
     }
     setFeedbackModal(nextFeedback);
+    setOpenHeaderDropdown("feedback");
     setFeedbackRating("helpful");
     setFeedbackComment(nextFeedback.defaultComment);
     setFeedbackMessage("");
@@ -711,6 +833,7 @@ export function StudentWorkspace() {
         setConversationSummaries(await fetchStudentConversationSummaries({ classId: activeCourseId, token }));
       }
       setFeedbackModal(null);
+      setOpenHeaderDropdown(null);
       setFeedbackComment("");
       setFeedbackMessage("Feedback sent.");
     } catch (caughtError) {
@@ -796,6 +919,7 @@ export function StudentWorkspace() {
       searches: []
     });
     let pendingFeedbackPrompt: FeedbackModalState | null = null;
+    let quickResponseMessageId = "";
 
     try {
       const token = await user.getIdToken();
@@ -830,12 +954,33 @@ export function StudentWorkspace() {
           }));
         }
 
+        if (event.type === "quick_response") {
+          setChatProgress((current) => ({
+            message: "Checking class materials.",
+            searches: current?.searches ?? []
+          }));
+          quickResponseMessageId = quickResponseMessageId || `quick-${studentMessage.id}`;
+          setMessages((current) =>
+            upsertChatMessage(current, {
+              id: quickResponseMessageId,
+              role: "assistant",
+              content: quickResponseContent(event),
+              createdAt: new Date().toISOString(),
+              debugInfo: event.debugInfo,
+              langGraphTrace: event.langGraphTrace,
+              sources: [],
+              structuredOutput: event.structuredOutput
+            })
+          );
+        }
+
         if (event.type === "search") {
           setChatProgress((current) =>
             appendProgressSearches(current, event.message, [
               {
-                description: coerceFiveWordSearchReason(event.description, event.query),
+                description: studentSearchPurposeLabel(event.retrievalReason, event.query, event.description),
                 query: event.query,
+                retrievalReason: event.retrievalReason,
                 searchNumber: event.searchNumber
               }
             ])
@@ -846,12 +991,22 @@ export function StudentWorkspace() {
           const searches =
             event.searches ??
             event.queries.map((query, index) => ({
-              description: describeSearchQueryForUi(query),
+              description: studentSearchPurposeLabel(undefined, query),
               query,
+              retrievalReason: undefined,
               searchNumber: event.searchNumbers?.[index]
             }));
 
-          setChatProgress((current) => appendProgressSearches(current, event.message, searches));
+          setChatProgress((current) =>
+            appendProgressSearches(
+              current,
+              event.message,
+              searches.map((search) => ({
+                ...search,
+                description: studentSearchPurposeLabel(search.retrievalReason, search.query, search.description)
+              }))
+            )
+          );
         }
       });
 
@@ -886,7 +1041,12 @@ export function StudentWorkspace() {
         structuredOutput: data.structuredOutput
       };
 
-      setMessages((current) => upsertChatMessage(current, assistantMessage));
+      setMessages((current) =>
+        upsertChatMessage(
+          current,
+          assistantMessage
+        )
+      );
       pendingFeedbackPrompt = buildFeedbackPromptCandidate({
         assistantMessage,
         classId: activeCourseId,
@@ -925,16 +1085,25 @@ export function StudentWorkspace() {
       return;
     }
 
+    const previousPreview = themePreferencePreview;
+    const nextAppearance = normalizeTeacherClassAppearance(nextPreference.appearance ?? activeAppearance);
+    const nextThemeColor = normalizeTeacherClassThemeColor(nextPreference.themeColor ?? activeThemeColor);
+
     setThemePreferenceError("");
+    setThemePreferencePreview({
+      appearance: nextAppearance,
+      themeColor: nextThemeColor
+    });
     setIsSavingThemePreference(true);
 
     try {
       await updateUserThemePreference({
-        appearance: normalizeTeacherClassAppearance(nextPreference.appearance ?? activeAppearance),
-        themeColor: normalizeTeacherClassThemeColor(nextPreference.themeColor ?? activeThemeColor),
+        appearance: nextAppearance,
+        themeColor: nextThemeColor,
         uid: user.uid
       });
     } catch (caughtError) {
+      setThemePreferencePreview(previousPreview);
       setThemePreferenceError(caughtError instanceof Error ? caughtError.message : "Theme preference failed.");
     } finally {
       setIsSavingThemePreference(false);
@@ -947,18 +1116,55 @@ export function StudentWorkspace() {
     }
 
     setAccountSettingsError("");
+
+    const nextEmail = accountEmailValue.trim().toLowerCase();
+    const passwordChanged = Boolean(newAccountPassword);
+    const emailChanged = Boolean(nextEmail && nextEmail !== accountEmail.trim().toLowerCase());
+
+    if (!nextEmail) {
+      setAccountSettingsError("Enter an email address.");
+      return;
+    }
+
+    if (passwordChanged && newAccountPassword.length < 6) {
+      setAccountSettingsError("New password must be at least 6 characters.");
+      return;
+    }
+
+    if (passwordChanged && newAccountPassword !== confirmAccountPassword) {
+      setAccountSettingsError("New password and confirmation do not match.");
+      return;
+    }
+
+    if ((emailChanged || passwordChanged) && !currentAccountPassword) {
+      setAccountSettingsError("Enter your current password before changing email or password.");
+      return;
+    }
+
     setIsSavingAccountSettings(true);
 
     try {
+      const nextUsername =
+        !accountUsername && accountUsernameValue === accountEmail && emailChanged
+          ? nextEmail
+          : accountUsername ?? accountUsernameValue;
+
       await updateUserAccountSettings({
         appearance: activeAppearance,
+        currentPassword: currentAccountPassword,
         displayName: accountDisplayName ?? accountName,
+        email: nextEmail,
+        newPassword: newAccountPassword,
         themeColor: activeThemeColor,
         uid: user.uid,
-        username: accountUsername ?? accountUsernameValue
+        username: nextUsername
       });
       setAccountDisplayName(null);
+      setAccountEmailDraft(null);
       setAccountUsername(null);
+      setCurrentAccountPassword("");
+      setNewAccountPassword("");
+      setConfirmAccountPassword("");
     } catch (caughtError) {
       setAccountSettingsError(caughtError instanceof Error ? caughtError.message : "Account settings failed.");
     } finally {
@@ -1150,10 +1356,12 @@ export function StudentWorkspace() {
                             setSelectedConversationClassId(activeCourseId);
                           }}
                         >
-                          <span className="student-conversation-icon" aria-hidden="true" />
                           <span className="student-conversation-copy">
                             <strong>{conversation.title}</strong>
                             <span>{formatConversationMeta(conversation)}</span>
+                          </span>
+                          <span className="student-conversation-compact-label" aria-hidden="true">
+                            {formatConversationCompactLabel(conversation.title)}
                           </span>
                           <span className="student-row-menu" aria-hidden="true">
                             <span />
@@ -1233,10 +1441,13 @@ export function StudentWorkspace() {
         {studentMainView === "settings" ? (
           <StudentSettingsPanel
             accountEmail={accountEmail}
+            accountEmailValue={accountEmailValue}
             accountDisplayName={accountDisplayName ?? accountName}
             accountLastSignInAt={accountLastSignInAt}
             accountUsername={accountUsername ?? accountUsernameValue}
             accountSettingsError={accountSettingsError}
+            confirmAccountPassword={confirmAccountPassword}
+            currentAccountPassword={currentAccountPassword}
             activeAppearance={activeAppearance}
             activeClass={activeClass}
             activeClassId={activeCourseId}
@@ -1248,12 +1459,17 @@ export function StudentWorkspace() {
             isSavingThemePreference={isSavingThemePreference}
             isTeacherDebugMode={isTeacherDebugMode}
             isTeacherPreview={isTeacherPreview}
+            newAccountPassword={newAccountPassword}
             role={profile?.role ?? "student"}
             themePreferenceError={themePreferenceError}
             onAccountDisplayNameChange={setAccountDisplayName}
+            onAccountEmailChange={setAccountEmailDraft}
             onAccountUsernameChange={setAccountUsername}
+            onConfirmAccountPasswordChange={setConfirmAccountPassword}
+            onCurrentAccountPasswordChange={setCurrentAccountPassword}
             onDeleteAccount={handleDeleteAccount}
             onDeleteAccountPasswordChange={setDeleteAccountPassword}
+            onNewAccountPasswordChange={setNewAccountPassword}
             onTeacherDebugModeChange={setIsTeacherDebugMode}
             onSaveAccountSettings={saveAccountSettings}
             onSignOut={handleSignOut}
@@ -1271,23 +1487,99 @@ export function StudentWorkspace() {
                   {classSectionLabel ? <span>{classSectionLabel}</span> : null}
                 </h1>
               </div>
-              <div className="student-main-header-actions">
-                {aiUsageStatus && !isTeacherPreview ? (
-                  <StudentAiUsagePanel
-                    isRequestingMoreUsage={isRequestingUsageIncrease}
-                    requestMessage={usageIncreaseRequestMessage}
-                    status={aiUsageStatus}
-                    onRequestMoreUsage={isTeacherPreview ? undefined : requestUsageIncrease}
-                  />
+              <div className="student-main-header-actions" ref={headerActionsRef}>
+                {!isTeacherPreview ? (
+                  <div className="student-header-control-wrap">
+                    <button
+                      aria-label={`Usage · ${usageSummary.todayPercentLeft}% today`}
+                      aria-controls="student-usage-popover"
+                      aria-expanded={openHeaderDropdown === "usage"}
+                      className="student-header-control student-usage-header-control"
+                      title={`Usage · ${usageSummary.todayPercentLeft}% today`}
+                      type="button"
+                      onClick={() =>
+                        setOpenHeaderDropdown((currentDropdown) => (currentDropdown === "usage" ? null : "usage"))
+                      }
+                    >
+                      <HeaderControlIcon kind="usage" />
+                      <span className="student-header-control-label">Usage · </span>
+                      <span className="student-header-usage-percent">{usageSummary.todayPercentLeft}%</span>
+                      <span className="student-header-control-label">today</span>
+                    </button>
+                    {openHeaderDropdown === "usage" ? (
+                      <StudentUsagePopover
+                        id="student-usage-popover"
+                        isRequestingMoreUsage={isRequestingUsageIncrease}
+                        requestMessage={usageIncreaseRequestMessage}
+                        summary={usageSummary}
+                        status={aiUsageStatus}
+                        onRequestMoreUsage={requestUsageIncrease}
+                      />
+                    ) : null}
+                  </div>
                 ) : null}
-                <button
-                  className="student-feedback-button"
-                  disabled={!activeCourseId || isTeacherPreview}
-                  type="button"
-                  onClick={() => openFeedbackModal()}
-                >
-                  Feedback
-                </button>
+                <div className="student-header-control-wrap">
+                  <KnowledgeIconButton
+                    animationLines={knowledgeAnimationLines}
+                    isActive={knowledgeLines.length > 0}
+                    isExpanded={openHeaderDropdown === "context"}
+                    recentItems={knowledgeLines.slice(-5)}
+                    onClick={() =>
+                      setOpenHeaderDropdown((currentDropdown) =>
+                        currentDropdown === "context" ? null : "context"
+                      )
+                    }
+                  />
+                  {openHeaderDropdown === "context" ? (
+                    <StudentContextPopover
+                      contextMemory={chatContextMemory}
+                      id="student-context-popover"
+                    />
+                  ) : null}
+                </div>
+                <div className="student-header-control-wrap">
+                  <button
+                    aria-label="Feedback"
+                    aria-controls="student-feedback-popover"
+                    aria-expanded={openHeaderDropdown === "feedback"}
+                    className="student-feedback-button student-header-control"
+                    disabled={!activeCourseId || isTeacherPreview}
+                    title="Feedback"
+                    type="button"
+                    onClick={() => {
+                      if (openHeaderDropdown === "feedback") {
+                        if (!isSendingFeedback) {
+                          setFeedbackModal(null);
+                          setOpenHeaderDropdown(null);
+                        }
+                        return;
+                      }
+
+                      openFeedbackModal();
+                    }}
+                  >
+                    <HeaderControlIcon kind="feedback" />
+                    <span className="student-header-control-label">Feedback</span>
+                  </button>
+                  {feedbackModal && openHeaderDropdown === "feedback" ? (
+                    <StudentFeedbackPopover
+                      comment={feedbackComment}
+                      id="student-feedback-popover"
+                      isSending={isSendingFeedback}
+                      message={feedbackMessage}
+                      rating={feedbackRating}
+                      onClose={() => {
+                        if (!isSendingFeedback) {
+                          setFeedbackModal(null);
+                          setOpenHeaderDropdown(null);
+                        }
+                      }}
+                      onCommentChange={setFeedbackComment}
+                      onRatingChange={setFeedbackRating}
+                      onSubmit={submitFeedback}
+                    />
+                  ) : null}
+                </div>
               </div>
             </header>
             {studentChatPaused ? (
@@ -1300,6 +1592,7 @@ export function StudentWorkspace() {
               {messages.map((message) => (
                 <StudentChatMessage
                   debugEnabled={isTeacherPreview && isTeacherDebugMode}
+                  isLatestKnowledgeMessage={latestKnowledgeMessageId === message.id}
                   message={message}
                   key={message.id}
                 />
@@ -1369,22 +1662,6 @@ export function StudentWorkspace() {
             </form>
           </section>
         )}
-        {feedbackModal ? (
-          <StudentFeedbackModal
-            comment={feedbackComment}
-            isSending={isSendingFeedback}
-            message={feedbackMessage}
-            rating={feedbackRating}
-            onClose={() => {
-              if (!isSendingFeedback) {
-                setFeedbackModal(null);
-              }
-            }}
-            onCommentChange={setFeedbackComment}
-            onRatingChange={setFeedbackRating}
-            onSubmit={submitFeedback}
-          />
-        ) : null}
       </section>
     </RequireAuth>
   );
@@ -1401,8 +1678,9 @@ function resizeStudentComposerTextarea(textarea: HTMLTextAreaElement | null) {
   textarea.style.overflowY = textarea.scrollHeight > studentComposerTextareaMaxHeight ? "auto" : "hidden";
 }
 
-function StudentFeedbackModal({
+function StudentFeedbackPopover({
   comment,
+  id,
   isSending,
   message,
   rating,
@@ -1412,6 +1690,7 @@ function StudentFeedbackModal({
   onSubmit
 }: {
   comment: string;
+  id: string;
   isSending: boolean;
   message: string;
   rating: StudentFeedbackRating;
@@ -1429,14 +1708,20 @@ function StudentFeedbackModal({
   ];
 
   return (
-    <div className="student-feedback-modal-backdrop" role="presentation">
-      <form className="student-feedback-modal" aria-label="Send feedback about Chandra" onSubmit={onSubmit}>
-        <div className="student-feedback-modal-heading">
-          <h2>Feedback about Chandra</h2>
-          <button aria-label="Close feedback" disabled={isSending} type="button" onClick={onClose}>
-            x
-          </button>
-        </div>
+    <form
+      className="student-header-popover student-feedback-popover"
+      id={id}
+      aria-label="Send feedback about Chandra"
+      onSubmit={onSubmit}
+    >
+      <div className="student-feedback-popover-heading">
+        <h2>Feedback</h2>
+        <button className="student-feedback-close" aria-label="Close feedback" disabled={isSending} type="button" onClick={onClose}>
+          <span aria-hidden="true">x</span>
+        </button>
+      </div>
+      <div className="student-popover-section">
+        <h3>Rating</h3>
         <div className="student-feedback-rating-grid" role="radiogroup" aria-label="Feedback rating">
           {ratingOptions.map((option) => (
             <button
@@ -1449,36 +1734,38 @@ function StudentFeedbackModal({
             </button>
           ))}
         </div>
-        <label className="sr-only" htmlFor="student-feedback-comment">
-          Feedback note
-        </label>
+      </div>
+      <div className="student-popover-section">
+        <label htmlFor="student-feedback-comment">Note</label>
         <textarea
           id="student-feedback-comment"
           maxLength={1000}
-          placeholder="What should your teacher know about this Chandra response?"
+          placeholder="What should your teacher know?"
           rows={4}
           value={comment}
           onChange={(event) => onCommentChange(event.target.value)}
         />
-        {message ? <p className="student-feedback-message">{message}</p> : null}
-        <div className="student-feedback-modal-actions">
-          <button disabled={isSending} type="button" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="student-feedback-submit" disabled={isSending || !comment.trim()} type="submit">
-            {isSending ? "Sending" : "Send feedback"}
-          </button>
-        </div>
-      </form>
-    </div>
+      </div>
+      {message ? <p className="student-feedback-message">{message}</p> : null}
+      <div className="student-feedback-popover-actions">
+        <button disabled={isSending} type="button" onClick={onClose}>
+          Cancel
+        </button>
+        <button className="student-feedback-submit" disabled={isSending || !comment.trim()} type="submit">
+          {isSending ? "Sending" : "Send feedback"}
+        </button>
+      </div>
+    </form>
   );
 }
 
 const StudentChatMessage = memo(function StudentChatMessage({
   debugEnabled,
+  isLatestKnowledgeMessage,
   message
 }: {
   debugEnabled: boolean;
+  isLatestKnowledgeMessage: boolean;
   message: ChatMessage;
 }) {
   if (message.role === "student") {
@@ -1504,7 +1791,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
   const sourceLabels = message.sources?.length ? condensedSourceLabels(message.sources) : [];
 
   return (
-    <article className="student-workspace-message assistant">
+    <article className={`student-workspace-message assistant${isLatestKnowledgeMessage ? " has-new-knowledge" : ""}`}>
       <span className="chandra-message-avatar" aria-hidden="true">
         C
       </span>
@@ -1522,7 +1809,15 @@ const StudentChatMessage = memo(function StudentChatMessage({
             </div>
           ) : (
             <div className={`assistant-structured-section ${block.kind}`} key={block.kind}>
-              <strong>{block.label}</strong>
+              <strong>
+                {block.kind === "problem" || block.kind === "example" || block.kind === "formula" ? (
+                  <KnowledgeItemTypeIcon
+                    isEmphasized={isLatestKnowledgeMessage}
+                    role={knowledgeRoleFromSectionKind(block.kind)}
+                  />
+                ) : null}
+                {block.label}
+              </strong>
               <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
                 {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(block.content, block.kind))}
               </ReactMarkdown>
@@ -1531,9 +1826,18 @@ const StudentChatMessage = memo(function StudentChatMessage({
         )}
         {sourceLabels.length ? (
           <div className="message-sources" aria-label="Sources used">
-            <strong>Sources:</strong>
+            <strong>
+              <KnowledgeItemTypeIcon isEmphasized={isLatestKnowledgeMessage} role="source" />
+              Sources:
+            </strong>
             {sourceLabels.map((label, index) => (
-              <span key={`${label}-${index}`}>{label}</span>
+              <span key={`${label}-${index}`}>
+                <KnowledgeItemTypeIcon
+                  isEmphasized={isLatestKnowledgeMessage}
+                  role={label.toLowerCase().includes("problem") ? "problem" : "source"}
+                />
+                {label}
+              </span>
             ))}
           </div>
         ) : null}
@@ -1720,10 +2024,13 @@ function formatDuration(durationMs: number) {
 
 function StudentSettingsPanel({
   accountEmail,
+  accountEmailValue,
   accountDisplayName,
   accountLastSignInAt,
   accountUsername,
   accountSettingsError,
+  confirmAccountPassword,
+  currentAccountPassword,
   deleteAccountPassword,
   activeAppearance,
   activeClass,
@@ -1736,12 +2043,17 @@ function StudentSettingsPanel({
   isSavingThemePreference,
   isTeacherDebugMode,
   isTeacherPreview,
+  newAccountPassword,
   role,
   themePreferenceError,
   onAccountDisplayNameChange,
+  onAccountEmailChange,
   onAccountUsernameChange,
+  onConfirmAccountPasswordChange,
+  onCurrentAccountPasswordChange,
   onDeleteAccount,
   onDeleteAccountPasswordChange,
+  onNewAccountPasswordChange,
   onTeacherDebugModeChange,
   onSaveAccountSettings,
   onSignOut,
@@ -1750,10 +2062,13 @@ function StudentSettingsPanel({
   onUpdateThemePreference
 }: {
   accountEmail: string;
+  accountEmailValue: string;
   accountDisplayName: string;
   accountLastSignInAt: string;
   accountUsername: string;
   accountSettingsError: string;
+  confirmAccountPassword: string;
+  currentAccountPassword: string;
   deleteAccountPassword: string;
   activeAppearance: TeacherClassAppearance;
   activeClass: StudentVisibleClass | null;
@@ -1766,12 +2081,17 @@ function StudentSettingsPanel({
   isSavingThemePreference: boolean;
   isTeacherDebugMode: boolean;
   isTeacherPreview: boolean;
+  newAccountPassword: string;
   role: string;
   themePreferenceError: string;
   onAccountDisplayNameChange: (displayName: string) => void;
+  onAccountEmailChange: (email: string) => void;
   onAccountUsernameChange: (username: string) => void;
+  onConfirmAccountPasswordChange: (password: string) => void;
+  onCurrentAccountPasswordChange: (password: string) => void;
   onDeleteAccount: () => Promise<void>;
   onDeleteAccountPasswordChange: (password: string) => void;
+  onNewAccountPasswordChange: (password: string) => void;
   onTeacherDebugModeChange: (enabled: boolean) => void;
   onSaveAccountSettings: () => Promise<void>;
   onSignOut: () => Promise<void>;
@@ -1858,7 +2178,7 @@ function StudentSettingsPanel({
           <div className="student-credentials-grid">
             <dl className="student-settings-data-list">
               <div>
-                <dt>Email address</dt>
+                <dt>Current email</dt>
                 <dd>{accountEmail || "No email on file"}</dd>
               </div>
               <div>
@@ -1866,13 +2186,59 @@ function StudentSettingsPanel({
                 <dd aria-label="Password hidden">**********</dd>
               </div>
             </dl>
-            <div className="student-settings-action-stack">
-              <button className="student-settings-secondary-button" disabled type="button">
-                Change email
-              </button>
-              <button className="student-settings-secondary-button" disabled type="button">
-                Change password
-              </button>
+            <div className="student-account-field-list student-credential-field-list">
+              <div>
+                <label className="student-settings-control-label" htmlFor="student-account-email">
+                  Email
+                </label>
+                <input
+                  id="student-account-email"
+                  autoCapitalize="none"
+                  autoComplete="email"
+                  inputMode="email"
+                  type="email"
+                  value={accountEmailValue}
+                  onChange={(event) => onAccountEmailChange(event.target.value)}
+                />
+              </div>
+              <div>
+                <label className="student-settings-control-label" htmlFor="student-current-password">
+                  Current password
+                </label>
+                <input
+                  id="student-current-password"
+                  autoComplete="current-password"
+                  type="password"
+                  value={currentAccountPassword}
+                  onChange={(event) => onCurrentAccountPasswordChange(event.target.value)}
+                />
+              </div>
+              <div>
+                <label className="student-settings-control-label" htmlFor="student-new-password">
+                  New password
+                </label>
+                <input
+                  id="student-new-password"
+                  autoComplete="new-password"
+                  minLength={6}
+                  type="password"
+                  value={newAccountPassword}
+                  onChange={(event) => onNewAccountPasswordChange(event.target.value)}
+                />
+              </div>
+              <div>
+                <label className="student-settings-control-label" htmlFor="student-confirm-password">
+                  Confirm new password
+                </label>
+                <input
+                  id="student-confirm-password"
+                  autoComplete="new-password"
+                  minLength={6}
+                  type="password"
+                  value={confirmAccountPassword}
+                  onChange={(event) => onConfirmAccountPasswordChange(event.target.value)}
+                />
+              </div>
             </div>
           </div>
         </section>
@@ -2104,6 +2470,8 @@ function AttachmentVisual({ attachment }: { attachment: Partial<ComposerAttachme
 }
 
 const ChatProgressMessage = memo(function ChatProgressMessage({ progress }: { progress: ChatProgress }) {
+  const display = chatProgressDisplay(progress);
+
   return (
     <article className="student-workspace-message assistant progress-message" aria-live="polite">
       <span className="chandra-message-avatar" aria-hidden="true">
@@ -2113,18 +2481,25 @@ const ChatProgressMessage = memo(function ChatProgressMessage({ progress }: { pr
         <div className="message-meta">Chandra</div>
         <div className="assistant-message-bubble">
           <div className="progress-row">
-            <span className="thinking-dot" aria-hidden="true" />
-            <p>{progress.message}</p>
+            <div className="progress-copy">
+              <p className="progress-main">{display.main}</p>
+              {display.secondary ? <p className="progress-secondary">{display.secondary}</p> : null}
+            </div>
           </div>
-          {progress.searches.length ? (
-            <ol className="progress-searches" aria-label="Searches Chandra has tried">
-              {progress.searches.map((search, index) => (
-                <li key={`${search.query}-${index}`}>
-                  <strong>{search.description}</strong>
-                  <span>{search.query}</span>
+          {display.searchRows.length ? (
+            <ul className="progress-search-list" aria-label="Class material checks">
+              {display.searchRows.map((row) => (
+                <li key={row.key} className="progress-search-item">
+                  <span className="progress-search-dot" aria-hidden="true" />
+                  <span>{row.label}</span>
                 </li>
               ))}
-            </ol>
+            </ul>
+          ) : null}
+          {display.isSearching ? (
+            <span className="progress-scan-line" aria-hidden="true">
+              <span />
+            </span>
           ) : null}
         </div>
       </div>
@@ -2132,42 +2507,412 @@ const ChatProgressMessage = memo(function ChatProgressMessage({ progress }: { pr
   );
 });
 
-const StudentAiUsagePanel = memo(function StudentAiUsagePanel({
+function chatProgressDisplay(progress: ChatProgress) {
+  const normalizedMessage = progress.message.trim().toLowerCase();
+  const hasMaterialSignal = /\b(search|checking|looking|locating|retriev|source|page|pdf|class material|materials)\b/.test(
+    normalizedMessage
+  );
+  const hasWritingSignal =
+    /\b(writ|draft|compos|respond|reply|answer|final)\b/.test(normalizedMessage) ||
+    /\bprepar(?:e|ing)\b/.test(normalizedMessage);
+  const isWriting = hasWritingSignal && !hasMaterialSignal;
+  const isSearching = !isWriting && (progress.searches.length > 0 || hasMaterialSignal);
+
+  if (isWriting) {
+    return {
+      isSearching: false,
+      main: "Chandra is writing",
+      searchRows: [],
+      secondary: "Turning this into a helpful next step..."
+    };
+  }
+
+  if (isSearching) {
+    const searchRows = progress.searches.map((search) => ({
+      key: normalizeSearchQuery(`${search.retrievalReason ?? ""} ${search.query}`) || search.description,
+      label: studentSearchPurposeLabel(search.retrievalReason, search.query, search.description)
+    }));
+
+    return {
+      isSearching: true,
+      main: "Chandra is checking class materials",
+      searchRows,
+      secondary: searchRows.length ? "" : "Looking for the most relevant page..."
+    };
+  }
+
+  return {
+    isSearching: false,
+    main: "Chandra is thinking",
+    searchRows: [],
+    secondary: "Reading your question..."
+  };
+}
+
+function KnowledgeIconButton({
+  animationLines,
+  isActive,
+  isExpanded,
+  recentItems,
+  onClick
+}: {
+  animationLines: KnowledgeAnimationLine[];
+  isActive: boolean;
+  isExpanded: boolean;
+  recentItems: KnowledgeLine[];
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-label="Knowledge"
+      aria-controls="student-context-popover"
+      aria-expanded={isExpanded}
+      className={`student-header-control student-knowledge-control${isActive ? " is-active" : ""}${
+        animationLines.length ? " is-inserting" : ""
+      }`}
+      title="Knowledge"
+      type="button"
+      onClick={onClick}
+    >
+      <KnowledgeStackIcon animationLines={animationLines} isActive={isActive} recentItems={recentItems} />
+    </button>
+  );
+}
+
+function KnowledgeStackIcon({
+  animationLines,
+  isActive,
+  recentItems
+}: {
+  animationLines: KnowledgeAnimationLine[];
+  isActive: boolean;
+  recentItems: KnowledgeLine[];
+}) {
+  const visibleItems = recentItems.slice(-5);
+
+  return (
+    <svg
+      aria-hidden="true"
+      className="student-header-control-icon knowledge-stack-icon"
+      data-active={isActive ? "true" : "false"}
+      viewBox="0 0 32 32"
+    >
+      <g className="knowledge-stack-pages">
+        <path d="M10.5 7.25h12.25a3.25 3.25 0 0 1 3.25 3.25v14.25H12a3 3 0 0 1-3-3V8.75a1.5 1.5 0 0 1 1.5-1.5Z" />
+        <path d="M7 9.5h2.75v15.25H7.8A2.8 2.8 0 0 1 5 21.95V11.5a2 2 0 0 1 2-2Z" />
+      </g>
+      <path className="knowledge-stack-cover" d="M10.5 5.75h11.75a3.25 3.25 0 0 1 3.25 3.25v14.25H12a3 3 0 0 1-3-3V7.25a1.5 1.5 0 0 1 1.5-1.5Z" />
+      <path className="knowledge-stack-spine" d="M12 23.25V8.25" />
+      {visibleItems.map((item, index) => (
+        <line
+          className="knowledge-stack-line"
+          data-color={item.colorToken}
+          key={item.key}
+          x1="15"
+          x2={24 - Math.min(index, 2)}
+          y1={11.25 + index * 2.45}
+          y2={11.25 + index * 2.45}
+        />
+      ))}
+      {animationLines.map((line, index) => (
+        <line
+          className="knowledge-stack-line knowledge-stack-insert-line"
+          data-color={line.colorToken}
+          key={line.id}
+          style={
+            {
+              "--knowledge-insert-delay": `${line.delayMs}ms`
+            } as Record<string, string>
+          }
+          x1="15"
+          x2={24 - Math.min(index, 2)}
+          y1={11.25 + Math.min(index, 4) * 2.45}
+          y2={11.25 + Math.min(index, 4) * 2.45}
+        />
+      ))}
+    </svg>
+  );
+}
+
+function knowledgeRoleFromSectionKind(kind: string): KnowledgeItemRole {
+  if (kind === "example") {
+    return "example";
+  }
+
+  if (kind === "formula") {
+    return "theorem";
+  }
+
+  return "problem";
+}
+
+function KnowledgeItemTypeIcon({
+  isEmphasized = false,
+  role
+}: {
+  isEmphasized?: boolean;
+  role: KnowledgeItemRole;
+}) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`knowledge-item-type-icon${isEmphasized ? " is-emphasized" : ""}`}
+      viewBox="0 0 16 16"
+    >
+      {role === "problem" ? (
+        <>
+          <path d="M4.1 2.6h7.8v10.8H4.1z" />
+          <path d="M5.8 5.2h4.4M5.8 7.8h3.3M5.8 10.4h2.2" />
+        </>
+      ) : role === "definition" || role === "theorem" ? (
+        <>
+          <path d="M3.4 3.2h7.1a2.1 2.1 0 0 1 2.1 2.1v7.5H5.1a1.7 1.7 0 0 1-1.7-1.7Z" />
+          <path d="M5.3 6.1h5.1M5.3 8.4h4" />
+        </>
+      ) : role === "example" ? (
+        <>
+          <path d="M3.1 10.9 6 8l2 2 4.9-5" />
+          <path d="M10 5h2.9v2.9" />
+        </>
+      ) : role === "student_upload" ? (
+        <>
+          <path d="M8 12.6V3.4" />
+          <path d="M4.8 6.3 8 3.1l3.2 3.2" />
+          <path d="M3.4 12.8h9.2" />
+        </>
+      ) : (
+        <>
+          <path d="M3.4 3.2h7.2a2 2 0 0 1 2 2v7.6H4.9a1.5 1.5 0 0 1-1.5-1.5Z" />
+          <path d="M5.2 6.2h5.1M5.2 8.5h3.7" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function HeaderControlIcon({ kind }: { kind: "feedback" | "usage" }) {
+  return (
+    <svg className="student-header-control-icon" aria-hidden="true" viewBox="0 0 24 24">
+      {kind === "usage" ? (
+        <>
+          <path d="M4 17 9 12l4 4 7-9" />
+          <path d="M16 7h4v4" />
+        </>
+      ) : (
+        <>
+          <path d="M5 5.5h14v9.5H9l-4 4v-13.5Z" />
+          <path d="M8.5 9h7M8.5 12h4" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+const StudentContextPopover = memo(function StudentContextPopover({
+  contextMemory,
+  id
+}: {
+  contextMemory: ChatContextMemory;
+  id: string;
+}) {
+  const hasContext = hasChatContextMemory(contextMemory);
+  const savedProblems = contextMemory.savedProblems?.length
+    ? contextMemory.savedProblems
+    : contextMemory.currentProblem
+      ? [contextMemory.currentProblem]
+      : [];
+  const sourceCount = contextMemory.sourcesUsed?.length ?? 0;
+
+  return (
+    <section className="student-header-popover student-context-popover" id={id} role="region" aria-label="Knowledge">
+      <div className="student-context-popover-heading">
+        <h2>Knowledge</h2>
+        {hasContext ? (
+          <span>
+            {savedProblems.length} {savedProblems.length === 1 ? "problem" : "problems"} · {sourceCount}{" "}
+            {sourceCount === 1 ? "source" : "sources"}
+          </span>
+        ) : null}
+      </div>
+      {!hasContext ? (
+        <p className="student-popover-empty">
+          No course material is being referenced yet. When Chandra uses a problem, page, or source, it will appear here.
+        </p>
+      ) : (
+        <>
+          {savedProblems.length ? (
+            <div className="student-popover-section">
+              <h3>Problems saved</h3>
+              <div className="student-context-problem-list">
+                {savedProblems.map((problem, index) => (
+                  <details
+                    className="student-context-problem-card"
+                    key={`${problem.sourceName ?? "problem"}-${problem.problemNumber ?? problem.pageNumber ?? index}`}
+                    open={index === 0}
+                  >
+                    <summary>
+                      <span>
+                        <strong>{formatProblemLabel(problem)}</strong>
+                        <small>{formatProblemMeta(problem)}</small>
+                      </span>
+                      {index === 0 ? <em>Current</em> : null}
+                    </summary>
+                    {problem.problemText ? (
+                      <div className="student-context-problem-text">
+                        <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                          {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(problem.problemText, "problem"))}
+                        </ReactMarkdown>
+                      </div>
+                    ) : (
+                      <p className="student-context-problem-text is-muted">
+                        Full problem text is not available yet. Chandra is using the saved source page below.
+                      </p>
+                    )}
+                    <dl className="student-context-details">
+                      <ContextDetail label="Source" value={problem.sourceName} />
+                      <ContextDetail label="Page" value={formatPageNumber(problem.pageNumber)} />
+                      <ContextDetail label="Section" value={problem.sectionTitle} />
+                    </dl>
+                  </details>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {contextMemory.sourcesUsed?.length ? (
+            <div className="student-popover-section">
+              <h3>Sources</h3>
+              <ul className="student-context-source-list">
+                {contextMemory.sourcesUsed.map((source, index) => (
+                  <li key={`${source.id ?? source.sourceName ?? "source"}-${source.pageNumber ?? index}`}>
+                    <span>{source.sourceName ?? "Class material"}</span>
+                    {formatPageNumber(source.pageNumber) ? <strong>{formatPageNumber(source.pageNumber)}</strong> : null}
+                    {source.problemNumber ? <small>Problem {source.problemNumber}</small> : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {contextMemory.failedSearches?.length ? (
+            <div className="student-popover-section">
+              <h3>Failed searches</h3>
+              <ul className="student-context-source-list">
+                {contextMemory.failedSearches.map((search, index) => (
+                  <li key={`${search.query}-${index}`}>
+                    {search.query}
+                    {search.reason ? ` - ${search.reason}` : " - no useful page found"}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+});
+
+function ContextDetail({ label, value }: { label: string; value?: string | number | null }) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  return (
+    <>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </>
+  );
+}
+
+const StudentUsagePopover = memo(function StudentUsagePopover({
+  id,
   isRequestingMoreUsage,
   onRequestMoreUsage,
   requestMessage,
-  status
+  status,
+  summary
 }: {
+  id: string;
   isRequestingMoreUsage: boolean;
   onRequestMoreUsage?: () => void;
   requestMessage: string;
-  status: StudentAiUsageStatus;
+  status: StudentAiUsageStatus | null;
+  summary: UsageSummary;
 }) {
   return (
-    <section
-      className={`student-ai-usage${status.nearLimit ? " near-limit" : ""}${status.blocked ? " blocked" : ""}`}
-      aria-label="AI usage remaining"
-    >
-      <div className="student-ai-usage-meters">
-        <StudentAiUsageMeter label="Today" percent={status.todayPercentRemaining} />
-        <StudentAiUsageMeter label="Week" percent={status.weekPercentRemaining} />
+    <section className="student-header-popover student-usage-popover" id={id} role="region" aria-label="Usage">
+      <h2>Usage</h2>
+      <UsagePopoverMeter
+        label="Today"
+        limit={summary.dailyLimit}
+        percentLeft={summary.todayPercentLeft}
+        used={summary.dailyUsed}
+      />
+      <UsagePopoverMeter
+        label="This week"
+        limit={summary.weeklyLimit}
+        percentLeft={summary.weekPercentLeft}
+        used={summary.weeklyUsed}
+      />
+      <div className="student-popover-section">
+        <h3>Credit costs</h3>
+        <ul className="student-usage-costs">
+          <li>Short hint: 1 credit</li>
+          <li>Long step-by-step answer: 2 credits</li>
+          <li>File/image upload: 3-5 credits</li>
+        </ul>
       </div>
-      {status.blocked ? (
-        <div className="student-ai-usage-request">
-          <p>{formatAiUsageLimitMessage(status)}</p>
-          {onRequestMoreUsage ? (
+      <div className="student-popover-section">
+        <h3>Reset info</h3>
+        <p>Daily usage resets tonight</p>
+        <p>Weekly usage resets Monday</p>
+      </div>
+      {status?.blocked || status?.nearLimit ? (
+        <div className="student-usage-request">
+          <p>{status.blocked ? formatAiUsageLimitMessage(status) : "AI usage is almost used up."}</p>
+          {status.blocked && onRequestMoreUsage ? (
             <button type="button" disabled={isRequestingMoreUsage} onClick={onRequestMoreUsage}>
               {isRequestingMoreUsage ? "Sending request" : "Ask professor for more usage"}
             </button>
           ) : null}
           {requestMessage ? <span>{requestMessage}</span> : null}
         </div>
-      ) : status.nearLimit ? (
-        <p>AI usage is almost used up.</p>
       ) : null}
     </section>
   );
 });
+
+function UsagePopoverMeter({
+  label,
+  limit,
+  percentLeft,
+  used
+}: {
+  label: string;
+  limit: number;
+  percentLeft: number;
+  used: number;
+}) {
+  const cleanPercentLeft = clampPercent(percentLeft);
+  const percentUsed = 100 - cleanPercentLeft;
+
+  return (
+    <div className="student-usage-popover-meter">
+      <span>
+        <strong>{label}</strong>
+        <em>{cleanPercentLeft}% left</em>
+      </span>
+      <p>
+        {formatUsageNumber(used)} / {formatUsageNumber(limit)} credits used
+      </p>
+      <div aria-hidden="true">
+        <span style={{ width: `${percentUsed}%` }} />
+      </div>
+    </div>
+  );
+}
 
 function formatAiUsageLimitMessage(status: StudentAiUsageStatus) {
   const resetHint = status.resetHint?.trim();
@@ -2175,42 +2920,417 @@ function formatAiUsageLimitMessage(status: StudentAiUsageStatus) {
   return resetHint ? `${aiUsageLimitMessage} It resets ${resetHint}.` : aiUsageLimitMessage;
 }
 
-function StudentAiUsageMeter({ label, percent }: { label: string; percent: number }) {
-  const cleanPercent = Math.max(0, Math.min(100, Math.round(percent)));
+function usageSummaryFromStatus(status: StudentAiUsageStatus | null): UsageSummary {
+  return {
+    dailyUsed: nonnegativeNumber(status?.dailyUsed, 0),
+    dailyLimit: positiveNumber(status?.dailyLimit, 100),
+    weeklyUsed: nonnegativeNumber(status?.weeklyUsed, 0),
+    weeklyLimit: positiveNumber(status?.weeklyLimit, 400),
+    todayPercentLeft: clampPercent(status?.todayPercentRemaining ?? 100),
+    weekPercentLeft: clampPercent(status?.weekPercentRemaining ?? 100)
+  };
+}
 
-  return (
-    <div className="student-ai-usage-meter">
-      <span>
-        <strong>
-          <UsageMeterIcon label={label} />
-          {label}
-        </strong>
-        <em>{cleanPercent}% left</em>
-      </span>
-      <div aria-hidden="true">
-        <span style={{ width: `${cleanPercent}%` }} />
-      </div>
-    </div>
+function buildKnowledgeLines(messages: ChatMessage[]): KnowledgeLine[] {
+  const lines: KnowledgeLine[] = [];
+  const seen = new Set<string>();
+
+  function addLine(line: KnowledgeLine) {
+    if (seen.has(line.key)) {
+      const existingIndex = lines.findIndex((currentLine) => currentLine.key === line.key);
+
+      if (existingIndex >= 0) {
+        lines.splice(existingIndex, 1);
+      }
+    } else {
+      seen.add(line.key);
+    }
+
+    lines.push(line);
+  }
+
+  for (const message of messages) {
+    for (const item of message.langGraphTrace?.knowledgeItems ?? []) {
+      addLine(knowledgeLineFromBackendItem(item));
+    }
+  }
+
+  return lines.slice(-5);
+}
+
+function knowledgeLineFromBackendItem(item: KnowledgeItem): KnowledgeLine {
+  return {
+    colorToken: item.uiColor ?? knowledgeUiColorToken(item.usedAs),
+    key: item.id,
+    role: knowledgeRoleFromBackendItem(item)
+  };
+}
+
+function knowledgeRoleFromBackendItem(item: KnowledgeItem): KnowledgeItemRole {
+  if (item.kind === "student_upload" || item.usedAs === "student_attempt") {
+    return "student_upload";
+  }
+
+  if (item.usedAs === "definition_reference") {
+    return "definition";
+  }
+
+  if (item.usedAs === "theorem_reference") {
+    return "theorem";
+  }
+
+  if (item.usedAs === "example_reference") {
+    return "example";
+  }
+
+  if (item.kind === "problem" || item.usedAs === "active_problem" || item.usedAs === "problem_source" || item.problemId) {
+    return "problem";
+  }
+
+  if (item.kind === "pdf_page") {
+    return "page";
+  }
+
+  return "source";
+}
+
+function latestKnowledgeAssistantMessageId(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+
+    if (
+      message?.role === "assistant" &&
+      message.langGraphTrace?.knowledgeItems?.length
+    ) {
+      return message.id;
+    }
+  }
+
+  return "";
+}
+
+function buildChatContextMemory(messages: ChatMessage[]): ChatContextMemory {
+  const assistantMessages = [...messages].reverse().filter((message) => message.role === "assistant");
+  const latestStructuredMessage = assistantMessages.find(
+    (message) =>
+      message.sources?.length ||
+      message.langGraphTrace?.selectedPages?.length ||
+      message.langGraphTrace?.selectedMetadataRecords?.length
+  );
+
+  if (!latestStructuredMessage) {
+    return {};
+  }
+
+  const trace = latestStructuredMessage.langGraphTrace;
+  const retrievalDecision = isRecord(trace?.retrievalDecision) ? trace.retrievalDecision : {};
+  const metadataRecords = trace?.selectedMetadataRecords?.filter(isRecord) ?? [];
+  const primaryMetadata = metadataRecords[0];
+  const primarySource = latestStructuredMessage.sources?.[0];
+  const primaryPage = trace?.selectedPages?.[0];
+  const latestContext = contextProblemFromMessage(latestStructuredMessage);
+  const activeProblemNumber = latestContext.activeProblemNumber;
+  const activePageNumber = latestContext.activePageNumber;
+  const activePdfId =
+    stringFromRecord(trace?.activeMaterialId) ||
+    stringFromRecord(retrievalDecision.active_material_id) ||
+    stringFromRecord(primaryMetadata?.doc_id) ||
+    stringFromRecord(primaryMetadata?.material_id) ||
+    primaryPage?.docId;
+  const currentProblem = latestContext.problem;
+  const savedProblems = dedupeContextProblems(
+    assistantMessages
+      .map((message) => contextProblemFromMessage(message).problem)
+      .filter((problem): problem is NonNullable<ChatContextMemory["currentProblem"]> => Boolean(problem))
+  );
+  const sourcesUsed = dedupeContextSources(
+    (latestStructuredMessage.sources ?? []).map((source) => ({
+      id: source.id,
+      sourceName: source.title,
+      pageNumber: source.pageNumber,
+      problemNumber: source.problemNumber,
+      label: formatContextSource({
+        sourceName: source.title,
+        pageNumber: source.pageNumber,
+        problemNumber: source.problemNumber
+      })
+    }))
+  );
+  const failedSearches = [
+    ...(trace?.failedSearchesSkipped ?? []).map((query) => ({
+      query,
+      reason: "Previous search failed"
+    }))
+  ];
+  const rawSourceIds = Array.from(
+    new Set(
+      [
+        activePdfId,
+        ...sourcesUsed.map((source) => source.id),
+        ...metadataRecords.map((record) => stringFromRecord(record.doc_id) || stringFromRecord(record.material_id))
+      ].filter((value): value is string => Boolean(value))
+    )
+  );
+
+  return {
+    activePdfId,
+    activeProblemId: activeProblemNumber,
+    activePageNumber,
+    currentProblem,
+    failedSearches,
+    rawSourceIds,
+    retrievalReason:
+      trace?.retrievalReason ||
+      stringFromRecord(retrievalDecision.retrieval_reason) ||
+      stringFromRecord(primaryMetadata?.retrievalReason),
+    savedProblems,
+    sourcesUsed
+  };
+}
+
+function hasChatContextMemory(contextMemory: ChatContextMemory) {
+  return Boolean(
+    contextMemory.activePdfId ||
+      contextMemory.activeProblemId ||
+      contextMemory.activePageNumber ||
+      contextMemory.currentProblem ||
+      contextMemory.savedProblems?.length ||
+      contextMemory.sourcesUsed?.length ||
+      contextMemory.failedSearches?.length ||
+      contextMemory.retrievalReason
   );
 }
 
-function UsageMeterIcon({ label }: { label: string }) {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24">
-      {label === "Today" ? (
-        <>
-          <path d="M7 3.5v3M17 3.5v3" />
-          <path d="M4.5 8.5h15" />
-          <path d="M6.5 5.5h11A2.5 2.5 0 0 1 20 8v10a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 18V8a2.5 2.5 0 0 1 2.5-2.5Z" />
-        </>
-      ) : (
-        <>
-          <path d="M4 17 9 12l4 4 7-9" />
-          <path d="M16 7h4v4" />
-        </>
-      )}
-    </svg>
+function contextProblemFromMessage(message: ChatMessage) {
+  const trace = message.langGraphTrace;
+  const retrievalDecision = isRecord(trace?.retrievalDecision) ? trace.retrievalDecision : {};
+  const metadataRecords = trace?.selectedMetadataRecords?.filter(isRecord) ?? [];
+  const primaryMetadata = metadataRecords[0];
+  const primarySource = message.sources?.[0];
+  const primaryPage = trace?.selectedPages?.[0];
+  const activeProblemNumbers = trace?.activeProblemNumbers ?? stringArrayFromRecord(retrievalDecision.active_problem_numbers);
+  const rawActiveProblemNumber =
+    stringFromRecord(retrievalDecision.active_problem_id) ||
+    stringFromRecord(primaryMetadata?.problem_number) ||
+    stringFromRecord(primaryMetadata?.problemNumber) ||
+    primarySource?.problemNumber ||
+    activeProblemNumbers[0];
+  const activePageNumber =
+    numberFromRecord(trace?.activePage) ??
+    numberFromRecord(retrievalDecision.active_page) ??
+    primarySource?.pageNumber ??
+    numberFromRecord(primaryMetadata?.page_start) ??
+    numberFromRecord(primaryMetadata?.pageStart) ??
+    numberFromRecord(primaryPage?.printedPageStart) ??
+    numberFromRecord(primaryPage?.pageStart);
+  const sourceName = primarySource?.title || stringFromRecord(primaryMetadata?.title) || primaryPage?.title;
+  const pageOcrText = stringFromRecord(primaryMetadata?.ocr_text) || stringFromRecord(primaryMetadata?.ocrText);
+  const structuredProblemText = normalizeContextProblemText(stringFromRecord(message.structuredOutput?.sections?.problem));
+  const metadataProblemText =
+    normalizeContextProblemText(stringFromRecord(primaryMetadata?.problem_text)) ||
+    normalizeContextProblemText(stringFromRecord(primaryMetadata?.problemText));
+  const activeProblemNumber =
+    rawActiveProblemNumber ||
+    extractProblemNumberFromContextText(structuredProblemText) ||
+    extractProblemNumberFromContextText(metadataProblemText);
+  const problemText =
+    structuredProblemText ||
+    metadataProblemText ||
+    extractProblemTextFromPageOcr(pageOcrText, activeProblemNumber);
+  const problem: NonNullable<ChatContextMemory["currentProblem"]> | undefined = activeProblemNumber || problemText
+    ? {
+        label: activeProblemNumber ? `Problem ${activeProblemNumber}` : sourceName,
+        problemNumber: activeProblemNumber,
+        sourceName,
+        pageNumber: activePageNumber,
+        sectionTitle:
+          stringFromRecord(primaryMetadata?.section_title) ||
+          stringFromRecord(primaryMetadata?.sectionHeading) ||
+          stringFromRecord(primaryMetadata?.section),
+        ocrConfidence: numberFromRecord(primaryMetadata?.ocr_confidence),
+        problemText
+      }
+    : undefined;
+
+  return {
+    activePageNumber,
+    activeProblemNumber,
+    problem
+  };
+}
+
+function normalizeContextProblemText(value?: string) {
+  return (value ?? "")
+    .replace(/^\s*problem\s*:\s*/i, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractProblemNumberFromContextText(text?: string) {
+  const normalizedText = (text ?? "").replace(/\s+/g, " ").trim();
+  const numberMatch = normalizedText.match(
+    /(?:^|\b)(?:Problem|Exercise|Question)?\s*(\d+(?:\.\d+)+(?:[a-z])?)\s*(?:\.\s*)?\*?(?=\s|\.|:|$)/i
   );
+
+  return numberMatch?.[1];
+}
+
+function extractProblemTextFromPageOcr(text: string | undefined, problemNumber?: string) {
+  const normalizedText = (text ?? "").replace(/\r\n?/g, "\n").trim();
+
+  if (!normalizedText || !problemNumber) {
+    return "";
+  }
+
+  const escapedProblemNumber = escapeRegExp(problemNumber);
+  const startPattern = new RegExp(
+    `(?:^|\\n|\\s)((?:Problem|Exercise|Question)?\\s*${escapedProblemNumber}\\s*(?:\\.\\s*)?\\*?\\s*[\\s\\S]*)`,
+    "i"
+  );
+  const startMatch = normalizedText.match(startPattern);
+  const afterStart = startMatch?.[1]?.trim() ?? "";
+
+  if (!afterStart) {
+    return "";
+  }
+
+  const nextProblemPattern = /\n\s*(?=(?:Problem|Exercise|Question)?\s*\d+(?:\.\d+)+\s*(?:\.\s*)?\*?\s+[A-Z])/i;
+  const [problemText] = afterStart.split(nextProblemPattern);
+
+  return normalizeContextProblemText(problemText).slice(0, 1200);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function dedupeContextProblems(problems: NonNullable<ChatContextMemory["savedProblems"]>) {
+  const seen = new Set<string>();
+  const deduped: NonNullable<ChatContextMemory["savedProblems"]> = [];
+
+  for (const problem of problems) {
+    const normalizedProblemText = normalizeComparableProblemText(problem.problemText);
+    const key = [
+      problem.sourceName?.toLowerCase() ?? "",
+      problem.problemNumber?.toLowerCase() ?? "",
+      problem.pageNumber ?? "",
+      normalizedProblemText || problem.label?.toLowerCase() || ""
+    ].join("|");
+
+    if (seen.has(key) || (!problem.sourceName && !problem.pageNumber && !problem.problemNumber && !problem.label)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(problem);
+  }
+
+  return deduped.slice(0, 8);
+}
+
+function normalizeComparableProblemText(text?: string) {
+  return (text ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .slice(0, 240);
+}
+
+function dedupeContextSources(sources: NonNullable<ChatContextMemory["sourcesUsed"]>) {
+  const seen = new Set<string>();
+  const deduped: NonNullable<ChatContextMemory["sourcesUsed"]> = [];
+
+  for (const source of sources) {
+    const key = [source.sourceName?.toLowerCase() ?? source.id ?? "", source.pageNumber ?? "", source.problemNumber ?? ""].join("|");
+
+    if (seen.has(key) || (!source.sourceName && !source.pageNumber && !source.problemNumber)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(source);
+  }
+
+  return deduped.slice(0, 6);
+}
+
+function formatProblemLabel(problem: NonNullable<ChatContextMemory["currentProblem"]>) {
+  return [problem.problemNumber ? `Problem ${problem.problemNumber}` : problem.label, problem.title]
+    .filter(Boolean)
+    .join(" - ") || "Saved problem";
+}
+
+function formatProblemMeta(problem: NonNullable<ChatContextMemory["currentProblem"]>) {
+  return [problem.sourceName, formatPageNumber(problem.pageNumber), problem.sectionTitle].filter(Boolean).join(" · ");
+}
+
+function formatContextSource(source: NonNullable<ChatContextMemory["sourcesUsed"]>[number]) {
+  return [
+    source.sourceName,
+    formatPageNumber(source.pageNumber),
+    source.problemNumber ? `Problem ${source.problemNumber}` : undefined
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function formatRetrievalReason(reason: string) {
+  const labels: Record<string, string> = {
+    student_requested_problem: "Student requested this problem",
+    needed_supporting_page: "Needed supporting page",
+    needed_example_page: "Needed helpful page",
+    student_changed_problem: "Student changed problem",
+    previous_search_failed: "Previous search failed"
+  };
+
+  return labels[reason] ?? reason.replaceAll("_", " ");
+}
+
+function formatPageNumber(pageNumber?: number) {
+  return typeof pageNumber === "number" && Number.isFinite(pageNumber) && pageNumber > 0 ? `p. ${pageNumber}` : undefined;
+}
+
+function formatOcrConfidence(confidence?: number) {
+  if (typeof confidence !== "number" || !Number.isFinite(confidence)) {
+    return undefined;
+  }
+
+  return confidence <= 1 ? `${Math.round(confidence * 100)}%` : `${Math.round(confidence)}%`;
+}
+
+function formatUsageNumber(value: number) {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(Math.max(0, Math.round(value)));
+}
+
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function nonnegativeNumber(value: unknown, fallback: number) {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : fallback;
+}
+
+function positiveNumber(value: unknown, fallback: number) {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : fallback;
+}
+
+function stringFromRecord(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function numberFromRecord(value: unknown) {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : undefined;
+}
+
+function stringArrayFromRecord(value: unknown) {
+  return Array.isArray(value) ? value.map(stringFromRecord).filter((item): item is string => Boolean(item)) : [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 async function readChatStream(response: Response, onEvent: (event: ChatStreamEvent) => void) {
@@ -2707,28 +3827,46 @@ function appendProgressSearches(
   };
 }
 
+function quickResponseContent(event: Extract<ChatStreamEvent, { type: "quick_response" }>) {
+  const answer = event.structuredOutput?.sections?.answer?.trim();
+
+  return answer || event.message.replace(/^(?:\*\*)?(?:your next step|next step)(?:\*\*)?\s*:\s*/i, "");
+}
+
+function studentSearchPurposeLabel(retrievalReason: string | undefined, query: string, fallback?: string) {
+  const normalizedReason = retrievalReason?.trim();
+
+  if (normalizedReason === "student_requested_problem" || normalizedReason === "student_changed_problem") {
+    return "Finding the exact problem";
+  }
+
+  if (normalizedReason === "needed_supporting_page") {
+    return "Looking for a method or rule";
+  }
+
+  if (normalizedReason === "needed_example_page") {
+    return "Looking for a similar example";
+  }
+
+  return fallback || describeSearchQueryForUi(query);
+}
+
 function describeSearchQueryForUi(query: string) {
   const normalizedQuery = query.toLowerCase();
 
   if (/(problem|page|worksheet|section|chapter|exercise|quiz|exam|number)/.test(normalizedQuery)) {
-    return "Checking exact problem and page";
+    return "Finding the exact problem";
   }
 
-  if (/(method|formula|theorem|definition|rule|example|substitution|derivative|integral|solve)/.test(normalizedQuery)) {
-    return "Finding method and example pages";
+  if (/(worked|example|similar)/.test(normalizedQuery)) {
+    return "Looking for a similar example";
+  }
+
+  if (/(method|formula|theorem|definition|rule|substitution|derivative|integral|solve)/.test(normalizedQuery)) {
+    return "Looking for a method or rule";
   }
 
   return "Searching class PDFs for support";
-}
-
-function coerceFiveWordSearchReason(reason: string | undefined, query: string) {
-  const words = reason?.match(/[A-Za-z0-9']+/g) ?? [];
-
-  if (words.length === 5) {
-    return words.join(" ");
-  }
-
-  return describeSearchQueryForUi(query);
 }
 
 function normalizeSearchQuery(query: string) {
@@ -2740,6 +3878,17 @@ function formatConversationMeta(conversation: StudentConversationSummary) {
     `${conversation.messageCount} messages`,
     formatConversationDate(conversation.lastMessageAt)
   ].filter(Boolean).join(" / ");
+}
+
+function formatConversationCompactLabel(title: string) {
+  const compactLabel = title
+    .split(/\s+/)
+    .map((word) => word.match(/[A-Za-z0-9]/)?.[0] ?? "")
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+
+  return compactLabel || "C";
 }
 
 function compareConversationSummariesByRecentActivity(

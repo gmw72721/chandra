@@ -1,30 +1,17 @@
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 import httpx
-from pypdf import PdfReader, PdfWriter
 
 from backend.internal_next import internal_next_base_url, reusable_async_client
 
-logger = logging.getLogger(__name__)
-
 MAX_TOTAL_PAGES = 12
-_NEXT_PAGE_ASSET_CLIENT: httpx.AsyncClient | None = None
-_PAGE_ASSET_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
-_PAGE_ASSET_CACHE_MAX = 256
-PRINTED_PAGE_FOOTER_PATTERNS = (
-    re.compile(r"[-\u2013\u2014]\s*(\d{1,5})\s*[-\u2013\u2014]"),
-    re.compile(r"\b[Pp]age\s+(\d{1,5})\b"),
-)
-PRINTED_PAGE_LINE_RE = re.compile(r"\d{1,5}")
+logger = logging.getLogger(__name__)
+_NEXT_ASSET_CLIENT: httpx.AsyncClient | None = None
 
 
 async def fetch_or_render_pdf_pages(
@@ -33,16 +20,10 @@ async def fetch_or_render_pdf_pages(
     max_total_pages: int = MAX_TOTAL_PAGES,
     output_dir: str | Path = "data/rendered",
 ) -> list[dict[str, Any]]:
-    """Fetch/render only selected PDF page ranges into multimodal assets."""
+    """Fetch canonical selected page assets through the internal Next.js route."""
 
-    selected_ranges = deduplicate_page_ranges(retrieved_pages, max_total_pages=max_total_pages)
-    target_dir = Path(output_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    source_cache = await resolve_pdf_sources(selected_ranges, output_dir=target_dir)
-
-    return await asyncio.gather(
-        *(build_page_asset(item, source_cache[str(item["source_pdf_path"])], target_dir) for item in selected_ranges)
-    )
+    _ = output_dir
+    return await fetch_pdf_page_assets_via_next(retrieved_pages, max_total_pages=max_total_pages)
 
 
 async def fetch_pdf_page_assets_via_next(
@@ -50,472 +31,286 @@ async def fetch_pdf_page_assets_via_next(
     *,
     max_total_pages: int = MAX_TOTAL_PAGES,
 ) -> list[dict[str, Any]]:
-    """Ask the Next.js server to build selected PDF assets using Node/Firebase."""
+    """Fetch page asset data for selected PDF OCR records.
 
-    selected_ranges = deduplicate_page_ranges(retrieved_pages, max_total_pages=max_total_pages)
+    The request sends only class/professor/material/page selectors. Storage
+    paths are resolved by Next.js from PostgreSQL metadata, not trusted from the
+    backend payload.
+    """
 
-    if not selected_ranges:
+    selected_pages = select_metadata_pages(retrieved_pages, max_total_pages=max_total_pages)
+    metadata_pages = [metadata_only_page_asset(page) for page in selected_pages]
+
+    if not metadata_pages:
         return []
 
+    class_id = first_nonempty(metadata_pages, "class_id", "classId")
+    professor_id = first_nonempty(metadata_pages, "professor_id", "professorId")
     shared_secret = os.getenv("BACKEND_SHARED_SECRET", "").strip()
 
-    if not shared_secret:
-        return [metadata_only_page_asset(page) for page in selected_ranges]
-
-    next_base_url = internal_next_base_url("PDF assets")
+    if not class_id or not professor_id or not shared_secret:
+        return metadata_pages
 
     try:
-        client = next_page_asset_http_client()
+        client = next_asset_http_client()
         response = await client.post(
-            f"{next_base_url}/api/internal/pdf-page-assets",
+            f"{internal_next_base_url('PDF page assets')}/api/internal/pdf-page-assets",
             headers={
                 "Content-Type": "application/json",
                 "X-Chandra-Internal-Secret": shared_secret,
             },
             json={
-                "maxTotalPages": max_total_pages,
-                "pages": selected_ranges,
+                "classId": class_id,
+                "professorId": professor_id,
+                "pages": [
+                    {
+                        "materialId": page.get("doc_id") or page.get("materialId"),
+                        "pageStart": page.get("page_start"),
+                        "pageEnd": page.get("page_end"),
+                    }
+                    for page in metadata_pages
+                ],
             },
         )
         response.raise_for_status()
         payload = response.json()
     except Exception as error:
         if isinstance(error, (httpx.TransportError, httpx.TimeoutException)):
-            await close_next_page_asset_http_client()
+            await close_next_asset_http_client()
 
-        logger.warning(
-            "Internal PDF asset build failed.",
-            extra={
-                "error": str(error),
-                "next_base_url": next_base_url,
-                "selected_page_count": len(selected_ranges),
-            },
-        )
-        return [metadata_only_page_asset(page) for page in selected_ranges]
+        logger.warning("Internal PDF page asset fetch failed.", extra={"error": str(error)})
+        return metadata_pages
 
-    assets = payload.get("assets") if isinstance(payload, dict) else []
-    return assets if isinstance(assets, list) else [metadata_only_page_asset(page) for page in selected_ranges]
+    asset_payloads = payload.get("assets") if isinstance(payload, dict) else []
+    assets = [asset for asset in asset_payloads if isinstance(asset, dict)] if isinstance(asset_payloads, list) else []
+    return merge_page_asset_payloads(metadata_pages, assets)
 
 
-def next_page_asset_http_client() -> httpx.AsyncClient:
-    global _NEXT_PAGE_ASSET_CLIENT
+def next_asset_http_client() -> httpx.AsyncClient:
+    global _NEXT_ASSET_CLIENT
 
-    _NEXT_PAGE_ASSET_CLIENT = reusable_async_client(_NEXT_PAGE_ASSET_CLIENT, timeout=60.0)
+    _NEXT_ASSET_CLIENT = reusable_async_client(_NEXT_ASSET_CLIENT, timeout=45.0)
+    return _NEXT_ASSET_CLIENT
 
-    return _NEXT_PAGE_ASSET_CLIENT
 
+async def close_next_asset_http_client() -> None:
+    global _NEXT_ASSET_CLIENT
 
-async def close_next_page_asset_http_client() -> None:
-    global _NEXT_PAGE_ASSET_CLIENT
-
-    if _NEXT_PAGE_ASSET_CLIENT is None:
+    if _NEXT_ASSET_CLIENT is None:
         return
 
-    await _NEXT_PAGE_ASSET_CLIENT.aclose()
-    _NEXT_PAGE_ASSET_CLIENT = None
+    await _NEXT_ASSET_CLIENT.aclose()
+    _NEXT_ASSET_CLIENT = None
 
 
 def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
-    page_start = int(page.get("page_start") or 1)
-    page_end = int(page.get("page_end") or page_start)
+    page_start = int(page.get("page_start") or page.get("pageStart") or page.get("pageNumber") or 1)
+    page_end = int(page.get("page_end") or page.get("pageEnd") or page_start)
+    page_start = max(1, min(page_start, page_end))
+    page_end = max(page_start, page_end)
+
+    printed_page_start = page.get("printed_page_start")
+    if printed_page_start is None:
+        printed_page_start = page.get("printedPageStart")
+
+    printed_page_end = page.get("printed_page_end")
+    if printed_page_end is None:
+        printed_page_end = page.get("printedPageEnd")
+
+    display_page_start = int(printed_page_start or page_start)
+    display_page_end = int(printed_page_end or (display_page_start if printed_page_start else page_end))
+    ocr_text = str(page.get("ocr_text") or page.get("ocrText") or page.get("chunk_text") or page.get("chunkText") or "")
+    chunk_text = str(page.get("chunk_text") or page.get("chunkText") or ocr_text)
+    title = str(page.get("title") or "Untitled PDF")
 
     return {
-        "citation_label": citation_label(str(page.get("title") or "Untitled PDF"), page_start, page_end),
-        "doc_id": str(page.get("doc_id") or ""),
+        "chunk_text": chunk_text,
+        "class_id": str(page.get("class_id") or page.get("classId") or ""),
+        "citation_label": citation_label(title, display_page_start, display_page_end),
+        "doc_id": str(page.get("doc_id") or page.get("docId") or page.get("materialId") or ""),
         "images": [],
-        "material_type": str(page.get("material_type") or ""),
+        "material_type": str(page.get("material_type") or page.get("materialType") or ""),
+        "ocr_confidence": page.get("ocr_confidence") if page.get("ocr_confidence") is not None else page.get("ocrConfidence"),
+        "ocr_provider": str(page.get("ocr_provider") or page.get("ocrProvider") or ""),
+        "ocr_source": str(page.get("ocr_source") or page.get("ocrSource") or ""),
+        "ocr_text": ocr_text,
         "page_end": page_end,
         "page_start": page_start,
-        "printed_page_end": None,
-        "printed_page_start": None,
-        "score": float(page.get("score") or 0.0),
-        "title": str(page.get("title") or "Untitled PDF"),
-    }
-
-
-async def resolve_pdf_sources(selected_ranges: list[dict[str, Any]], *, output_dir: Path) -> dict[str, Path]:
-    source_keys = list(dict.fromkeys(str(item["source_pdf_path"]) for item in selected_ranges))
-    source_paths = await asyncio.gather(*(resolve_pdf_path(source_key, output_dir=output_dir) for source_key in source_keys))
-
-    return dict(zip(source_keys, source_paths))
-
-
-async def build_page_asset(item: dict[str, Any], source_pdf: Path, output_dir: Path) -> dict[str, Any]:
-    cache_key = page_asset_cache_key(item, source_pdf, output_dir)
-    cached = _PAGE_ASSET_CACHE.get(cache_key)
-    if cached is not None:
-        return copy_page_asset(cached)
-
-    images, printed_page_range = await asyncio.gather(
-        asyncio.to_thread(
-            render_page_images,
-            source_pdf,
-            doc_id=item["doc_id"],
-            page_start=item["page_start"],
-            page_end=item["page_end"],
-            output_dir=output_dir,
-        ),
-        asyncio.to_thread(
-            extract_printed_page_range,
-            source_pdf,
-            page_start=item["page_start"],
-            page_end=item["page_end"],
-        ),
-    )
-    printed_page_start, printed_page_end = printed_page_range
-    display_page_start = printed_page_start or item["page_start"]
-    display_page_end = printed_page_end or item["page_end"]
-    asset: dict[str, Any] = {
-        "doc_id": item["doc_id"],
-        "title": item["title"],
-        "page_start": item["page_start"],
-        "page_end": item["page_end"],
-        "printed_page_start": printed_page_start,
+        "full_pdf_bucket": str(page.get("full_pdf_bucket") or page.get("fullPdfBucket") or ""),
+        "full_pdf_path": str(page.get("full_pdf_path") or page.get("fullPdfPath") or ""),
+        "full_pdf_uri": str(page.get("full_pdf_uri") or page.get("fullPdfUri") or ""),
+        "full_pdf_mime_type": str(page.get("full_pdf_mime_type") or page.get("fullPdfMimeType") or "application/pdf"),
+        "full_pdf_size_bytes": page.get("full_pdf_size") if page.get("full_pdf_size") is not None else page.get("fullPdfSize") if page.get("fullPdfSize") is not None else page.get("full_pdf_size_bytes") if page.get("full_pdf_size_bytes") is not None else page.get("fullPdfSizeBytes"),
+        "full_pdf_sha256": str(page.get("full_pdf_sha256") or page.get("fullPdfSha256") or ""),
+        "page_asset_bucket": str(page.get("page_asset_bucket") or page.get("pageAssetBucket") or page.get("page_asset_storage_bucket") or page.get("pageAssetStorageBucket") or ""),
+        "page_asset_path": str(page.get("page_asset_path") or page.get("pageAssetPath") or page.get("page_asset_storage_path") or page.get("pageAssetStoragePath") or ""),
+        "page_asset_uri": str(page.get("page_asset_uri") or page.get("pageAssetUri") or ""),
+        "page_asset_checksum_sha256": str(page.get("page_asset_sha256") or page.get("pageAssetSha256") or page.get("page_asset_checksum_sha256") or page.get("pageAssetChecksumSha256") or ""),
+        "page_asset_mime_type": str(page.get("page_asset_mime_type") or page.get("pageAssetMimeType") or ""),
+        "page_asset_size_bytes": page.get("page_asset_size") if page.get("page_asset_size") is not None else page.get("pageAssetSize") if page.get("pageAssetSize") is not None else page.get("page_asset_size_bytes") if page.get("page_asset_size_bytes") is not None else page.get("pageAssetSizeBytes"),
+        "page_asset_storage_bucket": str(page.get("page_asset_storage_bucket") or page.get("pageAssetStorageBucket") or page.get("page_asset_bucket") or page.get("pageAssetBucket") or ""),
+        "page_asset_storage_path": str(page.get("page_asset_storage_path") or page.get("pageAssetStoragePath") or page.get("page_asset_path") or page.get("pageAssetPath") or ""),
         "printed_page_end": printed_page_end,
-        "score": float(item.get("score") or 0.0),
-        "material_type": str(item.get("material_type") or ""),
-        "images": images,
-        "citation_label": citation_label(item["title"], display_page_start, display_page_end),
+        "printed_page_start": printed_page_start,
+        "professor_id": str(page.get("professor_id") or page.get("professorId") or ""),
+        "problem_numbers": page.get("problem_numbers") or page.get("problemNumbers") or [],
+        "retrieval_mode": str(page.get("retrieval_mode") or page.get("retrievalMode") or ""),
+        "score": float(page.get("score") or 0.0),
+        "source_pdf_path": str(page.get("source_pdf_path") or page.get("sourcePdfPath") or ""),
+        "storage_bucket": str(page.get("storage_bucket") or page.get("storageBucket") or ""),
+        "storage_path": str(page.get("storage_path") or page.get("storagePath") or ""),
+        "title": title,
     }
 
-    if not images:
-        mini_pdf = await asyncio.to_thread(
-            safe_extract_mini_pdf,
-            source_pdf,
-            doc_id=item["doc_id"],
-            page_start=item["page_start"],
-            page_end=item["page_end"],
-            output_dir=output_dir,
-        )
 
-        if mini_pdf:
-            asset["file"] = mini_pdf
+def merge_page_asset_payload(page: dict[str, Any], asset: dict[str, Any] | None) -> dict[str, Any]:
+    if not asset:
+        return page
 
-    remember_page_asset(cache_key, asset)
-    return asset
+    mime_type = str(asset.get("mimeType") or asset.get("pageAssetMimeType") or page.get("page_asset_mime_type") or "")
+    data_url = str(asset.get("dataUrl") or "")
+    merged = {
+        **page,
+        "full_pdf_bucket": str(asset.get("fullPdfBucket") or page.get("full_pdf_bucket") or ""),
+        "full_pdf_path": str(asset.get("fullPdfPath") or page.get("full_pdf_path") or ""),
+        "full_pdf_uri": str(asset.get("fullPdfUri") or page.get("full_pdf_uri") or ""),
+        "full_pdf_mime_type": str(asset.get("fullPdfMimeType") or page.get("full_pdf_mime_type") or "application/pdf"),
+        "full_pdf_size_bytes": asset.get("fullPdfSize") if asset.get("fullPdfSize") is not None else asset.get("fullPdfSizeBytes") if asset.get("fullPdfSizeBytes") is not None else page.get("full_pdf_size_bytes"),
+        "full_pdf_sha256": str(asset.get("fullPdfSha256") or page.get("full_pdf_sha256") or ""),
+        "full_pdf_skipped_reason": str(asset.get("fullPdfSkippedReason") or page.get("full_pdf_skipped_reason") or ""),
+        "page_asset_bucket": str(asset.get("pageAssetBucket") or page.get("page_asset_bucket") or page.get("page_asset_storage_bucket") or ""),
+        "page_asset_path": str(asset.get("pageAssetPath") or page.get("page_asset_path") or page.get("page_asset_storage_path") or ""),
+        "page_asset_uri": str(asset.get("pageAssetUri") or page.get("page_asset_uri") or ""),
+        "page_asset_checksum_sha256": str(asset.get("pageAssetSha256") or asset.get("pageAssetChecksumSha256") or page.get("page_asset_checksum_sha256") or ""),
+        "page_asset_mime_type": mime_type,
+        "page_asset_size_bytes": asset.get("pageAssetSize") if asset.get("pageAssetSize") is not None else asset.get("pageAssetSizeBytes") if asset.get("pageAssetSizeBytes") is not None else page.get("page_asset_size_bytes"),
+        "page_asset_storage_bucket": str(asset.get("pageAssetStorageBucket") or asset.get("pageAssetBucket") or page.get("page_asset_storage_bucket") or page.get("page_asset_bucket") or ""),
+        "page_asset_storage_path": str(asset.get("pageAssetStoragePath") or asset.get("pageAssetPath") or page.get("page_asset_storage_path") or page.get("page_asset_path") or ""),
+    }
+
+    if data_url:
+        if mime_type.startswith("image/"):
+            merged["image_url"] = {"url": data_url}
+            merged["images"] = [data_url]
+        else:
+            merged["file_data_url"] = data_url
+            merged["file_name"] = f"{page.get('doc_id') or 'pdf'}-page-{page.get('page_start')}.pdf"
+
+    full_pdf_data_url = str(asset.get("fullPdfDataUrl") or "")
+    if full_pdf_data_url:
+        merged["full_pdf_data_url"] = full_pdf_data_url
+        merged["full_pdf_file_name"] = str(asset.get("fullPdfFileName") or f"{page.get('doc_id') or 'source'}.pdf")
+
+    return merged
 
 
-def page_asset_cache_key(item: dict[str, Any], source_pdf: Path, output_dir: Path) -> tuple[Any, ...]:
-    stat = file_signature(source_pdf)
+def merge_page_asset_payloads(metadata_pages: list[dict[str, Any]], assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not assets:
+        return metadata_pages
+
+    merged_pages: list[dict[str, Any]] = []
+    used_asset_keys: set[tuple[str, int]] = set()
+
+    for page in metadata_pages:
+        doc_id = str(page.get("doc_id") or "")
+        page_start = int(page.get("page_start") or 1)
+        page_end = int(page.get("page_end") or page_start)
+        matching_assets = [
+            asset
+            for asset in assets
+            if str(asset.get("docId") or asset.get("materialId") or "") == doc_id
+            and page_start <= int(asset.get("pageNumber") or asset.get("pageStart") or page_start) <= page_end
+        ]
+
+        if not matching_assets:
+            merged_pages.append(page)
+            continue
+
+        for asset in matching_assets:
+            page_number = int(asset.get("pageNumber") or asset.get("pageStart") or page_start)
+            used_asset_keys.add(page_asset_key(asset))
+            merged_pages.append(
+                merge_page_asset_payload(
+                    {
+                        **page,
+                        "page_start": page_number,
+                        "page_end": page_number,
+                    },
+                    asset,
+                )
+            )
+
+    for asset in assets:
+        if page_asset_key(asset) in used_asset_keys:
+            continue
+        merged_pages.append(merge_page_asset_payload(metadata_only_page_asset(asset), asset))
+
+    return merged_pages
+
+
+def page_asset_key(page: dict[str, Any]) -> tuple[str, int]:
     return (
-        str(source_pdf),
-        stat,
-        str(output_dir),
-        str(item.get("doc_id") or ""),
-        str(item.get("title") or ""),
-        int(item.get("page_start") or 1),
-        int(item.get("page_end") or item.get("page_start") or 1),
-        float(item.get("score") or 0.0),
-        str(item.get("material_type") or ""),
+        str(page.get("doc_id") or page.get("docId") or page.get("materialId") or ""),
+        int(page.get("page_start") or page.get("pageStart") or page.get("pageNumber") or 1),
     )
 
 
-def copy_page_asset(asset: dict[str, Any]) -> dict[str, Any]:
-    copied = dict(asset)
-    if isinstance(copied.get("images"), list):
-        copied["images"] = list(copied["images"])
-    return copied
+def first_nonempty(pages: list[dict[str, Any]], *keys: str) -> str:
+    for page in pages:
+        for key in keys:
+            value = str(page.get(key) or "").strip()
+            if value:
+                return value
+    return ""
 
 
-def remember_page_asset(cache_key: tuple[Any, ...], asset: dict[str, Any]) -> None:
-    if len(_PAGE_ASSET_CACHE) >= _PAGE_ASSET_CACHE_MAX:
-        _PAGE_ASSET_CACHE.pop(next(iter(_PAGE_ASSET_CACHE)))
-
-    _PAGE_ASSET_CACHE[cache_key] = copy_page_asset(asset)
-
-
-def file_signature(path: Path) -> tuple[int, int]:
-    try:
-        stat = path.stat()
-    except OSError:
-        return (0, 0)
-
-    return (stat.st_mtime_ns, stat.st_size)
-
-
-def deduplicate_page_ranges(
+def select_metadata_pages(
     retrieved_pages: list[dict[str, Any]],
     *,
     max_total_pages: int = MAX_TOTAL_PAGES,
 ) -> list[dict[str, Any]]:
-    """Merge overlapping ranges per source PDF and cap total selected pages."""
+    """Select narrow OCR metadata records without merging or opening PDFs."""
 
-    by_source: dict[tuple[str, str], list[dict[str, Any]]] = {}
-
-    for page in retrieved_pages:
-        source_pdf_path = str(page.get("source_pdf_path") or "").strip()
-        if not source_pdf_path:
-            continue
-
-        page_start = int(page.get("page_start") or 1)
-        page_end = int(page.get("page_end") or page_start)
-        normalized = {
-            **page,
-            "doc_id": str(page.get("doc_id") or ""),
-            "title": str(page.get("title") or "Untitled PDF"),
-            "page_start": max(1, min(page_start, page_end)),
-            "page_end": max(page_start, page_end),
-            "source_pdf_path": source_pdf_path,
-        }
-        by_source.setdefault((normalized["doc_id"], source_pdf_path), []).append(normalized)
-
-    merged: list[dict[str, Any]] = []
-
-    for (_doc_id, _source), ranges in by_source.items():
-        sorted_ranges = sorted(ranges, key=lambda item: (item["page_start"], item["page_end"]))
-        current: dict[str, Any] | None = None
-
-        for item in sorted_ranges:
-            if current is None:
-                current = dict(item)
-                continue
-
-            if item["page_start"] <= current["page_end"] + 1:
-                current["page_end"] = max(current["page_end"], item["page_end"])
-                current["score"] = max(float(current.get("score") or 0.0), float(item.get("score") or 0.0))
-                current["chunk_text"] = "\n\n".join(
-                    text for text in [current.get("chunk_text"), item.get("chunk_text")] if text
-                )
-            else:
-                merged.append(current)
-                current = dict(item)
-
-        if current is not None:
-            merged.append(current)
-
-    capped: list[dict[str, Any]] = []
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int, str, str]] = set()
     pages_used = 0
 
-    for item in sorted(merged, key=lambda page: float(page.get("score") or 0.0), reverse=True):
-        remaining = max_total_pages - pages_used
-        if remaining <= 0:
-            break
+    for page in sorted(retrieved_pages, key=lambda item: float(item.get("score") or 0.0), reverse=True):
+        page_start = int(page.get("page_start") or page.get("pageStart") or page.get("pageNumber") or 1)
+        page_end = int(page.get("page_end") or page.get("pageEnd") or page_start)
+        normalized_page_start = max(1, min(page_start, page_end))
+        normalized_page_end = max(normalized_page_start, page_end)
+        page_count = normalized_page_end - normalized_page_start + 1
 
-        page_count = item["page_end"] - item["page_start"] + 1
-        if page_count > remaining:
-            item = {**item, "page_end": item["page_start"] + remaining - 1}
-            page_count = remaining
+        if pages_used + page_count > max_total_pages:
+            continue
 
-        capped.append(item)
+        key = (
+            str(page.get("doc_id") or page.get("docId") or page.get("materialId") or ""),
+            normalized_page_start,
+            normalized_page_end,
+            str(page.get("retrieval_mode") or page.get("retrievalMode") or ""),
+            str(page.get("chunk_text") or page.get("chunkText") or page.get("ocr_text") or page.get("ocrText") or "")[:160],
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        selected.append(
+            {
+                **page,
+                "doc_id": key[0],
+                "page_start": normalized_page_start,
+                "page_end": normalized_page_end,
+                "title": str(page.get("title") or "Untitled PDF"),
+            }
+        )
         pages_used += page_count
 
-    return capped
-
-
-async def resolve_pdf_path(source_pdf_path: str, *, output_dir: Path) -> Path:
-    """Resolve a local path or download a URL to a local cache file."""
-
-    storage_reference = parse_storage_reference(source_pdf_path)
-    if storage_reference:
-        bucket_name, object_path = storage_reference
-        digest = hashlib.sha256(f"{bucket_name}/{object_path}".encode("utf-8")).hexdigest()[:16]
-        target = output_dir / f"source_{digest}.pdf"
-
-        if not target.exists():
-            await asyncio.to_thread(download_storage_object, bucket_name, object_path, target)
-
-        return target
-
-    if source_pdf_path.startswith(("http://", "https://")):
-        digest = hashlib.sha256(source_pdf_path.encode("utf-8")).hexdigest()[:16]
-        target = output_dir / f"source_{digest}.pdf"
-
-        if not target.exists():
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.get(source_pdf_path)
-                response.raise_for_status()
-                target.write_bytes(response.content)
-
-        return target
-
-    path = Path(source_pdf_path)
-    if not path.is_absolute():
-        path = Path.cwd() / path
-
-    if not path.exists():
-        bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET") or os.getenv("NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET")
-
-        if bucket_name:
-            digest = hashlib.sha256(f"{bucket_name}/{source_pdf_path}".encode("utf-8")).hexdigest()[:16]
-            target = output_dir / f"source_{digest}.pdf"
-
-            if not target.exists():
-                await asyncio.to_thread(download_storage_object, bucket_name, source_pdf_path, target)
-
-            return target
-
-        raise FileNotFoundError(f"PDF source not found: {source_pdf_path}")
-
-    return path
-
-
-def parse_storage_reference(source_pdf_path: str) -> tuple[str, str] | None:
-    if source_pdf_path.startswith("gs://"):
-        bucket_and_path = source_pdf_path.removeprefix("gs://")
-        bucket_name, _, object_path = bucket_and_path.partition("/")
-        return (bucket_name, object_path) if bucket_name and object_path else None
-
-    parsed = urlparse(source_pdf_path)
-
-    if parsed.scheme in {"http", "https"} and parsed.netloc == "storage.googleapis.com":
-        bucket_name, _, object_path = parsed.path.lstrip("/").partition("/")
-        return (bucket_name, unquote(object_path)) if bucket_name and object_path else None
-
-    return None
-
-
-def download_storage_object(bucket_name: str, object_path: str, target: Path) -> None:
-    try:
-        import firebase_admin
-        from firebase_admin import storage
-    except ImportError as error:
-        raise RuntimeError("Firebase Admin storage support is not installed.") from error
-
-    if not firebase_admin._apps:
-        firebase_admin.initialize_app(options={"storageBucket": bucket_name})
-
-    bucket = storage.bucket(bucket_name)
-    bucket.blob(object_path).download_to_filename(target)
-
-
-def render_page_images(
-    source_pdf: Path,
-    *,
-    doc_id: str,
-    page_start: int,
-    page_end: int,
-    output_dir: Path,
-) -> list[str]:
-    """Render pages to PNG when pypdfium2 is available."""
-
-    try:
-        import pypdfium2
-    except ImportError:
-        return []
-
-    safe_doc_id = safe_name(doc_id)
-    rendered: list[str] = []
-    try:
-        pdf = pypdfium2.PdfDocument(str(source_pdf))
-    except Exception:
-        return []
-
-    try:
-        for page_number in range(page_start, page_end + 1):
-            output_path = output_dir / f"{safe_doc_id}_p{page_number}.png"
-
-            if not output_path.exists():
-                try:
-                    page = pdf[page_number - 1]
-                    bitmap = page.render(scale=2).to_pil()
-                    bitmap.save(output_path)
-                except Exception:
-                    continue
-
-            rendered.append(str(output_path))
-    finally:
-        pdf.close()
-
-    return rendered
-
-
-def safe_extract_mini_pdf(
-    source_pdf: Path,
-    *,
-    doc_id: str,
-    page_start: int,
-    page_end: int,
-    output_dir: Path,
-) -> str:
-    try:
-        return extract_mini_pdf(
-            source_pdf,
-            doc_id=doc_id,
-            page_start=page_start,
-            page_end=page_end,
-            output_dir=output_dir,
-        )
-    except Exception:
-        return ""
-
-
-def extract_printed_page_range(source_pdf: Path, *, page_start: int, page_end: int) -> tuple[int | None, int | None]:
-    try:
-        reader = PdfReader(str(source_pdf))
-    except Exception:
-        return (None, None)
-
-    page_count = len(reader.pages)
-    printed_pages: list[int] = []
-
-    for page_number in range(page_start, min(page_end, page_count) + 1):
-        try:
-            page_text = reader.pages[page_number - 1].extract_text() or ""
-        except Exception:
-            return (None, None)
-
-        printed_page = extract_printed_page_number_from_text(page_text)
-
-        if printed_page is None:
-            return (None, None)
-
-        printed_pages.append(printed_page)
-
-    if not printed_pages:
-        return (None, None)
-
-    return (printed_pages[0], printed_pages[-1])
-
-
-def extract_printed_page_number_from_text(text: str) -> int | None:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    footer_text = "\n".join(lines[-10:])
-
-    for pattern in PRINTED_PAGE_FOOTER_PATTERNS:
-        matches = pattern.findall(footer_text)
-        if matches:
-            return int(matches[-1])
-
-    for line in reversed(lines[-5:]):
-        if PRINTED_PAGE_LINE_RE.fullmatch(line):
-            return int(line)
-
-    return None
-
-
-def extract_mini_pdf(
-    source_pdf: Path,
-    *,
-    doc_id: str,
-    page_start: int,
-    page_end: int,
-    output_dir: Path,
-) -> str:
-    """Create a mini-PDF containing only the selected pages."""
-
-    output_path = output_dir / f"{safe_name(doc_id)}_p{page_start}-{page_end}.pdf"
-
-    if output_path.exists():
-        return str(output_path)
-
-    reader = PdfReader(str(source_pdf))
-    writer = PdfWriter()
-    page_count = len(reader.pages)
-
-    for page_number in range(page_start, min(page_end, page_count) + 1):
-        writer.add_page(reader.pages[page_number - 1])
-
-    with output_path.open("wb") as handle:
-        writer.write(handle)
-
-    return str(output_path)
+    return selected
 
 
 def citation_label(title: str, page_start: int, page_end: int) -> str:
     pages = f"page {page_start}" if page_start == page_end else f"pages {page_start}-{page_end}"
     return f"{title}, {pages}"
-
-
-def safe_name(value: str) -> str:
-    normalized = "".join(character if character.isalnum() or character in ("-", "_") else "_" for character in value)
-    return normalized or "pdf"

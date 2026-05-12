@@ -68,7 +68,7 @@ test("class join and teacher invite signup use server-side lockouts with generic
 test("teacher invites are hash-only, single-use, listable, revocable, and audited", () => {
   const inviteRoute = readFileSync(join(repoRoot, "frontend/app/api/teacher-invites/route.ts"), "utf8");
   const signupRoute = readFileSync(join(repoRoot, "frontend/app/api/teacher-signup/route.ts"), "utf8");
-  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(inviteRoute, /randomBytes\(32\)\.toString\("base64url"\)/);
   assert.match(inviteRoute, /hashInviteToken\(inviteToken\)/);
@@ -94,14 +94,14 @@ test("teacher invites are hash-only, single-use, listable, revocable, and audite
 test("account deletion requires fresh auth and protects owned teacher classes", () => {
   const deleteRoute = readFileSync(join(repoRoot, "frontend/app/api/account/delete/route.ts"), "utf8");
   const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
-  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
 
   assert.match(deleteRoute, /hasRecentAuthentication\(decodedToken\.auth_time\)/);
   assert.match(deleteRoute, /activeTeacherOwnedClasses/);
   assert.match(deleteRoute, /Transfer or delete active classes before deleting your teacher account/);
   assert.match(deleteRoute, /anonymizeStudentAccountData/);
-  assert.match(deleteRoute, /studentDeleted: true/);
+  assert.match(deleteRoute, /anonymizeStudentConversations/);
   assert.match(deleteRoute, /adminAuth!\.revokeRefreshTokens\(decodedToken\.uid\)/);
   assert.match(deleteRoute, /adminAuth!\.deleteUser\(decodedToken\.uid\)/);
   assert.match(deleteRoute, /account\.deleted/);
@@ -116,7 +116,7 @@ test("session revocation exists and account changes can revoke refresh tokens", 
   const revokeRoute = readFileSync(join(repoRoot, "frontend/app/api/account/sessions/revoke/route.ts"), "utf8");
   const accountRoute = readFileSync(join(repoRoot, "frontend/app/api/account/settings/route.ts"), "utf8");
   const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
-  const teacherSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
 
   assert.match(revokeRoute, /adminAuth!\.revokeRefreshTokens\(decodedToken\.uid\)/);
@@ -125,6 +125,11 @@ test("session revocation exists and account changes can revoke refresh tokens", 
   assert.match(accountRoute, /adminAuth!\.revokeRefreshTokens\(decodedToken\.uid\)/);
   assert.match(authSource, /signOutAllSessions/);
   assert.match(authSource, /\/api\/account\/sessions\/revoke/);
+  assert.match(studentSource, /id="student-account-email"/);
+  assert.match(studentSource, /id="student-current-password"/);
+  assert.match(studentSource, /id="student-new-password"/);
+  assert.match(studentSource, /currentPassword: currentAccountPassword/);
+  assert.match(studentSource, /newPassword: newAccountPassword/);
   assert.match(teacherSource, /Sign out all sessions/);
   assert.match(studentSource, /Sign out all sessions/);
   assert.match(teacherSource, /metadata\.lastSignInTime/);
@@ -193,8 +198,10 @@ test("conversation retention is enforced through a protected admin route", () =>
   assert.match(routeSource, /LEARNING_PROFILE_UPDATE_SECRET/);
   assert.match(routeSource, /enforceConversationRetention/);
   assert.match(retentionSource, /privacySettings.*conversationRetention/s);
-  assert.match(retentionSource, /collection\("conversations"\)/);
-  assert.match(retentionSource, /collection\("messages"\)/);
+  assert.match(retentionSource, /listClassConversations/);
+  assert.match(retentionSource, /listConversationMessages/);
+  assert.match(retentionSource, /softDeleteConversation/);
+  assert.doesNotMatch(retentionSource, /collection\("conversations"\)/);
   assert.match(envExample, /CONVERSATION_RETENTION_SECRET=/);
 });
 

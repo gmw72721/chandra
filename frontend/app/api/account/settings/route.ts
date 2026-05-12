@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
+import { assertAccountUsernameAvailable, getAccountProfile, tryPostgresData, upsertAccountProfile } from "@/lib/data/server";
+import { updateClassSettings, updateCoTeacherProfile, updateStudentEnrollmentIdentity } from "@/lib/data/classes";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 import {
   normalizeTeacherClassAppearance,
@@ -22,6 +24,7 @@ type AccountSettingsBody = {
 type AccountSettingsProfile = {
   appearance?: unknown;
   classId?: unknown;
+  classIds?: unknown;
   displayName?: unknown;
   email?: unknown;
   role?: unknown;
@@ -50,11 +53,9 @@ export async function PATCH(request: Request) {
     assertFirebaseAdminAuthReady();
     const decodedToken = await adminAuth!.verifyIdToken(token);
     const body = (await request.json().catch(() => ({}))) as AccountSettingsBody;
-    const userReference = adminDb!.collection("users").doc(decodedToken.uid);
-    const userSnapshot = await userReference.get();
-    const currentProfile = (userSnapshot.data() ?? {}) as AccountSettingsProfile;
+    const currentProfile = (await getAccountProfile(decodedToken.uid) ?? {}) as AccountSettingsProfile;
 
-    if (!userSnapshot.exists || !isSupportedAccountRole(currentProfile.role)) {
+    if (!isSupportedAccountRole(currentProfile.role)) {
       return NextResponse.json({ error: "Create a student or teacher profile before changing settings." }, { status: 403 });
     }
 
@@ -107,7 +108,22 @@ export async function PATCH(request: Request) {
       await adminAuth!.updateUser(decodedToken.uid, { displayName });
     }
 
-    await userReference.set(profileUpdates, { merge: true });
+    await upsertAccountProfile({
+      id: decodedToken.uid,
+      firebaseUid: decodedToken.uid,
+      email,
+      role: currentProfile.role,
+      displayName,
+      legacyClassId: String(currentProfile.classId ?? "").trim() || null,
+      legacyClassIds: Array.isArray(currentProfile.classIds) ? currentProfile.classIds.map(String) : [],
+      profile: {
+        ...currentProfile,
+        ...profileUpdates,
+        displayName,
+        uid: decodedToken.uid
+      },
+      username
+    });
 
     if (shouldRevokeRefreshTokens) {
       await adminAuth!.revokeRefreshTokens(decodedToken.uid);
@@ -133,6 +149,16 @@ export async function PATCH(request: Request) {
 
     if (shouldUpdateDisplayName && displayName !== currentDisplayName) {
       await syncDisplayNameReferences({
+        displayName,
+        email,
+        role: currentProfile.role,
+        uid: decodedToken.uid
+      });
+    }
+
+    if (email !== currentEmail) {
+      await syncEmailReferences({
+        currentEmail,
         displayName,
         email,
         role: currentProfile.role,
@@ -167,6 +193,94 @@ export async function PATCH(request: Request) {
   }
 }
 
+async function syncEmailReferences({
+  currentEmail,
+  displayName,
+  email,
+  role,
+  uid
+}: {
+  currentEmail: string;
+  displayName: string;
+  email: string;
+  role: unknown;
+  uid: string;
+}) {
+  if (role === "teacher") {
+    await tryPostgresData("account.email.co_teachers.sync", () =>
+      updateCoTeacherProfile({ displayName, email, teacherId: uid })
+    );
+
+    const coTeacherSnapshot = await adminDb!
+      .collection("classes")
+      .where("coTeacherIds", "array-contains", uid)
+      .get();
+
+    await Promise.all(
+      coTeacherSnapshot.docs.map((classDoc) => {
+        const classData = classDoc.data();
+        const existingCoTeachers = isPlainRecord(classData.coTeachers) ? classData.coTeachers : {};
+        const existingCoTeacher = isPlainRecord(existingCoTeachers[uid]) ? existingCoTeachers[uid] : {};
+        const coTeachers = {
+          ...existingCoTeachers,
+          [uid]: {
+            ...existingCoTeacher,
+            displayName,
+            email,
+            uid
+          }
+        };
+
+        return classDoc.ref.set({ coTeachers }, { merge: true });
+      })
+    );
+    return;
+  }
+
+  if (role !== "student") {
+    return;
+  }
+
+  await tryPostgresData("account.email.enrollments.sync", () =>
+    updateStudentEnrollmentIdentity({ displayName, newEmail: email, oldEmail: currentEmail, studentId: uid })
+  );
+
+  const rosterSnapshots = await Promise.all([
+    adminDb!.collectionGroup("students").where("uid", "==", uid).get(),
+    currentEmail
+      ? adminDb!.collectionGroup("students").where("email", "==", currentEmail).get()
+      : Promise.resolve(null)
+  ]);
+  const rosterDocs = uniqueSnapshotDocs(rosterSnapshots.filter(Boolean));
+
+  await Promise.all(
+    rosterDocs.map(async (studentDoc) => {
+      const nextStudentRef = studentDoc.ref.parent.doc(encodeURIComponent(email));
+      const studentData = studentDoc.data();
+      const nextStudentData = {
+        ...studentData,
+        displayName,
+        email,
+        uid
+      };
+
+      if (nextStudentRef.path === studentDoc.ref.path) {
+        await studentDoc.ref.set(nextStudentData, { merge: true });
+        return;
+      }
+
+      await nextStudentRef.set(nextStudentData, { merge: true });
+      await studentDoc.ref.delete();
+    })
+  );
+
+  await updateStudentCollectionGroupEmail("conversations", currentEmail, email, uid, { studentName: displayName });
+  await updateStudentCollectionGroupEmail("studentFeedback", currentEmail, email, uid);
+  await syncStudentKeyedCollectionEmail("studentLearningProfiles", { currentEmail, displayName, email, uid });
+  await syncStudentKeyedCollectionEmail("studentSupport", { currentEmail, displayName, email, uid });
+  await adminDb!.collection("userPresence").doc(uid).set({ email }, { merge: true });
+}
+
 async function syncDisplayNameReferences({
   displayName,
   email,
@@ -179,6 +293,23 @@ async function syncDisplayNameReferences({
   uid: string;
 }) {
   if (role === "teacher") {
+    await tryPostgresData("account.display_name.co_teachers.sync", () =>
+      updateCoTeacherProfile({ displayName, email, teacherId: uid })
+    );
+
+    await tryPostgresData("account.display_name.classes.sync", async () => {
+      const classesSnapshot = await adminDb!
+        .collection("classes")
+        .where("teacherId", "==", uid)
+        .get();
+
+      await Promise.all(
+        classesSnapshot.docs.map((classDoc) =>
+          updateClassSettings({ classId: classDoc.id, teacherName: displayName })
+        )
+      );
+    });
+
     const classesSnapshot = await adminDb!
       .collection("classes")
       .where("teacherId", "==", uid)
@@ -206,6 +337,95 @@ async function syncDisplayNameReferences({
       studentDoc.ref.set({ displayName }, { merge: true })
     )
   );
+}
+
+async function updateStudentCollectionGroupEmail(
+  collectionId: string,
+  currentEmail: string,
+  email: string,
+  uid: string,
+  extraUpdates: Record<string, unknown> = {}
+) {
+  const snapshots = await Promise.all([
+    adminDb!.collectionGroup(collectionId).where("studentId", "==", uid).get(),
+    currentEmail
+      ? adminDb!.collectionGroup(collectionId).where("studentEmail", "==", currentEmail).get()
+      : Promise.resolve(null)
+  ]);
+  const docs = uniqueSnapshotDocs(snapshots.filter(Boolean));
+
+  await Promise.all(
+    docs.map((docSnapshot) =>
+      docSnapshot.ref.set(
+        {
+          ...extraUpdates,
+          studentEmail: email,
+          studentId: uid
+        },
+        { merge: true }
+      )
+    )
+  );
+}
+
+async function syncStudentKeyedCollectionEmail(
+  collectionId: string,
+  {
+    currentEmail,
+    displayName,
+    email,
+    uid
+  }: {
+    currentEmail: string;
+    displayName: string;
+    email: string;
+    uid: string;
+  }
+) {
+  const snapshots = await Promise.all([
+    adminDb!.collectionGroup(collectionId).where("studentId", "==", uid).get(),
+    currentEmail
+      ? adminDb!.collectionGroup(collectionId).where("studentEmail", "==", currentEmail).get()
+      : Promise.resolve(null)
+  ]);
+  const docs = uniqueSnapshotDocs(snapshots.filter(Boolean));
+
+  await Promise.all(
+    docs.map(async (docSnapshot) => {
+      const nextDocRef = docSnapshot.ref.parent.doc(encodeURIComponent(email));
+      const docData = docSnapshot.data();
+      const nextDocData = {
+        ...docData,
+        displayName,
+        studentEmail: email,
+        studentId: uid
+      };
+
+      if (nextDocRef.path === docSnapshot.ref.path) {
+        await docSnapshot.ref.set(nextDocData, { merge: true });
+        return;
+      }
+
+      await nextDocRef.set(nextDocData, { merge: true });
+      await docSnapshot.ref.delete();
+    })
+  );
+}
+
+function uniqueSnapshotDocs(snapshots: Array<FirebaseFirestore.QuerySnapshot | null>) {
+  const docsByPath = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
+
+  for (const snapshot of snapshots) {
+    if (!snapshot) {
+      continue;
+    }
+
+    for (const docSnapshot of snapshot.docs) {
+      docsByPath.set(docSnapshot.ref.path, docSnapshot);
+    }
+  }
+
+  return Array.from(docsByPath.values());
 }
 
 function getBearerToken(request: Request) {
@@ -278,18 +498,9 @@ function normalizeUsername(value: unknown, accountEmail: string) {
 }
 
 async function assertUsernameIsAvailable(username: string, uid: string) {
-  if (username.includes("@")) {
-    return;
-  }
+  const available = await assertAccountUsernameAvailable(username, uid);
 
-  const usernameSnapshot = await adminDb!
-    .collection("users")
-    .where("username", "==", username)
-    .limit(1)
-    .get();
-  const usernameOwner = usernameSnapshot.docs[0];
-
-  if (usernameOwner && usernameOwner.id !== uid) {
+  if (!available) {
     throw new AccountSettingsError("That username is already in use.", 409);
   }
 }
@@ -316,4 +527,8 @@ function hasRecentAuthentication(authTime: unknown) {
   const authTimeSeconds = Number(authTime ?? 0);
 
   return authTimeSeconds > 0 && Date.now() / 1000 - authTimeSeconds <= recentAuthMaxAgeSeconds;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

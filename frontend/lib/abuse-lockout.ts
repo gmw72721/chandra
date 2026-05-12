@@ -2,6 +2,12 @@ import { createHash } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
 import { writeSecurityLog } from "./audit-log";
 import { adminDb } from "./firebase-admin";
+import {
+  getAbuseLockoutPostgres,
+  recordAbuseFailurePostgres,
+  resetAbuseLockoutPostgres
+} from "./data/operational";
+import { isPostgresConfigured, shouldFallbackToFirestoreWhenPostgresFails, withPostgresTransaction } from "./data/postgres";
 
 export type AbuseLockoutPolicy = {
   lockoutSteps?: { failures: number; cooldownMs: number }[];
@@ -35,6 +41,48 @@ export async function checkAbuseLockout(
   policy: AbuseLockoutPolicy = {}
 ): Promise<AbuseLockoutState> {
   const keyHash = abuseKeyHash(scope);
+
+  if (!adminDb && !isPostgresConfigured()) {
+    return { failureCount: 0, keyHash, locked: false, retryAfterMs: 0 };
+  }
+
+  if (isPostgresConfigured()) {
+    try {
+      const row = await getAbuseLockoutPostgres(keyHash);
+      const now = Date.now();
+      const lockedUntilMillis = row?.locked_until?.getTime() ?? 0;
+      const resetAtMillis = Number(row?.metadata.resetAtMillis ?? 0);
+      const locked = lockedUntilMillis > now;
+      const failureCount = resetAtMillis > now ? Number(row?.attempt_count ?? 0) : 0;
+
+      if (locked) {
+        await writeSecurityLog({
+          eventType: `${scope.namespace}.lockout_denied`,
+          metadata: {
+            actorUid: scope.actorUid ?? "",
+            failureCount,
+            identifierHash: hashForLog(scope.identifier),
+            keyHash,
+            retryAfterMs: lockedUntilMillis - now
+          },
+          route: scope.route
+        });
+      }
+
+      return {
+        failureCount,
+        keyHash,
+        locked,
+        retryAfterMs: locked ? lockedUntilMillis - now : 0
+      };
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("Abuse lockout Postgres read failed; using Firestore fallback.", caughtError);
+    }
+  }
 
   if (!adminDb) {
     return { failureCount: 0, keyHash, locked: false, retryAfterMs: 0 };
@@ -76,13 +124,71 @@ export async function recordAbuseFailure(
 ): Promise<AbuseLockoutState> {
   const keyHash = abuseKeyHash(scope);
 
-  if (!adminDb) {
+  if (!adminDb && !isPostgresConfigured()) {
     return { failureCount: 0, keyHash, locked: false, retryAfterMs: 0 };
   }
 
   const resetWindowMs = policy.resetWindowMs ?? defaultResetWindowMs;
   const lockoutSteps = policy.lockoutSteps ?? defaultLockoutSteps;
   const now = Date.now();
+
+  if (isPostgresConfigured()) {
+    try {
+      const state = await withPostgresTransaction(async (client) => {
+        const existing = await getAbuseLockoutPostgres(keyHash, client);
+        const previousResetAtMillis = Number(existing?.metadata.resetAtMillis ?? 0);
+        const currentFailureCount = previousResetAtMillis > now ? Number(existing?.attempt_count ?? 0) : 0;
+        const failureCount = currentFailureCount + 1;
+        const resetAtMillis = previousResetAtMillis > now ? previousResetAtMillis : now + resetWindowMs;
+        const cooldownMs = lockoutCooldownMs(failureCount, lockoutSteps);
+        const lockedUntilMillis = cooldownMs ? now + cooldownMs : existing?.locked_until?.getTime() ?? 0;
+
+        await recordAbuseFailurePostgres({
+          actorUid: scope.actorUid,
+          identifierHash: hashForLog(scope.identifier),
+          keyHash,
+          lockedUntil: new Date(lockedUntilMillis),
+          namespace: scope.namespace,
+          now: new Date(now),
+          resetAt: new Date(resetAtMillis)
+        }, client);
+
+        return {
+          failureCount,
+          keyHash,
+          locked: Boolean(cooldownMs),
+          retryAfterMs: cooldownMs
+        };
+      });
+
+      if (state.locked) {
+        await writeSecurityLog({
+          eventType: `${scope.namespace}.lockout`,
+          metadata: {
+            actorUid: scope.actorUid ?? "",
+            failureCount: state.failureCount,
+            identifierHash: hashForLog(scope.identifier),
+            keyHash,
+            retryAfterMs: state.retryAfterMs
+          },
+          route: scope.route
+        });
+      }
+
+      return state;
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("Abuse lockout Postgres write failed; using Firestore fallback.", caughtError);
+    }
+  }
+
+  if (!adminDb) {
+    return { failureCount: 0, keyHash, locked: false, retryAfterMs: 0 };
+  }
+
   const reference = adminDb.collection("abuseLockouts").doc(keyHash);
 
   const state = await adminDb.runTransaction(async (transaction) => {
@@ -138,6 +244,19 @@ export async function recordAbuseFailure(
 
 export async function resetAbuseFailures(scope: AbuseLockoutScope) {
   const keyHash = abuseKeyHash(scope);
+
+  if (isPostgresConfigured()) {
+    try {
+      await resetAbuseLockoutPostgres(keyHash);
+      return;
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("Abuse lockout Postgres reset failed; using Firestore fallback.", caughtError);
+    }
+  }
 
   if (!adminDb) {
     return;

@@ -3,6 +3,18 @@ import { adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
 import type { LearningStrategyProfileContext } from "./learning-strategy-telemetry";
 import { defaultOpenRouterModelId } from "./model-options";
 import { ConversationPersistenceError, listTeacherConversationMessages } from "./student-conversations-server";
+import { tryPostgresData } from "./data/server";
+import {
+  listStudentConversations as listPostgresStudentConversations,
+  listTeacherStudentConversations as listPostgresTeacherStudentConversations,
+  type ConversationRecord
+} from "./data/conversations";
+import {
+  addLearningProfileRevision,
+  getStudentLearningProfileById,
+  upsertStudentLearningProfile,
+  type StudentLearningProfileRecord
+} from "./data/student-records";
 import type {
   ChatMessage,
   LearningStrategyTelemetry,
@@ -80,6 +92,11 @@ type StudentLearningConversationForModel = {
   }>;
 };
 
+type StudentConversationDocForProfile = {
+  id: string;
+  data: () => Record<string, unknown>;
+};
+
 export function encodedStudentLearningProfileId({ studentEmail, studentId }: { studentEmail?: string; studentId?: string }) {
   const normalizedEmail = String(studentEmail ?? "").trim().toLowerCase();
   const fallbackId = String(studentId ?? "").trim();
@@ -116,6 +133,12 @@ export async function getStudentLearningProfile(input: StudentProfileIdentity): 
 
   if (!profileId) {
     return null;
+  }
+
+  const postgresProfile = await tryPostgresData("learning_profile.read", () => getStudentLearningProfileById(`${identity.classId}:${profileId}`));
+
+  if (postgresProfile) {
+    return profileRecordToApi(profileId, postgresProfile);
   }
 
   const snapshot = await adminDb!
@@ -192,6 +215,20 @@ export async function updateOneStudentLearningProfile({
     counts.pendingStudentMessageCount >= minimumStudentMessagesForUpdate;
 
   await profileReference.set(baseMetadata, { merge: true });
+  await tryPostgresData("learning_profile.metadata.write", () =>
+    upsertStudentLearningProfile({
+      classId,
+      id: `${classId}:${profileId}`,
+      confidence: existingProfile?.confidence ?? "low",
+      metadata: {
+        ...baseMetadata,
+        lastUpdateAttemptAt: new Date().toISOString()
+      },
+      studentEmail: identity.studentEmail ?? existingProfile?.studentEmail ?? "",
+      studentId: identity.studentId ?? existingProfile?.studentId ?? "",
+      studentName: identity.studentName ?? existingProfile?.studentName ?? "Student"
+    })
+  );
 
   if (force && counts.pendingConversationCount === 0 && counts.pendingStudentMessageCount === 0) {
     return {
@@ -250,6 +287,24 @@ export async function updateOneStudentLearningProfile({
     },
     { merge: true }
   );
+  await tryPostgresData("learning_profile.draft.write", () =>
+    upsertStudentLearningProfile({
+      activeProfile: existingProfile?.activeProfile ?? null,
+      classId,
+      confidence,
+      draftProfile,
+      id: `${classId}:${profileId}`,
+      metadata: {
+        ...baseMetadata,
+        active: existingProfile?.active ?? false,
+        lastSuccessfulUpdateAt: new Date().toISOString(),
+        teacherReviewed: false
+      },
+      studentEmail: identity.studentEmail ?? existingProfile?.studentEmail ?? "",
+      studentId: identity.studentId ?? existingProfile?.studentId ?? "",
+      studentName: identity.studentName ?? existingProfile?.studentName ?? "Student"
+    })
+  );
   await profileReference.collection("revisions").add({
     confidence,
     createdAt: FieldValue.serverTimestamp(),
@@ -258,6 +313,17 @@ export async function updateOneStudentLearningProfile({
     status: "draft",
     triggerCounts: counts
   });
+  await tryPostgresData("learning_profile.revision.write", () =>
+    addLearningProfileRevision({
+      classId,
+      confidence,
+      nextProfile: draftProfile,
+      previousProfile,
+      profileId: `${classId}:${profileId}`,
+      revisionType: "draft_generated",
+      studentId: identity.studentId ?? null
+    })
+  );
 
   return {
     attempted: true,
@@ -357,6 +423,31 @@ export async function approveStudentLearningProfile({
       },
       { merge: true }
     );
+  await tryPostgresData("learning_profile.approve.write", () =>
+    upsertStudentLearningProfile({
+      activeProfile,
+      approvedAt: new Date(),
+      classId,
+      confidence: profileDocument.confidence,
+      draftProfile: null,
+      id: `${classId}:${profileId}`,
+      metadata: { active: true, teacherReviewed: true },
+      studentEmail: identity.studentEmail ?? profileDocument.studentEmail,
+      studentId: identity.studentId ?? profileDocument.studentId,
+      studentName: identity.studentName ?? profileDocument.studentName
+    })
+  );
+  await tryPostgresData("learning_profile.approve_revision.write", () =>
+    addLearningProfileRevision({
+      classId,
+      confidence: profileDocument.confidence,
+      nextProfile: activeProfile,
+      previousProfile: profileDocument.activeProfile,
+      profileId: `${classId}:${profileId}`,
+      revisionType: "approved",
+      studentId: identity.studentId ?? null
+    })
+  );
 }
 
 export async function saveDraftStudentLearningProfile({
@@ -388,6 +479,17 @@ export async function saveDraftStudentLearningProfile({
       },
       { merge: true }
     );
+  await tryPostgresData("learning_profile.draft_save.write", () =>
+    upsertStudentLearningProfile({
+      classId,
+      draftProfile,
+      id: `${classId}:${profileId}`,
+      metadata: { teacherReviewed: false },
+      studentEmail: identity.studentEmail ?? "",
+      studentId: identity.studentId ?? "",
+      studentName: identity.studentName ?? "Student"
+    })
+  );
 }
 
 export async function disableStudentLearningProfile(input: StudentProfileIdentity) {
@@ -503,6 +605,56 @@ async function setProfileState(input: StudentProfileIdentity, data: Record<strin
     .collection("studentLearningProfiles")
     .doc(profileId)
     .set(data, { merge: true });
+  await tryPostgresData("learning_profile.state.write", () =>
+    upsertStudentLearningProfile({
+      activeProfile: Object.prototype.hasOwnProperty.call(data, "activeProfile")
+        ? data.activeProfile
+          ? normalizeStudentLearningProfileContent(data.activeProfile) as unknown as Record<string, unknown>
+          : null
+        : undefined,
+      classId: identity.classId,
+      disabled: data.active === false && !Object.prototype.hasOwnProperty.call(data, "activeProfile"),
+      draftProfile: Object.prototype.hasOwnProperty.call(data, "draftProfile")
+        ? data.draftProfile
+          ? normalizeStudentLearningProfileContent(data.draftProfile) as unknown as Record<string, unknown>
+          : null
+        : undefined,
+      id: `${identity.classId}:${profileId}`,
+      metadata: profileStateMetadata(data),
+      studentEmail: identity.studentEmail ?? "",
+      studentId: identity.studentId ?? "",
+      studentName: identity.studentName ?? "Student"
+    })
+  );
+}
+
+function profileStateMetadata(data: Record<string, unknown>) {
+  const metadata: Record<string, unknown> = {};
+
+  for (const key of [
+    "active",
+    "teacherReviewed",
+    "lastReviewedAt",
+    "lastSuccessfulUpdateAt",
+    "lastUpdateAttemptAt",
+    "minimumConversationsForUpdate",
+    "minimumStudentMessagesForUpdate",
+    "pendingConversationCount",
+    "pendingStudentMessageCount"
+  ]) {
+    const value = data[key];
+
+    if (
+      value === null ||
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      metadata[key] = value;
+    }
+  }
+
+  return metadata;
 }
 
 async function resolveStudentProfileIdentity(input: StudentProfileIdentity) {
@@ -562,11 +714,9 @@ async function countPendingConversationData({
       pendingConversationCount += 1;
     }
 
-    const messagesSnapshot = await conversationDoc.ref.collection("messages").orderBy("createdAt", "asc").get();
+    const messages = await listTeacherConversationMessages({ classId, conversationId: conversationDoc.id });
 
-    messagesSnapshot.docs.forEach((messageDoc) => {
-      const message = messageDoc.data() ?? {};
-
+    messages.forEach((message) => {
       if (message.role === "student" && (!sinceMillis || timestampMillis(message.createdAt) > sinceMillis)) {
         pendingStudentMessageCount += 1;
       }
@@ -645,19 +795,36 @@ async function getStudentConversationDocs({
   classId,
   studentEmail,
   studentId
-}: StudentProfileIdentity) {
-  const conversationsReference = adminDb!.collection("classes").doc(classId).collection("conversations");
+}: StudentProfileIdentity): Promise<StudentConversationDocForProfile[]> {
   const normalizedEmail = String(studentEmail ?? "").trim().toLowerCase();
+  const postgresConversations = normalizedEmail
+    ? await listPostgresTeacherStudentConversations({ classId, studentEmail: normalizedEmail })
+    : studentId
+      ? await listPostgresStudentConversations({ classId, studentId })
+      : [];
 
-  if (normalizedEmail) {
-    return (await conversationsReference.where("studentEmail", "==", normalizedEmail).get()).docs;
-  }
+  return postgresConversations.map((conversation) => ({
+    id: conversation.id,
+    data: () => conversationRecordToProfileData(conversation)
+  }));
+}
 
-  if (studentId) {
-    return (await conversationsReference.where("studentId", "==", studentId).get()).docs;
-  }
-
-  return [];
+function conversationRecordToProfileData(conversation: ConversationRecord): Record<string, unknown> {
+  return {
+    assignment: conversation.assignment,
+    classId: conversation.classId,
+    createdAt: conversation.createdAt.toISOString(),
+    lastMessageAt: conversation.lastMessageAt?.toISOString() ?? conversation.updatedAt.toISOString(),
+    modelId: conversation.modelId,
+    studentEmail: conversation.studentEmail,
+    studentId: conversation.studentId ?? "",
+    studentName: conversation.studentName,
+    tags: conversation.tags,
+    teacherId: conversation.teacherId ?? "",
+    teacherName: conversation.teacherName,
+    title: conversation.title,
+    updatedAt: conversation.updatedAt.toISOString()
+  };
 }
 
 async function generateProfileUpdateWithOpenRouter(input: {
@@ -857,6 +1024,35 @@ function profileDocToApi(id: string, data: Record<string, unknown>): StudentLear
   };
 }
 
+function profileRecordToApi(id: string, record: StudentLearningProfileRecord): StudentLearningProfileDocument {
+  const metadata = record.metadata ?? {};
+  const activeProfile = record.activeProfile ? normalizeStudentLearningProfileContent(record.activeProfile) : null;
+  const draftProfile = record.draftProfile ? normalizeStudentLearningProfileContent(record.draftProfile) : null;
+
+  return {
+    id,
+    active: !record.disabled && Boolean(metadata.active),
+    activeProfile,
+    classId: record.classId,
+    confidence: confidenceValues.has(record.confidence) ? record.confidence : "low",
+    draftProfile,
+    lastReviewedAt: serializePostgresValue(metadata.lastReviewedAt ?? record.approvedAt),
+    lastSuccessfulUpdateAt: serializePostgresValue(metadata.lastSuccessfulUpdateAt),
+    lastUpdateAttemptAt: serializePostgresValue(metadata.lastUpdateAttemptAt),
+    minimumConversationsForUpdate: Number(metadata.minimumConversationsForUpdate ?? defaultMinimumConversationsForUpdate),
+    minimumStudentMessagesForUpdate: Number(
+      metadata.minimumStudentMessagesForUpdate ?? defaultMinimumStudentMessagesForUpdate
+    ),
+    pendingConversationCount: Number(metadata.pendingConversationCount ?? 0),
+    pendingStudentMessageCount: Number(metadata.pendingStudentMessageCount ?? 0),
+    studentEmail: record.studentEmail,
+    studentId: record.studentId ?? "",
+    studentName: record.studentName || "Student",
+    teacherReviewed: Boolean(metadata.teacherReviewed),
+    updatedAt: record.updatedAt.toISOString()
+  };
+}
+
 function serializeFirestoreValue(value: unknown) {
   if (typeof value === "string") {
     return value;
@@ -867,6 +1063,14 @@ function serializeFirestoreValue(value: unknown) {
   }
 
   return value ?? "";
+}
+
+function serializePostgresValue(value: unknown) {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return serializeFirestoreValue(value);
 }
 
 function timestampMillis(value: unknown) {

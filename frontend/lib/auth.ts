@@ -66,11 +66,26 @@ export function subscribeToUserProfile(
     return () => {};
   }
 
+  let hasServerProfile = false;
+
+  void loadAccountProfileFromApi(uid)
+    .then((profile) => {
+      if (profile) {
+        hasServerProfile = true;
+        callback(profile);
+      }
+    })
+    .catch((error) => {
+      onError?.(error instanceof Error ? error : new Error("Profile load failed."));
+    });
+
   return onSnapshot(
     doc(db, "users", uid),
     (snapshot) => {
       if (!snapshot.exists()) {
-        callback(null);
+        if (!hasServerProfile) {
+          callback(null);
+        }
         return;
       }
 
@@ -130,7 +145,7 @@ export async function signUpWithRole({
     createdAt: serverTimestamp()
   };
 
-  await setDoc(doc(db!, "users", credential.user.uid), profile);
+  await createAccountProfile(profile, credential.user);
 
   if (role === "student" && classId?.trim()) {
     const cleanClassId = await joinStudentClass({
@@ -194,7 +209,7 @@ export async function createRoleProfile({
     createdAt: serverTimestamp()
   };
 
-  await setDoc(doc(db!, "users", user.uid), profile);
+  await createAccountProfile(profile, user);
 
   if (role === "student" && classId?.trim()) {
     const cleanClassId = await joinStudentClass({
@@ -347,6 +362,12 @@ export function startUserPresenceHeartbeat(user: User, profile: UserProfile) {
 }
 
 export async function getUserProfile(uid: string) {
+  const apiProfile = await loadAccountProfileFromApi(uid).catch(() => null);
+
+  if (apiProfile) {
+    return apiProfile;
+  }
+
   if (!db) {
     return null;
   }
@@ -690,4 +711,45 @@ async function createTeacherProfile({
   }
 
   return data.profile;
+}
+
+async function createAccountProfile(profile: UserProfile, user: User) {
+  const token = await user.getIdToken();
+  const response = await fetch("/api/account/profile", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(profile)
+  });
+  const data = (await response.json().catch(() => ({}))) as { profile?: UserProfile; error?: string };
+
+  if (!response.ok || !data.profile) {
+    throw new Error(data.error ?? "Profile creation failed.");
+  }
+
+  return data.profile;
+}
+
+async function loadAccountProfileFromApi(uid: string) {
+  const currentUser = auth?.currentUser;
+
+  if (!currentUser || currentUser.uid !== uid) {
+    return null;
+  }
+
+  const token = await currentUser.getIdToken();
+  const response = await fetch("/api/account/profile", {
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+  const data = (await response.json().catch(() => ({}))) as { profile?: UserProfile | null };
+
+  if (!response.ok) {
+    return null;
+  }
+
+  return data.profile ?? null;
 }

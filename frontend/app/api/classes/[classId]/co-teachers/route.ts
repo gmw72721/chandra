@@ -2,6 +2,9 @@ import { FieldValue } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
 import { classAccessRoleOptions, normalizeClassAccessRole } from "@/lib/class-settings";
+import { getAccountByEmail, getAccountById } from "@/lib/data/accounts";
+import { removeCoTeacher, updateCoTeacherRole, upsertCoTeacher } from "@/lib/data/classes";
+import { tryPostgresData } from "@/lib/data/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
@@ -34,6 +37,16 @@ export async function POST(
       return NextResponse.json({ error: "You cannot change your own class access here." }, { status: 400 });
     }
 
+    await tryPostgresData("class.co_teacher.write", () =>
+      upsertCoTeacher({
+        classId,
+        displayName: targetTeacher.displayName,
+        email: targetTeacher.email,
+        invitedBy: uid,
+        role,
+        teacherId: targetTeacher.uid
+      })
+    );
     await adminDb!.collection("classes").doc(classId).set(
       {
         coTeacherIds: FieldValue.arrayUnion(targetTeacher.uid),
@@ -95,6 +108,9 @@ export async function PATCH(
       return NextResponse.json({ error: "You cannot demote yourself." }, { status: 400 });
     }
 
+    await tryPostgresData("class.co_teacher.role.write", () =>
+      updateCoTeacherRole({ classId, role, teacherId: targetUid })
+    );
     await adminDb!.collection("classes").doc(classId).update({
       [`coTeachers.${targetUid}.role`]: role
     });
@@ -136,6 +152,7 @@ export async function DELETE(
       return NextResponse.json({ error: "You cannot remove yourself from this class." }, { status: 400 });
     }
 
+    await tryPostgresData("class.co_teacher.remove.write", () => removeCoTeacher({ classId, teacherId: targetUid }));
     await adminDb!.collection("classes").doc(classId).update({
       coTeacherIds: FieldValue.arrayRemove(targetUid),
       [`coTeachers.${targetUid}`]: FieldValue.delete()
@@ -170,6 +187,24 @@ function normalizeAssignableRole(value: unknown) {
 async function resolveTeacher(uidValue: unknown, emailValue: unknown) {
   const uid = String(uidValue ?? "").trim();
   const email = String(emailValue ?? "").trim().toLowerCase();
+  const postgresTeacher = await tryPostgresData("class.co_teacher.resolve", async () => {
+    const account = uid ? await getAccountById(uid) : email ? await getAccountByEmail(email) : null;
+
+    if (!account || account.role !== "teacher") {
+      return null;
+    }
+
+    return {
+      displayName: account.displayName || account.email || "Teacher",
+      email: account.email.trim().toLowerCase(),
+      uid: account.id
+    };
+  });
+
+  if (postgresTeacher) {
+    return postgresTeacher;
+  }
+
   const snapshot = uid
     ? await adminDb!.collection("users").doc(uid).get()
     : email

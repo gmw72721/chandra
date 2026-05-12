@@ -53,7 +53,7 @@ export async function retrieveCourseContext(
   const queryEmbedding = await createQueryEmbedding(query);
   const shouldIncludeKeywordCandidates = hasExactLookupSignal(query) || Boolean(options.materialId);
   const vectorCandidates = queryEmbedding?.values.length
-    ? await getVectorMaterialCandidates({
+    ? await getLegacyNonPdfVectorMaterialCandidates({
         classId,
         limit: Math.max(limit * 10, 50),
         materialId: options.materialId,
@@ -163,7 +163,7 @@ function trimQueryEmbeddingCache() {
   }
 }
 
-async function getVectorMaterialCandidates({
+async function getLegacyNonPdfVectorMaterialCandidates({
   classId,
   limit,
   materialId,
@@ -197,6 +197,10 @@ async function getVectorMaterialCandidates({
         const material = materialDoc.data() ?? {};
 
         if (!isStudentVisibleReadyMaterial(material)) {
+          return null;
+        }
+
+        if (isPdfMaterialRecord(material)) {
           return null;
         }
 
@@ -282,7 +286,7 @@ async function getVectorMaterialCandidates({
   } catch (caughtError) {
     console.warn(
       [
-        "Firestore Vector Search failed. Falling back to keyword tutor knowledge retrieval.",
+        "Legacy non-PDF Firestore Vector Search failed. Falling back to keyword tutor knowledge retrieval.",
         isLikelyMissingVectorIndex(caughtError)
           ? "The chunks collection group likely needs a vector index on professorId + classId + embedding."
           : ""
@@ -372,6 +376,10 @@ async function getClassMaterialDocuments({
       const teacherId = readProfessorId(material);
 
       if (!isStudentVisibleReadyMaterial(material) || teacherId !== professorId) {
+        return null;
+      }
+
+      if (isPdfMaterialRecord(material)) {
         return null;
       }
 
@@ -584,6 +592,20 @@ function isStudentVisibleReadyMaterial(material: Record<string, unknown>) {
     material.visibility !== "teacher-only" &&
     material.visibility !== "hidden" &&
     material.private !== true
+  );
+}
+
+function isPdfMaterialRecord(material: Record<string, unknown>) {
+  const contentType = String(material.contentType ?? material.content_type ?? "").split(";")[0]?.trim().toLowerCase();
+  const fileName = String(material.fileName ?? material.file_name ?? material.title ?? "").trim().toLowerCase();
+  const filePath = String(material.filePath ?? material.file_path ?? "").trim().toLowerCase();
+  const metadataSource = String(material.searchMetadataSource ?? material.search_metadata_source ?? "").trim().toLowerCase();
+
+  return (
+    contentType === "application/pdf" ||
+    fileName.endsWith(".pdf") ||
+    filePath.endsWith(".pdf") ||
+    metadataSource === "postgres"
   );
 }
 

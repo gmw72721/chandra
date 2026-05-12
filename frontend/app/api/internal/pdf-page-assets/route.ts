@@ -1,39 +1,29 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
-import { PDFDocument } from "pdf-lib";
 import { z } from "zod";
-import { adminStorage } from "@/lib/firebase-admin";
+import { downloadGcsPdfAssetBuffer } from "@/lib/gcs-pdf-page-assets";
+import { getPdfPageAssetRecords } from "@/lib/pdf-ocr-postgres";
 
 export const runtime = "nodejs";
 
-const pageSchema = z.object({
-  doc_id: z.string().max(500).optional(),
-  docId: z.string().max(500).optional(),
-  material_type: z.string().max(100).optional(),
-  materialType: z.string().max(100).optional(),
-  page_end: z.number().int().min(1).max(10000).optional(),
-  page_start: z.number().int().min(1).max(10000).optional(),
-  pageEnd: z.number().int().min(1).max(10000).optional(),
-  pageStart: z.number().int().min(1).max(10000).optional(),
-  score: z.number().optional(),
-  source_pdf_path: z.string().min(1).max(5000),
-  sourcePdfPath: z.string().min(1).max(5000).optional(),
-  title: z.string().min(1).max(500).optional()
+const maxRequestedPages = 12;
+const defaultMaxTotalBytes = 20 * 1024 * 1024;
+const defaultMaxFullPdfTotalBytes = 50 * 1024 * 1024;
+
+const pageRequestSchema = z.object({
+  materialId: z.string().min(1).max(200).optional(),
+  docId: z.string().min(1).max(200).optional(),
+  pageStart: z.number().int().min(1).max(100000).optional(),
+  pageEnd: z.number().int().min(1).max(100000).optional(),
+  page_start: z.number().int().min(1).max(100000).optional(),
+  page_end: z.number().int().min(1).max(100000).optional()
 });
 
 const requestSchema = z.object({
-  maxTotalPages: z.number().int().min(1).max(20).optional(),
-  pages: z.array(pageSchema).min(1).max(20)
+  classId: z.string().min(1).max(200),
+  professorId: z.string().min(1).max(200),
+  pages: z.array(pageRequestSchema).min(1).max(maxRequestedPages)
 });
-
-type RequestedPage = z.infer<typeof pageSchema>;
-const cacheRoot = path.join(process.cwd(), ".chandra-dev", "pdf-assets");
-const sourceCacheDirectory = path.join(cacheRoot, "sources");
-const pageCacheDirectory = path.join(cacheRoot, "pages");
-const sourcePdfCache = new Map<string, Promise<Buffer>>();
-const miniPdfCache = new Map<string, Promise<Buffer | null>>();
 
 export async function POST(request: Request) {
   const authError = authorizeInternalRequest(request);
@@ -45,255 +35,152 @@ export async function POST(request: Request) {
   const parsed = requestSchema.safeParse(await request.json().catch(() => null));
 
   if (!parsed.success) {
-    return NextResponse.json({ error: "Invalid internal PDF asset request." }, { status: 400 });
+    return NextResponse.json({ error: "Invalid internal PDF page asset request." }, { status: 400 });
   }
 
-  const assets = await buildAssets(parsed.data.pages, parsed.data.maxTotalPages ?? 12);
+  const requestedPages = expandRequestedPages(parsed.data.pages);
+
+  if (requestedPages.length > maxRequestedPages) {
+    return NextResponse.json({ error: "Too many PDF page assets requested." }, { status: 413 });
+  }
+
+  const records = await getPdfPageAssetRecords({
+    classId: parsed.data.classId,
+    professorId: parsed.data.professorId,
+    pages: requestedPages
+  });
+  const maxTotalBytes = readPositiveInteger(process.env.INTERNAL_PDF_PAGE_ASSET_MAX_TOTAL_BYTES) ?? defaultMaxTotalBytes;
+  const maxFullPdfTotalBytes =
+    readPositiveInteger(process.env.INTERNAL_FULL_PDF_ASSET_MAX_TOTAL_BYTES) ?? defaultMaxFullPdfTotalBytes;
+  let totalBytes = 0;
+  let fullPdfTotalBytes = 0;
+  const attachedFullPdfMaterials = new Set<string>();
+  const skippedFullPdfMaterials = new Set<string>();
+  const assets: Array<Record<string, unknown>> = [];
+
+  for (const record of records) {
+    const storageBucket = String(record.page_asset_bucket ?? record.page_asset_storage_bucket ?? "");
+    const storagePath = String(record.page_asset_path ?? record.page_asset_storage_path ?? "");
+    const mimeType = String(record.page_asset_mime_type ?? "application/pdf") || "application/pdf";
+    const declaredSize = Number(record.page_asset_size ?? record.page_asset_size_bytes ?? 0);
+    const fullPdfBucket = String(record.full_pdf_bucket ?? "");
+    const fullPdfPath = String(record.full_pdf_path ?? "");
+    const fullPdfMimeType = String(record.full_pdf_mime_type ?? "application/pdf") || "application/pdf";
+    const fullPdfDeclaredSize = Number(record.full_pdf_size ?? 0);
+    const materialId = String(record.material_id ?? "");
+
+    let pageAssetBuffer: Buffer | null = null;
+
+    if (storageBucket && storagePath) {
+      if (declaredSize > 0 && totalBytes + declaredSize > maxTotalBytes) {
+        return NextResponse.json({ error: "PDF page asset payload is too large." }, { status: 413 });
+      }
+
+      pageAssetBuffer = await downloadGcsPdfAssetBuffer({ bucketName: storageBucket, path: storagePath });
+      totalBytes += pageAssetBuffer.length;
+
+      if (totalBytes > maxTotalBytes) {
+        return NextResponse.json({ error: "PDF page asset payload is too large." }, { status: 413 });
+      }
+    }
+
+    let fullPdfBuffer: Buffer | null = null;
+    let fullPdfSkippedReason = "";
+
+    if (
+      materialId &&
+      fullPdfBucket &&
+      fullPdfPath &&
+      !attachedFullPdfMaterials.has(materialId) &&
+      !skippedFullPdfMaterials.has(materialId)
+    ) {
+      if (fullPdfDeclaredSize > 0 && fullPdfTotalBytes + fullPdfDeclaredSize > maxFullPdfTotalBytes) {
+        fullPdfSkippedReason = "full PDF payload would exceed configured byte limit";
+        skippedFullPdfMaterials.add(materialId);
+      } else {
+        fullPdfBuffer = await downloadGcsPdfAssetBuffer({ bucketName: fullPdfBucket, path: fullPdfPath });
+
+        if (fullPdfTotalBytes + fullPdfBuffer.length > maxFullPdfTotalBytes) {
+          fullPdfSkippedReason = "full PDF payload would exceed configured byte limit";
+          fullPdfBuffer = null;
+          skippedFullPdfMaterials.add(materialId);
+        } else {
+          fullPdfTotalBytes += fullPdfBuffer.length;
+          attachedFullPdfMaterials.add(materialId);
+        }
+      }
+    }
+
+    assets.push({
+      classId: record.class_id,
+      docId: materialId,
+      materialId,
+      materialType: record.material_type,
+      mimeType,
+      ocrConfidence: record.ocr_confidence,
+      ocrProvider: record.ocr_provider,
+      ocrSource: record.ocr_source,
+      ocrText: record.ocr_text,
+      fullPdfBucket,
+      fullPdfPath,
+      fullPdfUri: record.full_pdf_uri,
+      fullPdfMimeType,
+      fullPdfSize: fullPdfBuffer?.length ?? record.full_pdf_size,
+      fullPdfSizeBytes: fullPdfBuffer?.length ?? record.full_pdf_size,
+      fullPdfSha256: record.full_pdf_sha256,
+      ...(fullPdfBuffer
+        ? {
+            fullPdfDataUrl: `data:${fullPdfMimeType};base64,${fullPdfBuffer.toString("base64")}`,
+            fullPdfFileName: `${materialId || "source"}.pdf`
+          }
+        : fullPdfSkippedReason
+          ? { fullPdfSkippedReason }
+          : {}),
+      pageAssetBucket: storageBucket,
+      pageAssetPath: storagePath,
+      pageAssetUri: record.page_asset_uri,
+      pageAssetChecksumSha256: record.page_asset_sha256 ?? record.page_asset_checksum_sha256,
+      pageAssetMimeType: mimeType,
+      pageAssetSha256: record.page_asset_sha256 ?? record.page_asset_checksum_sha256,
+      pageAssetSize: pageAssetBuffer?.length ?? declaredSize,
+      pageAssetSizeBytes: pageAssetBuffer?.length ?? declaredSize,
+      pageAssetStorageBucket: storageBucket,
+      pageAssetStoragePath: storagePath,
+      pageEnd: record.page_end,
+      pageNumber: record.page_number,
+      pageStart: record.page_start,
+      title: record.title,
+      ...(pageAssetBuffer ? { dataUrl: `data:${mimeType};base64,${pageAssetBuffer.toString("base64")}` } : {})
+    });
+  }
 
   return NextResponse.json({ assets });
 }
 
-async function buildAssets(pages: RequestedPage[], maxTotalPages: number) {
-  const selectedPages = [];
-  let pagesUsed = 0;
+function expandRequestedPages(pages: z.infer<typeof pageRequestSchema>[]) {
+  const expanded: Array<{ materialId: string; pageNumber: number }> = [];
+  const seen = new Set<string>();
 
   for (const page of pages) {
-    if (pagesUsed >= maxTotalPages) {
-      break;
+    const materialId = String(page.materialId ?? page.docId ?? "").trim();
+    const pageStart = page.pageStart ?? page.page_start;
+    const pageEnd = page.pageEnd ?? page.page_end ?? pageStart;
+
+    if (!materialId || !pageStart || !pageEnd) {
+      continue;
     }
 
-    const pageStart = page.page_start ?? page.pageStart ?? 1;
-    const requestedPageEnd = page.page_end ?? page.pageEnd ?? pageStart;
-    const remainingPages = maxTotalPages - pagesUsed;
-    const pageEnd = Math.max(pageStart, Math.min(requestedPageEnd, pageStart + remainingPages - 1));
-    selectedPages.push({ page, pageEnd, pageStart });
-    pagesUsed += pageEnd - pageStart + 1;
-  }
+    for (let pageNumber = Math.min(pageStart, pageEnd); pageNumber <= Math.max(pageStart, pageEnd); pageNumber += 1) {
+      const key = `${materialId}:${pageNumber}`;
 
-  return Promise.all(
-    selectedPages.map(({ page, pageEnd, pageStart }) => buildAsset(page, pageStart, pageEnd))
-  );
-}
-
-async function buildAsset(page: RequestedPage, pageStart: number, pageEnd: number) {
-  const asset = metadataOnlyAsset(page, pageStart, pageEnd);
-  const sourcePdfPath = page.source_pdf_path ?? page.sourcePdfPath ?? "";
-
-  try {
-    const sourcePdf = await loadSourcePdf(sourcePdfPath);
-    const miniPdf = await extractCachedMiniPdf(sourcePdfPath, sourcePdf, pageStart, pageEnd);
-
-    if (miniPdf) {
-      asset.file_data_url = `data:application/pdf;base64,${miniPdf.toString("base64")}`;
-    }
-  } catch (error) {
-    console.error("Internal PDF asset build failed.", error);
-  }
-
-  return asset;
-}
-
-function metadataOnlyAsset(page: RequestedPage, pageStart: number, pageEnd: number) {
-  const title = page.title ?? "Untitled PDF";
-
-  return {
-    citation_label: citationLabel(title, pageStart, pageEnd),
-    doc_id: page.doc_id ?? page.docId ?? "",
-    images: [],
-    material_type: page.material_type ?? page.materialType ?? "",
-    page_end: pageEnd,
-    page_start: pageStart,
-    printed_page_end: null,
-    printed_page_start: null,
-    score: page.score ?? 0,
-    title
-  } as {
-    citation_label: string;
-    doc_id: string;
-    file_data_url?: string;
-    images: string[];
-    material_type: string;
-    page_end: number;
-    page_start: number;
-    printed_page_end: null;
-    printed_page_start: null;
-    score: number;
-    title: string;
-  };
-}
-
-async function loadSourcePdf(sourcePdfPath: string) {
-  const cacheKey = hashCacheKey(sourcePdfPath);
-  const cached = sourcePdfCache.get(cacheKey);
-
-  if (cached) {
-    return cached;
-  }
-
-  const pending = loadCachedSourcePdf(sourcePdfPath, cacheKey).catch((error) => {
-    sourcePdfCache.delete(cacheKey);
-    throw error;
-  });
-
-  sourcePdfCache.set(cacheKey, pending);
-  return pending;
-}
-
-async function loadCachedSourcePdf(sourcePdfPath: string, cacheKey: string) {
-  await mkdir(sourceCacheDirectory, { recursive: true });
-  const cachePath = path.join(sourceCacheDirectory, `${cacheKey}.pdf`);
-
-  try {
-    return await readFile(cachePath);
-  } catch {
-    const buffer = await downloadSourcePdf(sourcePdfPath);
-    await writeFile(cachePath, buffer);
-    return buffer;
-  }
-}
-
-async function downloadSourcePdf(sourcePdfPath: string) {
-  const storageReference = parseStorageReference(sourcePdfPath);
-
-  if (storageReference) {
-    if (!adminStorage) {
-      throw new Error("Firebase Admin Storage is not configured.");
-    }
-
-    const { bucketName, objectPath } = storageReference;
-    const bucket = bucketName ? adminStorage.bucket(bucketName) : adminStorage.bucket();
-    const [buffer] = await bucket.file(objectPath).download();
-    return buffer;
-  }
-
-  if (sourcePdfPath.startsWith("http://") || sourcePdfPath.startsWith("https://")) {
-    const response = await fetch(sourcePdfPath);
-
-    if (!response.ok) {
-      throw new Error(`PDF download failed with status ${response.status}.`);
-    }
-
-    return Buffer.from(await response.arrayBuffer());
-  }
-
-  if (!adminStorage) {
-    throw new Error("Firebase Admin Storage is not configured.");
-  }
-
-  const [buffer] = await adminStorage.bucket().file(sourcePdfPath).download();
-  return buffer;
-}
-
-async function extractCachedMiniPdf(sourcePdfPath: string, sourcePdf: Buffer, pageStart: number, pageEnd: number) {
-  const cacheKey = hashCacheKey(`${sourcePdfPath}:${pageStart}:${pageEnd}`);
-  const cached = miniPdfCache.get(cacheKey);
-
-  if (cached) {
-    return cached;
-  }
-
-  const pending = readOrCreateMiniPdf(cacheKey, sourcePdf, pageStart, pageEnd).catch((error) => {
-    miniPdfCache.delete(cacheKey);
-    throw error;
-  });
-
-  miniPdfCache.set(cacheKey, pending);
-  return pending;
-}
-
-async function readOrCreateMiniPdf(cacheKey: string, sourcePdf: Buffer, pageStart: number, pageEnd: number) {
-  await mkdir(pageCacheDirectory, { recursive: true });
-  const cachePath = path.join(pageCacheDirectory, `${cacheKey}.pdf`);
-
-  try {
-    return await readFile(cachePath);
-  } catch {
-    const miniPdf = await extractMiniPdf(sourcePdf, pageStart, pageEnd);
-
-    if (!miniPdf) {
-      return null;
-    }
-
-    const buffer = Buffer.from(miniPdf);
-    await writeFile(cachePath, buffer);
-    return buffer;
-  }
-}
-
-async function extractMiniPdf(sourcePdf: Buffer, pageStart: number, pageEnd: number) {
-  const source = await PDFDocument.load(sourcePdf, { ignoreEncryption: true });
-  const pageCount = source.getPageCount();
-  const indexes = [];
-
-  for (let pageNumber = pageStart; pageNumber <= Math.min(pageEnd, pageCount); pageNumber += 1) {
-    indexes.push(pageNumber - 1);
-  }
-
-  if (!indexes.length) {
-    return null;
-  }
-
-  const output = await PDFDocument.create();
-  const copiedPages = await output.copyPages(source, indexes);
-
-  for (const page of copiedPages) {
-    output.addPage(page);
-  }
-
-  return output.save();
-}
-
-function hashCacheKey(value: string) {
-  return createHash("sha256").update(value).digest("hex").slice(0, 32);
-}
-
-function parseStorageReference(sourcePdfPath: string) {
-  if (sourcePdfPath.startsWith("gs://")) {
-    const bucketAndPath = sourcePdfPath.slice("gs://".length);
-    const separatorIndex = bucketAndPath.indexOf("/");
-
-    if (separatorIndex > 0) {
-      return {
-        bucketName: bucketAndPath.slice(0, separatorIndex),
-        objectPath: bucketAndPath.slice(separatorIndex + 1)
-      };
-    }
-  }
-
-  try {
-    const parsed = new URL(sourcePdfPath);
-
-    if (parsed.hostname === "storage.googleapis.com") {
-      const [bucketName, ...pathParts] = parsed.pathname.split("/").filter(Boolean);
-
-      if (bucketName && pathParts.length) {
-        return {
-          bucketName,
-          objectPath: decodeURIComponent(pathParts.join("/"))
-        };
+      if (!seen.has(key)) {
+        seen.add(key);
+        expanded.push({ materialId, pageNumber });
       }
     }
-
-    if (parsed.hostname === "firebasestorage.googleapis.com") {
-      const match = parsed.pathname.match(/^\/v0\/b\/([^/]+)\/o\/(.+)$/);
-
-      if (match) {
-        return {
-          bucketName: decodeURIComponent(match[1]),
-          objectPath: decodeURIComponent(match[2])
-        };
-      }
-    }
-  } catch {
-    return null;
   }
 
-  return null;
-}
-
-function citationLabel(title: string, pageStart: number, pageEnd: number) {
-  const pages = pageStart === pageEnd ? `page ${pageStart}` : `pages ${pageStart}-${pageEnd}`;
-  return `${title}, ${pages}`;
+  return expanded;
 }
 
 function authorizeInternalRequest(request: Request) {
@@ -312,4 +199,9 @@ function authorizeInternalRequest(request: Request) {
   }
 
   return null;
+}
+
+function readPositiveInteger(value: string | undefined) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }

@@ -7,6 +7,7 @@ import {
   recordAbuseFailure,
   resetAbuseFailures
 } from "@/lib/abuse-lockout";
+import { resolveLoginEmailPostgresFirst } from "@/lib/data/server";
 import { adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 import { checkFirestoreRateLimit } from "@/lib/firestore-rate-limit";
 
@@ -70,6 +71,13 @@ export async function POST(request: Request) {
       });
 
       return genericResolveLoginResponse();
+    }
+
+    const postgresEmail = await resolveLoginEmailPostgresFirst(identifier);
+
+    if (postgresEmail) {
+      await resetAbuseFailures(abuseScope);
+      return NextResponse.json({ email: postgresEmail });
     }
 
     const usernameSnapshot = await adminDb!

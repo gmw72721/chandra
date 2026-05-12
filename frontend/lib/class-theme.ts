@@ -4,7 +4,7 @@ export const teacherClassAppearances = ["light", "dark"] as const;
 export type TeacherClassThemeColor = (typeof teacherClassThemeColors)[number];
 export type TeacherClassAppearance = (typeof teacherClassAppearances)[number];
 
-export const defaultTeacherClassThemeColor: TeacherClassThemeColor = "purple";
+export const defaultTeacherClassThemeColor: TeacherClassThemeColor = "emerald";
 export const defaultTeacherClassAppearance: TeacherClassAppearance = "light";
 
 export const teacherClassThemeColorOptions: Array<{
@@ -16,7 +16,7 @@ export const teacherClassThemeColorOptions: Array<{
   { id: "indigo", label: "Indigo", color: "#3949ab" },
   { id: "blue", label: "Blue", color: "#0b66a0" },
   { id: "teal", label: "Teal", color: "#075b60" },
-  { id: "emerald", label: "Emerald", color: "#167c3d" },
+  { id: "emerald", label: "Forest Green", color: "#346048" },
   { id: "rose", label: "Rose", color: "#b94e55" }
 ];
 

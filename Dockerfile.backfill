@@ -1,0 +1,10 @@
+FROM node:22-slim
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY scripts/*.mjs ./scripts/
+
+ENTRYPOINT ["node", "scripts/backfill-firestore-to-postgres.mjs"]

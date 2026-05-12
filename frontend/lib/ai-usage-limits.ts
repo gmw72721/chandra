@@ -8,6 +8,19 @@ import {
   type AiTokenLimitSettings
 } from "./class-settings.ts";
 import { adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
+import { isPostgresConfigured, shouldFallbackToFirestoreWhenPostgresFails } from "./data/postgres.ts";
+import {
+  adjustAiUsageReservationPostgres,
+  finalizeAiUsagePostgres,
+  getAiUsageReservationPostgres,
+  getAiUsageAllowancePercentPostgres,
+  listAiUsageTokenBucketsPostgres,
+  PostgresAiUsageLimitDataError,
+  reserveAiUsagePostgres,
+  upsertAiUsageAllowancePostgres,
+  type AiUsageRequestBucketInput,
+  type AiUsageTokenBucketInput
+} from "./data/usage.ts";
 
 export const AI_TOKEN_LIMITS = {
   ...defaultAiTokenLimitSettings
@@ -29,10 +42,14 @@ export type AiTokenUsage = {
 
 export type StudentAiUsageStatus = {
   blocked: boolean;
+  dailyLimit?: number;
+  dailyUsed?: number;
   nearLimit: boolean;
   resetHint: string;
   todayPercentRemaining: number;
   weekPercentRemaining: number;
+  weeklyLimit?: number;
+  weeklyUsed?: number;
 };
 
 export type AiUsageReservation = {
@@ -58,6 +75,8 @@ type TokenBucketPeriod = "fiveMinute" | "hour" | "day" | "week";
 
 type TokenBucketSpec = {
   bucketKey: string;
+  classId?: string;
+  id: string;
   limit: number;
   period: TokenBucketPeriod;
   reference: DocumentReference;
@@ -70,6 +89,7 @@ type RequestQuotaScope = "student" | "teacherPreview" | "class";
 type RequestQuotaSpec = {
   classId: string;
   dayBucket: string;
+  id: string;
   limit: number;
   modelId: string;
   provider: string;
@@ -183,6 +203,55 @@ export async function reserveAiTokenUsage({
   });
   const reservationReference = adminDb!.collection("aiUsageReservations").doc(reservationId);
   const usageEventReference = adminDb!.collection("aiUsageEvents").doc(reservationId);
+
+  if (isPostgresConfigured()) {
+    try {
+      const { tokenBuckets: buckets } = await reserveAiUsagePostgres({
+        classId,
+        estimatedInputTokens: cleanEstimatedInputTokens,
+        estimatedOutputTokens: cleanEstimatedOutputTokens,
+        estimatedTotalTokens: cleanEstimate,
+        modelId: modelId ?? "",
+        provider,
+        requestBuckets: requestQuotaSpecs.map(requestQuotaSpecToPostgres),
+        reservationId,
+        role,
+        studentId: role === "student" ? quotaUserId : undefined,
+        tokenBuckets: specs.map(tokenBucketSpecToPostgres),
+        userId: quotaUserId
+      });
+
+      return {
+        estimatedTokens: cleanEstimate,
+        id: reservationId,
+        requestQuota: {
+          bucketIds: requestQuotaSpecs.map((spec) => spec.id),
+          dayBucket: dayBucketKey(now),
+          estimatedInputTokens: cleanEstimatedInputTokens,
+          estimatedOutputTokens: cleanEstimatedOutputTokens,
+          estimatedTotalTokens: cleanEstimate,
+          modelId: modelId ?? "",
+          provider,
+          role
+        },
+        studentStatus: buckets.length ? studentStatusFromBuckets(buckets) : null
+      };
+    } catch (caughtError) {
+      if (caughtError instanceof PostgresAiUsageLimitDataError) {
+        const fallbackBuckets = await listAiUsageTokenBucketsPostgres(specs.map(tokenBucketSpecToPostgres)).catch(() => []);
+        throw new AiUsageLimitError(
+          fallbackBuckets.length ? blockedRealUsageStatus(fallbackBuckets) : blockedUsageStatus(),
+          caughtError.quotaScope
+        );
+      }
+
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("AI usage reservation Postgres path failed; using Firestore fallback.", caughtError);
+    }
+  }
 
   return adminDb!.runTransaction(async (transaction) => {
     const [buckets, requestQuotaBuckets] = await Promise.all([
@@ -316,6 +385,28 @@ export async function finalizeAiTokenUsage({
   const reservationReference = adminDb!.collection("aiUsageReservations").doc(reservation.id);
   const actual = normalizeAiTokenUsage(actualUsage);
 
+  if (isPostgresConfigured()) {
+    try {
+      const buckets = await finalizeAiUsagePostgres({
+        actualInputTokens: actual.inputTokens,
+        actualOutputTokens: actual.outputTokens,
+        actualTotalTokens: actual.totalTokens,
+        reservationId: reservation.id
+      });
+
+      if (buckets) {
+        const studentBuckets = buckets.filter((bucket) => bucket.scope === "student");
+        return studentBuckets.length ? studentStatusFromBuckets(studentBuckets) : null;
+      }
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("AI usage finalization Postgres path failed; using Firestore fallback.", caughtError);
+    }
+  }
+
   return adminDb!.runTransaction(async (transaction) => {
     const reservationSnapshot = await transaction.get(reservationReference);
 
@@ -405,6 +496,45 @@ export async function adjustAiTokenReservation({
   const reservationReference = adminDb!.collection("aiUsageReservations").doc(reservationId);
   const nextEstimate = Math.max(1, Math.ceil(estimatedTokens));
 
+  if (isPostgresConfigured()) {
+    try {
+      const postgresReservation = await getAiUsageReservationPostgres(reservationId);
+
+      if (!postgresReservation || postgresReservation.status !== "reserved") {
+        return null;
+      }
+
+      if (studentId && postgresReservation.studentId !== studentId) {
+        throw new AiUsageLimitError(blockedUsageStatus());
+      }
+
+      const currentEstimate = nonnegativeInteger(postgresReservation.estimatedTotalTokens);
+
+      if (nextEstimate <= currentEstimate) {
+        return null;
+      }
+
+      const deltaTokens = nextEstimate - currentEstimate;
+      const buckets = await adjustAiUsageReservationPostgres({
+        deltaTokens,
+        nextEstimatedTokens: nextEstimate,
+        reservationId
+      });
+
+      return buckets?.length ? studentStatusFromBuckets(buckets) : null;
+    } catch (caughtError) {
+      if (caughtError instanceof AiUsageLimitError) {
+        throw caughtError;
+      }
+
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("AI usage reservation adjustment Postgres path failed; using Firestore fallback.", caughtError);
+    }
+  }
+
   return adminDb!.runTransaction(async (transaction) => {
     const reservationSnapshot = await transaction.get(reservationReference);
 
@@ -470,14 +600,20 @@ export async function releaseAiTokenReservation(reservation: AiUsageReservation 
 function blockedUsageStatus(): StudentAiUsageStatus {
   return {
     blocked: true,
+    dailyLimit: 100,
+    dailyUsed: 100,
     nearLimit: false,
     resetHint: "today",
     todayPercentRemaining: 0,
-    weekPercentRemaining: 0
+    weekPercentRemaining: 0,
+    weeklyLimit: 400,
+    weeklyUsed: 400
   };
 }
 
-function blockedRealUsageStatus(buckets: TokenBucketSnapshot[]): StudentAiUsageStatus {
+function blockedRealUsageStatus(
+  buckets: Pick<TokenBucketSnapshot, "actualTotalTokens" | "limit" | "period" | "reservedTokens" | "scope">[]
+): StudentAiUsageStatus {
   return buckets.length ? studentStatusFromBuckets(buckets, true) : blockedUsageStatus();
 }
 
@@ -504,6 +640,20 @@ export async function getStudentAiUsageStatus(
   }).filter(
     (spec) => spec.scope === "student" && (spec.period === "day" || spec.period === "week")
   );
+
+  if (isPostgresConfigured()) {
+    try {
+      const postgresBuckets = await listAiUsageTokenBucketsPostgres(specs.map(tokenBucketSpecToPostgres));
+      return studentStatusFromBuckets(postgresBuckets);
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("AI usage status Postgres path failed; using Firestore fallback.", caughtError);
+    }
+  }
+
   const snapshots = await Promise.all(specs.map((spec) => spec.reference.get()));
   const buckets = snapshots.map((snapshot, index) => ({
     ...specs[index]!,
@@ -532,6 +682,30 @@ export async function grantStudentAiUsageAllowance({
   const cleanPercent = normalizeAllowancePercent(percent);
   const dayBucket = dayBucketKey(now);
   const allowanceReference = aiUsageAllowanceReference(classId, studentId, dayBucket);
+
+  if (isPostgresConfigured()) {
+    try {
+      await upsertAiUsageAllowancePostgres({
+        classId,
+        dayBucket,
+        feedbackId,
+        percent: cleanPercent,
+        studentId,
+        teacherId
+      });
+
+      return {
+        dayBucket,
+        percent: cleanPercent
+      };
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("AI usage allowance Postgres path failed; using Firestore fallback.", caughtError);
+    }
+  }
 
   await allowanceReference.set(
     compactFirestoreData({
@@ -627,7 +801,11 @@ function studentStatusFromBuckets(
   forceBlocked = false
 ): StudentAiUsageStatus {
   let dayRemaining = 100;
+  let dailyLimit = 100;
+  let dailyUsed = 0;
   let weekRemaining = 100;
+  let weeklyLimit = 400;
+  let weeklyUsed = 0;
 
   for (const bucket of buckets) {
     if (bucket.scope !== "student" || (bucket.period !== "day" && bucket.period !== "week")) {
@@ -639,10 +817,14 @@ function studentStatusFromBuckets(
 
     if (bucket.period === "day") {
       dayRemaining = remainingPercent;
+      dailyLimit = bucket.limit;
+      dailyUsed = usedTokens;
     }
 
     if (bucket.period === "week") {
       weekRemaining = remainingPercent;
+      weeklyLimit = bucket.limit;
+      weeklyUsed = usedTokens;
     }
   }
 
@@ -650,10 +832,14 @@ function studentStatusFromBuckets(
 
   return {
     blocked: forceBlocked || lowestRemaining <= 0,
+    dailyLimit,
+    dailyUsed,
     nearLimit: lowestRemaining > 0 && lowestRemaining <= nearLimitThresholdPercent,
     resetHint: dayRemaining <= weekRemaining ? "today" : "this week",
     todayPercentRemaining: dayRemaining,
-    weekPercentRemaining: weekRemaining
+    weekPercentRemaining: weekRemaining,
+    weeklyLimit,
+    weeklyUsed
   };
 }
 
@@ -696,6 +882,22 @@ async function tokenLimitsWithActiveAllowance({
 }
 
 async function activeAiUsageAllowancePercent(classId: string, studentId: string, now: Date) {
+  if (isPostgresConfigured()) {
+    try {
+      return await getAiUsageAllowancePercentPostgres({
+        classId,
+        dayBucket: dayBucketKey(now),
+        studentId
+      });
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("AI usage allowance Postgres path failed; using Firestore fallback.", caughtError);
+    }
+  }
+
   const snapshot = await aiUsageAllowanceReference(classId, studentId, dayBucketKey(now)).get();
 
   return normalizeAllowancePercent(snapshot.data()?.percent ?? 0);
@@ -721,8 +923,8 @@ function tokenBucketSpecs({
   const limits = normalizeAiTokenLimitSettings(tokenLimits);
   const studentHash = stableHash(classId ? `${classId}:${studentId}` : studentId);
   return [
-    bucketSpec({ bucketKey: dayBucketKey(now), limit: limits.perDay, period: "day", scope: "student", scopeHash: studentHash }),
-    bucketSpec({ bucketKey: weekBucketKey(now), limit: limits.perWeek, period: "week", scope: "student", scopeHash: studentHash })
+    bucketSpec({ bucketKey: dayBucketKey(now), classId, limit: limits.perDay, period: "day", scope: "student", scopeHash: studentHash }),
+    bucketSpec({ bucketKey: weekBucketKey(now), classId, limit: limits.perWeek, period: "week", scope: "student", scopeHash: studentHash })
   ];
 }
 
@@ -802,12 +1004,13 @@ function requestQuotaBucketSpec({
   scope,
   scopeHash,
   userId
-}: Omit<RequestQuotaSpec, "reference">): RequestQuotaSpec {
+}: Omit<RequestQuotaSpec, "id" | "reference">): RequestQuotaSpec {
   const documentId = `${scope}_${scopeHash}_day_${dayBucket}`;
 
   return {
     classId,
     dayBucket,
+    id: documentId,
     limit,
     modelId,
     provider,
@@ -821,15 +1024,18 @@ function requestQuotaBucketSpec({
 
 function bucketSpec({
   bucketKey,
+  classId,
   limit,
   period,
   scope,
   scopeHash
-}: Omit<TokenBucketSpec, "reference">): TokenBucketSpec {
+}: Omit<TokenBucketSpec, "id" | "reference">): TokenBucketSpec {
   const documentId = `${scope}_${scopeHash}_${period}_${bucketKey}`;
 
   return {
     bucketKey,
+    classId,
+    id: documentId,
     limit,
     period,
     reference: adminDb!.collection("aiUsageBuckets").doc(documentId),
@@ -860,10 +1066,38 @@ function tokenBucketFromSnapshot(reference: DocumentReference, data: Record<stri
     bucketKey: String(data.bucketKey ?? ""),
     limit: nonnegativeInteger(data.limitTokens),
     period: String(data.period ?? "day") as TokenBucketPeriod,
+    id: reference.id,
     reference,
     reservedTokens: nonnegativeInteger(data.reservedTokens),
     scope: String(data.scope ?? "student") as TokenBucketScope,
     scopeHash: String(data.scopeHash ?? "")
+  };
+}
+
+function tokenBucketSpecToPostgres(spec: TokenBucketSpec): AiUsageTokenBucketInput {
+  return {
+    bucketKey: spec.bucketKey,
+    classId: spec.classId,
+    id: spec.id,
+    limit: spec.limit,
+    period: spec.period,
+    scope: spec.scope,
+    scopeHash: spec.scopeHash
+  };
+}
+
+function requestQuotaSpecToPostgres(spec: RequestQuotaSpec): AiUsageRequestBucketInput {
+  return {
+    classId: spec.classId,
+    dayBucket: spec.dayBucket,
+    id: spec.id,
+    limit: spec.limit,
+    modelId: spec.modelId,
+    provider: spec.provider,
+    role: spec.role,
+    scope: spec.scope,
+    scopeHash: spec.scopeHash,
+    userId: spec.userId
   };
 }
 

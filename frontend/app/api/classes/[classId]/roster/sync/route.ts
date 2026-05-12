@@ -1,5 +1,6 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
+import { getClassSnapshotPostgresFirst, enrollStudentPostgresFirst } from "@/lib/data/server";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -19,13 +20,13 @@ export async function POST(
     assertFirebaseAdminAuthReady();
     const decodedToken = await adminAuth!.verifyIdToken(token);
     const classReference = adminDb!.collection("classes").doc(classId);
-    const classSnapshot = await classReference.get();
+    const classSnapshot = await getClassSnapshotPostgresFirst(classId);
 
     if (!classSnapshot.exists) {
       return NextResponse.json({ error: "Class not found." }, { status: 404 });
     }
 
-    if (classSnapshot.data()?.teacherId !== decodedToken.uid) {
+    if (classSnapshot.data.teacherId !== decodedToken.uid) {
       return NextResponse.json({ error: "Only the class teacher can sync this roster." }, { status: 403 });
     }
 
@@ -62,6 +63,12 @@ export async function POST(
       }
 
       batch.set(classReference.collection("students").doc(rosterStudentId), rosterData, { merge: true });
+      await enrollStudentPostgresFirst({
+        classId,
+        displayName,
+        studentEmail: email,
+        studentId: profileDoc.id
+      });
       syncedCount += 1;
     }
 

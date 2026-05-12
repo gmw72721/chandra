@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { FieldValue, type DocumentReference, type QueryDocumentSnapshot } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
+import { anonymizeStudentConversations } from "@/lib/data/conversations";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -150,33 +151,21 @@ async function anonymizeStudentAccountData({
   const rosterSnapshots = email
     ? await adminDb!.collectionGroup("students").where("email", "==", email).get()
     : { docs: [] as QueryDocumentSnapshot[] };
-  const conversationSnapshots = await Promise.all([
-    adminDb!.collectionGroup("conversations").where("studentId", "==", uid).get(),
-    email ? adminDb!.collectionGroup("conversations").where("studentEmail", "==", email).get() : null
-  ]);
-  const conversationDocs = uniqueDocs([
-    ...conversationSnapshots[0].docs,
-    ...(conversationSnapshots[1]?.docs ?? [])
-  ]);
+  const updatedConversations = await anonymizeStudentConversations({
+    anonymizedId,
+    anonymizedLabel,
+    deletedStudentDisplayName: displayName,
+    email,
+    originalEmailHash: email ? hashForId(email) : "",
+    studentId: uid
+  });
 
   await deleteDocumentsInBatches(rosterSnapshots.docs.map((studentDoc) => studentDoc.ref));
-  await updateDocumentsInBatches(
-    conversationDocs.map((conversationDoc) => conversationDoc.ref),
-    {
-      deletedStudentDisplayName: displayName,
-      originalStudentEmailHash: email ? hashForId(email) : "",
-      studentDeleted: true,
-      studentEmail: "",
-      studentId: anonymizedId,
-      studentName: anonymizedLabel,
-      updatedAt: FieldValue.serverTimestamp()
-    }
-  );
   await writeAuditLog({
     actor: { email, uid },
     eventType: "account.delete.student_data_anonymized",
     metadata: {
-      conversationCount: conversationDocs.length,
+      conversationCount: updatedConversations.length,
       rosterEntryCount: rosterSnapshots.docs.length
     },
     route: "/api/account/delete",
@@ -190,21 +179,6 @@ async function deleteDocumentsInBatches(references: DocumentReference[]) {
     references.slice(index, index + 450).forEach((reference) => batch.delete(reference));
     await batch.commit();
   }
-}
-
-async function updateDocumentsInBatches(references: DocumentReference[], data: Record<string, unknown>) {
-  for (let index = 0; index < references.length; index += 450) {
-    const batch = adminDb!.batch();
-    references.slice(index, index + 450).forEach((reference) => batch.set(reference, data, { merge: true }));
-    await batch.commit();
-  }
-}
-
-function uniqueDocs(docs: QueryDocumentSnapshot[]) {
-  const byPath = new Map<string, QueryDocumentSnapshot>();
-
-  docs.forEach((docSnapshot) => byPath.set(docSnapshot.ref.path, docSnapshot));
-  return Array.from(byPath.values());
 }
 
 function hasRecentAuthentication(authTime: unknown) {

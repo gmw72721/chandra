@@ -15,6 +15,7 @@ import {
   defaultTutorAccessSettings
 } from "@/lib/class-settings";
 import { defaultTeacherClassAppearance, defaultTeacherClassThemeColor } from "@/lib/class-theme";
+import { getAccountProfile, resolveClassCodePostgresFirst, upsertClassPostgresFirst } from "@/lib/data/server";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -33,10 +34,9 @@ export async function POST(request: Request) {
 
     assertFirebaseAdminAuthReady();
     const decodedToken = await adminAuth!.verifyIdToken(token);
-    const profileSnapshot = await adminDb!.collection("users").doc(decodedToken.uid).get();
-    const profile = profileSnapshot.data();
+    const profile = await getAccountProfile(decodedToken.uid);
 
-    if (!profileSnapshot.exists || profile?.role !== "teacher") {
+    if (profile?.role !== "teacher") {
       return NextResponse.json({ error: "Use a teacher account to create a class." }, { status: 403 });
     }
 
@@ -60,7 +60,7 @@ export async function POST(request: Request) {
 
     const classCode = await createUniqueClassCode();
     const tutorDefaults = buildDefaultClassTutorSettings({ name, section });
-    await adminDb!.collection("classes").doc(classCode).set({
+    const classData = {
       answerPolicy: defaultAnswerPolicySettings,
       behaviorInstructions: defaultBehaviorInstructions,
       behaviorTitle: "Guided problem solving",
@@ -86,7 +86,28 @@ export async function POST(request: Request) {
       tutorAccess: defaultTutorAccessSettings,
       appearance: defaultTeacherClassAppearance,
       themeColor: defaultTeacherClassThemeColor
-    });
+    };
+    await upsertClassPostgresFirst({
+      id: classCode,
+      teacherId: decodedToken.uid,
+      teacherName,
+      name,
+      section,
+      joinCode: classCode,
+      studentChatEnabled: defaultTutorAccessSettings.enabled,
+      appearance: defaultTeacherClassAppearance,
+      themeColor: defaultTeacherClassThemeColor,
+      settings: {
+        answerPolicy: defaultAnswerPolicySettings,
+        modelSettings: defaultClassModelSettings,
+        notificationSettings: defaultNotificationSettings,
+        privacySettings: defaultPrivacySettings,
+        responseFormat: defaultResponseFormatSettings,
+        sourceDefaults: defaultSourceDefaultsSettings,
+        sourceUsage: defaultSourceUsageSettings,
+        tutorAccess: defaultTutorAccessSettings
+      }
+    }, classData);
 
     return NextResponse.json({ class: { id: classCode, joinCode: classCode } });
   } catch (caughtError) {
@@ -123,19 +144,7 @@ async function createUniqueClassCode() {
 }
 
 async function isClassCodeAvailable(classCode: string) {
-  const classSnapshot = await adminDb!.collection("classes").doc(classCode).get();
-
-  if (classSnapshot.exists) {
-    return false;
-  }
-
-  const joinCodeSnapshot = await adminDb!
-    .collection("classes")
-    .where("joinCode", "==", classCode)
-    .limit(1)
-    .get();
-
-  return joinCodeSnapshot.empty;
+  return !(await resolveClassCodePostgresFirst(classCode));
 }
 
 function generateClassCode() {

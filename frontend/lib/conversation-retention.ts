@@ -1,5 +1,10 @@
-import { type DocumentReference, type QueryDocumentSnapshot } from "firebase-admin/firestore";
 import { adminDb, adminStorage, assertFirebaseAdminAuthReady } from "./firebase-admin";
+import {
+  listClassConversations,
+  listConversationAttachments,
+  listConversationMessages,
+  softDeleteConversation
+} from "./data/conversations";
 import {
   conversationRetentionCutoffDate,
   isConversationExpiredForRetention
@@ -43,15 +48,13 @@ export async function enforceConversationRetention(): Promise<ConversationRetent
       continue;
     }
 
-    const conversationsSnapshot = await classDoc.ref.collection("conversations").get();
-    const expiredConversationDocs = conversationsSnapshot.docs.filter((conversationDoc) => {
-      const conversation = conversationDoc.data() ?? {};
+    const expiredConversations = (await listClassConversations(classDoc.id)).filter((conversation) => {
       const lastActivity = conversation.lastMessageAt ?? conversation.updatedAt ?? conversation.createdAt;
       return isConversationExpiredForRetention({ lastActivity, retention });
     });
 
-    for (const conversationDoc of expiredConversationDocs) {
-      const deletedConversationData = await deleteConversationDocument(conversationDoc);
+    for (const conversation of expiredConversations) {
+      const deletedConversationData = await deleteConversationRecord(conversation.id);
       result.conversationsDeleted += 1;
       result.attachmentsDeleted += deletedConversationData.attachments;
       result.attachmentFilesDeleted += deletedConversationData.attachmentFiles;
@@ -62,47 +65,33 @@ export async function enforceConversationRetention(): Promise<ConversationRetent
   return result;
 }
 
-async function deleteConversationDocument(conversationDoc: QueryDocumentSnapshot) {
-  const [messagesSnapshot, attachmentsSnapshot] = await Promise.all([
-    conversationDoc.ref.collection("messages").get(),
-    conversationDoc.ref.collection("attachments").get()
+async function deleteConversationRecord(conversationId: string) {
+  const [messages, attachments] = await Promise.all([
+    listConversationMessages(conversationId),
+    listConversationAttachments(conversationId)
   ]);
-  const attachmentFiles = await deleteAttachmentStorageFiles(attachmentsSnapshot.docs);
+  const attachmentFiles = await deleteAttachmentStorageFiles(attachments.map((attachment) => attachment.storageKey));
 
-  await deleteDocumentsInBatches([
-    ...messagesSnapshot.docs.map((messageDoc) => messageDoc.ref),
-    ...attachmentsSnapshot.docs.map((attachmentDoc) => attachmentDoc.ref),
-    conversationDoc.ref
-  ]);
+  await softDeleteConversation(conversationId);
 
   return {
-    attachments: attachmentsSnapshot.size,
+    attachments: attachments.length,
     attachmentFiles,
-    messages: messagesSnapshot.size
+    messages: messages.length
   };
 }
 
-async function deleteAttachmentStorageFiles(attachmentDocs: QueryDocumentSnapshot[]) {
+async function deleteAttachmentStorageFiles(storageKeys: string[]) {
   if (!adminStorage) {
     return 0;
   }
 
   const bucket = adminStorage.bucket();
-  const storageKeys = Array.from(new Set(attachmentDocs.map((attachmentDoc) =>
-    String(attachmentDoc.data()?.storageKey ?? "").trim()
-  ).filter(Boolean)));
+  const uniqueStorageKeys = Array.from(new Set(storageKeys.map((storageKey) => storageKey.trim()).filter(Boolean)));
 
-  await Promise.all(storageKeys.map((storageKey) =>
+  await Promise.all(uniqueStorageKeys.map((storageKey) =>
     bucket.file(storageKey).delete({ ignoreNotFound: true })
   ));
 
-  return storageKeys.length;
-}
-
-async function deleteDocumentsInBatches(references: DocumentReference[]) {
-  for (let index = 0; index < references.length; index += 450) {
-    const batch = adminDb!.batch();
-    references.slice(index, index + 450).forEach((reference) => batch.delete(reference));
-    await batch.commit();
-  }
+  return uniqueStorageKeys.length;
 }

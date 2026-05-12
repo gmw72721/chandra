@@ -1,6 +1,12 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
 import { checkAbuseLockout, recordAbuseFailure, resetAbuseFailures } from "@/lib/abuse-lockout";
+import {
+  enrollStudentPostgresFirst,
+  getAccountProfile,
+  resolveClassCodePostgresFirst,
+  upsertAccountProfile
+} from "@/lib/data/server";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -33,9 +39,9 @@ export async function POST(request: Request) {
     const decodedToken = await adminAuth!.verifyIdToken(token);
     const body = (await request.json()) as JoinClassBody;
     const classCode = normalizeClassCode(String(body.classCode ?? ""));
-    const userReference = adminDb!.collection("users").doc(decodedToken.uid);
-    const userSnapshot = await userReference.get();
-    const userData = userSnapshot.data() ?? {};
+    const userSnapshot = await adminDb!.collection("users").doc(decodedToken.uid).get();
+    const postgresProfile = await getAccountProfile(decodedToken.uid);
+    const userData = postgresProfile ?? userSnapshot.data() ?? {};
 
     if (userData.role === "teacher") {
       return NextResponse.json({ error: "Use a student account to join a class." }, { status: 403 });
@@ -84,7 +90,7 @@ export async function POST(request: Request) {
       displayName,
       email,
       nextClassId: classId,
-      syncProfile: body.syncProfile === true || userSnapshot.exists,
+      syncProfile: body.syncProfile === true || userSnapshot.exists || Boolean(postgresProfile),
       uid: decodedToken.uid
     });
 
@@ -95,19 +101,7 @@ export async function POST(request: Request) {
 }
 
 async function resolveClassId(classCode: string) {
-  const directClassSnapshot = await adminDb!.collection("classes").doc(classCode).get();
-
-  if (directClassSnapshot.exists) {
-    return directClassSnapshot.id;
-  }
-
-  const joinCodeSnapshot = await adminDb!
-    .collection("classes")
-    .where("joinCode", "==", classCode)
-    .limit(1)
-    .get();
-
-  return joinCodeSnapshot.docs[0]?.id ?? "";
+  return resolveClassCodePostgresFirst(classCode);
 }
 
 async function updateStudentEnrollment({
@@ -128,6 +122,12 @@ async function updateStudentEnrollment({
   const userReference = adminDb!.collection("users").doc(uid);
 
   if (nextClassId) {
+    await enrollStudentPostgresFirst({
+      classId: nextClassId,
+      displayName,
+      studentEmail: email,
+      studentId: uid
+    });
     batch.set(adminDb!.collection("classes").doc(nextClassId).collection("students").doc(rosterStudentId), {
       addedAt: FieldValue.serverTimestamp(),
       displayName,
@@ -137,6 +137,31 @@ async function updateStudentEnrollment({
   }
 
   if (syncProfile) {
+    await upsertAccountProfile({
+      id: uid,
+      firebaseUid: uid,
+      email,
+      role: "student",
+      displayName,
+      legacyClassId: nextClassId || null,
+      legacyClassIds: nextClassId ? [nextClassId] : [],
+      profile: nextClassId
+        ? {
+            classId: nextClassId,
+            classIds: [nextClassId],
+            displayName,
+            email,
+            role: "student",
+            uid
+          }
+        : {
+            displayName,
+            email,
+            role: "student",
+            uid
+          },
+      username: email
+    }, { mirrorFirestore: false });
     batch.set(
       userReference,
       nextClassId

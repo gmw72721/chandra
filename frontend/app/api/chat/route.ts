@@ -38,9 +38,11 @@ import {
 import { buildTutorSystemPrompt, getTeacherClassTutorConfig, toProviderMessages } from "@/lib/prompts";
 import { maxStudentAttachmentsPerMessage } from "@/lib/student-attachments-server";
 import { writeAuditLog, writeChatErrorReference } from "@/lib/audit-log";
+import { adminStorage } from "@/lib/firebase-admin";
 import { getActiveStudentLearningProfileTutorContext } from "@/lib/student-learning-profiles-server";
 import {
   ConversationPersistenceError,
+  listStudentConversationMessages,
   prepareStudentConversationPersistence,
   saveAssistantMessage,
   type StudentConversationPersistence
@@ -63,6 +65,7 @@ const maxChatMessagesPerRequest = 40;
 const maxChatMessageCharacters = 12000;
 const maxChatRequestCharacters = 60000;
 const maxAttachmentContextCharacters = 4000;
+const defaultMaxAttachmentFilePayloadBytes = 8 * 1024 * 1024;
 
 const safeDocumentIdSchema = z
   .string()
@@ -96,6 +99,39 @@ const chatRequestSchema = z.object({
                 label: z.string(),
                 purpose: z.string().optional(),
                 stage: z.string().optional()
+              })
+            )
+            .optional(),
+          knowledgeItems: z
+            .array(
+              z.object({
+                assignmentId: z.string().optional(),
+                chatId: z.string(),
+                classId: z.string().optional(),
+                content: z.string().optional(),
+                createdAt: z.unknown(),
+                id: z.string(),
+                kind: z.enum(["problem", "pdf_page", "student_upload"]),
+                linkedProblemId: z.string().optional(),
+                ocrText: z.string().optional(),
+                page: z.number().optional(),
+                pdfId: z.string().optional(),
+                problemId: z.string().optional(),
+                reason: z.string(),
+                sourceId: z.string().optional(),
+                sourceName: z.string(),
+                summary: z.string().optional(),
+                uiColor: z.enum(["blue", "neutral", "purple", "green", "orange"]).optional(),
+                updatedAt: z.unknown(),
+                usedAs: z.enum([
+                  "active_problem",
+                  "problem_source",
+                  "supporting_context",
+                  "definition_reference",
+                  "theorem_reference",
+                  "example_reference",
+                  "student_attempt"
+                ])
               })
             )
             .optional(),
@@ -184,8 +220,10 @@ const chatRequestSchema = z.object({
             sourceConfidence: z.enum(["high", "medium", "low"]),
             studentActionNeeded: z.enum(tutorStudentActions),
             mode: z.enum(tutorModes)
-          })
+          }),
+          z.record(z.unknown())
         ])
+        .nullable()
         .optional()
     })
   ).min(1).max(maxChatMessagesPerRequest)
@@ -486,10 +524,16 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
     modelId: model,
     scope
   });
+  const conversationMessages = await loadConversationMessagesForTutor({
+    fallbackMessages: messages,
+    persistence,
+    scope
+  });
   const providerMessages = toProviderMessages(
     systemPrompt,
-    appendAttachmentContextToStudentMessage(messages, persistence)
+    appendAttachmentContextToStudentMessage(conversationMessages, persistence)
   );
+  const studentAttachmentFiles = await buildStudentAttachmentFilePayloads(persistence);
   const estimatedTokens = estimateAiRequestTokens({
     attachmentCount: persistence?.attachments.length ?? 0,
     maxTokens,
@@ -536,12 +580,33 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
         : undefined,
       sourceUsage: teacherClass?.sourceUsage,
       studentLearningProfileContext: privateBackendLearningProfileContext(studentLearningProfileContext),
-      messages: providerMessages
+      studentAttachmentFiles,
+        messages: providerMessages
     },
     learningProfileTelemetryContext: studentLearningProfileContext,
     persistence,
     scope
   };
+}
+
+async function loadConversationMessagesForTutor({
+  fallbackMessages,
+  persistence,
+  scope
+}: {
+  fallbackMessages: ChatMessage[];
+  persistence: StudentConversationPersistence | null;
+  scope: Awaited<ReturnType<typeof authorizeTutorChatRequest>>;
+}) {
+  if (!persistence || scope.role !== "student") {
+    return fallbackMessages;
+  }
+
+  return listStudentConversationMessages({
+    classId: scope.classId,
+    conversationId: persistence.conversationId,
+    studentId: scope.uid
+  });
 }
 
 type PreparedBackendChatRequest = Awaited<ReturnType<typeof buildBackendChatRequest>>;
@@ -663,6 +728,67 @@ function buildAttachmentTutorContext(attachments: StudentConversationPersistence
   return lines.join("\n");
 }
 
+type StudentAttachmentFilePayload = {
+  id: string;
+  dataUrl: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+};
+
+async function buildStudentAttachmentFilePayloads(
+  persistence: StudentConversationPersistence | null
+): Promise<StudentAttachmentFilePayload[]> {
+  const attachments = persistence?.attachments ?? [];
+
+  if (!attachments.length || !adminStorage) {
+    return [];
+  }
+
+  const maxTotalBytes = readPositiveInteger(process.env.STUDENT_ATTACHMENT_MODEL_MAX_TOTAL_BYTES) ?? defaultMaxAttachmentFilePayloadBytes;
+  let totalBytes = 0;
+  const files: StudentAttachmentFilePayload[] = [];
+
+  for (const attachment of attachments) {
+    if (attachment.fileType !== "pdf" || attachment.uploadStatus !== "ready") {
+      continue;
+    }
+
+    if (attachment.fileSize <= 0 || totalBytes + attachment.fileSize > maxTotalBytes) {
+      continue;
+    }
+
+    try {
+      const [buffer] = await adminStorage.bucket().file(attachment.storageKey).download();
+
+      if (buffer.length <= 0 || totalBytes + buffer.length > maxTotalBytes) {
+        continue;
+      }
+
+      totalBytes += buffer.length;
+      files.push({
+        id: attachment.id,
+        dataUrl: `data:${attachment.mimeType || "application/pdf"};base64,${buffer.toString("base64")}`,
+        fileName: attachment.fileName,
+        fileSize: buffer.length,
+        mimeType: attachment.mimeType || "application/pdf"
+      });
+    } catch (caughtError) {
+      console.warn("Student attachment file payload skipped.", {
+        attachmentId: attachment.id,
+        message: errorMessageForLog(caughtError)
+      });
+    }
+  }
+
+  return files;
+}
+
+function readPositiveInteger(value: string | undefined) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 function formatAttachmentSize(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) {
     return "unknown size";
@@ -686,7 +812,7 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
 
       try {
         send({
-          message: "Deciding whether class PDFs are needed.",
+          message: "Reading your question...",
           stage: "reading_question",
           type: "step"
         });
@@ -746,6 +872,7 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
 
         const decoder = new TextDecoder();
         let buffer = "";
+        let emittedQuickResponseModelCallCount = 0;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -768,6 +895,10 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
             if (event.type === "final" && event.payload) {
               const backendPayload = event.payload as RawTutorApiResponse;
               const actualTokens = actualTokenUsageFromTutorPayload(backendPayload);
+              const debugBackendPayload = debugBackendPayloadAfterEmittedQuickResponses(
+                backendPayload,
+                emittedQuickResponseModelCallCount
+              );
               const usageStatus = await finalizeAiTokenUsage({
                 actualUsage: actualTokens,
                 reservation: preparedRequest.aiUsageReservation
@@ -791,8 +922,8 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
               send({
                 payload: withStudentAiUsageStatus(
                   tutorResponseForScope({
-                    actualTokens,
-                    backendPayload,
+                    actualTokens: actualTokenUsageFromTutorPayload(debugBackendPayload),
+                    backendPayload: debugBackendPayload,
                     durationMs: performance.now() - backendRequestStartedAt,
                     preparedRequest,
                     requestId,
@@ -821,6 +952,32 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
                 message: studentChatErrorMessage(chatError),
                 stage: "error",
                 type: "error"
+              });
+            } else if (event.type === "quick_response") {
+              const message = typeof event.message === "string" ? event.message : "";
+              const quickBackendPayload = event as RawTutorApiResponse;
+              const quickModelCalls = normalizeModelCallUsage(quickBackendPayload.tokenUsage?.calls);
+              const quickResponseEvent: Record<string, unknown> = {
+                ...event,
+                structuredOutput: normalizeStructuredTutorOutput(event.structuredOutput, message)
+              };
+
+              if (preparedRequest.scope.role === "teacher") {
+                quickResponseEvent.debugInfo = buildTutorDebugInfo({
+                  actualTokens: actualTokenUsageFromTutorPayload(quickBackendPayload),
+                  backendPayload: quickBackendPayload,
+                  durationMs: performance.now() - backendRequestStartedAt,
+                  preparedRequest,
+                  requestId
+                });
+              }
+
+              emittedQuickResponseModelCallCount = Math.max(
+                emittedQuickResponseModelCallCount,
+                quickModelCalls.length
+              );
+              send({
+                ...quickResponseEvent
               });
             } else {
               send(event);
@@ -1103,6 +1260,47 @@ function buildTutorDebugInfo({
     toolCallCount,
     totalRequestCount: 1 + providerRequestCount + toolCallCount
   };
+}
+
+function debugBackendPayloadAfterEmittedQuickResponses(
+  backendPayload: RawTutorApiResponse,
+  emittedQuickResponseModelCallCount: number
+): RawTutorApiResponse {
+  if (emittedQuickResponseModelCallCount <= 0) {
+    return backendPayload;
+  }
+
+  const calls = normalizeModelCallUsage(backendPayload.tokenUsage?.calls ?? backendPayload.langGraphTrace?.modelCallUsage);
+  const remainingCalls = calls.slice(emittedQuickResponseModelCallCount);
+
+  const actual = sumModelCallUsageTokens(remainingCalls);
+
+  return {
+    ...backendPayload,
+    langGraphTrace: backendPayload.langGraphTrace
+      ? {
+          ...backendPayload.langGraphTrace,
+          modelCallUsage: remainingCalls
+        }
+      : backendPayload.langGraphTrace,
+    tokenUsage: {
+      ...backendPayload.tokenUsage,
+      actual,
+      calls: remainingCalls
+    }
+  };
+}
+
+function sumModelCallUsageTokens(calls: TutorModelCallUsage[]): AiTokenUsage {
+  return calls.reduce<AiTokenUsage>(
+    (total, call) => ({
+      inputTokens: total.inputTokens + call.inputTokens,
+      outputTokens: total.outputTokens + call.outputTokens,
+      reasoningTokens: (total.reasoningTokens ?? 0) + call.reasoningTokens,
+      totalTokens: total.totalTokens + call.totalTokens
+    }),
+    { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 }
+  );
 }
 
 function normalizeInputTokenBreakdown(value: unknown) {
@@ -1632,7 +1830,7 @@ function buildPdfToolChoosingTutorSystemPrompt(
   const directAnswerRules = answerPolicy.refuseAnswerOnlyRequests
     ? [
         "- If the student asks for the answer or a submission-ready version of the exact task, do not complete it. Use retrieval only if needed for a similar example walkthrough.",
-        "- Treat homework-ready wording, proof paragraphs, complete submissions, and `example of what I can say` for the exact task as direct-answer requests.",
+        "- Treat homework-ready wording, proof paragraphs, complete submissions, and `give me an example of what I can say` for the exact task as direct-answer requests.",
         "- After refusing, do not keep completing the exact task; offer a similar example or to check the student's attempted step."
       ]
     : [
@@ -1642,78 +1840,93 @@ function buildPdfToolChoosingTutorSystemPrompt(
   const citationRules = sourceUsage.citeSourcePages
     ? [
         pdfToolSourceUseInstruction(sourceUsage),
-        "- If a selected page shows a printed page number, use that printed page in the answer."
+        "- If a retrieved OCR metadata record shows a printed page number, use that printed page in the answer."
       ]
     : [pdfToolSourceUseInstruction(sourceUsage)];
   const unclearSourceRule = sourceUsage.askClarificationIfSourceUnclear
-    ? "- After retrieval, answer only from selected pages. If they still do not answer the question and no sharper query is available, ask for the exact title, page, problem, or pasted text."
-    : "- After retrieval, if selected pages are weak, state the uncertainty and give cautious general help without inventing source details.";
+    ? "- After retrieval, answer only from the returned OCR metadata records. If they still do not answer the question and no sharper query is available, ask for the exact title, page, problem, or pasted text."
+    : "- After retrieval, if the OCR metadata records are weak, state the uncertainty and give cautious general help without inventing source details.";
 
   return [
     "LangGraph PDF retrieval:",
-    "Tool: search_pdf_pages({ query, student_reason }) searches indexed class PDF page windows from homework, worksheets, assignments, textbook/readings, notes, and examples, then LangGraph opens selected pages for the final answer.",
+    "Tool: search_pdf_pages({ query, retrieval_reason }) searches indexed PostgreSQL OCR metadata for class PDF pages/problems from homework, worksheets, assignments, textbook/readings, notes, and examples.",
     "",
     "Use search_pdf_pages before answering when class PDFs could help solve, explain, or locate the student's question:",
     ...sourcePriorityRules,
     ...directAnswerRules.slice(0, 1),
     ...preferredSourceRules,
     "- Use it for class-source references like uploaded materials, pages/sections/problem numbers/titles, and source-backed follow-ups such as `part b` or `that example`.",
-    "- Do not use it for off-topic or non-course requests; briefly redirect those.",
+    "- Do not use it for off-topic or non-course requests such as relationships, family conflict, emotional support, unrelated coding. Briefly redirect those to course material.",
     "",
     "Skip the tool for greetings, study planning, off-topic support, unrelated coding, or trivial self-contained questions. For concrete assignments or pasted problems, check class materials first. For method/concept teaching, retrieve only when textbook/readings/examples would materially improve the help.",
     "",
     "Query rules:",
     "- Usually make one focused query from the student's wording plus source type, known title/page/section/problem number, topic/method, and recent source context.",
     "- For locate/find requests, start with a locator verb and assignment-style source terms; add textbook only if the student asked for it or task-source search failed.",
+    "- For find-similar-example requests, do not search only the assigned problem number. Build example searches from topic/method words, distinctive symbols, class source type, and section/chapter context.",
+    "- Similar-example search queries should prefer terms such as `worked example`, `example`, `textbook reading`, `lecture notes`, `method`, and the concept name; avoid `problem 2.14`/page locators unless the search is only trying to identify the surrounding section.",
     "- For textbook section/chapter requests, use `textbook reading`, the exact marker, and topic words; use a title only if the student or prior citation named it.",
     "- For solving help tied to a specific source, search both the exact task and method support if needed; for location-only requests, find the task page and stop.",
-    "- Reuse already-selected relevant pages and prior citations; follow-up searches should target only the missing support.",
-    "- If multiple searches help, keep them complementary: task/page, method/concept, and maybe one nearby worked example.",
-    "- Every call must include a five-word `student_reason` such as `Checking exact task and page`.",
+    "- Reuse already-retrieved relevant OCR metadata records and prior citations; follow-up searches should target only the missing support.",
+    "- If multiple searches help, keep them complementary and run one per distinct need: task/page, method/concept, and maybe one nearby worked example. For find-example requests, prefer method/concept plus worked-example searches before exact task lookup.",
+    "- Every call must include `retrieval_reason`: `student_requested_problem`, `needed_supporting_page`, `needed_example_page`, `student_changed_problem`, or `previous_search_failed`.",
     "- Make at most 3 searches, preserve names/numbers/symbols/quoted wording, and only search again with a genuinely new sharper query. Never repeat the same query or a trivial variant.",
     "",
     "Answering rules:",
-    "- If retrieval is needed, call search_pdf_pages and wait for selected pages before answering.",
+    "- If retrieval is needed, first call search_pdf_pages. Before the search runs, you may give a useful immediate response with appropriate sections from the student message, active source context, or chat history, then say briefly what class-material item you are checking next. Do not invent source facts before retrieval.",
+    "- For a bare problem, exercise, question, page, or section number such as `2.20`, do not ask the student for a page photo, textbook title, full problem text, or source name before searching available class OCR metadata. Treat it as a source lookup, call search_pdf_pages, and leave `nextStep` empty while the lookup runs.",
     "- If retrieval is not needed, answer directly.",
     unclearSourceRule,
     ...directAnswerRules.slice(1),
     "- If the student asks to see, locate, read, copy, quote, restate, identify, or ask what a specific source item says, treat it as source-text lookup: retrieve the exact source and provide the visible text when quoting is allowed, without solving it or requiring an attempt first. Source items include problems, exercises, questions, prompts, passages, lemmas, theorems, definitions, propositions, corollaries, examples, rubrics, tables, captions, and pages.",
     "- For source-text lookup, the lookup exception wins over attempt-first and direct-answer restrictions as long as you only provide the visible source wording and do not solve, prove, apply, or complete the task.",
     "- Retrieval does not override attempt-first. For exact graded-looking tasks without student work, orient with sources, then ask what they tried or where they are stuck.",
+    "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short: at most one brief orientation sentence plus one conceptual hint or one request for the student's attempted step.",
     "- In that first reply, do not provide task-specific starts, intermediate values, thesis claims, code, structure, exact next steps, or other work that begins completing the task unless the student asked for concept explanation, source lookup, or a similar example.",
-    "- Treat requests for proof paragraphs, student-style wording, sentence starters, outlines, scaffolds, or all-parts breakdowns for the exact task as requests for the final artifact.",
+    "- Treat requests for proof paragraphs, student-style wording, sentence starters, proof scaffolds, or all-parts breakdowns for the exact task as requests for the final artifact.",
     "- Similar examples must be meaningfully different and cannot complete any part of the assigned response.",
     "- Follow-ups like `I still need help`, `yes`, `tell me more`, or `explain like I am 5` are not attempts; keep helping conceptually or use a non-identical example.",
     "- Do not reveal the full solution, final answer, final artifact, final code, thesis, outline, or a multi-step solution chain for the exact task before the student shows work.",
     "- If section pages are mismatched, or pages only locate the task without method support, search again before giving solving help.",
     ...citationRules,
     "- Verify student calculations before affirming them; if something is wrong, point out the first wrong step or value.",
-    "- Once attempt-first is satisfied or not applicable, use a targeted question or small nudge rather than stating the next move outright.",
+    "- Once attempt-first is satisfied or not applicable, ask the student to complete one small piece; do not provide the result or a chain of several moves.",
     "",
     "Student-facing section guidance:",
+    "- For substantive tutoring replies, usually use this shape: brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when class material was actually used.",
+    "- Orientation names the kind of task or thinking move the student is doing; it should not repeat the hint or begin solving the task.",
+    "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
+    "- Next step asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
+    "- Do not repeat the same advice in the orientation, hint, explanation, and next step; each included section must add distinct value.",
+    "- If the configured help level or attempt-first rule allows only limited help, make the next step a request for the student's attempt or the exact place they are stuck.",
     "- Default to one clean answer plus useful optional sections when they improve scanability or learning.",
     "- Do not fill every section. Leave unused structured fields empty; each section should support the answer because that format is genuinely helpful for this turn.",
-    "- You may reorganize content into the section where it belongs instead of preserving the order or grouping from your draft. Put formulas in `Formula:`, conceptual commentary in `Why this works:`, examples in `Example:`, conceptual nudges or leading questions in `Hint:`, and only the student's immediate action or offer in `nextStep`.",
-    "- Choose the student-facing order of the answer and sections. When returning structured output, include `sectionOrder` with the keys in the order they should render, such as [`answer`, `hint`, `formula`, `example`, `nextStep`]. Include only keys that have content.",
+    "- Be deliberate about structure. Reorganize content into the section where it belongs instead of preserving draft order: problem text in `Problem:`, formulas/rules in `Formula:`, conceptual commentary in `Why this works:`, examples in `Example:`, conceptual nudges or leading questions in `Hint:`, checks of student work in `Check your work:`, source/context notes in `sourceNote`, and only the student's immediate action or offer in `nextStep`.",
+    "- Choose the student-facing order of the answer and sections. Decide what the student needs first and why: task text/context first, then the direct reply, then the supporting rule, concept, example, or work check that makes the reply clearer, and the immediate action last. When returning structured output, include `sectionOrder` with the keys in the exact order they should render, such as [`problem`, `answer`, `hint`, `formula`, `nextStep`] or [`answer`, `formula`, `example`]. Include only keys that have content. If `Problem:` is present, put `problem` first in `sectionOrder` so the task statement renders before any answer, offer, hint, or commentary. Put `nextStep` last unless it is the only student-facing section.",
     "- If content does not fit a section's narrow purpose, keep it in the main answer instead of forcing it into a labeled section.",
     "- Do not duplicate the same idea in both the main answer and a labeled section.",
     "- Allowed labels are only `Problem:`, `Hint:`, `Why this works:`, `Formula:`, `Example:`, and `Check your work:`.",
-    "- Use `Problem:` only for the academic exercise/question/task statement the student is working on, not for an issue/error. If you use it, put only the problem statement there. Never put prompts like `send me your work`, `what have you tried`, offers, hints, next steps, source context, or commentary inside `Problem:`.",
-    "- Use `Hint:` for one small nudge or leading question when the student needs a push. Keep it short, direct, and usually one sentence. Do not put citations, definitions, commentary, offers, or multiple bullet-like ideas in `Hint:`.",
+    "- Before using `Problem:`, classify the candidate text: it must be the exact academic exercise/question/task statement the student is working on, either supplied by the student or found in selected class material. Do not use `Problem:` for an issue/error, `You said...` recap, lookup/checking status, clarification, request for a page/title/textbook, source note, offer, hint, next step, or commentary; put those in the main answer or leave them out.",
+    "- If you use `Problem:`, put only the problem statement there. Never put prompts like `send me your work`, `what have you tried`, offers, hints, next steps, source context, or commentary inside `Problem:`.",
+    "- If the student is following up after a problem statement was already shown and asks for help, a hint, or what to try, do not restate the problem statement or include a `Problem:` section again.",
+    "- For that bare stuck follow-up, do not use both `Hint:` and `nextStep` unless `nextStep` only asks the student to show work; otherwise prefer one short `Hint:` and leave `nextStep` empty.",
+    "- Use `Hint:` when the student is stuck or asks how to start: give one small nudge or leading question. Keep it short, direct, and usually one sentence. Do not put citations, definitions, commentary, offers, or multiple bullet-like ideas in `Hint:`.",
+    "- For first help on an exact task with no shown attempt, keep the hint conceptual: ask about the relevant objects, definitions, constraints, evidence, or relationship to compare. Do not name the specific method, structure, or first executable move.",
     "- Use `Why this works:` for calm conceptual explanation. Prefer 1-2 short paragraphs or a few compact bullets when it clarifies the reasoning. Do not include offers, workflow prompts, attempt requests, or `If you want...`; put those in `nextStep`.",
-    "- Use `Formula:` only when there is one main rule, theorem, identity, or equation worth isolating. Put only formulas, equations, symbolic rules, or a very short rule name there. Do not include sentences that explain when to use it, why it matters, source/page notes, examples, substitutions, hints, or commentary such as `this is the key idea`. Move surrounding prose to the main answer, `Hint:`, or `Why this works:`.",
+    "- Use `Formula:` only when there is one main rule, theorem, identity, or equation worth isolating. Put only formulas, equations, symbolic rules, or a very short rule name there. Do not include sentences that explain when to use it, why it matters, source/page notes, examples, filled-in task values, hints, or commentary such as `this is the key idea`. Move surrounding prose to the main answer, `Hint:`, or `Why this works:`.",
     "- If a formula has a special-case version, keep both lines in `Formula:` only if both lines are formulas/rules. Put the words explaining the special case outside `Formula:`.",
     "- Use `Example:` when giving or discussing a genuinely similar example. Make the example visibly different from the student's exact task; when useful, separate it into `Setup:` and `Move:` lines.",
-    "- Use `Check your work:` only when the student has shown work or asks for validation. Make it evaluative and concise, using short lines such as `Looks right:`, `First issue:`, `What to fix:`, or `Try again with:` when they fit.",
-    "- Use `nextStep` metadata/section only for the student's most immediate action or an offer/request for their work. Keep it one clear command or question, not a hint, explanation, formula, or method nudge. Do not prefix it with `Hint:`. A question like `Is x - 1 a unit vector?` belongs in `Hint:`, while `Compute ||x - 1|| first and send me that value.` belongs in `nextStep`.",
+    "- Use `Check your work:` only when the student shows work or asks for validation. Make it evaluative and concise, using short lines such as `Looks right:`, `First issue:`, `What to fix:`, or `Try again with:` when they fit.",
+    "- Use `nextStep` metadata/section only for the student's most immediate action or an offer/request for their work. Do not use `nextStep` for source lookup, page lookup, problem finding/location, or retrieval status. Keep it one clear command or question, not a hint, explanation, formula, or method nudge. Do not prefix it with `Hint:`. A leading question about the idea belongs in `Hint:`, while a request to complete one small checkable piece and send it back belongs in `nextStep`.",
     "- Never use `Example:` for homework-ready wording, proof paragraphs, or a submittable version of the exact task.",
     "- Before returning, audit the sections: no `Hint:` text inside `nextStep`, no prose commentary inside `Formula:`, no offers inside `Why this works:`, and no source chips or page citations inside optional section text unless the source detail is the student's direct request.",
     "- Do not write `Source:`, `Sources:`, `Answer:`, `Question:`, `Next step:`, or `Your next step:`. Cite sources naturally and end with one direct question.",
+    "- Do not write `Answer:`, `Question:` as visible labels.",
     "- Do not force labels into greetings, clarifications, refusals, or already-clear replies. For substantive tutoring replies, freely use helpful labeled sections; 1-2 is often enough, and 3-4 is fine when the student asks for multiple kinds of help or the reply naturally has a problem, hint, formula, example, explanation, or next action.",
     "- Do not bold optional section content; put math in `$...$` or `$$...$$`.",
     "- Internal render indexes are not student-facing page numbers.",
     "- For task-location answers, use `That item is Problem/Question N in Section X, on printed page P of Title.`",
-    "- For source-text lookup without solving help, quote the requested visible source item exactly. For problem/exercise/prompt lookup, put only the visible task statement in a `Problem:` section, then put any brief offer, attempt request, or next action outside `Problem:` in `answer` or `nextStep`. When returning task text, only return the task directly in that section; do not include location/source context, offers, hints, next steps, attempt requests, or commentary inside `Problem:`. Do not repeat the task text again in the unlabeled main reply.",
+    "- For source-text lookup without solving help, quote the requested visible source item exactly. For problem/exercise/prompt lookup, first identify the visible task statement, then put only that statement in a `Problem:` section, with any brief location note or offer outside `Problem:` in `answer`; leave `nextStep` empty. When returning task text, only return the task directly in that section; do not include `You said...`, lookup/checking status, requests for page/title/textbook, location/source context, offers, hints, next steps, attempt requests, or commentary inside `Problem:`. Do not repeat the task text again in the unlabeled main reply.",
     "- Format `Problem:` for readability without changing meaning: preserve source line breaks when visible; if extracted text is flattened, use best-effort markdown line breaks by putting headings like `PROBLEM`, `EXERCISE`, `THEOREM`, or `DEFINITION` on their own line, the problem number and main statement after a blank line, and obvious enumerated parts such as `(i)`, `(ii)`, `(a)`, or `(b)` on separate lines.",
     "- Do not invent labels, split uncertain clauses, or alter mathematical notation while formatting `Problem:`. Only add line breaks around clear structural markers.",
     "- Keep source attributions short and natural instead of repeating long source identifiers.",

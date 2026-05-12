@@ -24,7 +24,7 @@ test("student-entered six-letter class codes normalize to uppercase", () => {
 });
 
 test("teacher workspace keeps join codes available without rendering top-page invite controls", () => {
-  const source = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const source = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(source, /selectedClass\.joinCode/);
   assert.match(source, /ensureClassJoinCode\(selectedClass\.id\)/);
@@ -38,11 +38,12 @@ test("student-entered join codes enroll the student through the server route", (
 
   assert.match(authSource, /fetch\("\/api\/classes\/join"/);
   assert.match(authSource, /Authorization: `Bearer \$\{token\}`/);
-  assert.match(authSource, /await setDoc\(doc\(db!, "users", credential\.user\.uid\), profile\)/);
+  assert.match(authSource, /createAccountProfile\(profile, credential\.user\)/);
   assert.match(authSource, /syncProfile: true/);
-  assert.match(joinSource, /\.where\("joinCode", "==", classCode\)/);
+  assert.match(joinSource, /resolveClassCodePostgresFirst\(classCode\)/);
   assert.match(joinSource, /firstString\(userData\.email, decodedToken\.email, decodedToken\.firebase\?\.identities\?\.email\?\.\[0\], body\.email\)/);
   assert.match(joinSource, /collection\("classes"\)\.doc\(nextClassId\)\.collection\("students"\)/);
+  assert.match(joinSource, /enrollStudentPostgresFirst/);
   assert.match(joinSource, /batch\.set\(/);
 });
 
@@ -68,7 +69,7 @@ test("student class joins are additive and keep enrolled class ids", () => {
 });
 
 test("teacher roster sync backfills students who already saved the classId", () => {
-  const managerSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
   const syncSource = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/roster/sync/route.ts"), "utf8");
 
   assert.match(managerSource, /\/api\/classes\/\$\{encodeURIComponent\(activeClassId\)\}\/roster\/sync/);
@@ -86,5 +87,5 @@ test("teacher class creation uses an authenticated server route", () => {
   assert.doesNotMatch(clientSource, /setDoc\(classReference/);
   assert.match(routeSource, /verifyIdToken\(token\)/);
   assert.match(routeSource, /profile\?\.role !== "teacher"/);
-  assert.match(routeSource, /collection\("classes"\)\.doc\(classCode\)\.set/);
+  assert.match(routeSource, /upsertClassPostgresFirst/);
 });

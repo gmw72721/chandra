@@ -27,8 +27,13 @@ service firebase.storage {
       return firestore.get(/databases/(default)/documents/classes/$(classId)/materialUploadSessions/$(materialId));
     }
 
+    function uploadSessionExists(classId, materialId) {
+      return firestore.exists(/databases/(default)/documents/classes/$(classId)/materialUploadSessions/$(materialId));
+    }
+
     function hasUploadSession(classId, materialId) {
       return isSignedIn()
+        && uploadSessionExists(classId, materialId)
         && uploadSession(classId, materialId).data.teacherId == request.auth.uid
         && uploadSession(classId, materialId).data.expiresAt > request.time;
     }

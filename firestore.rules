@@ -659,6 +659,12 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      match /materialUploadSessions/{materialId} {
+        allow read: if isTargetClassTeacher(classId)
+          && resource.data.teacherId == request.auth.uid;
+        allow write: if false;
+      }
+
       match /studentLearningProfiles/{profileId} {
         allow read: if isTargetClassTeacher(classId);
         allow write: if false;

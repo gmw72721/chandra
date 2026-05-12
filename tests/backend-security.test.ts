@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -97,7 +97,16 @@ test("production backend internal URLs and OpenRouter referer do not silently fa
 
   assert.match(internalNextSource, /raise RuntimeError\(f"NEXT_INTERNAL_BASE_URL or FRONTEND_ORIGIN is required/);
   assert.match(toolsSource, /internal_next_base_url\("PDF retrieval"\)/);
-  assert.match(assetsSource, /internal_next_base_url\("PDF assets"\)/);
+  assert.match(assetsSource, /\/api\/internal\/pdf-page-assets/);
+  assert.match(assetsSource, /BACKEND_SHARED_SECRET/);
+  assert.equal(existsSync(join(repoRoot, "frontend/app/api/internal/pdf-page-assets/route.ts")), true);
+  const assetRoute = readFileSync(join(repoRoot, "frontend/app/api/internal/pdf-page-assets/route.ts"), "utf8");
+  assert.match(assetRoute, /BACKEND_SHARED_SECRET/);
+  assert.match(assetRoute, /timingSafeEqual/);
+  assert.match(assetRoute, /maxRequestedPages = 12/);
+  assert.match(assetRoute, /INTERNAL_PDF_PAGE_ASSET_MAX_TOTAL_BYTES/);
+  assert.match(assetRoute, /getPdfPageAssetRecords/);
+  assert.doesNotMatch(assetRoute, /storagePath: z\.string/);
   assert.match(openRouterSource, /OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production/);
   assert.match(fastApiSource, /OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production/);
   assert.match(inviteRoute, /publicFrontendOrigin/);
@@ -183,7 +192,7 @@ test("Firestore class settings rules accept the current teacher settings schema"
 });
 
 test("teacher controls can pause class chat and one student without exposing content", () => {
-  const managerSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
   const profileSource = readFileSync(join(repoRoot, "frontend/components/StudentProfilePage.tsx"), "utf8");
   const supportRoute = readFileSync(
     join(repoRoot, "frontend/app/api/classes/[classId]/students/[studentId]/support/route.ts"),
@@ -239,7 +248,7 @@ test("class access and student data actions stay on server routes", () => {
   assert.match(studentDataRoute, /authorizeClassTeacher\(request, classId\)/);
   assert.match(studentDataRoute, /Content-Disposition/);
   assert.match(studentDataRoute, /DELETE_STUDENT_CLASS_DATA/);
-  assert.match(studentDataRoute, /collection\("messages"\)/);
+  assert.match(studentDataRoute, /listConversationMessages/);
 });
 
 test("Firestore user theme preference updates only validate theme fields", () => {
@@ -311,6 +320,9 @@ test("account settings route updates profile fields server-side for students and
   assert.match(source, /normalizeTeacherClassThemeColor/);
   assert.match(source, /profileUpdates\.displayName = displayName/);
   assert.match(source, /username/);
+  assert.match(source, /syncEmailReferences/);
+  assert.match(source, /updateStudentEnrollmentIdentity/);
+  assert.match(source, /updateCoTeacherProfile/);
   assert.match(source, /shouldUpdateDisplayName && displayName !== currentDisplayName/);
   assert.match(source, /adminAuth!\.updateUser\(decodedToken\.uid, \{ displayName \}\)/);
   assert.match(source, /where\("teacherId", "==", uid\)/);

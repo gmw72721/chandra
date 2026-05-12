@@ -3,6 +3,9 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
 import { checkAbuseLockout, recordAbuseFailure, resetAbuseFailures } from "@/lib/abuse-lockout";
+import { getTeacherInvitePostgres, markTeacherInviteUsedPostgres } from "@/lib/data/operational";
+import { isPostgresConfigured, shouldFallbackToFirestoreWhenPostgresFails } from "@/lib/data/postgres";
+import { assertAccountUsernameAvailable, upsertAccountProfile } from "@/lib/data/server";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -61,7 +64,10 @@ export async function POST(request: Request) {
     }
 
     const bootstrapInviteIsValid = isValidBootstrapTeacherInviteToken(inviteToken);
-    const inviteReference = bootstrapInviteIsValid
+    const postgresInvite = !bootstrapInviteIsValid && inviteToken && isPostgresConfigured()
+      ? await readTeacherInvitePostgres(inviteTokenHash)
+      : null;
+    const inviteReference = bootstrapInviteIsValid || postgresInvite
       ? null
       : adminDb!.collection("teacherInvites").doc(inviteTokenHash);
 
@@ -75,6 +81,10 @@ export async function POST(request: Request) {
     const email = String(decodedToken.email ?? "").trim().toLowerCase();
     const username = normalizeUsername(body.username, email);
     await assertUsernameIsAvailable(username, decodedToken.uid);
+
+    if (!bootstrapInviteIsValid && postgresInvite && !isUsablePostgresInvite(postgresInvite)) {
+      throw new TeacherSignupError("Teacher signup failed.", 403);
+    }
 
     const profile = {
       createdAt: FieldValue.serverTimestamp(),
@@ -122,9 +132,30 @@ export async function POST(request: Request) {
 
       transaction.set(userReference, profile);
     });
+	    await upsertAccountProfile({
+      id: decodedToken.uid,
+      firebaseUid: decodedToken.uid,
+      email,
+      role: "teacher",
+      displayName,
+      profile,
+      username
+	    });
+
+    if (postgresInvite) {
+      const usedInvite = await markTeacherInviteUsedPostgres({
+        id: inviteTokenHash,
+        usedBy: decodedToken.uid,
+        usedByEmail: email
+      });
+
+      if (!usedInvite) {
+        throw new TeacherSignupError("Teacher signup failed.", 403);
+      }
+    }
 
     await resetAbuseFailures(abuseScope);
-    if (inviteReference) {
+    if (inviteReference || postgresInvite) {
       await writeAuditLog({
         actor: {
           email,
@@ -210,6 +241,29 @@ function resolveInviteDocumentId(inviteToken: string) {
   return /^[a-f0-9]{64}$/i.test(inviteToken) ? inviteToken.toLowerCase() : hashInviteToken(inviteToken);
 }
 
+async function readTeacherInvitePostgres(inviteId: string) {
+  try {
+    return await getTeacherInvitePostgres(inviteId);
+  } catch (caughtError) {
+    if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+      throw caughtError;
+    }
+
+    console.warn("Teacher invite Postgres read failed; using Firestore fallback.", caughtError);
+    return null;
+  }
+}
+
+function isUsablePostgresInvite(invite: Awaited<ReturnType<typeof getTeacherInvitePostgres>>) {
+  return Boolean(
+    invite
+      && !invite.usedAt
+      && !invite.revokedAt
+      && (!invite.expiresAt || invite.expiresAt.getTime() > Date.now())
+      && invite.status === "active"
+  );
+}
+
 function firstString(...values: unknown[]) {
   for (const value of values) {
     if (typeof value === "string" && value.trim()) {
@@ -240,18 +294,9 @@ function normalizeUsername(value: unknown, fallbackEmail: string) {
 }
 
 async function assertUsernameIsAvailable(username: string, uid: string) {
-  if (!username || username.includes("@")) {
-    return;
-  }
+  const available = await assertAccountUsernameAvailable(username, uid);
 
-  const snapshot = await adminDb!
-    .collection("users")
-    .where("username", "==", username)
-    .limit(1)
-    .get();
-  const existingUser = snapshot.docs[0];
-
-  if (existingUser && existingUser.id !== uid) {
+  if (!available) {
     throw new TeacherSignupError("That username is already in use.", 409);
   }
 }

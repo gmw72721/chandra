@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { PDFDocument } from "pdf-lib";
-import { adminDb, adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
+import { adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
 import type { AuthorizedTutorChatScope } from "./tutor-chat-auth";
 import type { MessageAttachment } from "./types";
+import {
+  deleteAttachmentMetadata,
+  getConversationAttachment,
+  getConversationById,
+  listConversationAttachments,
+  updateAttachmentMessageId,
+  upsertMessageAttachment
+} from "./data/conversations";
 
 const maxDocumentIdLength = 200;
 const maxPdfFileBytes = 25 * 1024 * 1024;
@@ -53,13 +61,7 @@ export async function uploadStudentConversationAttachment({
     buffer,
     fileType: validatedFile.fileType
   });
-  const attachmentReference = adminDb!
-    .collection("classes")
-    .doc(scope.classId)
-    .collection("conversations")
-    .doc(conversationId)
-    .collection("attachments")
-    .doc();
+  const attachmentId = randomUUID();
   const now = new Date().toISOString();
   const safeFileName = sanitizeFileName(file.name);
   const storageKey = [
@@ -67,7 +69,7 @@ export async function uploadStudentConversationAttachment({
     scope.classId,
     scope.uid,
     conversationId,
-    `${attachmentReference.id}-${safeFileName}`
+    `${attachmentId}-${safeFileName}`
   ].join("/");
   const initialAttachment = {
     classId: scope.classId,
@@ -83,10 +85,13 @@ export async function uploadStudentConversationAttachment({
     storageKey,
     studentId: scope.uid,
     updatedAt: now,
-    uploadStatus: "uploading"
+    uploadStatus: "uploading" as const
   };
 
-  await attachmentReference.set(initialAttachment);
+  await upsertMessageAttachment({
+    ...initialAttachment,
+    id: attachmentId
+  });
 
   try {
     await adminStorage!.bucket().file(storageKey).save(buffer, {
@@ -99,27 +104,21 @@ export async function uploadStudentConversationAttachment({
       resumable: false
     });
 
-    await attachmentReference.set(
-      {
-        updatedAt: new Date().toISOString(),
-        uploadStatus: "ready"
-      },
-      { merge: true }
-    );
+    const savedAttachment = await upsertMessageAttachment({
+      ...initialAttachment,
+      id: attachmentId,
+      uploadStatus: "ready"
+    });
+    return attachmentRecordToMessageAttachment(savedAttachment);
   } catch (caughtError) {
-    await attachmentReference.set(
-      {
-        updatedAt: new Date().toISOString(),
-        uploadStatus: "failed"
-      },
-      { merge: true }
-    );
+    await upsertMessageAttachment({
+      ...initialAttachment,
+      id: attachmentId,
+      uploadStatus: "failed"
+    }).catch(() => {});
     console.error("Student attachment upload failed.", caughtError);
     throw new StudentAttachmentError("Homework file upload failed. Try again in a moment.", 502);
   }
-
-  const savedAttachment = await attachmentReference.get();
-  return attachmentDocToMessageAttachment(attachmentReference.id, savedAttachment.data() ?? initialAttachment);
 }
 
 export async function listStudentConversationAttachments({
@@ -133,10 +132,10 @@ export async function listStudentConversationAttachments({
   assertSafeDocumentId(conversationId, "Conversation id");
   assertFirebaseAdminReady();
   await verifyStudentConversation({ conversationId, scope });
+  const postgresAttachments = await listConversationAttachments(conversationId);
 
-  const snapshot = await attachmentsCollection(scope.classId, conversationId).orderBy("createdAt", "asc").get();
-  return snapshot.docs
-    .map((attachmentDoc) => attachmentDocToMessageAttachment(attachmentDoc.id, attachmentDoc.data()))
+  return postgresAttachments
+    .map(attachmentRecordToMessageAttachment)
     .filter((attachment) => attachment.studentId === scope.uid && attachment.classId === scope.classId);
 }
 
@@ -174,14 +173,13 @@ export async function deleteStudentConversationAttachment({
   assertFirebaseAdminReady();
   await verifyStudentConversation({ conversationId, scope });
 
-  const attachmentReference = attachmentsCollection(scope.classId, conversationId).doc(attachmentId);
-  const attachmentSnapshot = await attachmentReference.get();
+  const postgresAttachment = await getConversationAttachment(attachmentId);
 
-  if (!attachmentSnapshot.exists) {
+  if (!postgresAttachment) {
     throw new StudentAttachmentError("Attachment was not found.", 404);
   }
 
-  const attachment = attachmentDocToMessageAttachment(attachmentSnapshot.id, attachmentSnapshot.data() ?? {});
+  const attachment = attachmentRecordToMessageAttachment(postgresAttachment);
 
   if (attachment.classId !== scope.classId || attachment.studentId !== scope.uid || attachment.conversationId !== conversationId) {
     throw new StudentAttachmentError("You can only remove your own class attachments.", 403);
@@ -189,7 +187,7 @@ export async function deleteStudentConversationAttachment({
 
   await Promise.all([
     adminStorage!.bucket().file(attachment.storageKey).delete({ ignoreNotFound: true }),
-    attachmentReference.delete()
+    deleteAttachmentMetadata(attachmentId)
   ]);
 }
 
@@ -216,55 +214,41 @@ export async function associateStudentMessageAttachments({
 
   const uniqueAttachmentIds = Array.from(new Set(attachmentIds));
   const now = new Date().toISOString();
-  const attachmentReferences = uniqueAttachmentIds.map((attachmentId) =>
-    attachmentsCollection(scope.classId, conversationId).doc(attachmentId)
-  );
   const attachments: MessageAttachment[] = [];
 
-  await adminDb!.runTransaction(async (transaction) => {
-    const snapshots = await Promise.all(attachmentReferences.map((attachmentReference) => transaction.get(attachmentReference)));
+  for (const attachmentId of uniqueAttachmentIds) {
+    const record = await getConversationAttachment(attachmentId);
 
-    snapshots.forEach((snapshot, index) => {
-      if (!snapshot.exists) {
-        throw new StudentAttachmentError("Attachment was not found.", 404);
-      }
+    if (!record) {
+      throw new StudentAttachmentError("Attachment was not found.", 404);
+    }
 
-      const attachment = attachmentDocToMessageAttachment(snapshot.id, snapshot.data() ?? {});
-      const existingMessageId = String(attachment.messageId ?? "");
+    const attachment = attachmentRecordToMessageAttachment(record);
+    const existingMessageId = String(attachment.messageId ?? "");
 
-      if (
-        attachment.classId !== scope.classId ||
-        attachment.studentId !== scope.uid ||
-        attachment.conversationId !== conversationId
-      ) {
-        throw new StudentAttachmentError("You can only use your own class attachments.", 403);
-      }
+    if (
+      attachment.classId !== scope.classId ||
+      attachment.studentId !== scope.uid ||
+      attachment.conversationId !== conversationId
+    ) {
+      throw new StudentAttachmentError("You can only use your own class attachments.", 403);
+    }
 
-      if (attachment.uploadStatus !== "ready") {
-        throw new StudentAttachmentError("Wait for homework files to finish uploading before sending.", 400);
-      }
+    if (attachment.uploadStatus !== "ready") {
+      throw new StudentAttachmentError("Wait for homework files to finish uploading before sending.", 400);
+    }
 
-      if (existingMessageId && existingMessageId !== messageId) {
-        throw new StudentAttachmentError("Attachment has already been sent with another message.", 400);
-      }
+    if (existingMessageId && existingMessageId !== messageId) {
+      throw new StudentAttachmentError("Attachment has already been sent with another message.", 400);
+    }
 
-      const nextAttachment = {
-        ...attachment,
-        messageId,
-        updatedAt: now
-      };
-
-      attachments.push(nextAttachment);
-      transaction.set(
-        attachmentReferences[index],
-        {
-          messageId,
-          updatedAt: now
-        },
-        { merge: true }
-      );
+    await updateAttachmentMessageId({ attachmentId, messageId });
+    attachments.push({
+      ...attachment,
+      messageId,
+      updatedAt: now
     });
-  });
+  }
 
   return attachments;
 }
@@ -294,13 +278,13 @@ async function readStudentAttachment({
   conversationId: string;
   scope: AuthorizedTutorChatScope;
 }) {
-  const attachmentSnapshot = await attachmentsCollection(scope.classId, conversationId).doc(attachmentId).get();
+  const postgresAttachment = await getConversationAttachment(attachmentId);
 
-  if (!attachmentSnapshot.exists) {
+  if (!postgresAttachment) {
     throw new StudentAttachmentError("Attachment was not found.", 404);
   }
 
-  const attachment = attachmentDocToMessageAttachment(attachmentSnapshot.id, attachmentSnapshot.data() ?? {});
+  const attachment = attachmentRecordToMessageAttachment(postgresAttachment);
 
   if (attachment.classId !== scope.classId || attachment.studentId !== scope.uid || attachment.conversationId !== conversationId) {
     throw new StudentAttachmentError("You can only open your own class attachments.", 403);
@@ -316,22 +300,35 @@ async function verifyStudentConversation({
   conversationId: string;
   scope: AuthorizedTutorChatScope;
 }) {
-  const conversationSnapshot = await adminDb!
-    .collection("classes")
-    .doc(scope.classId)
-    .collection("conversations")
-    .doc(conversationId)
-    .get();
+  const postgresConversation = await getConversationById(conversationId);
 
-  if (!conversationSnapshot.exists) {
+  if (!postgresConversation) {
     throw new StudentAttachmentError("Conversation was not found.", 404);
   }
 
-  const conversation = conversationSnapshot.data() ?? {};
-
-  if (conversation.classId !== scope.classId || conversation.studentId !== scope.uid) {
+  if (postgresConversation.classId !== scope.classId || postgresConversation.studentId !== scope.uid) {
     throw new StudentAttachmentError("You can only use your own class conversations.", 403);
   }
+}
+
+function attachmentRecordToMessageAttachment(record: Awaited<ReturnType<typeof getConversationAttachment>> extends infer T ? NonNullable<T> : never): MessageAttachment {
+  return {
+    id: record.id,
+    conversationId: record.conversationId,
+    messageId: record.messageId,
+    studentId: record.studentId ?? "",
+    classId: record.classId,
+    fileName: record.fileName,
+    fileType: record.fileType,
+    mimeType: record.mimeType,
+    fileSize: record.fileSize,
+    storageKey: record.storageKey,
+    uploadStatus: record.uploadStatus,
+    extractedText: record.extractedText,
+    pageCount: record.pageCount,
+    createdAt: record.createdAt.toISOString(),
+    updatedAt: record.updatedAt.toISOString()
+  };
 }
 
 function validateAttachmentMetadata(file: File): AllowedAttachmentType {
@@ -441,34 +438,6 @@ function matchesMagicBytes(buffer: Buffer, mimeType: string) {
   return false;
 }
 
-function attachmentsCollection(classId: string, conversationId: string) {
-  return adminDb!.collection("classes").doc(classId).collection("conversations").doc(conversationId).collection("attachments");
-}
-
-function attachmentDocToMessageAttachment(id: string, data: Record<string, unknown>): MessageAttachment {
-  return {
-    classId: String(data.classId ?? ""),
-    conversationId: String(data.conversationId ?? ""),
-    createdAt: serializeFirestoreValue(data.createdAt),
-    extractedText: stringOrNull(data.extractedText),
-    fileName: String(data.fileName ?? "homework-file"),
-    fileSize: Number(data.fileSize ?? 0),
-    fileType: data.fileType === "pdf" ? "pdf" : "image",
-    id,
-    messageId: stringOrNull(data.messageId),
-    mimeType: String(data.mimeType ?? ""),
-    pageCount: numberOrNull(data.pageCount),
-    storageKey: String(data.storageKey ?? ""),
-    studentId: String(data.studentId ?? ""),
-    updatedAt: serializeFirestoreValue(data.updatedAt),
-    uploadStatus: normalizeUploadStatus(data.uploadStatus)
-  };
-}
-
-function normalizeUploadStatus(value: unknown): MessageAttachment["uploadStatus"] {
-  return value === "uploading" || value === "failed" ? value : "ready";
-}
-
 function sanitizeFileName(fileName: string) {
   const extension = fileExtension(fileName);
   const baseName = fileName
@@ -485,32 +454,6 @@ function sanitizeFileName(fileName: string) {
 function fileExtension(fileName: string) {
   const match = fileName.toLowerCase().match(/\.[a-z0-9]+$/);
   return match?.[0] ?? "";
-}
-
-function serializeFirestoreValue(value: unknown) {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  if (value && typeof value === "object" && "toDate" in value && typeof value.toDate === "function") {
-    return (value.toDate() as Date).toISOString();
-  }
-
-  return value ?? "";
-}
-
-function stringOrNull(value: unknown) {
-  const text = String(value ?? "").trim();
-  return text || null;
-}
-
-function numberOrNull(value: unknown) {
-  if (value === null || value === undefined || value === "") {
-    return null;
-  }
-
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? numberValue : null;
 }
 
 function assertSafeDocumentId(value: string, label: string) {

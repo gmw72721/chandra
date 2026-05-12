@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
 import { adminDb } from "./firebase-admin";
+import { checkRateLimitPostgres } from "./data/operational";
+import { isPostgresConfigured, shouldFallbackToFirestoreWhenPostgresFails, withPostgresTransaction } from "./data/postgres";
 
 export type FirestoreRateLimitResult = {
   allowed: boolean;
@@ -31,6 +33,30 @@ export async function checkFirestoreRateLimit({
 
   const now = Date.now();
   const documentId = createHash("sha256").update(`${namespace}:${key}`).digest("hex");
+  const windowKey = String(Math.floor(now / windowMs));
+
+  if (isPostgresConfigured()) {
+    try {
+      return await withPostgresTransaction((client) =>
+        checkRateLimitPostgres({
+          id: documentId,
+          keyHash: documentId,
+          limit,
+          namespace,
+          now: new Date(now),
+          windowKey,
+          windowMs
+        }, client)
+      );
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("Rate limit Postgres path failed; using Firestore fallback.", caughtError);
+    }
+  }
+
   const reference = adminDb.collection("rateLimits").doc(documentId);
 
   return adminDb.runTransaction(async (transaction) => {

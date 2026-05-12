@@ -154,10 +154,22 @@ async def close_shared_http_clients() -> None:
 
     try:
         from backend.agent.tools import close_next_search_http_client
-        from backend.retrieval.pdf_page_assets import close_next_page_asset_http_client
 
         await close_next_search_http_client()
-        await close_next_page_asset_http_client()
+    except Exception:
+        pass
+
+    try:
+        from backend.retrieval.pdf_page_assets import close_next_asset_http_client
+
+        await close_next_asset_http_client()
+    except Exception:
+        pass
+
+    try:
+        from backend.agent.graph import close_ai_usage_adjustment_http_client
+
+        await close_ai_usage_adjustment_http_client()
     except Exception:
         pass
 
@@ -193,6 +205,7 @@ class LangGraphChatRequest(BaseModel):
     aiUsageReservation: Optional[dict[str, Any]] = None
     sourceUsage: Optional[dict[str, Any]] = None
     studentLearningProfileContext: Optional[dict[str, Any]] = None
+    studentAttachmentFiles: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
     messages: list[dict[str, Any]] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES_PER_REQUEST)
 
 
@@ -368,6 +381,7 @@ async def langgraph_chat(
             ai_usage_reservation=request.aiUsageReservation,
             source_usage=request.sourceUsage,
             student_profile_context=request.studentLearningProfileContext,
+            student_attachment_files=request.studentAttachmentFiles,
             professor_id=request.professorId,
             professor_name=request.professorName,
             conversation_id=request.conversationId,
@@ -417,6 +431,7 @@ async def langgraph_chat_stream(
                 ai_usage_reservation=request.aiUsageReservation,
                 source_usage=request.sourceUsage,
                 student_profile_context=request.studentLearningProfileContext,
+                student_attachment_files=request.studentAttachmentFiles,
                 professor_id=request.professorId,
                 professor_name=request.professorName,
                 conversation_id=request.conversationId,
@@ -1124,8 +1139,11 @@ def build_core_tutor_instructions(
         "Tutoring method:",
         *tutor_behavior_lines(policy_title),
         *answer_policy_lines(answer_policy),
-        "- When the attempt-first rule is satisfied or not applicable, ask a targeted question or give a small nudge that helps the student identify their own next move. Never state the next move for the exact task.",
+        "- When the attempt-first rule is satisfied or not applicable, ask the student to complete one small piece; do not provide the result or a chain of several moves.",
         "- When a student gives a calculation, answer, or conclusion, verify it before affirming it. If it is incorrect, point out the first wrong step or value and continue from the corrected idea.",
+        "",
+        "Tutoring response shape:",
+        *tutoring_response_shape_lines(),
         "",
         "Academic integrity boundaries:",
         *academic_integrity_lines(answer_policy),
@@ -1217,8 +1235,19 @@ def response_length_style_line(response_length: str) -> str:
     if response_length == "extended":
         return "- You may give detailed multi-step explanations and relevant quoted class-material passages when allowed."
     if response_length == "long":
-        return "- Give fuller explanations with clear steps and enough context for math-heavy examples."
+        return "- Give fuller explanations with clear steps and enough context for multi-step examples."
     return "- Keep replies focused for chat, with enough detail to move the student forward."
+
+
+def tutoring_response_shape_lines() -> list[str]:
+    return [
+        "- For substantive tutoring replies, usually use this shape: brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when class material was actually used.",
+        "- Orientation names the kind of task or thinking move the student is doing; it should not repeat the hint or begin solving the task.",
+        "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
+        "- Next step asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
+        "- Do not repeat the same advice in the orientation, hint, explanation, and next step; each included section must add distinct value.",
+        "- If the configured help level or attempt-first rule allows only limited help, make the next step a request for the student's attempt or the exact place they are stuck.",
+    ]
 
 
 def tutor_behavior_lines(policy_title: str) -> list[str]:
@@ -1253,8 +1282,9 @@ def answer_policy_lines(answer_policy: dict[str, bool]) -> list[str]:
         *(
             [
                 "- Require a student attempt before substantial help on graded-looking work.",
-                "- If the student asks to see, read, pull up, copy, quote, recite, identify, or locate the wording of a specific problem, exercise, question, passage, or page, or only supplies a specific problem/exercise/page/title reference without asking for solving help, treat that as source lookup, not solving help: retrieve the exact source and provide the visible task text when quotation is allowed, without solving it or asking for an attempt first.",
+                "- If the student asks to see, read, pull up, copy, quote, recite, identify, or locate the wording of a specific problem, exercise, question, passage, or page, or only supplies a specific problem/exercise/page/title reference such as `2.20` without asking for solving help, treat that as source lookup, not solving help: retrieve the exact source and provide the visible task text when quotation is allowed, without solving it, asking for an attempt, or asking for a page photo, textbook title, full problem text, or source name before retrieval.",
                 "- If a student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, first ask what they have tried or where they are stuck.",
+                "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short: at most one brief orientation sentence plus one conceptual hint or one request for the student's attempted step.",
                 "- In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example.",
                 "- Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task.",
                 "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. A similar example must use meaningfully different facts, data, prompt details, or requirements so it does not complete any part of the assigned response.",
@@ -1311,7 +1341,7 @@ def source_usage_lines(source_usage: dict[str, Any]) -> list[str]:
         ),
         *(
             [
-                "- When a student asks to see, pull up, read, copy, quote, recite, identify, locate, or restate a specific problem, exercise, question, passage, or page from selected uploaded class material, or only supplies a specific problem/exercise/page/title reference without asking for solving help, quote the relevant passage exactly from the visible text with source/page context, then explain or paraphrase only if helpful. For problem-statement lookup, give only the problem text in the Problem section; do not include location/source context, offers, hints, or commentary in that section, and do not solve it or ask for an attempt first. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words."
+                "- When a student asks to see, pull up, read, copy, quote, recite, identify, locate, or restate a specific problem, exercise, question, passage, or page from selected uploaded class material, or only supplies a specific problem/exercise/page/title reference without asking for solving help, quote the relevant passage exactly from the visible text with source/page context, then explain or paraphrase only if helpful. For problem-statement lookup, first identify the exact academic exercise/question/task statement, then give only that problem text in the Problem section; do not include `You said...`, lookup/checking status, requests for page/title/textbook, location/source context, offers, hints, or commentary in that section, and do not solve it or ask for an attempt first. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words."
             ]
             if source_usage["quoteSourcePassages"]
             else ["- Include at most one short quote of 20 words or fewer from source material when useful, then paraphrase the idea."]

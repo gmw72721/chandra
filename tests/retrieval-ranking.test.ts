@@ -260,7 +260,7 @@ test("explicit problem lookup prefers an actual heading over a reference mention
   assert.equal(result.hits[0]?.chunk.id, "actual-2-14");
 });
 
-test("explicit problem lookup narrows to top 3 when scores are not close", () => {
+test("explicit problem lookup narrows to top 1 when the second score is not close", () => {
   const exactProblem = makeDocument({
     id: "reader-exercises",
     kind: "textbook",
@@ -297,7 +297,60 @@ test("explicit problem lookup narrows to top 3 when scores are not close", () =>
     queryVector: [1, 0]
   });
 
-  assert.equal(result.hits.length, 3);
+  assert.equal(result.hits.length, 1);
+});
+
+test("explicit problem lookup returns top 2 when scores are close", () => {
+  const firstPage = makeDocument({
+    id: "reader-exercises-a",
+    kind: "textbook",
+    title: "Linear Algebra Reader",
+    chunks: [
+      {
+        content: "Exercises 79. 2 .14 . Given the setup of Exercise 2.13, prove the inequalities.",
+        id: "actual-2-14-a",
+        problemNumbers: ["2.14"],
+        vector: [1, 0]
+      }
+    ]
+  });
+  const secondPage = makeDocument({
+    id: "reader-exercises-b",
+    kind: "textbook",
+    title: "Linear Algebra Reader",
+    chunks: [
+      {
+        content: "Exercises 80. Problem 2.14 asks for a closely related inequality proof.",
+        id: "actual-2-14-b",
+        problemNumbers: ["2.14"],
+        vector: [0.99, 0.01]
+      }
+    ]
+  });
+  const unrelatedPage = makeDocument({
+    id: "reader-reference",
+    kind: "textbook",
+    title: "Linear Algebra Reader",
+    chunks: [
+      {
+        content: "Reference page mentioning formula 2.14 in passing.",
+        id: "reference-2-14",
+        problemNumbers: ["2.14"],
+        vector: [0.1, 0.9]
+      }
+    ]
+  });
+
+  const result = rankMaterialChunks({
+    candidates: toCandidates([firstPage, secondPage, unrelatedPage]),
+    limit: 5,
+    query: "problem 2.14",
+    queryVector: [1, 0]
+  });
+
+  assert.equal(result.hits.length, 2);
+  assert.equal(result.hits[0]?.chunk.id, "actual-2-14-a");
+  assert.equal(result.hits[1]?.chunk.id, "actual-2-14-b");
 });
 
 test("practice problems and solutions have distinct material types", () => {
@@ -402,6 +455,11 @@ test("problem number matching handles OCR-spaced dotted exercise numbers", () =>
     problemNumbersFromText("no 2 14 Given the setup of Exercise 2.13").includes("2.14")
   );
   assert.ok(problemNumbersFromText("2 .14. Given the setup").includes("2.14"));
+});
+
+test("problem number matching handles bare dotted problem lookups", () => {
+  assert.deepEqual(problemNumbersFromText("2.20"), ["2.20"]);
+  assert.deepEqual(problemNumbersFromText("2.20?"), ["2.20"]);
 });
 
 test("concept method queries with equations do not force exact lookup", () => {

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getAccountProfile, getClassSnapshotPostgresFirst, listStudentClassIdsPostgresFirst } from "@/lib/data/server";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 import {
   normalizeTeacherClassAppearance,
@@ -28,10 +29,9 @@ export async function GET(request: Request) {
 
     assertFirebaseAdminAuthReady();
     const decodedToken = await adminAuth!.verifyIdToken(token);
-    const profileSnapshot = await adminDb!.collection("users").doc(decodedToken.uid).get();
-    const profile = profileSnapshot.data();
+    const profile = await getAccountProfile(decodedToken.uid);
 
-    if (!profileSnapshot.exists || profile?.role !== "student") {
+    if (profile?.role !== "student") {
       return NextResponse.json({ error: "Use a student account to load classes." }, { status: 403 });
     }
 
@@ -51,6 +51,12 @@ export async function GET(request: Request) {
     }
 
     if (email) {
+      const postgresClassIds = await listStudentClassIdsPostgresFirst({ email, studentId: decodedToken.uid });
+
+      for (const classId of postgresClassIds) {
+        classIds.add(classId);
+      }
+
       const rosterClassIds = await getRosterClassIdsByEmail(email);
 
       for (const classId of rosterClassIds) {
@@ -132,13 +138,13 @@ async function getRosterClassIdsByUid(uid: string) {
 }
 
 async function getStudentClassSummary(classId: string): Promise<StudentClassSummary | null> {
-  const classSnapshot = await adminDb!.collection("classes").doc(classId).get();
+  const classSnapshot = await getClassSnapshotPostgresFirst(classId);
 
   if (!classSnapshot.exists) {
     return null;
   }
 
-  const classData = classSnapshot.data() ?? {};
+  const classData = classSnapshot.data;
 
   return {
     appearance: normalizeTeacherClassAppearance(classData.appearance),
@@ -149,9 +155,15 @@ async function getStudentClassSummary(classId: string): Promise<StudentClassSumm
       ? { openingMessage: String(classData.openingMessage ?? "").trim() }
       : {}),
     section: String(classData.section ?? "").trim(),
-    studentChatEnabled: classData.tutorAccess?.enabled !== false && classData.studentChatEnabled !== false,
+    studentChatEnabled: readTutorAccessEnabled(classData.tutorAccess) !== false && classData.studentChatEnabled !== false,
     themeColor: normalizeTeacherClassThemeColor(classData.themeColor)
   };
+}
+
+function readTutorAccessEnabled(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as { enabled?: unknown }).enabled
+    : undefined;
 }
 
 function getBearerToken(request: Request) {

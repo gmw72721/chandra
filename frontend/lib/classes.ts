@@ -4,17 +4,11 @@ import {
   collection,
   doc,
   getDoc,
-  getDocs,
-  limit,
   onSnapshot,
   query,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
   where
 } from "firebase/firestore";
 import { apiUrl } from "./api-client";
-import { generateClassCode } from "./class-code";
 import {
   normalizeTeacherClassAppearance,
   normalizeTeacherClassThemeColor,
@@ -36,8 +30,6 @@ import {
 import { auth, db, isFirebaseConfigured } from "./firebase";
 import type { TutorKnowledgeKind, TutorKnowledgeSourceMode } from "./tutor-knowledge";
 import type { TutorKnowledgePriority } from "./types";
-
-const maxClassCodeAttempts = 10;
 
 export type TeacherClass = {
   id: string;
@@ -89,17 +81,23 @@ export type ClassMaterial = {
   fileSize?: number;
   characterCount?: number;
   chunkCount?: number;
+  metadata?: Record<string, unknown>;
+  ocrPageCount?: number;
+  pageCount?: number;
   priority?: TutorKnowledgePriority;
   requireCitations?: boolean;
   sourceMode?: TutorKnowledgeSourceMode;
-  status: "uploaded" | "processing" | "ready";
+  status: "uploaded" | "processing" | "ready" | "failed";
   teacherOnly?: boolean;
+  visualPageCount?: number;
   addedAt?: unknown;
+  processingJob?: MaterialJobProgress;
 };
 
 export type MaterialJobStep =
   | "upload_received"
   | "reading_file"
+  | "ocr_material"
   | "chunking_material"
   | "embedding_chunks"
   | "saving_to_class"
@@ -227,19 +225,50 @@ export function subscribeToClassMaterials(
   callback: (materials: ClassMaterial[]) => void,
   onError?: (error: Error) => void
 ) {
-  assertFirestoreReady();
+  let isSubscribed = true;
+  let pollTimer: number | undefined;
 
-  return onSnapshot(
-    collection(db!, "classes", classId, "materials"),
-    (snapshot) => {
-      const materials = snapshot.docs
-        .map((materialDoc) => ({ id: materialDoc.id, ...materialDoc.data() }) as ClassMaterial)
-        .sort((firstMaterial, secondMaterial) => firstMaterial.title.localeCompare(secondMaterial.title));
+  const loadMaterials = async () => {
+    try {
+      if (!auth?.currentUser) {
+        throw new Error("Sign in as the class teacher to load tutor knowledge.");
+      }
 
-      callback(materials);
-    },
-    (error) => onError?.(error)
-  );
+      const token = await auth.currentUser.getIdToken();
+      const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(classId)}/materials`), {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      const data = (await response.json().catch(() => ({}))) as { error?: string; materials?: ClassMaterial[] };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Tutor knowledge load failed.");
+      }
+
+      if (isSubscribed) {
+        callback((data.materials ?? []).sort((firstMaterial, secondMaterial) => firstMaterial.title.localeCompare(secondMaterial.title)));
+      }
+    } catch (caughtError) {
+      if (isSubscribed) {
+        onError?.(caughtError instanceof Error ? caughtError : new Error("Tutor knowledge load failed."));
+      }
+    } finally {
+      if (isSubscribed) {
+        pollTimer = window.setTimeout(loadMaterials, 3000);
+      }
+    }
+  };
+
+  void loadMaterials();
+
+  return () => {
+    isSubscribed = false;
+
+    if (pollTimer) {
+      window.clearTimeout(pollTimer);
+    }
+  };
 }
 
 export async function createTeacherClass({
@@ -284,23 +313,31 @@ export async function createTeacherClass({
 export async function ensureClassJoinCode(classId: string) {
   assertFirestoreReady();
 
-  const classReference = doc(db!, "classes", classId);
-  const classSnapshot = await getDoc(classReference);
-
-  if (!classSnapshot.exists()) {
-    throw new Error("Class not found.");
-  }
-
-  const existingJoinCode = classSnapshot.data().joinCode;
+  const classSnapshot = await getDoc(doc(db!, "classes", classId));
+  const existingJoinCode = classSnapshot.exists() ? classSnapshot.data().joinCode : "";
 
   if (typeof existingJoinCode === "string" && existingJoinCode.trim()) {
     return existingJoinCode;
   }
 
-  const joinCode = await createUniqueClassCode();
-  await updateDoc(classReference, { joinCode });
+  if (!auth?.currentUser) {
+    throw new Error("Sign in as the class teacher to create an invite code.");
+  }
 
-  return joinCode;
+  const token = await auth.currentUser.getIdToken();
+  const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(classId)}/invite-code`), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+  const data = (await response.json().catch(() => ({}))) as { error?: string; joinCode?: string };
+
+  if (!response.ok || !data.joinCode) {
+    throw new Error(data.error ?? "Class invite code reset failed.");
+  }
+
+  return data.joinCode;
 }
 
 export async function updateTeacherClassSettings({
@@ -346,27 +383,44 @@ export async function updateTeacherClassSettings({
 }) {
   assertFirestoreReady();
 
-  await updateDoc(doc(db!, "classes", classId), {
-    answerPolicy,
-    appearance: normalizeTeacherClassAppearance(appearance),
-    behaviorInstructions: behaviorInstructions.trim(),
-    behaviorTitle: behaviorTitle.trim(),
-    defaultAssignmentContext: defaultAssignmentContext.trim(),
-    modelSettings,
-    name: name.trim(),
-    notificationSettings,
-    openingMessage: openingMessage.trim(),
-    privacySettings,
-    refusalStyle: refusalStyle.trim(),
-    responseFormat,
-    section: section.trim(),
-    sourceDefaults,
-    sourceUsage,
-    studentFacingInstructions: studentFacingInstructions.trim(),
-    studentChatEnabled: tutorAccess.enabled,
-    tutorAccess,
-    themeColor: normalizeTeacherClassThemeColor(themeColor)
+  if (!auth?.currentUser) {
+    throw new Error("Sign in as the class teacher to update class settings.");
+  }
+
+  const token = await auth.currentUser.getIdToken();
+  const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(classId)}/settings`), {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      answerPolicy,
+      appearance: normalizeTeacherClassAppearance(appearance),
+      behaviorInstructions: behaviorInstructions.trim(),
+      behaviorTitle: behaviorTitle.trim(),
+      defaultAssignmentContext: defaultAssignmentContext.trim(),
+      modelSettings,
+      name: name.trim(),
+      notificationSettings,
+      openingMessage: openingMessage.trim(),
+      privacySettings,
+      refusalStyle: refusalStyle.trim(),
+      responseFormat,
+      section: section.trim(),
+      sourceDefaults,
+      sourceUsage,
+      studentFacingInstructions: studentFacingInstructions.trim(),
+      studentChatEnabled: tutorAccess.enabled,
+      tutorAccess,
+      themeColor: normalizeTeacherClassThemeColor(themeColor)
+    })
   });
+  const data = (await response.json().catch(() => ({}))) as { error?: string };
+
+  if (!response.ok) {
+    throw new Error(data.error ?? "Class settings update failed.");
+  }
 }
 
 export async function addStudentToClass({
@@ -379,45 +433,32 @@ export async function addStudentToClass({
   email: string;
 }) {
   assertFirestoreReady();
+  if (!auth?.currentUser) {
+    throw new Error("Sign in as the class teacher to add students.");
+  }
 
   const normalizedEmail = email.trim().toLowerCase();
-  const studentId = encodeURIComponent(normalizedEmail);
-
-  await setDoc(doc(db!, "classes", classId, "students", studentId), {
-    email: normalizedEmail,
-    displayName: displayName.trim(),
-    addedAt: serverTimestamp()
+  const token = await auth.currentUser.getIdToken();
+  const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(classId)}/students`), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      displayName,
+      email: normalizedEmail
+    })
   });
+  const data = (await response.json().catch(() => ({}))) as { error?: string };
+
+  if (!response.ok) {
+    throw new Error(data.error ?? "Student add failed.");
+  }
 }
 
 function assertFirestoreReady() {
   if (!isFirebaseConfigured || !db) {
     throw new Error("Firebase is not configured. Add NEXT_PUBLIC_FIREBASE_* values to .env.local.");
   }
-}
-
-async function createUniqueClassCode() {
-  for (let attempt = 0; attempt < maxClassCodeAttempts; attempt += 1) {
-    const classCode = generateClassCode();
-
-    if (await isClassCodeAvailable(classCode)) {
-      return classCode;
-    }
-  }
-
-  throw new Error("Could not create a unique class code. Please try again.");
-}
-
-async function isClassCodeAvailable(classCode: string) {
-  const classSnapshot = await getDoc(doc(db!, "classes", classCode));
-
-  if (classSnapshot.exists()) {
-    return false;
-  }
-
-  const joinCodeSnapshot = await getDocs(
-    query(collection(db!, "classes"), where("joinCode", "==", classCode), limit(1))
-  );
-
-  return joinCodeSnapshot.empty;
 }

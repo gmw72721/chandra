@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { createMaterialUploadSession } from "@/lib/data/materials";
+import { tryPostgresData } from "@/lib/data/server";
 import { TutorKnowledgeHttpError, authorizeClassTeacher } from "@/lib/tutor-knowledge-server";
 import { adminDb } from "@/lib/firebase-admin";
 
@@ -21,6 +23,14 @@ export async function POST(request: Request) {
 
     const { uid } = await authorizeClassTeacher(request, classId);
     const expiresAt = Timestamp.fromMillis(Date.now() + 30 * 60 * 1000);
+    await tryPostgresData("material.upload_session.write", () =>
+      createMaterialUploadSession({
+        classId,
+        expiresAt: expiresAt.toDate(),
+        materialId,
+        teacherId: uid
+      })
+    );
 
     await adminDb!
       .collection("classes")

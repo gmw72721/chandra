@@ -64,6 +64,101 @@ export type SourceChunk = {
   vectorDistance?: number;
 };
 
+export type PdfMaterialMetadata = {
+  materialId: string;
+  classId: string;
+  courseId: string;
+  professorId: string;
+  teacherId: string;
+  title: string;
+  materialType: string;
+  contentType: string;
+  fileName: string;
+  fileSize: number;
+  storageBucket: string;
+  storagePath: string;
+  storageUri: string;
+  fullPdfBucket?: string | null;
+  fullPdfPath?: string | null;
+  fullPdfUri?: string | null;
+  fullPdfMimeType?: string | null;
+  fullPdfSize?: number | null;
+  fullPdfSha256?: string | null;
+  sourceKind: "file" | "storage" | "url";
+  ocrProvider: string;
+  ocrSource: string;
+  ocrConfidence?: number | null;
+  pageCount: number;
+  characterCount: number;
+};
+
+export type PdfOcrPageMetadata = {
+  materialId: string;
+  classId: string;
+  courseId: string;
+  professorId: string;
+  teacherId: string;
+  title: string;
+  materialType: string;
+  pageNumber: number;
+  pageStart: number;
+  pageEnd: number;
+  ocrText: string;
+  ocrProvider: string;
+  ocrSource: string;
+  ocrConfidence?: number | null;
+  embedding?: number[];
+  embeddingCreatedAt?: string;
+  embeddingDimensions?: number;
+  embeddingModel?: string;
+  embeddingProvider?: string;
+  embeddingTaskType?: string;
+  storageBucket: string;
+  storagePath: string;
+  fullPdfBucket?: string | null;
+  fullPdfPath?: string | null;
+  fullPdfUri?: string | null;
+  fullPdfMimeType?: string | null;
+  fullPdfSize?: number | null;
+  fullPdfSha256?: string | null;
+  pageAssetBucket?: string | null;
+  pageAssetPath?: string | null;
+  pageAssetUri?: string | null;
+  pageAssetMimeType?: string | null;
+  pageAssetSize?: number | null;
+  pageAssetSha256?: string | null;
+  pageAssetStorageBucket?: string | null;
+  pageAssetStoragePath?: string | null;
+  pageAssetSizeBytes?: number | null;
+  pageAssetChecksumSha256?: string | null;
+};
+
+export type PdfDetectedProblemMetadata = {
+  materialId: string;
+  classId: string;
+  courseId: string;
+  professorId: string;
+  teacherId: string;
+  title: string;
+  materialType: string;
+  problemNumber: string;
+  pageStart: number;
+  pageEnd: number;
+  problemText: string;
+  source: string;
+  confidence?: number | null;
+  ocrProvider: string;
+  ocrSource: string;
+  embedding?: number[];
+  embeddingCreatedAt?: string;
+  embeddingDimensions?: number;
+  embeddingModel?: string;
+  embeddingProvider?: string;
+  embeddingTaskType?: string;
+  storageBucket: string;
+  storagePath: string;
+};
+
 export type TutorKnowledgePriority = "primary" | "normal" | "low";
 
 export type Course = {
@@ -132,6 +227,8 @@ export type StudentConversationSummary = {
   lastMessageAt: unknown;
   messageCount: number;
   assignment?: string;
+  contextMemory?: ChatContextMemory;
+  contextUpdatedAt?: unknown;
   tags?: string[];
 };
 
@@ -218,11 +315,47 @@ export type TutorStructuredOutput = {
 };
 
 export type TutorSource = {
+  id?: string;
   title: string;
   materialType: string;
   citationsRequired?: boolean;
   pageNumber?: number;
   problemNumber?: string;
+};
+
+export type KnowledgeItemKind = "problem" | "pdf_page" | "student_upload";
+
+export type KnowledgeItemUsedAs =
+  | "active_problem"
+  | "problem_source"
+  | "supporting_context"
+  | "definition_reference"
+  | "theorem_reference"
+  | "example_reference"
+  | "student_attempt";
+
+export type KnowledgeUiColorToken = "blue" | "neutral" | "purple" | "green" | "orange";
+
+export type KnowledgeItem = {
+  id: string;
+  chatId: string;
+  classId?: string;
+  assignmentId?: string;
+  kind: KnowledgeItemKind;
+  sourceName: string;
+  sourceId?: string;
+  pdfId?: string;
+  page?: number;
+  problemId?: string;
+  content?: string;
+  ocrText?: string;
+  summary?: string;
+  usedAs: KnowledgeItemUsedAs;
+  uiColor?: KnowledgeUiColorToken;
+  reason: string;
+  linkedProblemId?: string;
+  createdAt: unknown;
+  updatedAt: unknown;
 };
 
 export type ConversationReviewStatus =
@@ -338,10 +471,20 @@ export type TeacherConversationReviewSummary = {
 };
 
 export type TutorTrace = {
+  activeMaterialId?: string;
+  activePage?: number;
+  activeProblemNumbers?: string[];
+  decisionSource?: string;
+  failedSearchesSkipped?: string[];
   finishReason?: string;
   inputTokenBreakdown?: TutorInputTokenSection[];
+  knowledgeItems?: KnowledgeItem[];
+  memoryUsed?: boolean;
   modelCallUsage?: TutorModelCallUsage[];
+  retrievalDecision?: Record<string, unknown>;
+  retrievalReason?: string;
   searchQueries: string[];
+  selectedMetadataRecords?: Array<Record<string, unknown>>;
   selectedPages: Array<{
     citationLabel?: string;
     docId?: string;
@@ -424,10 +567,64 @@ export type TutorDebugInfo = {
 
 export type StudentAiUsageStatus = {
   blocked: boolean;
+  dailyLimit?: number;
+  dailyUsed?: number;
   nearLimit: boolean;
   resetHint: string;
   todayPercentRemaining: number;
   weekPercentRemaining: number;
+  weeklyLimit?: number;
+  weeklyUsed?: number;
+};
+
+export type UsageSummary = {
+  dailyUsed: number;
+  dailyLimit: number;
+  weeklyUsed: number;
+  weeklyLimit: number;
+  todayPercentLeft: number;
+  weekPercentLeft: number;
+};
+
+export type ChatContextMemory = {
+  activePdfId?: string;
+  activePdfName?: string;
+  activeProblemId?: string;
+  activePageNumber?: number;
+  currentProblem?: {
+    label?: string;
+    problemNumber?: string;
+    title?: string;
+    sourceName?: string;
+    pageNumber?: number;
+    sectionTitle?: string;
+    ocrConfidence?: number;
+    problemText?: string;
+  };
+  savedProblems?: Array<{
+    label?: string;
+    problemNumber?: string;
+    title?: string;
+    sourceName?: string;
+    pageNumber?: number;
+    sectionTitle?: string;
+    ocrConfidence?: number;
+    problemText?: string;
+  }>;
+  sourcesUsed?: Array<{
+    id?: string;
+    sourceName?: string;
+    pageNumber?: number;
+    problemNumber?: string;
+    label?: string;
+  }>;
+  failedSearches?: Array<{
+    query: string;
+    reason?: string;
+    timestamp?: string;
+  }>;
+  retrievalReason?: string;
+  rawSourceIds?: string[];
 };
 
 export type LearningStrategyTutorMove =

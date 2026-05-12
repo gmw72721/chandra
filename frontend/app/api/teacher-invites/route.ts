@@ -2,6 +2,15 @@ import { createHash, randomBytes } from "crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
+import { getAccountProfile } from "@/lib/data/server";
+import {
+  createTeacherInvitePostgres,
+  getTeacherInvitePostgres,
+  listTeacherInvitesPostgres,
+  revokeTeacherInvitePostgres,
+  type TeacherInviteRecord
+} from "@/lib/data/operational";
+import { isPostgresConfigured, shouldFallbackToFirestoreWhenPostgresFails } from "@/lib/data/postgres";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -17,6 +26,16 @@ export async function GET(request: Request) {
   try {
     const teacher = await authorizeTeacherInviteRequest(request, "list active invites");
     const frontendOrigin = publicFrontendOrigin(request);
+    const postgresInvites = await readPostgresInvites(teacher.uid);
+
+    if (postgresInvites.length) {
+      return NextResponse.json({
+        invites: postgresInvites
+          .map((invite) => inviteRecordToResponse(invite, frontendOrigin))
+          .sort((firstInvite, secondInvite) => secondInvite.createdAt.localeCompare(firstInvite.createdAt))
+      });
+    }
+
     const snapshot = await adminDb!
       .collection("teacherInvites")
       .where("createdByUid", "==", teacher.uid)
@@ -40,14 +59,23 @@ export async function POST(request: Request) {
     const expiresAtDate = new Date(Date.now() + inviteTtlDays * 24 * 60 * 60 * 1000);
     const inviteUrl = buildTeacherInviteUrl(publicFrontendOrigin(request), inviteToken);
 
-    await adminDb!.collection("teacherInvites").doc(tokenHash).set({
-      createdAt: FieldValue.serverTimestamp(),
+    const postgresInvite = await writePostgresInvite({
+      createdBy: teacher.uid,
       createdByEmail: teacher.email,
-      createdByUid: teacher.uid,
-      expiresAt: Timestamp.fromDate(expiresAtDate),
-      revokedAt: null,
+      expiresAt: expiresAtDate,
       tokenHash
     });
+
+    if (!postgresInvite) {
+      await adminDb!.collection("teacherInvites").doc(tokenHash).set({
+        createdAt: FieldValue.serverTimestamp(),
+        createdByEmail: teacher.email,
+        createdByUid: teacher.uid,
+        expiresAt: Timestamp.fromDate(expiresAtDate),
+        revokedAt: null,
+        tokenHash
+      });
+    }
 
     await writeAuditLog({
       actor: {
@@ -85,18 +113,27 @@ export async function DELETE(request: Request) {
     }
 
     const inviteReference = adminDb!.collection("teacherInvites").doc(inviteId);
-    const inviteSnapshot = await inviteReference.get();
-    const invite = inviteSnapshot.data();
+    const postgresInvite = await readPostgresInvite(inviteId);
+    const inviteSnapshot = postgresInvite ? null : await inviteReference.get();
+    const invite = inviteSnapshot?.data();
 
-    if (!inviteSnapshot.exists || invite?.createdByUid !== teacher.uid) {
+    if (
+      (!postgresInvite && !inviteSnapshot?.exists)
+      || (postgresInvite && postgresInvite.createdBy !== teacher.uid)
+      || (!postgresInvite && invite?.createdByUid !== teacher.uid)
+    ) {
       return NextResponse.json({ error: "Choose an invite to revoke." }, { status: 404 });
     }
 
-    if (invite?.usedAt) {
+    if (postgresInvite?.usedAt || invite?.usedAt) {
       return NextResponse.json({ error: "Used invites cannot be revoked." }, { status: 409 });
     }
 
-    if (!invite?.revokedAt) {
+    if (postgresInvite && !postgresInvite.revokedAt) {
+      await revokePostgresInvite({ id: inviteId, revokedBy: teacher.uid, revokedByEmail: teacher.email });
+    }
+
+    if (!postgresInvite && !invite?.revokedAt) {
       await inviteReference.set(
         {
           revokedAt: FieldValue.serverTimestamp(),
@@ -134,10 +171,11 @@ async function authorizeTeacherInviteRequest(request: Request, action: string): 
 
   assertFirebaseAdminAuthReady();
   const decodedToken = await adminAuth!.verifyIdToken(token);
-  const profileSnapshot = await adminDb!.collection("users").doc(decodedToken.uid).get();
-  const profile = profileSnapshot.data();
+  const postgresProfile = await getAccountProfile(decodedToken.uid);
+  const profileSnapshot = postgresProfile ? null : await adminDb!.collection("users").doc(decodedToken.uid).get();
+  const profile = postgresProfile ?? profileSnapshot?.data();
 
-  if (!profileSnapshot.exists || profile?.role !== "teacher") {
+  if ((!postgresProfile && !profileSnapshot?.exists) || profile?.role !== "teacher") {
     throw new TeacherInviteRouteError(`Use a teacher account to ${action}.`, 403);
   }
 
@@ -145,6 +183,79 @@ async function authorizeTeacherInviteRequest(request: Request, action: string): 
     email: String(profile.email ?? decodedToken.email ?? "").trim().toLowerCase(),
     uid: decodedToken.uid
   };
+}
+
+async function readPostgresInvites(teacherId: string) {
+  if (!isPostgresConfigured()) {
+    return [];
+  }
+
+  try {
+    return await listTeacherInvitesPostgres(teacherId);
+  } catch (caughtError) {
+    if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+      throw caughtError;
+    }
+
+    console.warn("Teacher invite Postgres list failed; using Firestore fallback.", caughtError);
+    return [];
+  }
+}
+
+async function readPostgresInvite(inviteId: string) {
+  if (!isPostgresConfigured()) {
+    return null;
+  }
+
+  try {
+    return await getTeacherInvitePostgres(inviteId);
+  } catch (caughtError) {
+    if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+      throw caughtError;
+    }
+
+    console.warn("Teacher invite Postgres read failed; using Firestore fallback.", caughtError);
+    return null;
+  }
+}
+
+async function writePostgresInvite(input: {
+  createdBy: string;
+  createdByEmail: string;
+  expiresAt: Date;
+  tokenHash: string;
+}) {
+  if (!isPostgresConfigured()) {
+    return null;
+  }
+
+  try {
+    return await createTeacherInvitePostgres(input);
+  } catch (caughtError) {
+    if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+      throw caughtError;
+    }
+
+    console.warn("Teacher invite Postgres create failed; using Firestore fallback.", caughtError);
+    return null;
+  }
+}
+
+async function revokePostgresInvite(input: { id: string; revokedBy: string; revokedByEmail: string }) {
+  if (!isPostgresConfigured()) {
+    return null;
+  }
+
+  try {
+    return await revokeTeacherInvitePostgres(input);
+  } catch (caughtError) {
+    if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+      throw caughtError;
+    }
+
+    console.warn("Teacher invite Postgres revoke failed; using Firestore fallback.", caughtError);
+    return null;
+  }
 }
 
 class TeacherInviteRouteError extends Error {
@@ -194,6 +305,29 @@ function inviteDocToResponse(inviteId: string, invite: Record<string, unknown>, 
     usedAt: usedAt?.toISOString() ?? "",
     usedByEmail: normalizeEmail(invite.usedByEmail),
     usedByUid: String(invite.usedByUid ?? "").trim()
+  };
+}
+
+function inviteRecordToResponse(invite: TeacherInviteRecord, frontendOrigin: string) {
+  const now = Date.now();
+  const status = invite.usedAt
+    ? "used"
+    : invite.revokedAt
+      ? "revoked"
+      : invite.expiresAt && invite.expiresAt.getTime() <= now
+        ? "expired"
+        : invite.status;
+
+  return {
+    createdAt: invite.createdAt.toISOString(),
+    expiresAt: invite.expiresAt?.toISOString() ?? "",
+    inviteId: invite.id,
+    inviteUrl: status === "active" ? buildTeacherInviteUrl(frontendOrigin, invite.id) : "",
+    revokedAt: invite.revokedAt?.toISOString() ?? "",
+    status,
+    usedAt: invite.usedAt?.toISOString() ?? "",
+    usedByEmail: normalizeEmail(invite.metadata.usedByEmail),
+    usedByUid: invite.usedBy
   };
 }
 

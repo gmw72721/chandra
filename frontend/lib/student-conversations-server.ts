@@ -1,4 +1,5 @@
-import { FieldValue, type DocumentData, type DocumentReference } from "firebase-admin/firestore";
+import { randomUUID } from "node:crypto";
+import { FieldValue } from "firebase-admin/firestore";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
 import {
   inferLearningStrategyObservedOutcome,
@@ -8,6 +9,30 @@ import type { AuthorizedTutorChatScope } from "./tutor-chat-auth";
 import { associateStudentMessageAttachments } from "./student-attachments-server";
 import { getTeacherFeedbackByConversationId, summarizeFeedback } from "./student-feedback-server";
 import { normalizeStructuredTutorOutput } from "./tutor-response";
+import {
+  buildChatContextMemory,
+  hasChatContextMemory,
+  normalizeChatContextMemory
+} from "./chat-context-memory";
+import { getAccountProfile, listClassEnrollmentsPostgresFirst, tryPostgresData } from "./data/server";
+import {
+  addMessage as addPostgresMessage,
+  getConversationById,
+  listClassConversations as listPostgresClassConversations,
+  listConversationMessages as listPostgresConversationMessages,
+  listStudentConversations as listPostgresStudentConversations,
+  listTeacherStudentConversations as listPostgresTeacherStudentConversations,
+  updateConversationMetadata,
+  updateConversationTitle,
+  updateMessageLearningStrategyTelemetry,
+  upsertConversation
+} from "./data/conversations";
+import {
+  listConversationReviews,
+  listStudentSupport,
+  upsertConversationReview,
+  upsertStudentSupport
+} from "./data/student-records";
 import type {
   ChatMessage,
   ConversationReviewStatus,
@@ -21,6 +46,7 @@ import type {
   TeacherConversationReviewSummary,
   TeacherConversationSourceAuditSummary,
   TutorApiResponse,
+  TutorTrace,
   TutorSource
 } from "./types";
 
@@ -73,6 +99,14 @@ const vagueConversationTitles = new Set([
   "question",
   "still stuck"
 ]);
+
+type RosterActivityStudentRow = {
+  chatBlocked?: boolean;
+  displayName?: string;
+  email?: string;
+  id: string;
+  uid?: string;
+};
 
 export type StudentConversationPersistence = {
   assistantMessageId: string;
@@ -171,14 +205,13 @@ export async function createStudentConversationDraft({
     scope,
     title: title?.trim() || "New conversation"
   });
-  const conversationSnapshot = await adminDb!
-    .collection("classes")
-    .doc(scope.classId)
-    .collection("conversations")
-    .doc(conversationId)
-    .get();
+  const postgresConversation = await getConversationById(conversationId);
 
-  return conversationDocToSummary(conversationSnapshot.id, conversationSnapshot.data() ?? {});
+  if (postgresConversation) {
+    return conversationRecordToSummary(postgresConversation);
+  }
+
+  throw new ConversationPersistenceError("Conversation failed to save.", 500);
 }
 
 export async function saveAssistantMessage({
@@ -198,22 +231,24 @@ export async function saveAssistantMessage({
   assertFirebaseAdminAuthReady();
 
   const createdAt = new Date().toISOString();
+  const assistantMessage: ChatMessage = {
+    content: response.message,
+    createdAt,
+    id: assistantMessageId,
+    langGraphTrace: response.langGraphTrace,
+    learningStrategyTelemetry: response.learningStrategyTelemetry,
+    retrievalConfidence: response.retrievalConfidence,
+    role: "assistant",
+    sources: response.sources ?? [],
+    structuredOutput: response.structuredOutput
+  };
   await saveConversationMessage({
     classId: scope.classId,
     conversationId,
-    message: {
-      content: response.message,
-      createdAt,
-      id: assistantMessageId,
-      langGraphTrace: response.langGraphTrace,
-      learningStrategyTelemetry: response.learningStrategyTelemetry,
-      retrievalConfidence: response.retrievalConfidence,
-      role: "assistant",
-      sources: response.sources ?? [],
-      structuredOutput: response.structuredOutput
-    },
+    message: assistantMessage,
     modelId
   });
+  await saveConversationCurrentContext({ conversationId });
 
   await updateVagueConversationTitleFromTutorResponse({
     classId: scope.classId,
@@ -246,39 +281,9 @@ export async function listTeacherStudentConversations({
   studentEmail: string;
 }): Promise<StudentConversationSummary[]> {
   assertFirebaseAdminAuthReady();
+  const postgresConversations = await listPostgresTeacherStudentConversations({ classId, studentEmail });
 
-  const snapshot = await adminDb!
-    .collection("classes")
-    .doc(classId)
-    .collection("conversations")
-    .where("studentEmail", "==", studentEmail.trim().toLowerCase())
-    .get();
-
-  return snapshot.docs
-    .map((conversationDoc) => {
-      const data = conversationDoc.data();
-
-      return {
-        assignment: stringOrUndefined(data.assignment),
-        classId: String(data.classId ?? ""),
-        createdAt: serializeFirestoreValue(data.createdAt),
-        id: conversationDoc.id,
-        lastMessageAt: serializeFirestoreValue(data.lastMessageAt),
-        messageCount: Number(data.messageCount ?? 0),
-        modelId: String(data.modelId ?? ""),
-        studentEmail: String(data.studentEmail ?? ""),
-        studentId: String(data.studentId ?? ""),
-        studentName: String(data.studentName ?? "Student"),
-        tags: Array.isArray(data.tags) ? data.tags.map(String) : undefined,
-        teacherId: String(data.teacherId ?? ""),
-        teacherName: stringOrUndefined(data.teacherName),
-        title: String(data.title ?? "Conversation"),
-        updatedAt: serializeFirestoreValue(data.updatedAt)
-      };
-    })
-    .sort((firstConversation, secondConversation) =>
-      timestampMillis(secondConversation.lastMessageAt) - timestampMillis(firstConversation.lastMessageAt)
-    );
+  return postgresConversations.map(conversationRecordToSummary);
 }
 
 export async function listStudentConversations({
@@ -289,19 +294,9 @@ export async function listStudentConversations({
   studentId: string;
 }): Promise<StudentConversationSummary[]> {
   assertFirebaseAdminAuthReady();
+  const postgresConversations = await listPostgresStudentConversations({ classId, studentId });
 
-  const snapshot = await adminDb!
-    .collection("classes")
-    .doc(classId)
-    .collection("conversations")
-    .where("studentId", "==", studentId)
-    .get();
-
-  return snapshot.docs
-    .map((conversationDoc) => conversationDocToSummary(conversationDoc.id, conversationDoc.data()))
-    .sort((firstConversation, secondConversation) =>
-      timestampMillis(secondConversation.lastMessageAt) - timestampMillis(firstConversation.lastMessageAt)
-    );
+  return postgresConversations.map(conversationRecordToSummary);
 }
 
 export async function listTeacherClassConversations({
@@ -311,57 +306,51 @@ export async function listTeacherClassConversations({
 }): Promise<TeacherConversationReviewSummary[]> {
   assertFirebaseAdminAuthReady();
 
-  const classReference = adminDb!.collection("classes").doc(classId);
-  const [conversationsSnapshot, reviewsSnapshot, feedbackByConversationId] = await Promise.all([
-    classReference.collection("conversations").get(),
-    classReference.collection("conversationReviews").get(),
-    getTeacherFeedbackByConversationId(classId)
+  const [postgresConversations, postgresReviews] = await Promise.all([
+    listPostgresClassConversations(classId),
+    tryPostgresData("conversation.review.read", () => listConversationReviews(classId))
   ]);
-  const reviewsByConversationId = new Map(
-    reviewsSnapshot.docs.map((reviewDoc) => [reviewDoc.id, reviewDocToTeacherReview(reviewDoc.id, reviewDoc.data())])
-  );
+  const postgresFeedbackByConversationId = await getTeacherFeedbackByConversationId(classId);
 
+  const reviewsByConversationId = new Map(
+    (postgresReviews ?? []).map((review) => [review.conversationId, reviewRecordToTeacherReview(review)])
+  );
   const rows = await Promise.all(
-    conversationsSnapshot.docs.map(async (conversationDoc) => {
-      const conversation = conversationDoc.data();
+    postgresConversations.map(async (conversationRecord) => {
+      const conversation = conversationRecordToFirestoreData(conversationRecord);
       const sourceAudit = await getConversationSourceAuditForConversation({
         classId,
         conversation,
-        conversationId: conversationDoc.id,
-        conversationReference: conversationDoc.ref
+        conversationId: conversationRecord.id
       });
-      const review = reviewsByConversationId.get(conversationDoc.id) ?? defaultTeacherConversationReview({
+      const review = reviewsByConversationId.get(conversationRecord.id) ?? defaultTeacherConversationReview({
         classId,
-        conversationId: conversationDoc.id,
-        teacherId: String(conversation.teacherId ?? "")
+        conversationId: conversationRecord.id,
+        teacherId: conversationRecord.teacherId ?? ""
       });
-      const feedback = feedbackByConversationId.get(conversationDoc.id) ?? [];
+      const feedback = postgresFeedbackByConversationId.get(conversationRecord.id) ?? [];
 
       return {
-        classId: String(conversation.classId ?? classId),
-        conversationId: conversationDoc.id,
+        classId,
+        conversationId: conversationRecord.id,
         feedback,
         feedbackSummary: summarizeFeedback(feedback),
-        id: conversationDoc.id,
-        lastMessageAt: serializeFirestoreValue(conversation.lastMessageAt),
+        id: conversationRecord.id,
+        lastMessageAt: conversationRecord.lastMessageAt?.toISOString() ?? conversationRecord.updatedAt.toISOString(),
         latestRetrievalConfidence: sourceAudit.latestRetrievalConfidence,
-        messageCount: Number(conversation.messageCount ?? 0),
-        modelId: String(conversation.modelId ?? ""),
+        messageCount: conversationRecord.messageCount,
+        modelId: conversationRecord.modelId,
         learningSignals: sourceAudit.learningSignals,
         review,
         reviewStatus: review.status,
         sourceAudit,
-        studentEmail: String(conversation.studentEmail ?? ""),
-        studentId: String(conversation.studentId ?? ""),
-        studentName: String(conversation.studentName ?? "Student"),
-        teacherId: String(conversation.teacherId ?? ""),
-        teacherName: stringOrUndefined(conversation.teacherName),
-        title: String(conversation.title ?? "Conversation"),
-        topic: inferConversationTopic(
-          String(conversation.title ?? ""),
-          stringOrUndefined(conversation.assignment),
-          Array.isArray(conversation.tags) ? conversation.tags.map(String) : undefined
-        )
+        studentEmail: conversationRecord.studentEmail,
+        studentId: conversationRecord.studentId ?? "",
+        studentName: conversationRecord.studentName,
+        teacherId: conversationRecord.teacherId ?? "",
+        teacherName: stringOrUndefined(conversationRecord.teacherName),
+        title: conversationRecord.title || "Conversation",
+        topic: inferConversationTopic(conversationRecord.title, conversationRecord.assignment, conversationRecord.tags)
       };
     })
   );
@@ -382,43 +371,33 @@ export async function getConversationSourceAudit({
   assertSafeDocumentId(conversationId, "Conversation id");
   assertFirebaseAdminAuthReady();
 
-  const conversationReference = adminDb!
-    .collection("classes")
-    .doc(classId)
-    .collection("conversations")
-    .doc(conversationId);
-  const conversationSnapshot = await conversationReference.get();
+  const postgresConversation = await getConversationById(conversationId);
 
-  if (!conversationSnapshot.exists) {
+  if (!postgresConversation) {
     throw new ConversationPersistenceError("Conversation was not found.", 404);
   }
 
-  const conversation = conversationSnapshot.data() ?? {};
-
   return getConversationSourceAuditForConversation({
     classId,
-    conversation,
-    conversationId,
-    conversationReference
+    conversation: conversationRecordToFirestoreData(postgresConversation),
+    conversationId
   });
 }
 
 async function getConversationSourceAuditForConversation({
   classId,
   conversation,
-  conversationId,
-  conversationReference
+  conversationId
 }: {
   classId: string;
-  conversation: DocumentData;
+  conversation: Record<string, unknown>;
   conversationId: string;
-  conversationReference: DocumentReference<DocumentData>;
 }): Promise<TeacherConversationSourceAuditSummary> {
   if (conversation.classId !== classId) {
     throw new ConversationPersistenceError("Conversation does not belong to this class.", 403);
   }
 
-  const messagesSnapshot = await conversationReference.collection("messages").orderBy("createdAt", "asc").get();
+  const messages = (await listPostgresConversationMessages(conversationId)).map(messageRecordToFirestoreData);
   const sourcesByKey = new Map<string, TutorSource>();
   let hasAssistantMessage = false;
   let latestRetrievalConfidence: RetrievalConfidence | undefined;
@@ -426,8 +405,7 @@ async function getConversationSourceAuditForConversation({
   let hasClassMaterialQuestion = false;
   const learningSignals = emptyConversationLearningSignals();
 
-  messagesSnapshot.docs.forEach((messageDoc) => {
-    const message = messageDoc.data();
+  messages.forEach((message) => {
     const role = String(message.role ?? "");
 
     if (role === "student" && classMaterialQuestionPattern.test(String(message.content ?? ""))) {
@@ -549,22 +527,25 @@ export async function updateTeacherConversationReview({
     throw new ConversationPersistenceError("Conversation review status is invalid.", 400);
   }
 
-  const conversationReference = adminDb!
-    .collection("classes")
-    .doc(classId)
-    .collection("conversations")
-    .doc(conversationId);
-  const conversationSnapshot = await conversationReference.get();
+  const postgresConversation = await getConversationById(conversationId);
 
-  if (!conversationSnapshot.exists) {
+  if (!postgresConversation) {
     throw new ConversationPersistenceError("Conversation was not found.", 404);
   }
 
-  const conversation = conversationSnapshot.data() ?? {};
-
-  if (conversation.classId !== classId) {
+  if (postgresConversation.classId !== classId) {
     throw new ConversationPersistenceError("Conversation does not belong to this class.", 403);
   }
+  await tryPostgresData("conversation.review.write", () =>
+    upsertConversationReview({
+      classId,
+      conversationId,
+      flags: sanitizeReviewFlags(flags),
+      privateNote: privateNote.slice(0, maxTeacherReviewNoteLength),
+      reviewedBy: teacherId,
+      status
+    })
+  );
 
   const reviewReference = adminDb!
     .collection("classes")
@@ -599,13 +580,23 @@ export async function listTeacherRosterActivity({
 }): Promise<StudentRosterActivitySummary[]> {
   assertFirebaseAdminAuthReady();
 
-  const [rosterSnapshot, conversationsSnapshot, supportSnapshot] = await Promise.all([
+  const [rosterSnapshot, supportSnapshot] = await Promise.all([
     adminDb!.collection("classes").doc(classId).collection("students").get(),
-    adminDb!.collection("classes").doc(classId).collection("conversations").get(),
     adminDb!.collection("classes").doc(classId).collection("studentSupport").get()
   ]);
-  const rosterEmails = rosterSnapshot.docs
-    .map((studentDoc) => String(studentDoc.data().email ?? "").trim().toLowerCase())
+  const [postgresRoster, postgresConversations, postgresSupport] = await Promise.all([
+    listClassEnrollmentsPostgresFirst(classId),
+    listPostgresClassConversations(classId),
+    tryPostgresData("support.roster_activity.read", () => listStudentSupport(classId))
+  ]);
+  const rosterRows: RosterActivityStudentRow[] = postgresRoster.length ? postgresRoster : rosterSnapshot.docs.map((studentDoc) => ({
+    id: studentDoc.id,
+    displayName: String(studentDoc.data().displayName ?? ""),
+    email: String(studentDoc.data().email ?? ""),
+    chatBlocked: studentDoc.data().chatBlocked === true
+  }));
+  const rosterEmails = rosterRows
+    .map((student) => String(student.email ?? "").trim().toLowerCase())
     .filter(Boolean);
   const presenceByEmail = await getStudentPresenceByEmail(classId, rosterEmails);
   const activeDaysByEmail = new Map<string, Set<string>>();
@@ -613,21 +604,30 @@ export async function listTeacherRosterActivity({
   const lastStudentMessageAtByEmail = new Map<string, number>();
   const todayKey = date || dateKey(new Date().toISOString(), timezone);
   const supportByEmail = new Map(
-    supportSnapshot.docs
-      .map((supportDoc) => {
-        const support = supportDoc.data();
-        const studentEmail = String(support.studentEmail ?? decodeURIComponent(supportDoc.id)).trim().toLowerCase();
-
-        return [studentEmail, {
-          chatBlocked: support.chatBlocked === true,
-          teacherNotes: String(support.teacherNotes ?? support.notes ?? "")
-        }] as const;
-      })
+    (postgresSupport?.length
+      ? postgresSupport.map((support) => ({
+          id: support.id,
+          studentEmail: support.studentEmail,
+          chatBlocked: support.chatBlocked,
+          teacherNotes: support.supportNotes
+        }))
+      : supportSnapshot.docs.map((supportDoc) => {
+          const support = supportDoc.data();
+          return {
+            id: supportDoc.id,
+            studentEmail: String(support.studentEmail ?? decodeURIComponent(supportDoc.id)).trim().toLowerCase(),
+            chatBlocked: support.chatBlocked === true,
+            teacherNotes: String(support.teacherNotes ?? support.notes ?? "")
+          };
+        }))
+      .map((support) => [support.studentEmail, {
+        chatBlocked: support.chatBlocked,
+        teacherNotes: support.teacherNotes
+      }] as const)
       .filter(([studentEmail]) => Boolean(studentEmail))
   );
 
-  rosterSnapshot.docs.forEach((studentDoc) => {
-    const student = studentDoc.data();
+  rosterRows.forEach((student) => {
     const studentEmail = String(student.email ?? "").trim().toLowerCase();
 
     if (!studentEmail) {
@@ -645,7 +645,7 @@ export async function listTeacherRosterActivity({
       questionsToday: 0,
       recentConversations: [],
       status: "no_activity",
-      studentId: studentDoc.id,
+      studentId: student.id,
       studentEmail,
       teacherNotes: supportByEmail.get(studentEmail)?.teacherNotes ?? "",
       totalQuestions: 0
@@ -657,7 +657,11 @@ export async function listTeacherRosterActivity({
     lastStudentMessageAtByEmail.set(studentEmail, 0);
   });
 
-  const conversationDocs = conversationsSnapshot.docs.filter((conversationDoc) => {
+  const conversationRows = postgresConversations.map((conversation) => ({
+    data: () => conversationRecordToFirestoreData(conversation),
+    id: conversation.id
+  }));
+  const conversationDocs = conversationRows.filter((conversationDoc) => {
     const studentEmail = String(conversationDoc.data().studentEmail ?? "").trim().toLowerCase();
     return activityByEmail.has(studentEmail);
   });
@@ -680,11 +684,14 @@ export async function listTeacherRosterActivity({
     });
   });
 
-  const messageSnapshots = await Promise.all(
-    conversationDocs.map((conversationDoc) => conversationDoc.ref.collection("messages").where("role", "==", "student").get())
+  const conversationStudentMessages = await Promise.all(
+    conversationDocs.map(async (conversationDoc) => {
+      const postgresMessages = await listPostgresConversationMessages(conversationDoc.id);
+      return postgresMessages.filter((message) => message.role === "student").map(messageRecordToFirestoreData);
+    })
   );
 
-  messageSnapshots.forEach((messageSnapshot, conversationIndex) => {
+  conversationStudentMessages.forEach((messages, conversationIndex) => {
     const conversationData = conversationDocs[conversationIndex]?.data() ?? {};
     const studentEmail = String(conversationData.studentEmail ?? "").trim().toLowerCase();
     const activity = activityByEmail.get(studentEmail);
@@ -693,8 +700,7 @@ export async function listTeacherRosterActivity({
       return;
     }
 
-    messageSnapshot.docs.forEach((messageDoc) => {
-      const message = messageDoc.data();
+    messages.forEach((message) => {
       const createdAt = serializeFirestoreValue(message.createdAt);
 
       activity.totalQuestions += 1;
@@ -816,10 +822,29 @@ export async function updateTeacherStudentSupport({
     .collection("students")
     .doc(supportDocumentId)
     .get();
+  const postgresRosterStudent = rosterStudentSnapshot.exists
+    ? null
+    : ((await listClassEnrollmentsPostgresFirst(classId)) as RosterActivityStudentRow[]).find((student) =>
+        String(student.email ?? "").trim().toLowerCase() === normalizedEmail
+      );
 
-  if (!rosterStudentSnapshot.exists) {
+  if (!rosterStudentSnapshot.exists && !postgresRosterStudent) {
     throw new ConversationPersistenceError("Student is not on this class roster.", 404);
   }
+  await tryPostgresData("support.notes.write", () =>
+    upsertStudentSupport({
+      classId,
+      displayName: rosterStudentSnapshot.exists
+        ? String(rosterStudentSnapshot.data()?.displayName ?? "")
+        : String(postgresRosterStudent?.displayName ?? ""),
+      id: `${classId}:${supportDocumentId}`,
+      studentEmail: normalizedEmail,
+      studentId: rosterStudentSnapshot.exists ? rosterStudentSnapshot.id : String(postgresRosterStudent?.uid ?? ""),
+      supportNotes: notes.slice(0, 1000),
+      metadata: { updatedBy: teacherId },
+      chatBlocked
+    })
+  );
 
   await adminDb!
     .collection("classes")
@@ -861,10 +886,28 @@ export async function updateTeacherStudentChatAccess({
   const classReference = adminDb!.collection("classes").doc(classId);
   const rosterStudentReference = classReference.collection("students").doc(supportDocumentId);
   const rosterStudentSnapshot = await rosterStudentReference.get();
+  const postgresRosterStudent = rosterStudentSnapshot.exists
+    ? null
+    : ((await listClassEnrollmentsPostgresFirst(classId)) as RosterActivityStudentRow[]).find((student) =>
+        String(student.email ?? "").trim().toLowerCase() === normalizedEmail
+      );
 
-  if (!rosterStudentSnapshot.exists) {
+  if (!rosterStudentSnapshot.exists && !postgresRosterStudent) {
     throw new ConversationPersistenceError("Student is not on this class roster.", 404);
   }
+  await tryPostgresData("support.chat_access.write", () =>
+    upsertStudentSupport({
+      chatBlocked,
+      classId,
+      displayName: rosterStudentSnapshot.exists
+        ? String(rosterStudentSnapshot.data()?.displayName ?? "")
+        : String(postgresRosterStudent?.displayName ?? ""),
+      id: `${classId}:${supportDocumentId}`,
+      studentEmail: normalizedEmail,
+      studentId: rosterStudentSnapshot.exists ? rosterStudentSnapshot.id : String(postgresRosterStudent?.uid ?? ""),
+      metadata: { updatedBy: teacherId }
+    })
+  );
 
   await adminDb!.runTransaction(async (transaction) => {
     transaction.set(
@@ -899,32 +942,17 @@ export async function listTeacherConversationMessages({
 }): Promise<ChatMessage[]> {
   assertSafeDocumentId(conversationId, "Conversation id");
   assertFirebaseAdminAuthReady();
+  const conversation = await getConversationById(conversationId);
 
-  const snapshot = await adminDb!
-    .collection("classes")
-    .doc(classId)
-    .collection("conversations")
-    .doc(conversationId)
-    .collection("messages")
-    .orderBy("createdAt", "asc")
-    .get();
+  if (!conversation) {
+    throw new ConversationPersistenceError("Conversation was not found.", 404);
+  }
 
-  return snapshot.docs.map((messageDoc) => {
-    const data = messageDoc.data();
+  if (conversation.classId !== classId) {
+    throw new ConversationPersistenceError("Conversation does not belong to this class.", 403);
+  }
 
-    return {
-      content: String(data.content ?? ""),
-      attachments: normalizeMessageAttachments(data.attachments),
-      createdAt: String(serializeFirestoreValue(data.createdAt) ?? ""),
-      id: String(data.id ?? messageDoc.id),
-      langGraphTrace: data.langGraphTrace,
-      learningStrategyTelemetry: normalizeLearningStrategyTelemetry(data.learningStrategyTelemetry),
-      retrievalConfidence: normalizeRetrievalConfidence(data.retrievalConfidence),
-      role: data.role,
-      sources: Array.isArray(data.sources) ? data.sources : undefined,
-      structuredOutput: normalizeStructuredTutorOutput(data.structuredOutput, String(data.content ?? ""))
-    } as ChatMessage;
-  });
+  return (await listPostgresConversationMessages(conversationId)).map(messageRecordToStudentChatMessage);
 }
 
 async function getLastSignInAt(studentEmail: string) {
@@ -1007,40 +1035,17 @@ export async function listStudentConversationMessages({
   assertSafeDocumentId(conversationId, "Conversation id");
   assertFirebaseAdminAuthReady();
 
-  const conversationReference = adminDb!
-    .collection("classes")
-    .doc(classId)
-    .collection("conversations")
-    .doc(conversationId);
-  const conversationSnapshot = await conversationReference.get();
+  const conversation = await getConversationById(conversationId);
 
-  if (!conversationSnapshot.exists) {
+  if (!conversation) {
     throw new ConversationPersistenceError("Conversation was not found.", 404);
   }
-
-  const conversation = conversationSnapshot.data() ?? {};
 
   if (conversation.classId !== classId || conversation.studentId !== studentId) {
     throw new ConversationPersistenceError("You can only open your own class conversations.", 403);
   }
 
-  const snapshot = await conversationReference.collection("messages").orderBy("createdAt", "asc").get();
-
-  return snapshot.docs.map((messageDoc) => {
-    const data = messageDoc.data();
-
-    return {
-      content: String(data.content ?? ""),
-      attachments: normalizeMessageAttachments(data.attachments),
-      createdAt: String(serializeFirestoreValue(data.createdAt) ?? ""),
-      id: String(data.id ?? messageDoc.id),
-      langGraphTrace: data.langGraphTrace,
-      retrievalConfidence: normalizeRetrievalConfidence(data.retrievalConfidence),
-      role: data.role,
-      sources: Array.isArray(data.sources) ? data.sources : undefined,
-      structuredOutput: normalizeStructuredTutorOutput(data.structuredOutput, String(data.content ?? ""))
-    } as ChatMessage;
-  });
+  return (await listPostgresConversationMessages(conversationId)).map(messageRecordToChatMessage);
 }
 
 function conversationDocToSummary(id: string, data: Record<string, unknown>): StudentConversationSummary {
@@ -1048,6 +1053,8 @@ function conversationDocToSummary(id: string, data: Record<string, unknown>): St
     assignment: stringOrUndefined(data.assignment),
     classId: String(data.classId ?? ""),
     createdAt: serializeFirestoreValue(data.createdAt),
+    contextMemory: normalizeChatContextMemory(data.currentContext),
+    contextUpdatedAt: serializeFirestoreValue(data.currentContextUpdatedAt),
     id,
     lastMessageAt: serializeFirestoreValue(data.lastMessageAt),
     messageCount: Number(data.messageCount ?? 0),
@@ -1060,6 +1067,105 @@ function conversationDocToSummary(id: string, data: Record<string, unknown>): St
     teacherName: stringOrUndefined(data.teacherName),
     title: String(data.title ?? "Conversation"),
     updatedAt: serializeFirestoreValue(data.updatedAt)
+  };
+}
+
+function conversationRecordToSummary(conversation: Awaited<ReturnType<typeof getConversationById>> extends infer T ? NonNullable<T> : never): StudentConversationSummary {
+  return {
+    assignment: conversation.assignment || undefined,
+    classId: conversation.classId,
+    createdAt: conversation.createdAt.toISOString(),
+    contextMemory: normalizeChatContextMemory(conversation.metadata.currentContext),
+    contextUpdatedAt: stringOrUndefined(conversation.metadata.contextUpdatedAt),
+    id: conversation.id,
+    lastMessageAt: conversation.lastMessageAt?.toISOString() ?? conversation.updatedAt.toISOString(),
+    messageCount: conversation.messageCount,
+    modelId: conversation.modelId,
+    studentEmail: conversation.studentEmail,
+    studentId: conversation.studentId ?? "",
+    studentName: conversation.studentName,
+    tags: conversation.tags.length ? conversation.tags : undefined,
+    teacherId: conversation.teacherId ?? "",
+    teacherName: stringOrUndefined(conversation.teacherName),
+    title: conversation.title || "Conversation",
+    updatedAt: conversation.updatedAt.toISOString()
+  };
+}
+
+function conversationRecordToFirestoreData(conversation: Parameters<typeof conversationRecordToSummary>[0]): Record<string, unknown> {
+  return {
+    assignment: conversation.assignment,
+    classId: conversation.classId,
+    createdAt: conversation.createdAt.toISOString(),
+    currentContext: conversation.metadata.currentContext,
+    currentContextUpdatedAt: conversation.metadata.contextUpdatedAt,
+    id: conversation.id,
+    lastMessageAt: conversation.lastMessageAt?.toISOString() ?? conversation.updatedAt.toISOString(),
+    messageCount: conversation.messageCount,
+    modelId: conversation.modelId,
+    studentEmail: conversation.studentEmail,
+    studentId: conversation.studentId ?? "",
+    studentName: conversation.studentName,
+    tags: conversation.tags,
+    teacherId: conversation.teacherId ?? "",
+    teacherName: conversation.teacherName,
+    title: conversation.title,
+    updatedAt: conversation.updatedAt.toISOString()
+  };
+}
+
+function messageRecordToFirestoreData(message: Awaited<ReturnType<typeof listPostgresConversationMessages>>[number]): Record<string, unknown> {
+  return {
+    attachments: message.attachments,
+    content: message.content,
+    createdAt: message.createdAt.toISOString(),
+    debugInfo: message.debugInfo,
+    id: message.id,
+    langGraphTrace: isRecord(message.langGraphTrace) ? message.langGraphTrace as TutorTrace : undefined,
+    learningStrategyTelemetry: message.learningStrategyTelemetry,
+    modelId: message.modelId,
+    retrievalConfidence: message.retrievalConfidence,
+    role: message.role,
+    sources: message.sources,
+    structuredOutput: message.structuredOutput
+  };
+}
+
+function messageRecordToChatMessage(message: Awaited<ReturnType<typeof listPostgresConversationMessages>>[number]): ChatMessage {
+  return {
+    content: message.content,
+    attachments: normalizeMessageAttachments(message.attachments),
+    createdAt: message.createdAt.toISOString(),
+    id: message.id,
+    langGraphTrace: isRecord(message.langGraphTrace) ? message.langGraphTrace as TutorTrace : undefined,
+    learningStrategyTelemetry: normalizeLearningStrategyTelemetry(message.learningStrategyTelemetry),
+    retrievalConfidence: normalizeRetrievalConfidence(message.retrievalConfidence),
+    role: message.role,
+    sources: Array.isArray(message.sources) ? message.sources as ChatMessage["sources"] : undefined,
+    structuredOutput: normalizeStructuredTutorOutput(message.structuredOutput, message.content)
+  };
+}
+
+function messageRecordToStudentChatMessage(message: Awaited<ReturnType<typeof listPostgresConversationMessages>>[number]): ChatMessage {
+  const chatMessage = messageRecordToChatMessage(message);
+
+  if (chatMessage.role === "assistant") {
+    delete chatMessage.learningStrategyTelemetry;
+  }
+
+  return chatMessage;
+}
+
+function reviewRecordToTeacherReview(review: Awaited<ReturnType<typeof listConversationReviews>>[number]): TeacherConversationReview {
+  return {
+    classId: review.classId,
+    conversationId: review.conversationId,
+    flags: Array.isArray(review.metadata.flags) ? review.metadata.flags.map(String) : [],
+    privateNote: review.teacherNote,
+    reviewedAt: review.reviewedAt?.toISOString() ?? null,
+    status: normalizeConversationReviewStatus(review.status),
+    teacherId: String(review.metadata.teacherId ?? review.reviewedBy ?? ""),
+    updatedAt: review.updatedAt.toISOString()
   };
 }
 
@@ -1078,23 +1184,17 @@ async function updateVagueConversationTitleFromTutorResponse({
     return;
   }
 
-  const conversationReference = adminDb!.collection("classes").doc(classId).collection("conversations").doc(conversationId);
+  const conversation = await getConversationById(conversationId);
 
-  await adminDb!.runTransaction(async (transaction) => {
-    const conversationSnapshot = await transaction.get(conversationReference);
-    const conversation = conversationSnapshot.data() ?? {};
-    const currentTitle = String(conversation.title ?? "");
-    const messageCount = Number(conversation.messageCount ?? 0);
+  if (!conversation || conversation.classId !== classId) {
+    return;
+  }
 
-    if (!conversationSnapshot.exists || messageCount > 2 || !isVagueConversationTitle(currentTitle)) {
-      return;
-    }
+  if (conversation.messageCount > 2 || !isVagueConversationTitle(conversation.title)) {
+    return;
+  }
 
-    transaction.update(conversationReference, {
-      title: nextTitle,
-      updatedAt: new Date().toISOString()
-    });
-  });
+  await updateConversationTitle({ id: conversationId, title: nextTitle });
 }
 
 function buildConversationTitleFromTutorResponse(response: TutorApiResponse) {
@@ -1231,31 +1331,24 @@ async function createStudentConversation({
   scope: AuthorizedTutorChatScope;
   title: string;
 }) {
-  const userSnapshot = await adminDb!.collection("users").doc(scope.uid).get();
-  const profile = userSnapshot.data() ?? {};
-  const conversationReference = adminDb!
-    .collection("classes")
-    .doc(scope.classId)
-    .collection("conversations")
-    .doc();
-  const createdAt = new Date().toISOString();
+  const postgresProfile = await getAccountProfile(scope.uid).catch(() => null);
+  const userSnapshot = postgresProfile ? null : await adminDb!.collection("users").doc(scope.uid).get();
+  const profile = postgresProfile ?? userSnapshot?.data() ?? {};
+  const conversationId = randomUUID();
 
-  await conversationReference.set({
+  await upsertConversation({
+    id: conversationId,
     classId: scope.classId,
-    createdAt,
-    lastMessageAt: createdAt,
-    messageCount: 0,
     modelId,
     studentEmail: String(profile.email ?? "").trim().toLowerCase(),
     studentId: scope.uid,
     studentName: String(profile.displayName ?? profile.email ?? "Student").trim() || "Student",
     teacherId: scope.professorId,
     teacherName: scope.professorName ?? "",
-    title,
-    updatedAt: createdAt
+    title
   });
 
-  return conversationReference.id;
+  return conversationId;
 }
 
 async function verifyStudentConversation({
@@ -1265,22 +1358,16 @@ async function verifyStudentConversation({
   conversationId: string;
   scope: AuthorizedTutorChatScope;
 }) {
-  const conversationSnapshot = await adminDb!
-    .collection("classes")
-    .doc(scope.classId)
-    .collection("conversations")
-    .doc(conversationId)
-    .get();
+  const postgresConversation = await getConversationById(conversationId);
 
-  if (!conversationSnapshot.exists) {
-    throw new ConversationPersistenceError("Conversation was not found.", 404);
+  if (postgresConversation) {
+    if (postgresConversation.classId !== scope.classId || postgresConversation.studentId !== scope.uid) {
+      throw new ConversationPersistenceError("You can only continue your own class conversations.", 403);
+    }
+    return;
   }
 
-  const conversation = conversationSnapshot.data() ?? {};
-
-  if (conversation.classId !== scope.classId || conversation.studentId !== scope.uid) {
-    throw new ConversationPersistenceError("You can only continue your own class conversations.", 403);
-  }
+  throw new ConversationPersistenceError("Conversation was not found.", 404);
 }
 
 async function saveStudentMessage({
@@ -1301,7 +1388,6 @@ async function saveStudentMessage({
     modelId
   });
   await updatePreviousLearningStrategyTelemetryOutcome({
-    classId: scope.classId,
     conversationId,
     studentMessage
   }).catch((caughtError) => {
@@ -1324,46 +1410,42 @@ async function saveConversationMessage({
   message: ChatMessage & { retrievalConfidence?: string };
   modelId: string;
 }) {
-  const conversationReference = adminDb!.collection("classes").doc(classId).collection("conversations").doc(conversationId);
-  const messageReference = conversationReference.collection("messages").doc(message.id);
-  const lastMessageAt = message.createdAt || new Date().toISOString();
+  await addPostgresMessage({
+    attachments: message.attachments,
+    classId,
+    content: message.content,
+    conversationId,
+    debugInfo: message.debugInfo,
+    id: message.id,
+    langGraphTrace: message.langGraphTrace,
+    learningStrategyTelemetry: message.role === "assistant" ? normalizeLearningStrategyTelemetry(message.learningStrategyTelemetry) : undefined,
+    modelId: message.role === "assistant" ? modelId : undefined,
+    retrievalConfidence: message.role === "assistant" ? message.retrievalConfidence : undefined,
+    role: message.role,
+    sources: message.sources,
+    structuredOutput: message.role === "assistant" ? message.structuredOutput : undefined
+  });
+}
 
-  await adminDb!.runTransaction(async (transaction) => {
-    const existingMessage = await transaction.get(messageReference);
+async function saveConversationCurrentContext({ conversationId }: { conversationId: string }) {
+  const messages = (await listPostgresConversationMessages(conversationId)).map(messageRecordToChatMessage);
+  const currentContext = buildChatContextMemory(messages);
 
-    if (existingMessage.exists) {
-      return;
-    }
+  if (!hasChatContextMemory(currentContext)) {
+    return;
+  }
 
-    transaction.set(messageReference, compactFirestoreData({
-      content: message.content,
-      createdAt: lastMessageAt,
-      id: message.id,
-      langGraphTrace: message.langGraphTrace,
-      learningStrategyTelemetry:
-        message.role === "assistant" ? normalizeLearningStrategyTelemetry(message.learningStrategyTelemetry) : undefined,
-      modelId: message.role === "assistant" ? modelId : undefined,
-      retrievalConfidence: message.role === "assistant" ? message.retrievalConfidence : undefined,
-      role: message.role,
-      attachments: message.attachments,
-      sources: message.sources,
-      structuredOutput: message.role === "assistant" ? message.structuredOutput : undefined
-    }));
-
-    transaction.update(conversationReference, {
-      lastMessageAt,
-      messageCount: FieldValue.increment(1),
-      updatedAt: lastMessageAt
-    });
+  await updateConversationMetadata({
+    contextUpdatedAt: new Date().toISOString(),
+    currentContext,
+    id: conversationId
   });
 }
 
 async function updatePreviousLearningStrategyTelemetryOutcome({
-  classId,
   conversationId,
   studentMessage
 }: {
-  classId: string;
   conversationId: string;
   studentMessage: ChatMessage;
 }) {
@@ -1373,18 +1455,11 @@ async function updatePreviousLearningStrategyTelemetryOutcome({
     return;
   }
 
-  const conversationReference = adminDb!.collection("classes").doc(classId).collection("conversations").doc(conversationId);
-  const messagesSnapshot = await conversationReference
-    .collection("messages")
-    .orderBy("createdAt", "desc")
-    .limit(8)
-    .get();
+  const messages = (await listPostgresConversationMessages(conversationId)).slice(-8).reverse();
   const studentCreatedAtMillis = timestampMillis(studentMessage.createdAt);
 
-  for (const messageDoc of messagesSnapshot.docs) {
-    const message = messageDoc.data() ?? {};
-
-    if (message.role !== "assistant" || timestampMillis(message.createdAt) > studentCreatedAtMillis) {
+  for (const message of messages) {
+    if (message.role !== "assistant" || timestampMillis(message.createdAt.toISOString()) > studentCreatedAtMillis) {
       continue;
     }
 
@@ -1394,21 +1469,16 @@ async function updatePreviousLearningStrategyTelemetryOutcome({
       continue;
     }
 
-    await messageDoc.ref.set(
-      {
-        learningStrategyTelemetry: {
-          ...telemetry,
-          observedOutcome: outcome
-        }
+    await updateMessageLearningStrategyTelemetry({
+      conversationId,
+      learningStrategyTelemetry: {
+        ...telemetry,
+        observedOutcome: outcome
       },
-      { merge: true }
-    );
+      messageId: message.id
+    });
     return;
   }
-}
-
-function compactFirestoreData(data: Record<string, unknown>) {
-  return Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined));
 }
 
 function serializeFirestoreValue(value: unknown) {
@@ -1565,6 +1635,10 @@ function sourceKey(source: TutorSource) {
   ]
     .join("|")
     .toLowerCase();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function sanitizeReviewFlags(value: unknown): string[] {

@@ -16,19 +16,18 @@ The backend is not public API surface for browsers. Browser requests go to the N
 ## Stack
 
 - Next.js 16, React 19, TypeScript
-- Firebase Auth, Firestore, Firebase Storage
+- Firebase Auth for identity, Firebase Storage/GCS for files, Firestore for legacy fallback/presence
+- Cloud SQL/Postgres for app data, quota accounting, audit/security logs, and PDF OCR/search metadata
 - FastAPI, LangGraph, Uvicorn
 - OpenRouter for tutor model calls
-- Gemini embeddings and Firestore Vector Search for retrieval
+- Gemini embeddings and Postgres OCR/search metadata for PDF retrieval
 - Firebase App Hosting, Cloud Run, Artifact Registry, Secret Manager, Cloud Build
 
 ## Repository Layout
 
 ```text
 frontend/                         Next.js app, API routes, UI, Firebase server code
-backend/                          FastAPI app and Python container config
-agent/                            LangGraph tutor workflow
-retrieval/                        PDF retrieval/rendering helpers
+backend/                          FastAPI app, LangGraph tutor workflow, PDF retrieval helpers, and Python container config
 tests/                            TypeScript and Python tests
 apphosting.yaml                   Firebase App Hosting runtime config
 cloudbuild.backend.deploy.yaml    Backend build/push/deploy pipeline
@@ -40,7 +39,8 @@ Requirements:
 
 - Node.js 20+
 - Python 3.11+
-- Firebase project with Auth, Firestore, and Storage
+- Firebase project with Auth, Firestore fallback/presence, and Storage
+- Cloud SQL/Postgres database with `migrations/001_pdf_ocr_metadata.sql` and `migrations/002_core_app_tables.sql` applied
 - OpenRouter API key
 - Gemini API key
 
@@ -85,6 +85,7 @@ NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
 NEXT_PUBLIC_FIREBASE_APP_ID=
 FIREBASE_PROJECT_ID=
 FIREBASE_STORAGE_BUCKET=
+GCS_PDF_ASSETS_BUCKET=chandra-f6e13-pdf-page-assets
 OPENROUTER_API_KEY=
 OPENROUTER_BASE_URL=
 DEFAULT_MODEL=
@@ -109,6 +110,7 @@ FRONTEND_ORIGIN=
 NEXT_INTERNAL_BASE_URL=
 FIREBASE_PROJECT_ID=
 FIREBASE_STORAGE_BUCKET=
+GCS_PDF_ASSETS_BUCKET=chandra-f6e13-pdf-page-assets
 NEXT_PUBLIC_FIREBASE_PROJECT_ID=
 NEXT_PUBLIC_FIREBASE_API_KEY=
 NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
@@ -127,7 +129,7 @@ Production stores sensitive values in Secret Manager / App Hosting secrets. Clou
 npm run lint
 npm run typecheck
 npm test
-python3 -m pytest tests/test_provider_retries.py tests/test_pdf_rag_graph.py tests/test_backend_visibility.py
+python3 -m pytest tests/test_provider_retries.py tests/test_backend_visibility.py
 ```
 
 ## Deployment

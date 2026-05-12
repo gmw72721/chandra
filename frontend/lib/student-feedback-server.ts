@@ -2,6 +2,9 @@ import { FieldValue, type Query } from "firebase-admin/firestore";
 import { grantStudentAiUsageAllowance } from "./ai-usage-limits";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
 import { checkFirestoreRateLimit } from "./firestore-rate-limit";
+import { getAccountProfile, getClassSnapshotPostgresFirst, tryPostgresData } from "./data/server";
+import { getConversationById, listConversationMessages } from "./data/conversations";
+import { listFeedback, upsertStudentFeedback } from "./data/student-records";
 import type { AuthorizedTutorChatScope } from "./tutor-chat-auth";
 import type {
   StudentFeedback,
@@ -53,13 +56,11 @@ export async function authorizeStudentFeedbackRequest(
   assertFirebaseAdminAuthReady();
 
   const decodedToken = await adminAuth!.verifyIdToken(token);
-  const profileSnapshot = await adminDb!.collection("users").doc(decodedToken.uid).get();
+  const profile = await getAccountProfile(decodedToken.uid);
 
-  if (!profileSnapshot.exists) {
+  if (!profile) {
     throw new StudentFeedbackPersistenceError("Create a student profile before sending feedback.", 403);
   }
-
-  const profile = profileSnapshot.data() ?? {};
 
   if (profile.role !== "student") {
     throw new StudentFeedbackPersistenceError("Use a student account to send feedback.", 403);
@@ -70,13 +71,13 @@ export async function authorizeStudentFeedbackRequest(
     savedClassId: String(profile.classId ?? ""),
     savedClassIds: Array.isArray(profile.classIds) ? profile.classIds.map(String) : []
   });
-  const classSnapshot = await adminDb!.collection("classes").doc(classId).get();
+  const classSnapshot = await getClassSnapshotPostgresFirst(classId);
 
   if (!classSnapshot.exists) {
     throw new StudentFeedbackPersistenceError("Your saved class was not found.", 404);
   }
 
-  const classData = classSnapshot.data() ?? {};
+  const classData = classSnapshot.data;
   const professorId = String(classData.teacherId ?? classData.professorId ?? "").trim();
 
   if (!professorId) {
@@ -125,32 +126,36 @@ export async function createStudentFeedback({
 
   await assertStudentFeedbackRateLimit(scope);
 
-  const classReference = adminDb!.collection("classes").doc(scope.classId);
-  const conversationReference = classReference.collection("conversations").doc(conversationId);
-  const [conversationSnapshot, profileSnapshot] = await Promise.all([
-    conversationReference.get(),
+  const [postgresConversation, profileSnapshot] = await Promise.all([
+    getConversationById(conversationId),
     adminDb!.collection("users").doc(scope.uid).get()
   ]);
 
-  if (!conversationSnapshot.exists) {
+  if (!postgresConversation) {
     throw new StudentFeedbackPersistenceError("Conversation was not found.", 404);
   }
 
-  const conversation = conversationSnapshot.data() ?? {};
+  const conversation = {
+    classId: postgresConversation.classId,
+    studentEmail: postgresConversation.studentEmail,
+    studentId: postgresConversation.studentId,
+    studentName: postgresConversation.studentName
+  };
 
   if (conversation.classId !== scope.classId || conversation.studentId !== scope.uid) {
     throw new StudentFeedbackPersistenceError("You can only send feedback for your own class conversations.", 403);
   }
 
   if (messageId) {
-    const messageSnapshot = await conversationReference.collection("messages").doc(messageId).get();
+    const postgresMessages = await listConversationMessages(conversationId);
 
-    if (!messageSnapshot.exists) {
+    if (!postgresMessages.some((message) => message.id === messageId)) {
       throw new StudentFeedbackPersistenceError("Feedback message context was not found.", 404);
     }
   }
 
   const profile = profileSnapshot.data() ?? {};
+  const classReference = adminDb!.collection("classes").doc(scope.classId);
   const feedbackReference = classReference.collection("studentFeedback").doc();
   const normalizedKind = normalizeFeedbackKind(kind);
   const normalizedPromptReason = normalizeFeedbackPromptReason(promptReason);
@@ -174,6 +179,21 @@ export async function createStudentFeedback({
   });
 
   await feedbackReference.set(feedbackData);
+  await tryPostgresData("feedback.write", () =>
+    upsertStudentFeedback({
+      classId: scope.classId,
+      comment: normalizedComment,
+      conversationId,
+      id: feedbackReference.id,
+      kind: normalizedKind,
+      messageId: messageId || null,
+      promptReason: normalizedKind === "prompted" ? normalizedPromptReason : null,
+      rating: normalizedRating,
+      studentEmail: String(profile.email ?? conversation.studentEmail ?? "").trim().toLowerCase(),
+      studentId: scope.uid,
+      studentName: String(profile.displayName ?? conversation.studentName ?? "Student").trim() || "Student"
+    })
+  );
 
   const savedFeedbackSnapshot = await feedbackReference.get();
   return feedbackDocToStudentFeedback(savedFeedbackSnapshot.id, savedFeedbackSnapshot.data() ?? feedbackData);
@@ -190,6 +210,13 @@ export async function listStudentFeedback({
 }): Promise<StudentFeedback[]> {
   assertOptionalSafeDocumentId(conversationId, "Conversation id");
   assertFirebaseAdminAuthReady();
+  const postgresFeedback = await tryPostgresData("feedback.student.read", () =>
+    listFeedback({ classId, conversationId, studentId })
+  );
+
+  if (postgresFeedback?.length) {
+    return postgresFeedback.map(feedbackRecordToStudentFeedback).map(sanitizeStudentVisibleFeedback);
+  }
 
   let feedbackQuery: Query = adminDb!
     .collection("classes")
@@ -219,6 +246,13 @@ export async function listTeacherClassFeedback({
 }): Promise<StudentFeedback[]> {
   assertOptionalSafeDocumentId(conversationId, "Conversation id");
   assertFirebaseAdminAuthReady();
+  const postgresFeedback = await tryPostgresData("feedback.teacher.read", () =>
+    listFeedback({ classId, conversationId, status: status && feedbackStatuses.has(status as StudentFeedbackStatus) ? status : undefined })
+  );
+
+  if (postgresFeedback?.length) {
+    return postgresFeedback.map(feedbackRecordToStudentFeedback);
+  }
 
   let feedbackQuery: Query = adminDb!.collection("classes").doc(classId).collection("studentFeedback");
 
@@ -310,6 +344,28 @@ export async function updateTeacherStudentFeedback({
   });
 
   await feedbackReference.set(updateData, { merge: true });
+  await tryPostgresData("feedback.teacher_update.write", () =>
+    upsertStudentFeedback({
+      classId,
+      comment: String(feedback.comment ?? ""),
+      conversationId: String(feedback.conversationId ?? ""),
+      id: feedbackId,
+      kind: normalizeFeedbackKind(feedback.kind),
+      messageId: stringOrNull(feedback.messageId),
+      promptReason: normalizeFeedbackPromptReason(feedback.promptReason),
+      rating: normalizeFeedbackRating(feedback.rating),
+      status,
+      studentEmail: String(feedback.studentEmail ?? "").trim().toLowerCase(),
+      studentId: String(feedback.studentId ?? ""),
+      studentName: String(feedback.studentName ?? "Student"),
+      teacherNote: String(teacherNote ?? feedback.teacherNote ?? "").slice(0, maxTeacherFeedbackNoteLength),
+      metadata: {
+        reviewedBy: teacherId,
+        usageAllowanceDayBucket: usageAllowance?.dayBucket,
+        usageAllowancePercent: usageAllowance?.percent
+      }
+    })
+  );
 
   const savedFeedbackSnapshot = await feedbackReference.get();
   return feedbackDocToStudentFeedback(savedFeedbackSnapshot.id, savedFeedbackSnapshot.data() ?? {});
@@ -352,6 +408,31 @@ function feedbackDocToStudentFeedback(id: string, data: Record<string, unknown>)
     usageAllowanceDayBucket: String(data.usageAllowanceDayBucket ?? ""),
     usageAllowancePercent: normalizeUsageAllowancePercent(data.usageAllowancePercent),
     updatedAt: serializeFirestoreValue(data.updatedAt)
+  };
+}
+
+function feedbackRecordToStudentFeedback(record: Awaited<ReturnType<typeof listFeedback>>[number]): StudentFeedback {
+  return {
+    classId: record.classId,
+    comment: record.comment,
+    conversationId: record.conversationId ?? "",
+    createdAt: record.createdAt.toISOString(),
+    id: record.id,
+    kind: normalizeFeedbackKind(record.kind),
+    messageId: stringOrNull(record.messageId),
+    promptReason: normalizeFeedbackPromptReason(record.promptReason),
+    rating: normalizeFeedbackRating(record.rating),
+    resolvedAt: serializeFirestoreValue(record.metadata.resolvedAt),
+    reviewedAt: serializeFirestoreValue(record.metadata.reviewedAt),
+    reviewedBy: stringOrNull(record.metadata.reviewedBy),
+    status: normalizeFeedbackStatus(record.status),
+    studentEmail: record.studentEmail,
+    studentId: record.studentId ?? "",
+    studentName: record.studentName,
+    teacherNote: record.teacherNote,
+    usageAllowanceDayBucket: String(record.metadata.usageAllowanceDayBucket ?? ""),
+    usageAllowancePercent: normalizeUsageAllowancePercent(record.metadata.usageAllowancePercent),
+    updatedAt: record.updatedAt.toISOString()
   };
 }
 

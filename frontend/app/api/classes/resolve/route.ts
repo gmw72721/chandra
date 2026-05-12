@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { checkAbuseLockout, recordAbuseFailure, resetAbuseFailures } from "@/lib/abuse-lockout";
+import { resolveClassCodePostgresFirst } from "@/lib/data/server";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -44,27 +45,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Class code lookup failed." }, { status: 429 });
     }
 
-    const directClassSnapshot = await adminDb!.collection("classes").doc(classCode).get();
+    const resolvedClassId = await resolveClassCodePostgresFirst(classCode);
 
-    if (directClassSnapshot.exists) {
+    if (resolvedClassId) {
       await resetAbuseFailures(abuseScope);
-      return NextResponse.json({ classId: directClassSnapshot.id });
+      return NextResponse.json({ classId: resolvedClassId });
     }
 
-    const joinCodeSnapshot = await adminDb!
-      .collection("classes")
-      .where("joinCode", "==", classCode)
-      .limit(1)
-      .get();
-    const joinedClass = joinCodeSnapshot.docs[0];
-
-    if (!joinedClass) {
-      await recordAbuseFailure(abuseScope, classCodeLockoutPolicy);
-      return NextResponse.json({ error: "Class code lookup failed." }, { status: 404 });
-    }
-
-    await resetAbuseFailures(abuseScope);
-    return NextResponse.json({ classId: joinedClass.id });
+    await recordAbuseFailure(abuseScope, classCodeLockoutPolicy);
+    return NextResponse.json({ error: "Class code lookup failed." }, { status: 404 });
   } catch {
     return NextResponse.json({ error: "Class code lookup failed." }, { status: 500 });
   }

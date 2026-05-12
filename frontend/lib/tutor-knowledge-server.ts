@@ -4,17 +4,22 @@ import { FieldValue, type DocumentReference } from "firebase-admin/firestore";
 import { isIP } from "net";
 import { PDFDocument } from "pdf-lib";
 import { adminAuth, adminDb, adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
-import { sourceDefaultsForMaterialKind } from "./class-settings";
-import { attachPdfSlicesToChunks } from "./pdf-embedding-chunks";
 import {
-  classifyTutorKnowledgePage,
-  chunkTutorKnowledgePages,
+  buildPdfOcrMetadataRecords,
+  runGoogleDocumentAiPdfOcr
+} from "./google-document-ai-ocr";
+import { sourceDefaultsForMaterialKind } from "./class-settings";
+import {
+  assertPdfOcrPostgresConfigured,
+  deletePdfOcrMetadata,
+  replacePdfOcrMetadata
+} from "./pdf-ocr-postgres";
+import {
   chunkTutorKnowledgeText,
   getTutorKnowledgeSourceMode,
   isTutorKnowledgeKind,
   supportedTutorKnowledgeExtensions,
-  type TutorKnowledgeChunk,
-  type TutorKnowledgePage
+  type TutorKnowledgeChunk
 } from "./tutor-knowledge";
 import { TutorKnowledgeHttpError } from "./tutor-knowledge-errors";
 import { materialTypeForKind, problemNumbersFromText } from "./retrieval-ranking";
@@ -27,6 +32,24 @@ import {
   type VertexEmbeddingResult
 } from "./vertex-embeddings";
 import { firebaseConfig } from "./firebase-config";
+import {
+  canonicalOriginalPdfPath,
+  canonicalPdfPageAssetPath,
+  deleteGcsPdfAssetPrefix,
+  downloadGcsPdfAssetBuffer,
+  getGcsPdfAssetsBucketName,
+  isGcsPdfAssetsBucket,
+  saveGcsPdfAsset
+} from "./gcs-pdf-page-assets";
+import { getClassSnapshotPostgresFirst, tryPostgresData } from "./data/server";
+import {
+  deleteMaterial,
+  getMaterialById,
+  updateMaterialStatus,
+  updateMaterialVisibility,
+  upsertMaterial,
+  upsertMaterialJob
+} from "./data/materials";
 
 export type TutorKnowledgePreview = {
   extractedCharacterCount: number;
@@ -45,6 +68,7 @@ export type TutorKnowledgePreview = {
 type TutorKnowledgeOriginalSource = {
   contentType: string;
   fileName: string;
+  fileSha256?: string;
   filePath?: string;
   fileSize: number;
   fileUrl?: string;
@@ -52,6 +76,11 @@ type TutorKnowledgeOriginalSource = {
   sourceKind: "file" | "storage" | "url";
   sourceUrl?: string;
   storageBucket?: string;
+};
+
+type UploadedStorageSource = {
+  file: File | null;
+  metadata: TutorKnowledgeOriginalSource;
 };
 
 const supportedContentTypes = new Set([
@@ -63,193 +92,12 @@ const supportedContentTypes = new Set([
   "text/x-markdown"
 ]);
 const embeddingConcurrencyLimit = 4;
+const pdfPageAssetSaveConcurrencyLimit = 4;
 const maxTutorKnowledgeFileBytes = 500 * 1024 * 1024;
 const maxTutorKnowledgePastedTextCharacters = 250000;
 const maxTutorKnowledgeUrlRedirects = 4;
 
 export { TutorKnowledgeHttpError } from "./tutor-knowledge-errors";
-
-class PdfJsDomMatrix {
-  a = 1;
-  b = 0;
-  c = 0;
-  d = 1;
-  e = 0;
-  f = 0;
-  is2D = true;
-
-  constructor(init?: string | number[] | Float32Array | Float64Array | PdfJsDomMatrix) {
-    if (!init || typeof init === "string") {
-      return;
-    }
-
-    const values = Array.from(init instanceof PdfJsDomMatrix ? init.toFloat64Array() : init);
-    if (values.length === 6) {
-      [this.a, this.b, this.c, this.d, this.e, this.f] = values;
-    } else if (values.length >= 16) {
-      this.a = values[0] ?? 1;
-      this.b = values[1] ?? 0;
-      this.c = values[4] ?? 0;
-      this.d = values[5] ?? 1;
-      this.e = values[12] ?? 0;
-      this.f = values[13] ?? 0;
-    }
-  }
-
-  get m11() {
-    return this.a;
-  }
-
-  set m11(value: number) {
-    this.a = value;
-  }
-
-  get m12() {
-    return this.b;
-  }
-
-  set m12(value: number) {
-    this.b = value;
-  }
-
-  get m21() {
-    return this.c;
-  }
-
-  set m21(value: number) {
-    this.c = value;
-  }
-
-  get m22() {
-    return this.d;
-  }
-
-  set m22(value: number) {
-    this.d = value;
-  }
-
-  get m41() {
-    return this.e;
-  }
-
-  set m41(value: number) {
-    this.e = value;
-  }
-
-  get m42() {
-    return this.f;
-  }
-
-  set m42(value: number) {
-    this.f = value;
-  }
-
-  multiply(other?: PdfJsDomMatrix | number[]) {
-    return new PdfJsDomMatrix(this).multiplySelf(other);
-  }
-
-  multiplySelf(other?: PdfJsDomMatrix | number[]) {
-    const matrix = new PdfJsDomMatrix(other);
-    const a = this.a * matrix.a + this.c * matrix.b;
-    const b = this.b * matrix.a + this.d * matrix.b;
-    const c = this.a * matrix.c + this.c * matrix.d;
-    const d = this.b * matrix.c + this.d * matrix.d;
-    const e = this.a * matrix.e + this.c * matrix.f + this.e;
-    const f = this.b * matrix.e + this.d * matrix.f + this.f;
-
-    this.a = a;
-    this.b = b;
-    this.c = c;
-    this.d = d;
-    this.e = e;
-    this.f = f;
-
-    return this;
-  }
-
-  preMultiplySelf(other?: PdfJsDomMatrix | number[]) {
-    const matrix = new PdfJsDomMatrix(other);
-    return this.setMatrixValue(matrix.multiply(this).toFloat64Array());
-  }
-
-  translate(tx = 0, ty = 0) {
-    return this.multiply(new PdfJsDomMatrix([1, 0, 0, 1, tx, ty]));
-  }
-
-  translateSelf(tx = 0, ty = 0) {
-    return this.multiplySelf([1, 0, 0, 1, tx, ty]);
-  }
-
-  scale(scaleX = 1, scaleY = scaleX) {
-    return this.multiply(new PdfJsDomMatrix([scaleX, 0, 0, scaleY, 0, 0]));
-  }
-
-  scaleSelf(scaleX = 1, scaleY = scaleX) {
-    return this.multiplySelf([scaleX, 0, 0, scaleY, 0, 0]);
-  }
-
-  inverse() {
-    return new PdfJsDomMatrix(this).invertSelf();
-  }
-
-  invertSelf() {
-    const determinant = this.a * this.d - this.b * this.c;
-    if (!determinant) {
-      this.a = Number.NaN;
-      this.b = Number.NaN;
-      this.c = Number.NaN;
-      this.d = Number.NaN;
-      this.e = Number.NaN;
-      this.f = Number.NaN;
-      return this;
-    }
-
-    const a = this.d / determinant;
-    const b = -this.b / determinant;
-    const c = -this.c / determinant;
-    const d = this.a / determinant;
-    const e = (this.c * this.f - this.d * this.e) / determinant;
-    const f = (this.b * this.e - this.a * this.f) / determinant;
-
-    this.a = a;
-    this.b = b;
-    this.c = c;
-    this.d = d;
-    this.e = e;
-    this.f = f;
-
-    return this;
-  }
-
-  setMatrixValue(transformList?: string | number[] | Float32Array | Float64Array) {
-    const matrix = new PdfJsDomMatrix(transformList);
-    this.a = matrix.a;
-    this.b = matrix.b;
-    this.c = matrix.c;
-    this.d = matrix.d;
-    this.e = matrix.e;
-    this.f = matrix.f;
-    return this;
-  }
-
-  toFloat32Array() {
-    return Float32Array.from(this.toFloat64Array());
-  }
-
-  toFloat64Array() {
-    return [this.a, this.b, 0, 0, this.c, this.d, 0, 0, 0, 0, 1, 0, this.e, this.f, 0, 1];
-  }
-
-  toString() {
-    return `matrix(${this.a}, ${this.b}, ${this.c}, ${this.d}, ${this.e}, ${this.f})`;
-  }
-}
-
-function ensurePdfJsDomGlobals() {
-  const globalWithPdfJsDom = globalThis as Record<string, unknown>;
-
-  globalWithPdfJsDom.DOMMatrix ??= PdfJsDomMatrix;
-}
 
 export function validateTutorKnowledgeFile(file: File) {
   validateFile(file);
@@ -267,6 +115,7 @@ export function assertTutorKnowledgeTextWithinLimit(text: string, label = "Tutor
 type MaterialJobStep =
   | "upload_received"
   | "reading_file"
+  | "ocr_material"
   | "chunking_material"
   | "embedding_chunks"
   | "saving_to_class"
@@ -315,20 +164,28 @@ export async function authorizeClassTeacher(request: Request, classId: string) {
   assertFirebaseAdminReady();
 
   const decodedToken = await adminAuth!.verifyIdToken(token);
-  const classSnapshot = await adminDb!.collection("classes").doc(classId).get();
+  const classSnapshot = await getClassSnapshotPostgresFirst(classId);
 
   if (!classSnapshot.exists) {
     throw new TutorKnowledgeHttpError("Class not found.", 404);
   }
 
-  const classData = classSnapshot.data() ?? {};
+  const classData = classSnapshot.data;
   const coTeacherRole = readCoTeacherRole(classData.coTeachers, decodedToken.uid);
 
   if (classData.teacherId !== decodedToken.uid && coTeacherRole !== "owner" && coTeacherRole !== "co-teacher") {
     throw new TutorKnowledgeHttpError("Only the class teacher can manage tutor knowledge.", 403);
   }
 
-  return { classSnapshot, email: decodedToken.email, uid: decodedToken.uid };
+  return {
+    classSnapshot: {
+      id: classSnapshot.id,
+      exists: classSnapshot.exists,
+      data: () => classData
+    },
+    email: decodedToken.email,
+    uid: decodedToken.uid
+  };
 }
 
 function readCoTeacherRole(coTeachers: unknown, uid: string) {
@@ -424,6 +281,34 @@ export async function saveTutorKnowledge({
   const materialRef = requestedMaterialId
     ? adminDb!.collection("classes").doc(classId).collection("materials").doc(requestedMaterialId)
     : adminDb!.collection("classes").doc(classId).collection("materials").doc();
+  const materialType = materialTypeForKind(kind);
+  const initialSourceSettings = normalizeTutorKnowledgeSourceSettings(defaultSourceSettingsForKind(kind));
+  const sourceMode = getTutorKnowledgeSourceMode({
+    hasFile: Boolean(file || sourceUrl || storagePath),
+    hasPastedText: Boolean(pastedText)
+  });
+
+  await tryPostgresData("material.metadata.initial.write", () =>
+    upsertMaterial({
+      id: materialRef.id,
+      classId,
+      teacherId,
+      title,
+      kind,
+      activeForStudents: initialSourceSettings.activeForStudents,
+      citationsRequired: initialSourceSettings.requireCitations,
+      materialType,
+      metadata: {
+        professorName: professorName ?? "",
+        sourceKind: file || storagePath ? "file" : sourceUrl ? "url" : "pasted"
+      },
+      priority: initialSourceSettings.priority,
+      sourceMode,
+      status: "processing",
+      teacherOnly: initialSourceSettings.teacherOnly
+    })
+  );
+
   const updateProgress = createMaterialJobProgressWriter({
     classId,
     jobId,
@@ -438,7 +323,7 @@ export async function saveTutorKnowledge({
     step: "upload_received"
   });
   let storedSource: Awaited<ReturnType<typeof readUploadedStorageSource>> | null = null;
-  let fileMetadata = {};
+  let fileMetadata: Partial<TutorKnowledgeOriginalSource> = {};
 
   try {
     storedSource = storagePath
@@ -463,6 +348,84 @@ export async function saveTutorKnowledge({
   }
 
   const sourceFile = file ?? storedSource?.file ?? null;
+  const classSnapshot = await getClassSnapshotPostgresFirst(classId);
+  const configuredSourceDefaults = sourceDefaultsForMaterialKind(classSnapshot.data.sourceDefaults, kind);
+  const sourceSettings = normalizeTutorKnowledgeSourceSettings({
+    ...defaultSourceSettingsForKind(kind),
+    activeForStudents: configuredSourceDefaults.activeForStudents,
+    priority: configuredSourceDefaults.priority,
+    requireCitations: configuredSourceDefaults.citationsRequired,
+    teacherOnly: configuredSourceDefaults.teacherOnly
+  });
+
+  await tryPostgresData("material.metadata.processing.write", () =>
+    upsertMaterial({
+      id: materialRef.id,
+      classId,
+      teacherId,
+      title,
+      kind,
+      activeForStudents: sourceSettings.activeForStudents,
+      citationsRequired: sourceSettings.requireCitations,
+      contentType: fileMetadata.contentType ?? null,
+      fileName: fileMetadata.fileName ?? null,
+      fileSize: fileMetadata.fileSize ?? 0,
+      fileUrl: fileMetadata.fileUrl ?? null,
+      materialType,
+      metadata: {
+        professorName: professorName ?? "",
+        sourceKind: fileMetadata.sourceKind ?? (sourceUrl ? "url" : pastedText ? "pasted" : "file")
+      },
+      priority: sourceSettings.priority,
+      sourceMode,
+      status: "processing",
+      storageBucket: fileMetadata.storageBucket ?? null,
+      storagePath: fileMetadata.filePath ?? null,
+      teacherOnly: sourceSettings.teacherOnly
+    })
+  );
+
+  if (
+    fileMetadata.filePath
+    && fileMetadata.storageBucket
+    && isPdfSource(fileMetadata.fileName ?? sourceFile?.name ?? "", fileMetadata.contentType ?? sourceFile?.type ?? "")
+  ) {
+    const pdfContentType = fileMetadata.contentType ?? sourceFile?.type ?? "application/pdf";
+    const pdfFileName = fileMetadata.fileName ?? sourceFile?.name ?? title;
+
+    try {
+      return await savePdfTutorKnowledgeOcrMetadata({
+        classId,
+        contentType: pdfContentType || "application/pdf",
+        fileName: pdfFileName,
+        fileSize: fileMetadata.fileSize ?? sourceFile?.size ?? 0,
+        kind,
+        materialId: materialRef.id,
+        materialRef,
+        materialType,
+        pastedText,
+        professorName,
+        sourceKind: fileMetadata.sourceKind ?? "file",
+        sourceSettings,
+        storageBucket: fileMetadata.storageBucket,
+        storagePath: fileMetadata.filePath,
+        storageSha256: fileMetadata.fileSha256,
+        teacherId,
+        title,
+        updateProgress
+      });
+    } catch (caughtError) {
+      const errorMessage = caughtError instanceof Error ? caughtError.message : String(caughtError);
+
+      await markMaterialProcessingFailed({
+        errorMessage,
+        materialId: materialRef.id,
+        updateProgress
+      });
+      throw caughtError;
+    }
+  }
+
   const ingestion = await buildTutorKnowledgeIngestion({
     docId: materialRef.id,
     file: sourceFile,
@@ -478,16 +441,37 @@ export async function saveTutorKnowledge({
     throw new TutorKnowledgeHttpError("No tutor knowledge text was found. This source may be private, scanned, or unsupported.", 400);
   }
 
-  const materialType = materialTypeForKind(kind);
-  const classSnapshot = await adminDb!.collection("classes").doc(classId).get();
-  const configuredSourceDefaults = sourceDefaultsForMaterialKind(classSnapshot.data()?.sourceDefaults, kind);
-  const sourceSettings = normalizeTutorKnowledgeSourceSettings({
-    ...defaultSourceSettingsForKind(kind),
-    activeForStudents: configuredSourceDefaults.activeForStudents,
-    priority: configuredSourceDefaults.priority,
-    requireCitations: configuredSourceDefaults.citationsRequired,
-    teacherOnly: configuredSourceDefaults.teacherOnly
-  });
+  await tryPostgresData("material.metadata.write", () =>
+    upsertMaterial({
+      id: materialRef.id,
+      classId,
+      teacherId,
+      title,
+      kind,
+      activeForStudents: sourceSettings.activeForStudents,
+      citationsRequired: sourceSettings.requireCitations,
+      contentType: fileMetadata.contentType ?? null,
+      fileName: fileMetadata.fileName ?? null,
+      fileSize: fileMetadata.fileSize ?? 0,
+      fileUrl: fileMetadata.fileUrl ?? null,
+      materialType,
+      metadata: {
+        professorName: professorName ?? "",
+        sourceKind: fileMetadata.sourceKind ?? "pasted",
+        textSource: pastedText || undefined,
+        visualPageCount: ingestion.visualPageCount
+      },
+      priority: sourceSettings.priority,
+      sourceMode: getTutorKnowledgeSourceMode({
+        hasFile: Boolean(sourceFile || sourceUrl),
+        hasPastedText: Boolean(pastedText)
+      }),
+      status: "processing",
+      storageBucket: fileMetadata.storageBucket ?? null,
+      storagePath: fileMetadata.filePath ?? null,
+      teacherOnly: sourceSettings.teacherOnly
+    })
+  );
 
   await materialRef.set({
     classId,
@@ -562,6 +546,14 @@ export async function saveTutorKnowledge({
       indexedAt: FieldValue.serverTimestamp(),
       status: "ready"
     });
+    await tryPostgresData("material.status.ready", () =>
+      updateMaterialStatus({
+        characterCount: searchableText.length,
+        chunkCount: chunks.length,
+        id: materialRef.id,
+        status: "ready"
+      })
+    );
     await updateProgress({
       completedChunks: chunks.length,
       detail: "Source is ready for students.",
@@ -582,6 +574,9 @@ export async function saveTutorKnowledge({
         title
       });
       await materialRef.update(buildEmbeddingFailureMaterialMetadata(caughtError));
+      await tryPostgresData("material.status.failed", () =>
+        updateMaterialStatus({ id: materialRef.id, status: "failed" })
+      );
       await updateProgress({
         completedChunks: 0,
         detail: "Source preparation failed. The source was not saved for student use.",
@@ -614,6 +609,492 @@ export async function saveTutorKnowledge({
   };
 }
 
+async function savePdfTutorKnowledgeOcrMetadata({
+  classId,
+  contentType,
+  fileName,
+  fileSize,
+  kind,
+  materialId,
+  materialRef,
+  materialType,
+  pastedText,
+  professorName,
+  sourceKind,
+  sourceSettings,
+  storageBucket,
+  storagePath,
+  storageSha256,
+  teacherId,
+  title,
+  updateProgress
+}: {
+  classId: string;
+  contentType: string;
+  fileName: string;
+  fileSize: number;
+  kind: string;
+  materialId: string;
+  materialRef: DocumentReference;
+  materialType: string;
+  pastedText: string;
+  professorName?: string;
+  sourceKind: TutorKnowledgeOriginalSource["sourceKind"];
+  sourceSettings: TutorKnowledgeSourceSettings;
+  storageBucket: string;
+  storagePath: string;
+  storageSha256?: string;
+  teacherId: string;
+  title: string;
+  updateProgress: (progress: MaterialJobProgressUpdate) => Promise<void>;
+}) {
+  assertPdfOcrPostgresConfigured();
+  await updateProgress({
+    detail: "Saving the canonical PDF in dedicated page asset storage.",
+    percent: 35,
+    step: "ocr_material"
+  });
+
+  const canonicalFullPdf = await saveCanonicalOriginalPdfAsset({
+    classId,
+    contentType: contentType || "application/pdf",
+    fileName,
+    materialId,
+    sourceFileSize: fileSize,
+    sourceStorageBucket: storageBucket,
+    sourceStoragePath: storagePath,
+    sourceStorageSha256: storageSha256
+  });
+  const canonicalStorageBucket = canonicalFullPdf.bucket;
+  const canonicalStoragePath = canonicalFullPdf.path;
+
+  await updateProgress({
+    detail: "Running Google Document AI OCR on the canonical PDF.",
+    percent: 40,
+    step: "ocr_material"
+  });
+
+  const ocr = await runGoogleDocumentAiPdfOcr({
+    classId,
+    materialId,
+    mimeType: contentType || "application/pdf",
+    onProgress: async (progress) => {
+      if (progress.phase === "started") {
+        await updateProgress({
+          detail: `Running Google Document AI OCR on ${progress.totalShards ?? 1} PDF shard${progress.totalShards === 1 ? "" : "s"}.`,
+          percent: 41,
+          totalChunks: progress.totalShards,
+          step: "ocr_material"
+        });
+        return;
+      }
+
+      if (progress.phase === "processing") {
+        const completed = progress.completedShards ?? 0;
+        const total = progress.totalShards ?? 1;
+        await updateProgress({
+          completedChunks: completed,
+          detail: `OCR shard ${completed} of ${total} complete${progress.pageStart && progress.pageEnd ? ` (pages ${progress.pageStart}-${progress.pageEnd})` : ""}.`,
+          percent: Math.min(49, 41 + Math.round((completed / Math.max(total, 1)) * 8)),
+          totalChunks: total,
+          step: "ocr_material"
+        });
+      }
+    },
+    storageBucket: canonicalStorageBucket,
+    storagePath: canonicalStoragePath
+  });
+  const records = buildPdfOcrMetadataRecords({
+    classId,
+    contentType: contentType || "application/pdf",
+    fileName,
+    fileSize,
+    fullPdfBucket: canonicalFullPdf.bucket,
+    fullPdfMimeType: canonicalFullPdf.mimeType,
+    fullPdfPath: canonicalFullPdf.path,
+    fullPdfSha256: canonicalFullPdf.sha256,
+    fullPdfSize: canonicalFullPdf.size,
+    fullPdfUri: canonicalFullPdf.uri,
+    materialId,
+    materialType,
+    ocr,
+    sourceKind,
+    storageBucket: canonicalStorageBucket,
+    storagePath: canonicalStoragePath,
+    teacherId,
+    title
+  });
+
+  if (!records.pages.length) {
+    throw new TutorKnowledgeHttpError("Google Document AI OCR did not return any PDF pages.", 502);
+  }
+
+  await updateProgress({
+    completedChunks: 0,
+    detail: "Saving exact single-page PDF assets for OCR pages.",
+    percent: 50,
+    step: "ocr_material",
+    totalChunks: records.pages.length
+  });
+  await saveCanonicalPdfPageAssets({
+    classId,
+    materialId,
+    pages: records.pages,
+    storageBucket: canonicalStorageBucket,
+    storagePath: canonicalStoragePath
+  });
+
+  await updateProgress({
+    completedChunks: 0,
+    detail: "Preparing Gemini embeddings for OCR page and problem metadata.",
+    percent: 60,
+    step: "embedding_chunks",
+    totalChunks: records.pages.length + records.problems.length
+  });
+  await attachPdfOcrEmbeddings({
+    pages: records.pages,
+    problems: records.problems,
+    title,
+    updateProgress
+  });
+
+  await updateProgress({
+    detail: "Saving OCR page and problem metadata to PostgreSQL.",
+    percent: 75,
+    step: "saving_to_class",
+    totalChunks: records.pages.length
+  });
+  await replacePdfOcrMetadata({
+    material: records.material,
+    pages: records.pages,
+    problems: records.problems
+  });
+  await tryPostgresData("material.pdf.metadata.write", () =>
+    upsertMaterial({
+      id: materialId,
+      classId,
+      teacherId,
+      title,
+      kind,
+      activeForStudents: sourceSettings.activeForStudents,
+      citationsRequired: sourceSettings.requireCitations,
+      contentType: contentType || "application/pdf",
+      fileName,
+      fileSize,
+      fileUrl: canonicalFullPdf.uri,
+      materialType,
+      metadata: {
+        ocrInputShardCount: ocr.inputShardCount,
+        ocrInputShardPageCount: ocr.inputShardPageCount,
+        ocrOutputPrefix: ocr.outputPrefix,
+        ocrPageCount: records.pageCount,
+        ocrProblemCount: records.problems.length,
+        ocrProvider: records.material.ocrProvider,
+        ocrSource: records.material.ocrSource,
+        pageCount: records.pageCount,
+        professorName: professorName ?? "",
+        sourceKind,
+        textSource: pastedText || undefined,
+        visualPageCount: records.pageCount
+      },
+      priority: sourceSettings.priority,
+      searchMetadataSource: "postgres",
+      sourceMode: getTutorKnowledgeSourceMode({
+        hasFile: true,
+        hasPastedText: Boolean(pastedText)
+      }),
+      status: "ready",
+      storageBucket: canonicalStorageBucket,
+      storagePath: canonicalStoragePath,
+      storageUri: records.material.storageUri,
+      teacherOnly: sourceSettings.teacherOnly
+    })
+  );
+
+  await materialRef.set({
+    classId,
+    class_id: classId,
+    course_id: classId,
+    title,
+    kind,
+    materialType,
+    professorId: teacherId,
+    professorName: professorName ?? "",
+    professor_id: teacherId,
+    professor_name: professorName ?? "",
+    teacherId,
+    activeForStudents: sourceSettings.activeForStudents,
+    citationsRequired: sourceSettings.requireCitations,
+    priority: sourceSettings.priority,
+    requireCitations: sourceSettings.requireCitations,
+    studentVisible: sourceSettings.activeForStudents,
+    teacherOnly: sourceSettings.teacherOnly,
+    visibility: sourceSettings.teacherOnly
+      ? "teacher-only"
+      : sourceSettings.activeForStudents
+        ? "student-visible"
+        : "hidden",
+    characterCount: records.characterCount + pastedText.length,
+    chunkCount: 0,
+    contentType: contentType || "application/pdf",
+    embeddingProvider: "vertex-ai",
+    embeddingStatus: isVertexEmbeddingConfigured() ? "ready" : "not-configured",
+    fileName,
+    filePath: canonicalStoragePath,
+    fileSize,
+    fileUrl: canonicalFullPdf.uri,
+    fullPdfBucket: canonicalFullPdf.bucket,
+    fullPdfPath: canonicalFullPdf.path,
+    fullPdfUri: canonicalFullPdf.uri,
+    fullPdfMimeType: canonicalFullPdf.mimeType,
+    fullPdfSize: canonicalFullPdf.size,
+    fullPdfSha256: canonicalFullPdf.sha256,
+    indexedAt: FieldValue.serverTimestamp(),
+    ocrInputShardCount: ocr.inputShardCount,
+    ocrInputShardPageCount: ocr.inputShardPageCount,
+    ocrOutputPrefix: ocr.outputPrefix,
+    ocrPageCount: records.pageCount,
+    ocrProblemCount: records.problems.length,
+    ocrProvider: records.material.ocrProvider,
+    ocrSource: records.material.ocrSource,
+    ocrConfidence: records.material.ocrConfidence,
+    pageCount: records.pageCount,
+    searchMetadataSource: "postgres",
+    sourceKind,
+    sourceMode: getTutorKnowledgeSourceMode({
+      hasFile: true,
+      hasPastedText: Boolean(pastedText)
+    }),
+    status: "ready",
+    storageBucket: canonicalStorageBucket,
+    ...(pastedText ? { textSource: pastedText } : {}),
+    visualPageCount: records.pageCount,
+    addedAt: FieldValue.serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp()
+  });
+
+  await updateProgress({
+    completedChunks: records.pages.length,
+    detail: "PDF OCR metadata is ready for retrieval.",
+    percent: 100,
+    step: "ready",
+    totalChunks: records.pages.length
+  });
+
+  return {
+    id: materialId,
+    characterCount: records.characterCount + pastedText.length,
+    chunkCount: 0
+  };
+}
+
+async function saveCanonicalOriginalPdfAsset({
+  classId,
+  contentType,
+  fileName,
+  materialId,
+  sourceFileSize,
+  sourceStorageBucket,
+  sourceStoragePath,
+  sourceStorageSha256
+}: {
+  classId: string;
+  contentType: string;
+  fileName: string;
+  materialId: string;
+  sourceFileSize: number;
+  sourceStorageBucket: string;
+  sourceStoragePath: string;
+  sourceStorageSha256?: string;
+}) {
+  const bucketName = getGcsPdfAssetsBucketName();
+  const path = canonicalOriginalPdfPath({
+    classId,
+    materialId,
+    safeFileName: sanitizeFileName(fileName)
+  });
+
+  if (sourceStorageBucket === bucketName && sourceStoragePath === path) {
+    return {
+      bucket: bucketName,
+      path,
+      uri: `gs://${bucketName}/${path}`,
+      mimeType: contentType || "application/pdf",
+      size: sourceFileSize,
+      sha256: sourceStorageSha256 ?? ""
+    };
+  }
+
+  const sourceBuffer = await downloadTutorKnowledgeStorageBuffer({
+    storageBucket: sourceStorageBucket,
+    storagePath: sourceStoragePath
+  });
+
+  return saveGcsPdfAsset({
+    bucketName,
+    buffer: sourceBuffer,
+    contentType: contentType || "application/pdf",
+    metadata: {
+      sourceStorageBucket,
+      sourceStoragePath
+    },
+    path
+  });
+}
+
+async function saveCanonicalPdfPageAssets({
+  classId,
+  materialId,
+  pages,
+  storageBucket,
+  storagePath
+}: {
+  classId: string;
+  materialId: string;
+  pages: Array<Parameters<typeof replacePdfOcrMetadata>[0]["pages"][number]>;
+  storageBucket: string;
+  storagePath: string;
+}) {
+  const sourceBuffer = await downloadGcsPdfAssetBuffer({ bucketName: storageBucket, path: storagePath });
+  const sourcePdf = await PDFDocument.load(sourceBuffer, { ignoreEncryption: true });
+  const sourcePageCount = sourcePdf.getPageCount();
+
+  await mapWithConcurrency(pages, pdfPageAssetSaveConcurrencyLimit, async (page) => {
+    const pageIndex = page.pageNumber - 1;
+
+    if (pageIndex < 0 || pageIndex >= sourcePageCount) {
+      throw new TutorKnowledgeHttpError(`OCR returned page ${page.pageNumber}, but the stored PDF has ${sourcePageCount} pages.`, 502);
+    }
+
+    const pagePdf = await PDFDocument.create();
+    const [copiedPage] = await pagePdf.copyPages(sourcePdf, [pageIndex]);
+    pagePdf.addPage(copiedPage);
+
+    const pageBuffer = Buffer.from(await pagePdf.save());
+    const pageAssetStoragePath = canonicalPdfPageAssetPath({
+      classId,
+      materialId,
+      pageNumber: page.pageNumber
+    });
+    const pageAsset = await saveGcsPdfAsset({
+      bucketName: storageBucket,
+      buffer: pageBuffer,
+      contentType: "application/pdf",
+      metadata: {
+        sourcePageNumber: String(page.pageNumber)
+      },
+      path: pageAssetStoragePath
+    });
+
+    page.pageAssetBucket = pageAsset.bucket;
+    page.pageAssetPath = pageAsset.path;
+    page.pageAssetUri = pageAsset.uri;
+    page.pageAssetMimeType = pageAsset.mimeType;
+    page.pageAssetSize = pageAsset.size;
+    page.pageAssetSha256 = pageAsset.sha256;
+    page.pageAssetStorageBucket = pageAsset.bucket;
+    page.pageAssetStoragePath = pageAsset.path;
+    page.pageAssetSizeBytes = pageAsset.size;
+    page.pageAssetChecksumSha256 = pageAsset.sha256;
+  });
+}
+
+async function attachPdfOcrEmbeddings({
+  pages,
+  problems,
+  title,
+  updateProgress
+}: {
+  pages: Array<Parameters<typeof replacePdfOcrMetadata>[0]["pages"][number]>;
+  problems: Array<Parameters<typeof replacePdfOcrMetadata>[0]["problems"][number]>;
+  title: string;
+  updateProgress: (progress: MaterialJobProgressUpdate) => Promise<void>;
+}) {
+  const problemInputs = problems
+    .map((problem) => ({
+      label: `Problem ${problem.problemNumber}`,
+      target: problem,
+      text: problem.problemText
+    }))
+    .filter((input) => input.text.trim());
+  const pageInputs = pages
+    .map((page) => ({
+      label: `Page ${page.pageNumber}`,
+      target: page,
+      text: page.ocrText
+    }))
+    .filter((input) => input.text.trim());
+  const pageInputsByTextAndPage = new Map(
+    pageInputs.map((input) => [pdfEmbeddingReuseKey(input.target.pageNumber, input.text), input])
+  );
+  const problemInputsNeedingEmbeddings = problemInputs.filter(
+    (input) => !pageInputsByTextAndPage.has(pdfEmbeddingReuseKey(input.target.pageStart, input.text))
+  );
+  const embeddingInputs = [...pageInputs, ...problemInputsNeedingEmbeddings];
+
+  if (!embeddingInputs.length) {
+    return;
+  }
+
+  const embeddings = await createVertexEmbeddings(
+    embeddingInputs.map((input) => ({
+      taskType: "RETRIEVAL_DOCUMENT",
+      text: input.text,
+      title: `${title} ${input.label}`
+    })),
+    {
+      onProgress: async ({ completed, total }) => {
+        await updateProgress({
+          completedChunks: completed,
+          detail: `Preparing OCR metadata embedding ${completed} of ${total}.`,
+          percent: Math.min(74, 60 + Math.round((completed / Math.max(total, 1)) * 14)),
+          step: "embedding_chunks",
+          totalChunks: total
+        });
+      }
+    }
+  );
+  const embeddingCreatedAt = new Date().toISOString();
+
+  embeddings.forEach((embedding, index) => {
+    if (!embedding?.values.length) {
+      return;
+    }
+
+    const target = embeddingInputs[index].target;
+    target.embedding = embedding.values;
+    target.embeddingCreatedAt = embeddingCreatedAt;
+    target.embeddingDimensions = embedding.dimensions;
+    target.embeddingModel = embedding.model;
+    target.embeddingProvider = embedding.provider;
+    target.embeddingTaskType = embedding.taskType;
+  });
+
+  for (const problemInput of problemInputs) {
+    if (problemInput.target.embedding?.length) {
+      continue;
+    }
+
+    const pageInput = pageInputsByTextAndPage.get(pdfEmbeddingReuseKey(problemInput.target.pageStart, problemInput.text));
+    const pageEmbedding = pageInput?.target.embedding;
+
+    if (!pageInput || !pageEmbedding?.length) {
+      continue;
+    }
+
+    problemInput.target.embedding = pageEmbedding;
+    problemInput.target.embeddingCreatedAt = pageInput.target.embeddingCreatedAt;
+    problemInput.target.embeddingDimensions = pageInput.target.embeddingDimensions;
+    problemInput.target.embeddingModel = pageInput.target.embeddingModel;
+    problemInput.target.embeddingProvider = pageInput.target.embeddingProvider;
+    problemInput.target.embeddingTaskType = pageInput.target.embeddingTaskType;
+  }
+}
+
+function pdfEmbeddingReuseKey(pageNumber: number, text: string) {
+  return `${pageNumber}:${text.trim()}`;
+}
+
 export async function deleteTutorKnowledge({
   classId,
   materialId
@@ -624,11 +1105,20 @@ export async function deleteTutorKnowledge({
   const materialRef = adminDb!.collection("classes").doc(classId).collection("materials").doc(materialId);
   const materialSnapshot = await materialRef.get();
 
-  if (!materialSnapshot.exists) {
+  const postgresMaterial = materialSnapshot.exists
+    ? null
+    : await tryPostgresData("material.delete.read", () => getMaterialById(materialId));
+
+  if (!materialSnapshot.exists && !postgresMaterial) {
     throw new TutorKnowledgeHttpError("Tutor knowledge not found.", 404);
   }
 
-  const material = materialSnapshot.data() ?? {};
+  const material = materialSnapshot.exists
+    ? materialSnapshot.data() ?? {}
+    : {
+        filePath: postgresMaterial?.storagePath,
+        storageBucket: postgresMaterial?.storageBucket
+      };
   const filePath = String(material.filePath ?? "");
   const storageBucket = String(material.storageBucket ?? "").trim();
   const [chunksSnapshot, jobsSnapshot] = await Promise.all([
@@ -642,6 +1132,8 @@ export async function deleteTutorKnowledge({
   ]);
 
   await deleteMaterialStorageFiles({ classId, filePath, materialId, storageBucket });
+  await deletePdfOcrMetadata(materialId);
+  await tryPostgresData("material.delete", () => deleteMaterial(materialId));
   await deleteDocumentsInBatches([
     ...chunksSnapshot.docs.map((chunkDoc) => chunkDoc.ref),
     ...jobsSnapshot.docs.map((jobDoc) => jobDoc.ref)
@@ -660,31 +1152,52 @@ export async function updateTutorKnowledgeSettings({
 }) {
   const materialRef = adminDb!.collection("classes").doc(classId).collection("materials").doc(materialId);
   const materialSnapshot = await materialRef.get();
+  const postgresMaterial = materialSnapshot.exists
+    ? null
+    : await tryPostgresData("material.visibility.read", () => getMaterialById(materialId));
 
-  if (!materialSnapshot.exists) {
+  if (!materialSnapshot.exists && !postgresMaterial) {
     throw new TutorKnowledgeHttpError("Tutor knowledge not found.", 404);
   }
 
-  const currentSettings = sourceSettingsFromMaterial(materialSnapshot.data() ?? {});
+  const currentSettings = materialSnapshot.exists
+    ? sourceSettingsFromMaterial(materialSnapshot.data() ?? {})
+    : {
+        activeForStudents: postgresMaterial!.activeForStudents,
+        priority: postgresMaterial!.priority,
+        requireCitations: postgresMaterial!.citationsRequired,
+        teacherOnly: postgresMaterial!.teacherOnly
+      };
   const normalizedSettings = normalizeTutorKnowledgeSourceSettings({
     ...currentSettings,
     ...settings
   });
 
-  await materialRef.update({
-    activeForStudents: normalizedSettings.activeForStudents,
-    citationsRequired: normalizedSettings.requireCitations,
-    priority: normalizedSettings.priority,
-    requireCitations: normalizedSettings.requireCitations,
-    studentVisible: normalizedSettings.activeForStudents,
-    teacherOnly: normalizedSettings.teacherOnly,
-    updatedAt: FieldValue.serverTimestamp(),
-    visibility: normalizedSettings.teacherOnly
-      ? "teacher-only"
-      : normalizedSettings.activeForStudents
-        ? "student-visible"
-        : "hidden"
-  });
+  if (materialSnapshot.exists) {
+    await materialRef.update({
+      activeForStudents: normalizedSettings.activeForStudents,
+      citationsRequired: normalizedSettings.requireCitations,
+      priority: normalizedSettings.priority,
+      requireCitations: normalizedSettings.requireCitations,
+      studentVisible: normalizedSettings.activeForStudents,
+      teacherOnly: normalizedSettings.teacherOnly,
+      updatedAt: FieldValue.serverTimestamp(),
+      visibility: normalizedSettings.teacherOnly
+        ? "teacher-only"
+        : normalizedSettings.activeForStudents
+          ? "student-visible"
+          : "hidden"
+    });
+  }
+  await tryPostgresData("material.visibility.write", () =>
+    updateMaterialVisibility({
+      activeForStudents: normalizedSettings.activeForStudents,
+      citationsRequired: normalizedSettings.requireCitations,
+      id: materialId,
+      priority: normalizedSettings.priority,
+      teacherOnly: normalizedSettings.teacherOnly
+    })
+  );
 
   return {
     id: materialId,
@@ -842,20 +1355,63 @@ async function uploadTutorKnowledgeFile({
   materialId: string;
   updateProgress?: (progress: MaterialJobProgressUpdate) => Promise<void>;
 }) {
+  const contentType = file.type || contentTypeFromFileName(file.name);
   await updateProgress?.({
-    detail: "Saving the original source file to Firebase Storage.",
+    detail: isPdfSource(file.name, contentType)
+      ? "Saving the original PDF to dedicated page asset storage."
+      : "Saving the original source file to Firebase Storage.",
     percent: 20,
     step: "upload_received"
   });
   const buffer = Buffer.from(await file.arrayBuffer());
   const safeFileName = sanitizeFileName(file.name);
   const filePath = `classes/${classId}/materials/${materialId}/original/${safeFileName}`;
+
+  if (isPdfSource(file.name, contentType)) {
+    try {
+      const asset = await saveGcsPdfAsset({
+        buffer,
+        contentType: contentType || "application/pdf",
+        metadata: {
+          classId,
+          materialId,
+          sourceKind: "teacher-upload"
+        },
+        path: canonicalOriginalPdfPath({
+          classId,
+          materialId,
+          safeFileName
+        })
+      });
+
+      return {
+        fileName: file.name,
+        filePath: asset.path,
+        fileSha256: asset.sha256,
+        fileUrl: `https://storage.googleapis.com/${asset.bucket}/${asset.path.split("/").map((segment) => encodeURIComponent(segment)).join("/")}`,
+        contentType: asset.mimeType,
+        fileSize: asset.size,
+        sourceKind: "file",
+        storageBucket: asset.bucket
+      } satisfies TutorKnowledgeOriginalSource;
+    } catch (caughtError) {
+      console.error("Tutor knowledge original PDF GCS upload failed.", caughtError);
+
+      throw new TutorKnowledgeHttpError(
+        caughtError instanceof Error
+          ? `Original PDF file could not be saved: ${caughtError.message}`
+          : "Original PDF file could not be saved.",
+        502
+      );
+    }
+  }
+
   const downloadToken = randomUUID();
   const storageFile = adminStorage!.bucket().file(filePath);
 
   try {
     await storageFile.save(buffer, {
-      contentType: file.type || contentTypeFromFileName(file.name),
+      contentType,
       metadata: {
         metadata: {
           firebaseStorageDownloadTokens: downloadToken
@@ -884,11 +1440,11 @@ async function uploadTutorKnowledgeFile({
     fileName: file.name,
     filePath,
     fileUrl: `https://storage.googleapis.com/${bucketName}/${encodedPath}`,
-    contentType: file.type || contentTypeFromFileName(file.name),
+    contentType,
     fileSize: file.size,
     sourceKind: "file",
     storageBucket: bucketName
-  };
+  } satisfies TutorKnowledgeOriginalSource;
 }
 
 async function deleteMaterialStorageFiles({
@@ -902,18 +1458,41 @@ async function deleteMaterialStorageFiles({
   materialId: string;
   storageBucket?: string;
 }) {
-  const bucket = resolveTutorKnowledgeStorageBucket(storageBucket);
   const materialStoragePrefix = `classes/${classId}/materials/${materialId}/`;
-  const [files] = await bucket.getFiles({ prefix: materialStoragePrefix });
-  const filePaths = new Set(files.map((file) => file.name));
+  const firebaseBuckets = new Map<string, ReturnType<typeof resolveTutorKnowledgeStorageBucket>>();
+  const defaultFirebaseBucket = resolveTutorKnowledgeStorageBucket();
+  firebaseBuckets.set(defaultFirebaseBucket.name, defaultFirebaseBucket);
 
-  if (filePath) {
-    filePaths.add(filePath);
+  if (storageBucket && !isGcsPdfAssetsBucket(storageBucket)) {
+    const requestedBucket = resolveTutorKnowledgeStorageBucket(storageBucket);
+    firebaseBuckets.set(requestedBucket.name, requestedBucket);
   }
 
   await Promise.all(
-    Array.from(filePaths).map((path) => bucket.file(path).delete({ ignoreNotFound: true }))
+    Array.from(firebaseBuckets.values()).map(async (bucket) => {
+      const [files] = await bucket.getFiles({ prefix: materialStoragePrefix });
+      const filePaths = new Set(files.map((file) => file.name));
+
+      if (filePath && !isGcsPdfAssetsBucket(storageBucket)) {
+        filePaths.add(filePath);
+      }
+
+      await Promise.all(Array.from(filePaths).map((path) => bucket.file(path).delete({ ignoreNotFound: true })));
+    })
   );
+
+  if (filePath && isGcsPdfAssetsBucket(storageBucket)) {
+    await deleteGcsPdfAssetPrefix({
+      bucketName: storageBucket,
+      prefix: materialStoragePrefix
+    });
+    return;
+  }
+
+  await deleteGcsPdfAssetPrefix({
+    bucketName: getGcsPdfAssetsBucketName(),
+    prefix: materialStoragePrefix
+  }).catch(() => {});
 }
 
 function defaultSourceSettingsForKind(kind: string): TutorKnowledgeSourceSettings {
@@ -1048,12 +1627,27 @@ async function readStoredMaterialFile(material: Record<string, unknown>) {
     return null;
   }
 
-  const [buffer] = await resolveTutorKnowledgeStorageBucket(storageBucket).file(filePath).download();
+  const buffer = await downloadTutorKnowledgeStorageBuffer({ storageBucket, storagePath: filePath });
   const fileBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 
   return new File([fileBytes], fileName, {
     type: String(material.contentType ?? "") || contentTypeFromFileName(fileName)
   });
+}
+
+async function downloadTutorKnowledgeStorageBuffer({
+  storageBucket,
+  storagePath
+}: {
+  storageBucket?: string;
+  storagePath: string;
+}) {
+  if (isGcsPdfAssetsBucket(storageBucket)) {
+    return downloadGcsPdfAssetBuffer({ bucketName: storageBucket, path: storagePath });
+  }
+
+  const [buffer] = await resolveTutorKnowledgeStorageBucket(storageBucket).file(storagePath).download();
+  return buffer;
 }
 
 async function readUploadedStorageSource({
@@ -1066,7 +1660,7 @@ async function readUploadedStorageSource({
   materialId: string;
   storageBucket?: string;
   storagePath: string;
-}) {
+}): Promise<UploadedStorageSource> {
   const expectedPrefix = `classes/${classId}/materials/${materialId}/original/`;
 
   if (!storagePath.startsWith(expectedPrefix) || storagePath.includes("..")) {
@@ -1094,25 +1688,34 @@ async function readUploadedStorageSource({
   }
 
   validateStoredSourceMetadata({ contentType, fileName, fileSize });
-  const [buffer] = await storageFile.download();
-  const fileBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
   const bucketName = bucket.name;
   const encodedPath = storagePath
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/");
+  const metadataResult = {
+    contentType,
+    fileName,
+    filePath: storagePath,
+    fileSize,
+    fileUrl: `https://storage.googleapis.com/${bucketName}/${encodedPath}`,
+    sourceKind: "storage",
+    storageBucket: bucketName
+  } satisfies TutorKnowledgeOriginalSource;
+
+  if (isPdfSource(fileName, contentType)) {
+    return {
+      file: null,
+      metadata: metadataResult
+    };
+  }
+
+  const [buffer] = await storageFile.download();
+  const fileBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 
   return {
     file: new File([fileBytes], fileName, { type: contentType }),
-    metadata: {
-      contentType,
-      fileName,
-      filePath: storagePath,
-      fileSize,
-      fileUrl: `https://storage.googleapis.com/${bucketName}/${encodedPath}`,
-      sourceKind: "storage",
-      storageBucket: bucketName
-    } satisfies TutorKnowledgeOriginalSource
+    metadata: metadataResult
   };
 }
 
@@ -1260,22 +1863,10 @@ async function extractChunksFromFile({
     };
   }
 
-  const pages = await extractPdfPages(buffer);
-  const chunks = chunkTutorKnowledgePages({
-    docId,
-    pages,
-    title
-  });
-
-  return {
-    chunks: await attachPdfSlicesToChunks({
-      chunks,
-      pdfBytes: buffer
-    }),
-    extractedText: pages.map((page) => page.text.trim()).filter(Boolean).join("\n\n"),
-    pageCount: pages.length,
-    visualPageCount: pages.filter((page) => classifyTutorKnowledgePage(page) !== "text-heavy").length
-  };
+  throw new TutorKnowledgeHttpError(
+    "PDF files are indexed through Document AI OCR and PostgreSQL metadata, not Firestore tutor-knowledge chunks.",
+    400
+  );
 }
 
 async function extractChunksFromUrl({
@@ -1299,17 +1890,10 @@ async function extractChunksFromUrl({
   };
 
   if (isPdfSource(downloaded.fileName, contentType)) {
-    const fileBytes = downloaded.buffer.buffer.slice(
-      downloaded.buffer.byteOffset,
-      downloaded.buffer.byteOffset + downloaded.buffer.byteLength
-    ) as ArrayBuffer;
-    const file = new File([fileBytes], downloaded.fileName, { type: contentType });
-    const extracted = await extractChunksFromFile({ docId, file, title });
-
-    return {
-      ...extracted,
-      metadata
-    };
+    throw new TutorKnowledgeHttpError(
+      "PDF URLs are not ingested as Firestore tutor-knowledge chunks. Upload the PDF so it can be indexed through Document AI OCR and PostgreSQL metadata.",
+      400
+    );
   }
 
   if (isHtmlSource(contentType, downloaded.fileName)) {
@@ -1349,130 +1933,6 @@ async function extractChunksFromUrl({
   }
 
   throw new TutorKnowledgeHttpError("This URL is not a supported PDF, HTML, TXT, MD, or CSV source.", 415);
-}
-
-async function extractPdfPages(buffer: Buffer): Promise<TutorKnowledgePage[]> {
-  const pageInfoByNumberPromise = extractPdfPageInfo(buffer);
-  let pages = await extractPdfTextPages(buffer, { lineEnforce: true }).catch(() =>
-    extractPdfTextPages(buffer, { lineEnforce: false }).catch(async () =>
-      visualPdfPagesFromPageInfo(await pageInfoByNumberPromise)
-    )
-  );
-  const pageInfoByNumber = await pageInfoByNumberPromise;
-
-  if (!pages.length) {
-    pages = visualPdfPagesFromPageInfo(pageInfoByNumber);
-  }
-
-  if (!pages.length) {
-    throw new TutorKnowledgeHttpError(
-      "We could not inspect this PDF. Try a non-password-protected PDF or paste the content manually.",
-      400
-    );
-  }
-
-  return pages.map((page) => {
-    const text = page.text.trim();
-    const pageInfo = pageInfoByNumber.get(page.num);
-    const pageArea = pageInfo?.area ?? 0;
-    const wordCount = text.split(/\s+/).filter(Boolean).length;
-    const lineCount = text.split(/\r?\n/).filter((line) => line.trim().length >= 3).length;
-
-    return {
-      metrics: {
-        embeddedImageCount: 0,
-        imageCoverageRatio: text ? 0 : 1,
-        lineCount,
-        pageArea,
-        textDensity: pageArea ? wordCount / pageArea : 0
-      },
-      isVisual: !text,
-      pageNumber: page.num,
-      text
-    };
-  });
-}
-
-async function extractPdfTextPages(buffer: Buffer, options: { lineEnforce: boolean }) {
-  ensurePdfJsDomGlobals();
-  const { PDFParse } = await import("pdf-parse");
-  const parser = new PDFParse({ data: buffer });
-
-  try {
-    const result = await parser.getText({
-      lineEnforce: options.lineEnforce,
-      pageJoiner: ""
-    });
-
-    return result.pages.map((page) => ({
-      num: page.num,
-      text: page.text
-    }));
-  } catch {
-    throw new TutorKnowledgeHttpError(
-      "We could not read this PDF. Try a non-password-protected PDF or paste the content manually.",
-      400
-    );
-  } finally {
-    await parser.destroy();
-  }
-}
-
-async function extractPdfPageInfo(buffer: Buffer) {
-  ensurePdfJsDomGlobals();
-  const { PDFParse } = await import("pdf-parse");
-  const parser = new PDFParse({ data: buffer });
-
-  try {
-    const info = await parser.getInfo({ parsePageInfo: true });
-
-    return new Map(
-      (info.pages ?? []).map((page) => [
-        page.pageNumber,
-        {
-          area: page.width * page.height,
-          height: page.height,
-          width: page.width
-        }
-      ])
-    );
-  } catch {
-    return extractPdfPageInfoWithPdfLib(buffer);
-  } finally {
-    await parser.destroy();
-  }
-}
-
-async function extractPdfPageInfoWithPdfLib(buffer: Buffer) {
-  try {
-    const pdf = await PDFDocument.load(buffer, { ignoreEncryption: true });
-
-    return new Map(
-      pdf.getPages().map((page, index) => {
-        const { height, width } = page.getSize();
-
-        return [
-          index + 1,
-          {
-            area: width * height,
-            height,
-            width
-          }
-        ];
-      })
-    );
-  } catch {
-    return new Map<number, { area: number; height: number; width: number }>();
-  }
-}
-
-function visualPdfPagesFromPageInfo(pageInfoByNumber: Map<number, { area: number; height: number; width: number }>) {
-  return Array.from(pageInfoByNumber.keys())
-    .sort((first, second) => first - second)
-    .map((num) => ({
-      num,
-      text: ""
-    }));
 }
 
 function readOptionalFile(formData: FormData) {
@@ -1554,7 +2014,6 @@ async function writeChunks({
     ? []
     : await createVertexEmbeddings(
         chunks.map((chunk) => ({
-          file: chunk.pdfPart ?? chunk.pageImage,
           taskType: "RETRIEVAL_DOCUMENT",
           text: chunk.content,
           title
@@ -1668,17 +2127,15 @@ export async function prepareTutorKnowledgeChunkData({
   const chunkEmbedding = embedding ?? (skipEmbedding
     ? undefined
     : await createEmbedding({
-        file: chunk.pdfPart ?? chunk.pageImage,
         taskType: "RETRIEVAL_DOCUMENT",
         text: chunk.content,
         title
       }));
-  const { pageImage: _pageImage, pdfPart: _pdfPart, ...storedChunk } = chunk;
   const pageNumber = chunk.pageStart ?? extractPageNumber(chunk.label);
   const sectionHeading = chunk.section ?? extractSectionHeading(chunk.content);
 
   return {
-    ...storedChunk,
+    ...chunk,
     classId,
     class_id: classId,
     chunkId: chunkId ?? "",
@@ -1688,8 +2145,8 @@ export async function prepareTutorKnowledgeChunkData({
     createdAt: FieldValue.serverTimestamp(),
     doc_id: chunk.docId ?? materialId,
     docId: chunk.docId ?? materialId,
-    hasPageImage: Boolean(chunk.pageImage),
-    hasPdfPart: Boolean(chunk.pdfPart),
+    hasPageImage: false,
+    hasPdfPart: false,
     materialId,
     materialType,
     excerpt: buildChunkExcerpt(chunk.chunkText ?? chunk.content),
@@ -1720,6 +2177,28 @@ export function buildEmbeddingFailureMaterialMetadata(error: VertexEmbeddingErro
   };
 }
 
+async function markMaterialProcessingFailed({
+  errorMessage,
+  materialId,
+  updateProgress
+}: {
+  errorMessage: string;
+  materialId: string;
+  updateProgress: (progress: MaterialJobProgressUpdate) => Promise<void>;
+}) {
+  await Promise.allSettled([
+    tryPostgresData("material.status.failed", () =>
+      updateMaterialStatus({ id: materialId, status: "failed" })
+    ),
+    updateProgress({
+      detail: "Tutor knowledge processing failed before it was ready.",
+      error: errorMessage,
+      percent: 100,
+      step: "failed"
+    })
+  ]);
+}
+
 function createMaterialJobProgressWriter({
   classId,
   jobId,
@@ -1746,6 +2225,21 @@ function createMaterialJobProgressWriter({
   const jobRef = adminDb!.collection("classes").doc(classId).collection("materialJobs").doc(normalizedJobId);
 
   return async (progress: MaterialJobProgressUpdate) => {
+    await tryPostgresData("material.job.write", () =>
+      upsertMaterialJob({
+        classId,
+        completedChunks: progress.completedChunks ?? null,
+        detail: progress.detail,
+        error: progress.error ?? null,
+        id: normalizedJobId,
+        materialId,
+        metadata: { professorId: teacherId },
+        percent: progress.percent,
+        step: progress.step,
+        title,
+        totalChunks: progress.totalChunks ?? null
+      })
+    );
     await jobRef.set(
       {
         classId,

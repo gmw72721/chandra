@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { resolveClassCodePostgresFirst, tryPostgresData } from "@/lib/data/server";
+import { updateClassJoinCode } from "@/lib/data/classes";
 import { adminDb } from "@/lib/firebase-admin";
 import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
@@ -17,9 +19,8 @@ export async function POST(
     await authorizeClassTeacher(request, classId);
     const joinCode = await createUniqueClassCode();
 
-    await adminDb!.collection("classes").doc(classId).update({
-      joinCode
-    });
+    await tryPostgresData("class.join_code.write", () => updateClassJoinCode({ classId, joinCode }));
+    await adminDb!.collection("classes").doc(classId).update({ joinCode });
 
     return NextResponse.json({ joinCode });
   } catch (caughtError) {
@@ -44,19 +45,7 @@ async function createUniqueClassCode() {
 }
 
 async function isClassCodeAvailable(classCode: string) {
-  const classSnapshot = await adminDb!.collection("classes").doc(classCode).get();
-
-  if (classSnapshot.exists) {
-    return false;
-  }
-
-  const joinCodeSnapshot = await adminDb!
-    .collection("classes")
-    .where("joinCode", "==", classCode)
-    .limit(1)
-    .get();
-
-  return joinCodeSnapshot.empty;
+  return !(await resolveClassCodePostgresFirst(classCode));
 }
 
 function generateClassCode() {

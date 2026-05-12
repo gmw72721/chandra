@@ -9,6 +9,10 @@ runConfig:
   concurrency: 80
   cpu: 1
   memoryMiB: 1024
+  vpcAccess:
+    egress: PRIVATE_RANGES_ONLY
+    networkInterfaces:
+      - network: default
 
 env:
   # App Hosting deploys run `npm run build`; explicit type validation remains
@@ -55,6 +59,10 @@ env:
       - RUNTIME
   - variable: FIREBASE_STORAGE_BUCKET
     value: chandra-f6e13-tutor-knowledge
+    availability:
+      - RUNTIME
+  - variable: GCS_PDF_ASSETS_BUCKET
+    value: chandra-f6e13-pdf-page-assets
     availability:
       - RUNTIME
   # Use either FIREBASE_SERVICE_ACCOUNT_KEY or the split
@@ -147,6 +155,31 @@ env:
       - RUNTIME
   - variable: BETTER_STACK_ENV
     value: production
+    availability:
+      - RUNTIME
+
+  - variable: DATABASE_URL
+    secret: DATABASE_URL
+    availability:
+      - RUNTIME
+  - variable: CLOUD_SQL_POSTGRES_POOL_MAX
+    value: "5"
+    availability:
+      - RUNTIME
+  - variable: POSTGRES_FIRESTORE_FALLBACK
+    value: "0"
+    availability:
+      - RUNTIME
+  - variable: DOCUMENT_AI_LOCATION
+    value: us
+    availability:
+      - RUNTIME
+  - variable: DOCUMENT_AI_OCR_PROCESSOR_NAME
+    value: chandra-ocr
+    availability:
+      - RUNTIME
+  - variable: DOCUMENT_AI_OCR_PROCESSOR_ID
+    value: 5d3fa32c2ebe2a90
     availability:
       - RUNTIME
 

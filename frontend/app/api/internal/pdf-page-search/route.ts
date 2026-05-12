@@ -1,12 +1,14 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { retrieveCourseContext } from "@/lib/retrieval";
+import { searchPdfOcrMetadata, searchPdfOcrMetadataVectorOnly } from "@/lib/pdf-ocr-postgres";
+import { VertexEmbeddingError, createVertexEmbedding } from "@/lib/vertex-embeddings";
 
 export const runtime = "nodejs";
 
 const requestSchema = z.object({
   classId: z.string().min(1).max(200),
+  materialId: z.string().min(1).max(200).optional(),
   professorId: z.string().min(1).max(200),
   query: z.string().min(1).max(30000),
   topK: z.number().int().min(1).max(20).optional()
@@ -25,28 +27,87 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid internal PDF retrieval request." }, { status: 400 });
   }
 
-  const retrieval = await retrieveCourseContext(
-    {
-      classId: parsed.data.classId,
-      professorId: parsed.data.professorId
-    },
-    parsed.data.query,
-    parsed.data.topK ?? 5
-  );
+  let pages = await searchPdfOcrMetadata({
+    classId: parsed.data.classId,
+    limit: parsed.data.topK ?? 5,
+    materialId: parsed.data.materialId,
+    professorId: parsed.data.professorId,
+    query: parsed.data.query
+  });
+
+  if (!pages.length) {
+    const queryEmbedding = await createPdfSearchQueryEmbedding(parsed.data.query);
+
+    if (queryEmbedding?.values.length) {
+      pages = await searchPdfOcrMetadataVectorOnly({
+        classId: parsed.data.classId,
+        limit: parsed.data.topK ?? 5,
+        materialId: parsed.data.materialId,
+        professorId: parsed.data.professorId,
+        query: parsed.data.query,
+        queryVector: queryEmbedding.values
+      });
+    }
+  }
 
   return NextResponse.json({
-    pages: retrieval.hits.map((hit) => ({
-      chunk_text: hit.chunk.chunkText ?? hit.chunk.content,
-      doc_id: hit.document.id,
-      material_type: hit.chunk.materialType ?? hit.document.materialType ?? hit.document.kind,
-      page_end: hit.chunk.pageEnd ?? hit.chunk.pageNumber ?? hit.chunk.pageStart ?? 1,
-      page_start: hit.chunk.pageStart ?? hit.chunk.pageNumber ?? 1,
-      score: hit.score,
-      section: hit.chunk.sectionHeading ?? hit.chunk.section ?? "",
-      source_pdf_path: hit.document.filePath ?? hit.document.fileUrl ?? "",
-      title: hit.chunk.title ?? hit.document.title
+    pages: pages.map((page) => ({
+      chunk_text: page.chunkText,
+      classId: page.classId,
+      doc_id: page.docId,
+      docId: page.docId,
+      materialId: page.materialId,
+      material_type: page.materialType,
+      materialType: page.materialType,
+      ocrConfidence: page.ocrConfidence,
+      ocrProvider: page.ocrProvider,
+      ocrSource: page.ocrSource,
+      ocrText: page.ocrText,
+      page_end: page.pageEnd,
+      page_start: page.pageStart,
+      fullPdfBucket: page.fullPdfBucket,
+      fullPdfPath: page.fullPdfPath,
+      fullPdfUri: page.fullPdfUri,
+      pageAssetBucket: page.pageAssetBucket,
+      pageAssetPath: page.pageAssetPath,
+      pageAssetUri: page.pageAssetUri,
+      pageAssetChecksumSha256: page.pageAssetChecksumSha256,
+      pageAssetMimeType: page.pageAssetMimeType,
+      pageAssetSizeBytes: page.pageAssetSizeBytes,
+      pageAssetSha256: page.pageAssetSha256,
+      pageAssetSize: page.pageAssetSize,
+      pageAssetStorageBucket: page.pageAssetStorageBucket,
+      pageAssetStoragePath: page.pageAssetStoragePath,
+      pageEnd: page.pageEnd,
+      pageStart: page.pageStart,
+      printed_page_end: page.printedPageEnd,
+      printed_page_start: page.printedPageStart,
+      professorId: parsed.data.professorId,
+      problemNumbers: page.problemNumbers,
+      retrievalMode: page.retrievalMode,
+      score: page.score,
+      source_pdf_path: page.sourcePdfPath,
+      storageBucket: page.storageBucket,
+      storagePath: page.storagePath,
+      title: page.title
     }))
   });
+}
+
+async function createPdfSearchQueryEmbedding(query: string) {
+  try {
+    return await createVertexEmbedding({
+      taskType: "RETRIEVAL_QUERY",
+      text: query
+    });
+  } catch (caughtError) {
+    if (caughtError instanceof VertexEmbeddingError) {
+      console.warn("PDF OCR query embedding failed. Falling back to exact/full-text PostgreSQL OCR search.", caughtError);
+      return undefined;
+    }
+
+    throw caughtError;
+  }
 }
 
 function authorizeInternalRequest(request: Request) {

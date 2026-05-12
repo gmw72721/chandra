@@ -16,13 +16,16 @@
     "build:web": "next build frontend",
     "build:fast": "NEXT_IGNORE_TYPECHECK=1 next build frontend",
     "start": "next start frontend",
+    "migrate:postgres": "node scripts/apply-postgres-migrations.mjs",
     "eval:retrieval:live": "node --env-file=.env.local --experimental-strip-types scripts/live-retrieval-eval.mjs",
+    "backfill:postgres": "node scripts/backfill-firestore-to-postgres.mjs",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "test:retrieval": "node --test --experimental-strip-types tests/retrieval-ranking.test.ts tests/retrieval-eval.test.ts",
     "lint": "eslint --config frontend/eslint.config.mjs frontend/app frontend/components frontend/lib tests",
     "typecheck": "tsc --project frontend/tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@google-cloud/storage": "^7.19.0",
     "clsx": "^2.1.1",
     "firebase": "^12.12.1",
     "firebase-admin": "^13.8.0",
@@ -31,6 +34,7 @@
     "openai": "^4.56.0",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
+    "pg": "^8.20.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-markdown": "^9.0.1",
@@ -40,6 +44,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.39.4",

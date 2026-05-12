@@ -11,7 +11,7 @@ export type AssistantMessageBlock =
   | AssistantStructuredSection;
 
 type MessageSource = NonNullable<ChatMessage["sources"]>[number];
-const fallbackSectionOrder: TutorStructuredSectionKey[] = [
+const defaultSectionOrder: TutorStructuredSectionKey[] = [
   "problem",
   "answer",
   "hint",
@@ -45,13 +45,14 @@ export function assistantMessageBlocks(message: ChatMessage): AssistantMessageBl
       !message.sources?.length && !isGenericSourceNote(sections.sourceNote)
         ? { content: sections.sourceNote ?? "", kind: "source-note", label: "Source" }
         : undefined,
-    nextStep: sections.nextStep ? { content: sections.nextStep, kind: "next-step", label: "Your next step" } : undefined
+    nextStep:
+      sections.nextStep && !shouldSuppressRenderedNextStep(message)
+        ? { content: sections.nextStep, kind: "next-step", label: "Your next step" }
+        : undefined
   };
-  const requestedOrder = message.structuredOutput.sectionOrder?.length
-    ? message.structuredOutput.sectionOrder
-    : fallbackSectionOrder;
+  const effectiveOrder = orderedTutorSectionKeys(message);
   const seen = new Set<TutorStructuredSectionKey>();
-  const orderedKeys = [...requestedOrder, ...fallbackSectionOrder].filter((key) => {
+  const orderedKeys = [...effectiveOrder, ...defaultSectionOrder].filter((key) => {
     if (seen.has(key)) {
       return false;
     }
@@ -60,11 +61,67 @@ export function assistantMessageBlocks(message: ChatMessage): AssistantMessageBl
     return Boolean(sectionMap[key]);
   });
 
-  return orderedKeys.map((key) => sectionMap[key]).filter((block): block is AssistantMessageBlock => Boolean(block));
+  const blocks = orderedKeys.map((key) => sectionMap[key]).filter((block): block is AssistantMessageBlock => Boolean(block));
+  const seenContent: string[] = [];
+
+  return blocks.filter((block) => {
+    const normalizedContent = normalizeComparableBlockText(block.content);
+
+    if (
+      normalizedContent &&
+      seenContent.some(
+        (content) =>
+          content === normalizedContent || (normalizedContent.length >= 24 && content.endsWith(normalizedContent))
+      )
+    ) {
+      return false;
+    }
+
+    seenContent.push(normalizedContent);
+    return true;
+  });
 }
 
 export function assistantStructuredSections(message: ChatMessage): AssistantStructuredSection[] {
   return assistantMessageBlocks(message).filter((block): block is AssistantStructuredSection => block.kind !== "answer");
+}
+
+function orderedTutorSectionKeys(message: ChatMessage): TutorStructuredSectionKey[] {
+  const sections = message.structuredOutput?.sections;
+  if (!sections) {
+    return defaultSectionOrder;
+  }
+
+  const requestedOrder = message.structuredOutput?.sectionOrder?.length
+    ? message.structuredOutput.sectionOrder
+    : defaultSectionOrder;
+  const presentKeys = new Set(defaultSectionOrder.filter((key) => Boolean(sections[key])));
+  const orderedKeys = requestedOrder.filter((key) => presentKeys.has(key));
+  const remainingKeys = defaultSectionOrder.filter((key) => presentKeys.has(key) && !orderedKeys.includes(key));
+  const candidateOrder = [...orderedKeys, ...remainingKeys];
+  const leadKeys: TutorStructuredSectionKey[] = [];
+
+  if (presentKeys.has("problem")) {
+    leadKeys.push("problem");
+  }
+
+  if (presentKeys.has("answer")) {
+    leadKeys.push("answer");
+  }
+
+  const trailingKeys: TutorStructuredSectionKey[] = [];
+  if (presentKeys.has("sourceNote")) {
+    trailingKeys.push("sourceNote");
+  }
+  if (presentKeys.has("nextStep")) {
+    trailingKeys.push("nextStep");
+  }
+
+  return [
+    ...leadKeys,
+    ...candidateOrder.filter((key) => !leadKeys.includes(key) && !trailingKeys.includes(key)),
+    ...trailingKeys
+  ];
 }
 
 export function condensedSourceLabels(sources: NonNullable<ChatMessage["sources"]>) {
@@ -186,6 +243,19 @@ export function normalizeMarkdownMath(content: string) {
 
 function isGenericSourceNote(note: string | undefined) {
   return !note || /^based on the selected class material\.?$/i.test(note.trim());
+}
+
+function shouldSuppressRenderedNextStep(message: ChatMessage) {
+  return message.structuredOutput?.metadata.mode === "source_lookup" || Boolean(message.structuredOutput?.sections.problem);
+}
+
+function normalizeComparableBlockText(value: string) {
+  return value
+    .replace(/^(?:\*\*)?(?:answer|your next step|next step)(?:\*\*)?\s*:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/g, "")
+    .trim()
+    .toLowerCase();
 }
 
 function formatSourceLabel(source: MessageSource) {

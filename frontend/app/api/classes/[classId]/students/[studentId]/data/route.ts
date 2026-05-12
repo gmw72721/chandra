@@ -1,6 +1,13 @@
 import { type DocumentReference, type QueryDocumentSnapshot } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
+import {
+  listConversationAttachments,
+  listConversationMessages,
+  listStudentConversations,
+  listTeacherStudentConversations,
+  softDeleteConversation
+} from "@/lib/data/conversations";
 import { adminDb, adminStorage } from "@/lib/firebase-admin";
 import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
@@ -95,25 +102,21 @@ async function buildStudentClassDataExport({
   const roster = rosterSnapshot?.data() ?? {};
   const conversations = await Promise.all(
     conversationsSnapshot.map(async (conversationDoc) => {
-      const [messagesSnapshot, attachmentsSnapshot] = await Promise.all([
-        conversationDoc.ref.collection("messages").orderBy("createdAt").get().catch(() =>
-          conversationDoc.ref.collection("messages").get()
-        ),
-        conversationDoc.ref.collection("attachments").orderBy("createdAt").get().catch(() =>
-          conversationDoc.ref.collection("attachments").get()
-        )
+      const [messages, attachments] = await Promise.all([
+        listConversationMessages(conversationDoc.id),
+        listConversationAttachments(conversationDoc.id)
       ]);
 
       return {
         id: conversationDoc.id,
         ...serializeFirestoreData(conversationDoc.data()),
-        messages: messagesSnapshot.docs.map((messageDoc) => ({
-          id: messageDoc.id,
-          ...serializeFirestoreData(messageDoc.data())
+        messages: messages.map((message) => ({
+          id: message.id,
+          ...serializeFirestoreData(message as unknown as Record<string, unknown>)
         })),
-        attachments: attachmentsSnapshot.docs.map((attachmentDoc) => ({
-          id: attachmentDoc.id,
-          ...serializeFirestoreData(attachmentDoc.data())
+        attachments: attachments.map((attachment) => ({
+          id: attachment.id,
+          ...serializeFirestoreData(attachment as unknown as Record<string, unknown>)
         }))
       };
     })
@@ -166,7 +169,7 @@ async function deleteStudentClassData({
   let attachmentFileCount = 0;
 
   for (const conversationDoc of conversationDocs) {
-    const deletedConversationData = await deleteConversationDocument(conversationDoc);
+    const deletedConversationData = await deleteConversationRecord(conversationDoc.id);
     messageCount += deletedConversationData.messages;
     attachmentCount += deletedConversationData.attachments;
     attachmentFileCount += deletedConversationData.attachmentFiles;
@@ -276,7 +279,10 @@ function collectRosterIdentity(identity: StudentClassIdentity, rosterDocs: Query
   });
 }
 
-function collectConversationIdentity(identity: StudentClassIdentity, conversationDocs: QueryDocumentSnapshot[]) {
+function collectConversationIdentity(
+  identity: StudentClassIdentity,
+  conversationDocs: Array<{ data: () => Record<string, unknown> }>
+) {
   conversationDocs.forEach((conversationDoc) => {
     const conversation = conversationDoc.data() ?? {};
 
@@ -361,18 +367,20 @@ async function getStudentConversationDocs({
   classId: string;
   identity: StudentClassIdentity;
 }) {
-  const conversationsRef = adminDb!.collection("classes").doc(classId).collection("conversations");
-  const docs: QueryDocumentSnapshot[] = [];
+  const conversations = [];
 
   for (const email of identity.emails) {
-    docs.push(...(await conversationsRef.where("studentEmail", "==", email).get()).docs);
+    conversations.push(...(await listTeacherStudentConversations({ classId, studentEmail: email })));
   }
 
   for (const uid of identity.uids) {
-    docs.push(...(await conversationsRef.where("studentId", "==", uid).get()).docs);
+    conversations.push(...(await listStudentConversations({ classId, studentId: uid })));
   }
 
-  return dedupeDocs(docs);
+  return dedupeDocs(conversations).map((conversation) => ({
+    id: conversation.id,
+    data: () => conversation as unknown as Record<string, unknown>
+  }));
 }
 
 async function getAiUsageDocs({
@@ -401,41 +409,35 @@ async function getAiUsageDocs({
   return dedupeDocs(docs);
 }
 
-async function deleteConversationDocument(conversationDoc: QueryDocumentSnapshot) {
-  const [messagesSnapshot, attachmentsSnapshot] = await Promise.all([
-    conversationDoc.ref.collection("messages").get(),
-    conversationDoc.ref.collection("attachments").get()
+async function deleteConversationRecord(conversationId: string) {
+  const [messages, attachments] = await Promise.all([
+    listConversationMessages(conversationId),
+    listConversationAttachments(conversationId)
   ]);
-  const attachmentFiles = await deleteAttachmentStorageFiles(attachmentsSnapshot.docs);
+  const attachmentFiles = await deleteAttachmentStorageFiles(attachments.map((attachment) => attachment.storageKey));
 
-  await deleteDocumentsInBatches([
-    ...messagesSnapshot.docs.map((messageDoc) => messageDoc.ref),
-    ...attachmentsSnapshot.docs.map((attachmentDoc) => attachmentDoc.ref),
-    conversationDoc.ref
-  ]);
+  await softDeleteConversation(conversationId);
 
   return {
-    attachments: attachmentsSnapshot.size,
+    attachments: attachments.length,
     attachmentFiles,
-    messages: messagesSnapshot.size
+    messages: messages.length
   };
 }
 
-async function deleteAttachmentStorageFiles(attachmentDocs: QueryDocumentSnapshot[]) {
+async function deleteAttachmentStorageFiles(storageKeys: string[]) {
   if (!adminStorage) {
     return 0;
   }
 
   const bucket = adminStorage.bucket();
-  const storageKeys = Array.from(new Set(attachmentDocs.map((attachmentDoc) =>
-    String(attachmentDoc.data()?.storageKey ?? "").trim()
-  ).filter(Boolean)));
+  const uniqueStorageKeys = Array.from(new Set(storageKeys.map((storageKey) => storageKey.trim()).filter(Boolean)));
 
-  await Promise.all(storageKeys.map((storageKey) =>
+  await Promise.all(uniqueStorageKeys.map((storageKey) =>
     bucket.file(storageKey).delete({ ignoreNotFound: true })
   ));
 
-  return storageKeys.length;
+  return uniqueStorageKeys.length;
 }
 
 async function deleteDocumentsInBatches(references: DocumentReference[]) {
@@ -457,6 +459,10 @@ function serializeFirestoreData(data: Record<string, unknown>) {
 }
 
 function serializeFirestoreValue(value: unknown): unknown {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
   if (value && typeof value === "object" && "toDate" in value && typeof value.toDate === "function") {
     return value.toDate().toISOString();
   }

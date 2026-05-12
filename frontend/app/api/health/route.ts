@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { adminApp, adminDb } from "@/lib/firebase-admin";
+import { adminApp, adminAuth, adminDb, adminStorage } from "@/lib/firebase-admin";
+import { isPostgresConfigured, queryPostgres } from "@/lib/data/postgres";
 import { firebaseConfig, isFirebaseConfigured } from "@/lib/firebase-config";
 import {
   betterStackLoggingStatus,
@@ -19,14 +20,17 @@ export async function GET(request: Request) {
   const requestId = requestIdFromRequest(request);
   const startedAt = performance.now();
   const dependencies = {
-    backend: await checkBackend(),
-    betterStackLogging: checkBetterStackLogging(),
-    embeddings: await checkEmbeddings(),
-    firebaseAdmin: checkFirebaseAdmin(),
-    frontendRuntimeConfig: checkFrontendRuntimeConfig(),
-    firebaseWebConfig: checkFirebaseWebConfig(),
-    openrouter: await checkOpenRouter()
-  };
+	    backend: await checkBackend(),
+	    betterStackLogging: checkBetterStackLogging(),
+	    embeddings: await checkEmbeddings(),
+	    firebaseAdmin: await checkFirebaseAdmin(),
+	    firebaseStorage: await checkFirebaseStorage(),
+	    frontendRuntimeConfig: checkFrontendRuntimeConfig(),
+	    firebaseWebConfig: checkFirebaseWebConfig(),
+	    openrouter: await checkOpenRouter(),
+	    pdfOcrSearchTables: await checkPdfOcrSearchTables(),
+	    postgres: await checkPostgres()
+	  };
   const status = overallStatus(Object.values(dependencies));
   const responseStatus = status === "ok" ? 200 : 503;
   const response = NextResponse.json(
@@ -85,15 +89,94 @@ async function checkBackend(): Promise<DependencyStatus> {
   }
 }
 
-function checkFirebaseAdmin(): DependencyStatus {
-  if (!adminApp || !adminDb) {
+async function checkFirebaseAdmin(): Promise<DependencyStatus> {
+  if (!adminApp || !adminAuth || !adminDb) {
     return {
       detail: "Firebase Admin is not initialized.",
       status: "missing_config"
     };
   }
 
-  return { status: "ok" };
+  try {
+    await adminAuth.listUsers(1);
+    return { status: "ok" };
+  } catch {
+    return {
+      detail: "Firebase Auth/Admin connectivity check failed.",
+      status: "down"
+    };
+  }
+}
+
+async function checkFirebaseStorage(): Promise<DependencyStatus> {
+  if (!adminStorage) {
+    return {
+      detail: "Firebase Storage is not initialized.",
+      status: "missing_config"
+    };
+  }
+
+  try {
+    const [metadata] = await adminStorage.bucket().getMetadata();
+    return {
+      detail: String(metadata.name ?? ""),
+      status: "ok"
+    };
+  } catch {
+    return {
+      detail: "Firebase Storage connectivity check failed.",
+      status: "down"
+    };
+  }
+}
+
+async function checkPostgres(): Promise<DependencyStatus> {
+  if (!isPostgresConfigured()) {
+    return {
+      detail: "DATABASE_URL, CLOUD_SQL_POSTGRES_URL, or CHANDRA_CLOUD_SQL_POSTGRES_URL is not configured.",
+      status: "missing_config"
+    };
+  }
+
+  try {
+    await queryPostgres("SELECT 1");
+    return { status: "ok" };
+  } catch {
+    return {
+      detail: "Postgres connectivity check failed.",
+      status: "down"
+    };
+  }
+}
+
+async function checkPdfOcrSearchTables(): Promise<DependencyStatus> {
+  if (!isPostgresConfigured()) {
+    return {
+      detail: "Postgres is not configured for PDF OCR/search metadata.",
+      status: "missing_config"
+    };
+  }
+
+  try {
+    const result = await queryPostgres<{ pdf_materials: string | null; pdf_pages: string | null }>(
+      "SELECT to_regclass('pdf_materials')::text AS pdf_materials, to_regclass('pdf_pages')::text AS pdf_pages"
+    );
+    const row = result.rows[0];
+
+    if (!row?.pdf_materials || !row?.pdf_pages) {
+      return {
+        detail: "PDF OCR/search tables are missing.",
+        status: "down"
+      };
+    }
+
+    return { status: "ok" };
+  } catch {
+    return {
+      detail: "PDF OCR/search table connectivity check failed.",
+      status: "down"
+    };
+  }
 }
 
 function checkFirebaseWebConfig(): DependencyStatus {

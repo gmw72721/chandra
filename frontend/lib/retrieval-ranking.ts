@@ -45,7 +45,7 @@ type CorpusStats = {
 };
 
 const assignmentKinds = new Set(["assignment", "worksheet", "homework", "practice", "quiz"]);
-const explicitProblemLookupTightScoreWindow = 2;
+const explicitProblemLookupTightScoreWindow = 5;
 const stopwords = new Set([
   "about",
   "after",
@@ -168,6 +168,7 @@ export function problemNumbersFromText(text: string) {
     /\bq\s*(\d{1,3}[a-z]?)\b/g,
     /(?:^|[\s([{])(\d{1,3})\s*\.\s*(\d{1,3}[a-z]?)\s*[\).]/g
   ];
+  const bareDottedLocatorPattern = /^\s*(?:problem|question|exercise|ex\.?)?\s*(\d{1,3})\s*\.\s*(\d{1,3}[a-z]?)\s*[?.!]?\s*$/;
 
   for (const pattern of patterns) {
     for (const match of normalized.matchAll(pattern)) {
@@ -177,6 +178,11 @@ export function problemNumbersFromText(text: string) {
         matches.add(match[1].toUpperCase());
       }
     }
+  }
+
+  const bareDottedLocator = normalized.match(bareDottedLocatorPattern);
+  if (bareDottedLocator) {
+    matches.add(`${bareDottedLocator[1]}.${bareDottedLocator[2]}`.toUpperCase());
   }
 
   return [...matches];
@@ -553,15 +559,14 @@ function selectedHitLimit(
     return requestedLimit;
   }
 
-  if (scored.length <= 3 || requestedLimit <= 3) {
+  if (scored.length <= 1 || requestedLimit <= 1) {
     return Math.min(requestedLimit, scored.length);
   }
 
-  const comparisonIndex = Math.min(4, scored.length - 1);
   const topScore = scored[0]?.score ?? 0;
-  const comparisonScore = scored[comparisonIndex]?.score ?? 0;
+  const secondScore = scored[1]?.score ?? 0;
 
-  return topScore - comparisonScore <= explicitProblemLookupTightScoreWindow ? Math.min(requestedLimit, 5) : 3;
+  return topScore - secondScore <= explicitProblemLookupTightScoreWindow ? Math.min(requestedLimit, 2) : 1;
 }
 
 function scoreExactPhrases(normalizedContent: string, exactPhrases: NormalizedExactPhrase[]) {

@@ -55,7 +55,7 @@ test("teacher overview review queue excludes reviewed conversations even when so
 
 test("teacher overview keeps unresolved student feedback in the review queue", () => {
   const serverSource = source();
-  const componentSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
   const conversationServerSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
 
   assert.match(conversationServerSource, /getTeacherFeedbackByConversationId\(classId\)/);
@@ -81,7 +81,7 @@ test("teacher overview uses timezone-aware day keys", () => {
 });
 
 test("overview UI consumes API rows instead of screenshot literals", () => {
-  const componentSource = readFileSync(join(repoRoot, "components/TeacherClassManager.tsx"), "utf8");
+  const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
   assert.match(componentSource, /TeacherClassOverview/);
   assert.match(componentSource, /\/api\/classes\/\$\{encodeURIComponent\(activeClassId\)\}\/overview/);

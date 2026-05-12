@@ -1,5 +1,11 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { adminDb } from "./firebase-admin";
+import {
+  writeAuditLogPostgres,
+  writeChatErrorReferencePostgres,
+  writeSecurityEventPostgres
+} from "./data/operational";
+import { isPostgresConfigured, shouldFallbackToFirestoreWhenPostgresFails } from "./data/postgres";
 
 export type AuditLogEvent = {
   actor?: {
@@ -19,6 +25,29 @@ export async function writeAuditLog({
   route = "",
   target = {}
 }: AuditLogEvent) {
+  if (isPostgresConfigured()) {
+    try {
+      await writeAuditLogPostgres({
+        actorId: String(actor?.uid ?? "").trim(),
+        eventType,
+        metadata: {
+          actorEmail: normalizeEmail(actor?.email),
+          ...metadata
+        },
+        resourceId: normalizeDocumentId(target.id ?? target.resourceId ?? target.inviteId),
+        resourceType: String(target.type ?? target.resourceType ?? "").trim(),
+        route
+      });
+      return;
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.error("Postgres audit log write failed; using Firestore fallback.", caughtError);
+    }
+  }
+
   if (!adminDb) {
     return;
   }
@@ -47,6 +76,24 @@ export async function writeSecurityLog({
   metadata?: Record<string, unknown>;
   route?: string;
 }) {
+  if (isPostgresConfigured()) {
+    try {
+      await writeSecurityEventPostgres({
+        eventType,
+        metadata,
+        route,
+        severity: severityFromSecurityEvent(eventType)
+      });
+      return;
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.error("Postgres security log write failed; using Firestore fallback.", caughtError);
+    }
+  }
+
   if (!adminDb) {
     return;
   }
@@ -96,6 +143,37 @@ export async function writeChatErrorReference({
   userId?: string;
   userRole?: string;
 }) {
+  if (isPostgresConfigured()) {
+    try {
+      await writeChatErrorReferencePostgres({
+        classId: normalizeDocumentId(classId),
+        conversationId: normalizeDocumentId(conversationId),
+        errorCode: String(code).trim(),
+        errorMessage: truncateLogText(message, 2000),
+        id: normalizeReferenceId(errorId),
+        metadata: {
+          backendDetail: truncateLogText(backendDetail, 4000),
+          backendStatus: normalizeNumber(backendStatus),
+          phase: String(phase).trim(),
+          providerErrorClass: String(providerErrorClass ?? "").trim(),
+          providerStatus: normalizeNumber(providerStatus),
+          requestId: String(requestId).trim(),
+          route: String(route).trim(),
+          userId: normalizeDocumentId(userId),
+          userRole: String(userRole ?? "").trim()
+        },
+        provider: String(provider ?? "").trim()
+      });
+      return;
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.error("Postgres chat error reference write failed; using Firestore fallback.", caughtError);
+    }
+  }
+
   if (!adminDb) {
     return;
   }
@@ -142,4 +220,10 @@ function normalizeReferenceId(value: unknown) {
 
 function truncateLogText(value: unknown, maxLength: number) {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+}
+
+function severityFromSecurityEvent(eventType: string) {
+  return eventType.includes("lockout") || eventType.includes("rate_limited")
+    ? "warning" as const
+    : "info" as const;
 }

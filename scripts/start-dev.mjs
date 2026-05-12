@@ -1,17 +1,24 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename } from "node:path";
 
 const ports = [3000, 8000];
 const children = [];
 const pidDirectory = ".chandra-dev";
 const pidFile = `${pidDirectory}/dev-stack-pids.json`;
+const defaultCloudSqlInstance = "chandra-f6e13:us-central1:chandra-postgres";
+const cloudSqlProxyVersion = "v2.18.3";
 
 loadDotEnvLocal();
 process.env.CHANDRA_ENV_LOADED = "1";
 stopPreviousStack();
 writePidFile();
 
+if (shouldStartCloudSqlProxy()) {
+  startCloudSqlProxy();
+}
+applyPostgresMigrations();
 start("frontend", "node_modules/.bin/next", ["dev", "frontend", "--hostname", "127.0.0.1", "--port", "3000"]);
 start("backend", "python3", ["-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"]);
 
@@ -73,7 +80,7 @@ function stopKnownProcesses() {
 
   try {
     const pids = JSON.parse(readFileSync(pidFile, "utf8"));
-    const knownPids = [pids.frontend, pids.backend, pids.supervisor]
+    const knownPids = [pids.frontend, pids.backend, pids.cloudSqlProxy, pids.supervisor]
       .map((pid) => Number(pid))
       .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid);
 
@@ -87,6 +94,115 @@ function stopKnownProcesses() {
     removePidFile();
     return false;
   }
+}
+
+function shouldStartCloudSqlProxy() {
+  if (process.env.CHANDRA_DEV_CLOUD_SQL_PROXY?.trim() === "0") {
+    return false;
+  }
+
+  if (process.env.CHANDRA_DEV_CLOUD_SQL_PROXY?.trim() === "1") {
+    return true;
+  }
+
+  const databaseUrl = process.env.DATABASE_URL || process.env.CLOUD_SQL_POSTGRES_URL || process.env.CHANDRA_CLOUD_SQL_POSTGRES_URL || "";
+
+  try {
+    const hostname = new URL(databaseUrl).hostname.toLowerCase();
+    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function startCloudSqlProxy() {
+  const port = Number(process.env.CLOUD_SQL_PROXY_PORT || "5432");
+  const instance = process.env.CLOUD_SQL_INSTANCE_CONNECTION_NAME || defaultCloudSqlInstance;
+
+  if (isPortListening(port)) {
+    console.log(`[cloud-sql-proxy] 127.0.0.1:${port} is already listening; reusing existing Postgres endpoint`);
+    return;
+  }
+
+  const binary = ensureCloudSqlProxyBinary();
+  start("cloud-sql-proxy", binary, ["--address", "127.0.0.1", "--port", String(port), instance]);
+}
+
+function applyPostgresMigrations() {
+  if (process.env.CHANDRA_DEV_AUTO_MIGRATE_POSTGRES?.trim() === "0") {
+    return;
+  }
+
+  const databaseUrl = process.env.DATABASE_URL || process.env.CLOUD_SQL_POSTGRES_URL || process.env.CHANDRA_CLOUD_SQL_POSTGRES_URL || "";
+
+  if (!databaseUrl) {
+    return;
+  }
+
+  console.log("[postgres-migrate] checking local Postgres schema");
+  const result = spawnSync("node", ["scripts/apply-postgres-migrations.mjs"], {
+    cwd: process.cwd(),
+    env: process.env,
+    encoding: "utf8"
+  });
+
+  if (result.stdout) {
+    process.stdout.write(result.stdout);
+  }
+
+  if (result.stderr) {
+    process.stderr.write(result.stderr);
+  }
+
+  if (result.status !== 0) {
+    throw new Error("Postgres migrations failed. Start the local Postgres/Cloud SQL proxy, then rerun npm run dev:all.");
+  }
+}
+
+function ensureCloudSqlProxyBinary() {
+  if (process.env.CLOUD_SQL_PROXY_BIN && existsSync(process.env.CLOUD_SQL_PROXY_BIN)) {
+    return process.env.CLOUD_SQL_PROXY_BIN;
+  }
+
+  const fromPath = spawnSync("which", ["cloud-sql-proxy"], { encoding: "utf8" }).stdout.trim();
+
+  if (fromPath) {
+    return fromPath;
+  }
+
+  const cachedBinary = `${pidDirectory}/bin/cloud-sql-proxy`;
+
+  if (existsSync(cachedBinary)) {
+    return cachedBinary;
+  }
+
+  const platform = process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : "";
+  const arch = process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "amd64" : "";
+
+  if (!platform || !arch) {
+    throw new Error(`Unsupported Cloud SQL Auth Proxy platform: ${process.platform}/${process.arch}`);
+  }
+
+  mkdirSync(`${pidDirectory}/bin`, { recursive: true });
+
+  const url = `https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${cloudSqlProxyVersion}/cloud-sql-proxy.${platform}.${arch}`;
+  console.log(`[cloud-sql-proxy] downloading ${basename(url)} to ${cachedBinary}`);
+  const result = spawnSync("curl", ["-fsSL", "-o", cachedBinary, url], { encoding: "utf8", stdio: "inherit" });
+
+  if (result.status !== 0) {
+    throw new Error("Failed to download Cloud SQL Auth Proxy. Install cloud-sql-proxy or set CLOUD_SQL_PROXY_BIN.");
+  }
+
+  chmodSync(cachedBinary, 0o755);
+  return cachedBinary;
+}
+
+function isPortListening(port) {
+  const result = spawnSync("lsof", [`-tiTCP:${port}`, "-sTCP:LISTEN"], {
+    encoding: "utf8"
+  });
+
+  return Boolean(result.stdout.trim());
 }
 
 function stopExistingListeners() {
@@ -120,6 +236,7 @@ function start(name, command, args) {
     shell: false,
     stdio: ["ignore", "pipe", "pipe"]
   });
+  child.chandraName = name;
   children.push(child);
   writePidFile();
 
@@ -160,6 +277,7 @@ function writePidFile() {
     JSON.stringify(
       {
         backend: children.find((child) => child.spawnargs.includes("uvicorn"))?.pid,
+        cloudSqlProxy: children.find((child) => child.chandraName === "cloud-sql-proxy")?.pid,
         frontend: children.find((child) => child.spawnargs.includes("next"))?.pid,
         supervisor: process.pid
       },
