@@ -187,6 +187,7 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = Field(default=None, ge=0, le=2)
     maxTokens: Optional[int] = Field(default=None, ge=1, le=MAX_MODEL_RESPONSE_TOKENS)
     reasoningEffort: Optional[str] = Field(default=None, max_length=20)
+    aiUsageReservation: Optional[dict[str, Any]] = None
     messages: list[ChatMessage] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES_PER_REQUEST)
 
 
@@ -1288,6 +1289,8 @@ def tutoring_response_shape_lines() -> list[str]:
         "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
         "- Next step asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
         "- Do not repeat the same advice in the orientation, hint, explanation, and next step; each included section must add distinct value.",
+        "- If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, treat that as a repeated-stuck signal: do not restate the prior hint. Add one new concrete distinction, prerequisite idea, or smaller sub-question within the same allowed help depth.",
+        "- If recent help already named a broad method, the next hint should narrow to the specific missing object, definition, target space, assumption, comparison, representation, or notation choice rather than naming the method again.",
         "- Before returning, run a distinct-value audit: if the main answer already gives the key clue, equation, theorem, or method, omit Hint. If Hint already gives the action, omit nextStep or make it a meaningfully different request such as showing the student's attempt.",
         "- For broad concept explanations or topic overviews, usually answer in plain prose without Hint. Do not add Hint just to restate a definition, fact list, or summary already in the main reply.",
         "- If the only possible Hint would repeat the main answer with different wording, omit it entirely. A reply with no labeled sections is better than a duplicated main answer plus Hint.",
@@ -1339,7 +1342,7 @@ def answer_policy_lines(answer_policy: dict[str, Any]) -> list[str]:
                 "- Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task.",
                 "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. A similar example must use meaningfully different facts, data, prompt details, or requirements so it does not complete any part of the assigned response.",
                 "- If a student asks how a source, example, prior exercise, hint, rubric, rule, method, or instructor note gives, supports, covers, applies to, or connects to a part, half, subquestion, requirement, or step of their exact assigned task, treat that as solving help for the exact task. Ask one targeted question or explain a prerequisite concept without applying it to the exact task. Do not state what this gives them, what it proves, which part it completes, what to write next, or any task-specific claim, response structure, content, setup, checklist, or sequence.",
-                "- A follow-up like 'I still need help', 'yes', 'tell me more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution.",
+                "- A follow-up like 'I still need help', 'yes', 'tell me more', 'that hint is too vague', 'that hint is not adding more', or 'explain like I am 5' is not a student attempt. Keep the help conceptual, ask what step is confusing, or use a similar non-identical example instead of continuing the exact solution.",
                 "- For the student's exact task, do not reveal a full solution, final answer, final artifact, final expression, final code, thesis, outline, or a chain of multiple intermediate steps before the student has shown work. If one small scaffold is allowed, stop there and ask the student to do the next piece.",
             ]
             if answer_policy["requireStudentAttemptFirst"]

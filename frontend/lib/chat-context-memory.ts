@@ -37,10 +37,10 @@ export function buildChatContextMemory(messages: ChatMessage[]): ChatContextMemo
       .filter((problem): problem is NonNullable<ChatContextMemory["currentProblem"]> => Boolean(problem))
   );
   const sourcesUsed = dedupeContextSources(
-    [
-      ...contextSourcesFromTutorSources(latestStructuredMessage),
-      ...contextSourcesFromKnowledgeItems(latestStructuredMessage)
-    ]
+    assistantMessages.flatMap((message) => [
+      ...contextSourcesFromTutorSources(message),
+      ...contextSourcesFromKnowledgeItems(message)
+    ])
   );
   const failedSearches = [
     ...(trace?.failedSearchesSkipped ?? []).map((query) => ({

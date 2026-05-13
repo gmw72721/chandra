@@ -594,7 +594,7 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
       maxTokens,
       reasoningEffort,
       answerPolicy: teacherClass?.answerPolicy,
-          aiUsageReservation: aiUsageReservation
+      aiUsageReservation: aiUsageReservation
         ? {
             estimatedTokens: aiUsageReservation.estimatedTokens,
             id: aiUsageReservation.id,
@@ -604,7 +604,7 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
       sourceUsage: teacherClass?.sourceUsage,
       studentLearningProfileContext: privateBackendLearningProfileContext(studentLearningProfileContext),
       studentAttachmentFiles,
-        messages: providerMessages
+      messages: providerMessages
     },
     learningProfileTelemetryContext: studentLearningProfileContext,
     persistence,
@@ -874,6 +874,7 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
         const reader = response.body?.getReader();
 
         if (!reader) {
+          await releaseAiTokenReservationSafely(preparedRequest.aiUsageReservation, requestId);
           const chatError = reportStudentChatError({
             code: "TUTOR_BACKEND_STREAM_MISSING",
             classId: preparedRequest.scope.classId,
@@ -1910,7 +1911,7 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- Do not say `I can't give a worked example here` when the student asks for an example. A similar, non-identical example is allowed; search class examples first when class PDFs may contain one.",
     "- Treat requests for proof paragraphs, student-style wording, sentence starters, proof scaffolds, or all-parts breakdowns for the exact task as requests for the final artifact.",
     "- Similar examples must be meaningfully different and cannot complete any part of the assigned response.",
-    "- Follow-ups like `I still need help`, `yes`, `tell me more`, or `explain like I am 5` are not attempts; keep helping conceptually or use a non-identical example.",
+    "- Follow-ups like `I still need help`, `yes`, `tell me more`, `that hint is too vague`, `that hint is not adding more`, or `explain like I am 5` are not attempts; keep helping conceptually or use a non-identical example.",
     "- Do not reveal the full solution, final answer, final artifact, final code, thesis, outline, or a multi-step solution chain for the exact task before the student shows work.",
     "- If section pages are mismatched, or pages only locate the task without method support, search again before giving solving help.",
     ...citationRules,
@@ -1926,6 +1927,8 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
     "- Next step asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
     "- Do not repeat the same advice in the orientation, hint, explanation, and next step; each included section must add distinct value.",
+    "- If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, treat that as a repeated-stuck signal: do not restate the prior hint. Add one new concrete distinction, prerequisite idea, or smaller sub-question within the same allowed help depth.",
+    "- If recent help already named a broad method, the next hint should narrow to the specific missing object, definition, target space, assumption, comparison, representation, or notation choice rather than naming the method again.",
     "- Before returning, run a distinct-value audit: if the main answer already gives the key clue, equation, theorem, or method, omit `Hint:`. If `Hint:` already gives the action, omit `nextStep` or make it a meaningfully different request such as showing the student's attempt.",
     "- For broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`. Do not add `Hint:` just to restate a definition, fact list, or summary already in the main reply.",
     "- If the only possible `Hint:` would repeat the main answer with different wording, omit it entirely. A reply with no labeled sections is better than a duplicated main answer plus `Hint:`.",
@@ -1942,7 +1945,7 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- If you use `Problem:`, also set structured metadata `problemNumber` when visible and `problemSummary` to a short noun phrase of at most 12 words describing the task, without solving it.",
     "- If the student is following up after a problem statement was already shown and asks for help, says they are lost/confused/stuck, asks for a hint, or asks what to try, do not restate the problem statement or include a `Problem:` section again.",
     "- For that bare stuck follow-up, use at most one nudge plus one question. Do not use both `Hint:` and `nextStep` unless `nextStep` only asks the student to show work; otherwise prefer one concise reply or one short `Hint:` and leave `nextStep` empty.",
-    "- Use `Hint:` when the student is stuck or asks how to start: give one small nudge or leading question. Keep it short, direct, and usually one sentence. Do not put citations, definitions, commentary, offers, or multiple bullet-like ideas in `Hint:`.",
+    "- Use `Hint:` when the student is stuck or asks how to start: give one small nudge or leading question. Keep it short, direct, and usually one sentence. If the previous hint did not help, make this hint narrower instead of repeating it. Do not put citations, definitions, commentary, offers, or multiple bullet-like ideas in `Hint:`.",
     "- For first help on an exact task with no shown attempt, keep the hint conceptual: ask about the relevant objects, definitions, constraints, evidence, or relationship to compare. Do not name the specific method, structure, or first executable move.",
     "- Use `Why this works:` for calm conceptual explanation. Prefer 1-2 short paragraphs or a few compact bullets when it clarifies the reasoning. Do not include offers, workflow prompts, attempt requests, or `If you want...`; put those in `nextStep`.",
     "- Use `Formula:` only when there is one main rule, theorem, identity, or equation worth isolating. Put only formulas, equations, symbolic rules, or a very short rule name there. Do not include sentences that explain when to use it, why it matters, source/page notes, examples, filled-in task values, hints, or commentary such as `this is the key idea`. Move surrounding prose to the main answer, `Hint:`, or `Why this works:`.",

@@ -36,15 +36,12 @@ export function safeUnderstandingReasons(
   level: UnderstandingLevel
 ): string[] {
   const candidates = [
-    ...(Array.isArray(state.reasons) ? state.reasons : []),
-    ...(Array.isArray(state.conceptsUnderstood)
-      ? state.conceptsUnderstood.map((concept) => `You identified ${concept}.`)
-      : []),
-    ...(Array.isArray(state.knownConfusions)
-      ? state.knownConfusions.map((confusion) => `A next point to clarify is ${confusion}.`)
-      : []),
-    state.lastStudentAttemptSummary,
-    state.lastHintSummary
+    understandingLevelUpdate(level),
+    attemptUpdate(state.lastStudentAttemptSummary, level),
+    ...(Array.isArray(state.conceptsUnderstood) ? state.conceptsUnderstood.map((concept) => conceptUpdate(concept)) : []),
+    ...(Array.isArray(state.knownConfusions) ? state.knownConfusions.map((confusion) => confusionUpdate(confusion)) : []),
+    ...(Array.isArray(state.reasons) ? state.reasons.map((reason) => reasonUpdate(reason, level)) : []),
+    recentSupportUpdate(state.lastHintSummary)
   ];
   const safe = dedupeStrings(candidates.map(sanitizeUnderstandingReason).filter(Boolean));
   return safe.length ? safe.slice(0, 4) : [fallbackUnderstandingReason(level)];
@@ -64,6 +61,110 @@ export function normalizeUnderstandingLevel(value: unknown): UnderstandingLevel 
     return parsed as UnderstandingLevel;
   }
   return 0;
+}
+
+function understandingLevelUpdate(level: UnderstandingLevel) {
+  if (level === 0) {
+    return "Chandra has the problem, but has not seen your work on it yet.";
+  }
+  if (level === 1) {
+    return "Chandra has the problem and still needs to see your next step or attempt.";
+  }
+  if (level === 2) {
+    return "You have part of the setup; the next update depends on the main idea you use.";
+  }
+  if (level === 3) {
+    return "You are using the main idea; Chandra is watching the execution details.";
+  }
+  return "You are close; Chandra is mostly checking notation, justification, or cleanup.";
+}
+
+function conceptUpdate(value: unknown) {
+  const text = conciseProcessText(value);
+  if (!text) {
+    return "";
+  }
+  if (looksLikeConceptDefinition(text)) {
+    const concept = conceptLabel(text);
+    return concept ? `Chandra is checking how you use ${concept} in this problem.` : "";
+  }
+  return `You identified ${text}.`;
+}
+
+function confusionUpdate(value: unknown) {
+  const text = conciseProcessText(value);
+  return text ? `Next, clarify ${text}.` : "";
+}
+
+function attemptUpdate(value: unknown, level: UnderstandingLevel) {
+  const text = conciseProcessText(value);
+  if (!text) {
+    return "";
+  }
+  if (looksLikeConceptDefinition(text)) {
+    return reasonUpdate(text, level);
+  }
+  return text;
+}
+
+function reasonUpdate(value: unknown, level: UnderstandingLevel) {
+  const text = conciseProcessText(value);
+  if (!text) {
+    return "";
+  }
+  if (normalizeReasonKey(text) === normalizeReasonKey(fallbackUnderstandingReason(level))) {
+    return "";
+  }
+  if (looksLikeConceptDefinition(text)) {
+    const concept = conceptLabel(text);
+    return concept ? `Chandra is checking how you use ${concept} in this problem.` : understandingLevelUpdate(level);
+  }
+  return text;
+}
+
+function recentSupportUpdate(value: unknown) {
+  const text = conciseProcessText(value);
+  if (!text) {
+    return "";
+  }
+  if (normalizeReasonKey(text) === normalizeReasonKey(fallbackUnderstandingReason(0))) {
+    return "";
+  }
+  return /^chandra\b/i.test(text) ? text : `Recent support focused on: ${lowercaseFirst(text)}`;
+}
+
+function conceptLabel(value: unknown) {
+  const text = conciseProcessText(value);
+  if (!text) {
+    return "";
+  }
+  const definitionMatch = text.match(/^([A-Za-z][A-Za-z0-9\s-]{1,40})\s+(?:means|is|are|refers to)\b/i);
+  const raw = (definitionMatch?.[1] ?? text).replace(/\b(?:the|a|an)\b/gi, " ").replace(/\s+/g, " ").trim();
+  const words = raw.split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 6 || ["you", "chandra", "student"].includes(words[0].toLowerCase())) {
+    return "";
+  }
+  return words.join(" ").toLowerCase();
+}
+
+function conciseProcessText(value: unknown) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "";
+  }
+  return text.replace(/[.;:]\s*.*$/, "").replace(/[.!?]+$/, "").trim().slice(0, 140);
+}
+
+function looksLikeConceptDefinition(value: string) {
+  return /^(?!you\b|chandra\b|student\b)[A-Za-z][A-Za-z0-9\s-]{1,40}\s+(?:means|is|are|refers to)\b/i.test(value) || /\bin data science\b/i.test(value);
+}
+
+function lowercaseFirst(value: string) {
+  return value ? value[0].toLowerCase() + value.slice(1) : value;
+}
+
+function normalizeReasonKey(value: string) {
+  return value.toLowerCase().replace(/[.!?]+$/, "").trim();
 }
 
 function latestProblemUnderstandingState(

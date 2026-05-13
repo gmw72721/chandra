@@ -589,17 +589,21 @@ def build_tutor_decision_messages(state: PdfRagState, heuristic: dict[str, Any])
         "Decide stateUpdates.understandingLevel from evidence in the student's latest work, not from turn count and not by incrementing one level at a time. "
         "The level may jump by more than 1 in a single update when the student's message shows stronger understanding. "
         "Understanding rubric: 0 = problem loaded, no student understanding observed yet; 1 = needs first nudge or little/no useful work shown; 2 = understands setup but is missing the core idea; 3 = understands the core idea but needs execution help; 4 = solution-ready, mostly needs verification or minor cleanup. "
+        "Use level 0 only for source lookup or a freshly loaded problem before tutoring starts; once the student asks for help, shows work, asks for explanation, asks for a next step, or seeks verification on the active problem, use at least level 1. "
         "Examples: `help me` with no work -> level 1; identifying relevant objects or definitions but missing the key idea -> level 2; a coherent proof attempt with one conceptual flaw -> level 2; right strategy with algebra or notation mistakes -> level 3; basically correct with minor typos or cleanup -> level 4. "
         "Allowed jumps include 0->2, 0->3, 0->4, 1->3, and 1->4. Do not require 0->1->2->3->4 across multiple turns. "
         "Specific calibration: in a rank proof, if the student correctly proves rank(KL) <= rank(K), understands rank/image reasoning, but incorrectly claims im(KL) is contained in im(L), set understandingLevel to 2, not 1. "
         "Track the active problem and the current mathematical step explicitly. A currentStep is the mathematical move currently being understood or completed; a currentSubstep is a smaller question inside that same move. "
         "Do not advance currentStep to a later problem step until the student has completed it or shown understanding. If the student asks for the next step while currentStepStatus is not completed, stay on currentStep and make currentSubstep smaller. "
         "For example, do not move from computing L(2e1 - 3e2) to computing L^2(2e1 - 3e2) until the first expression is understood; instead split L(2e1 - 3e2) = 2L(e1) - 3L(e2) into pieces such as 2L(e1), -3L(e2), then combining terms. "
-        "Repeated stuck signals include `next step?`, `what now?`, `I don't get it`, repeated wrong answers, empty replies, or tiny unclear answers. On repeated stuck signals, do not repeat lastHintSummary; scaffold a smaller currentSubstep inside the same currentStep. "
+        "Repeated stuck signals include requests for the next step, confusion, complaints that the previous hint was unhelpful, repetitive, too vague, or did not add more, repeated wrong answers, empty replies, or tiny unclear answers. On repeated stuck signals, do not repeat lastHintSummary; scaffold a smaller currentSubstep inside the same currentStep. "
+        "If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, acknowledge the gap internally and plan one new concrete distinction, prerequisite idea, or narrower sub-question rather than restating the same broad method. "
         "If the student gives a tiny or unclear answer like `2?`, classify it as unclear_attempt, explain only the expected answer form or type without revealing the value they should get, and ask one smaller sub-question for the active currentStep. "
         "If the student asks `is this right?`, `am I right?`, or asks for validation, internally evaluate the work but do not give a direct correctness verdict unless teacher policy explicitly allows answer checking. "
         "Avoid student-facing correctness labels such as `correct`, `incorrect`, `right`, `wrong`, `yes`, `no`, `that's the answer`, `your first part is right`, or `the mistake is`. Use learning-process language instead: name the useful idea, point to the step to inspect, ask what would justify it, or ask a diagnostic question. "
         "You own tutor state updates in this first step: set stateUpdates.understandingLevel, stateUpdates.lastHelpDepth, stateUpdates.answerSeekingRisk, stateUpdates.currentStep, stateUpdates.currentStepStatus, and concise lastHintSummary/lastStudentAttemptSummary when applicable. "
+        "State update wording must explain the evidence for the understanding level, not teach the academic concept. Do not write definitions such as `image means...` or real-world analogies in conceptsUnderstood, knownConfusions, lastHintSummary, lastStudentAttemptSummary, or any reason-like field. "
+        "Use short level-evidence phrases instead, such as `connected image containment to rank`, `asked how the concept applies but has not shown work`, `needs to justify the target space`, or `used the main idea but needs notation cleanup`. "
         "If the student showed work, update attemptsCount, conceptsUnderstood, knownConfusions, and lastStudentAttemptSummary. If this is a stuck/help signal, update hintsGiven or repeatedStuckSignals as appropriate. "
         "Depth 1 means one light hint and one targeted question; no full route, no multiple methods, no proof skeleton, no worked algebra. "
         "Depth 2 means a guided hint with one clear next action, still not the whole solution. "
@@ -625,7 +629,7 @@ def build_tutor_decision_messages(state: PdfRagState, heuristic: dict[str, Any])
         "For a bare stuck/start follow-up after the problem statement was already shown, keep structuredOutput short: at most one "
         "brief answer sentence plus one conceptual hint, or one request for the student's attempted step. Do not include both hint "
         "and nextStep unless nextStep only asks the student to show work. "
-        "For repeated stuck follow-ups, the nextStep is allowed to be a smaller sub-question inside the same currentStep; do not use it to advance to a later mathematical step. "
+        "For repeated stuck follow-ups, the nextStep is allowed to be a smaller sub-question inside the same currentStep; do not use it to advance to a later mathematical step. If prior help already named a broad method, narrow the hint to the specific missing object, definition, target space, assumption, comparison, representation, or notation choice rather than naming the method again. "
         "Before using the problem section, classify the candidate text: use problem only for the exact academic exercise, question, "
         "or task statement from the student, active metadata, or retrieved source. Never put `You said...`, lookup/checking status, "
         "clarifying questions, requests for a page/title/textbook, source notes, offers, hints, or next steps in problem; put those "
@@ -1893,12 +1897,19 @@ def state_after_tutor_plan(state: PdfRagState, tutor_plan: Any) -> dict[str, Any
     current = current_problem_understanding_state(state)
     plan = tutor_plan if isinstance(tutor_plan, dict) else {}
     updates = plan.get("stateUpdates") if isinstance(plan.get("stateUpdates"), dict) else {}
-    next_state = {**current, **normalize_problem_understanding_state_updates(updates)}
+    normalized_updates = normalize_problem_understanding_state_updates(updates)
+    next_state = {**current, **normalized_updates}
     depth = clamp_int(plan.get("nextHelpDepth"), minimum=1, maximum=4, default=next_state.get("lastHelpDepth") or 1)
     intent = str(plan.get("studentIntent") or "")
     risk = normalize_answer_seeking_risk(plan.get("answerSeekingRisk") or next_state.get("answerSeekingRisk"))
     source_lookup_only = tutor_plan_is_source_lookup_only(plan)
 
+    next_state["understandingLevel"] = protected_understanding_level(
+        current,
+        next_state,
+        plan,
+        source_lookup_only=source_lookup_only,
+    )
     next_state["lastHelpDepth"] = depth
     next_state["answerSeekingRisk"] = risk
     if "currentStep" not in updates and str(plan.get("currentStep") or "").strip():
@@ -1919,6 +1930,48 @@ def state_after_tutor_plan(state: PdfRagState, tutor_plan: Any) -> dict[str, Any
     next_state["activeProblemId"] = str(plan.get("activeProblemId") or next_state.get("activeProblemId") or "unknown")
     next_state["updatedAt"] = utc_timestamp()
     return next_state
+
+
+def protected_understanding_level(
+    current: dict[str, Any],
+    next_state: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    source_lookup_only: bool,
+) -> int:
+    level = clamp_int(next_state.get("understandingLevel"), minimum=0, maximum=4, default=0)
+    if level != 0:
+        return level
+
+    active_problem_id = str(plan.get("activeProblemId") or next_state.get("activeProblemId") or "").strip()
+    if not active_problem_id or active_problem_id.lower() in {"unknown", "none", "null", "n/a"}:
+        return level
+
+    current_level = clamp_int(current.get("understandingLevel"), minimum=0, maximum=4, default=0)
+    if current_level > 0 and same_problem_id(current.get("activeProblemId"), active_problem_id):
+        return current_level
+
+    if source_lookup_only:
+        return level
+
+    intent = str(plan.get("studentIntent") or "")
+    if intent in {
+        "vague_help",
+        "specific_question",
+        "showed_work",
+        "unclear_attempt",
+        "asks_for_next_step",
+        "asks_for_solution",
+        "asks_for_explanation",
+        "verification",
+    }:
+        return max(current_level, 1)
+
+    return level
+
+
+def same_problem_id(left: Any, right: Any) -> bool:
+    return str(left or "").strip() == str(right or "").strip()
 
 
 def sync_problem_understanding_state_to_active_context(
@@ -2697,7 +2750,7 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
         "Tutor planning contract: obey TutorPlan.nextHelpDepth in the student-facing response. The first LLM already decided understandingLevel, lastHelpDepth, summaries, and help depth; do not revise those fields.",
         *help_limit_instruction_lines(answer_policy),
         "Current-step contract: obey TutorPlan.currentStep/currentSubstep and the current problem understanding state. Do not advance to a later mathematical step until currentStepStatus is completed or the student has shown understanding. If the student asks for the next step but the current step is incomplete, make the currentSubstep smaller inside the same currentStep.",
-        "Repeated-stuck contract: if repeatedStuckSignals is positive, the student gives a tiny unclear answer like `2?`, or TutorPlan.studentIntent is unclear_attempt/asks_for_next_step while the current step is incomplete, do not repeat the previous hint wording. Explain only the expected answer form or type if needed, without revealing the value the student should get, then ask one smaller sub-question inside the active currentStep.",
+        "Repeated-stuck contract: if repeatedStuckSignals is positive, the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, the student gives a tiny unclear answer like `2?`, or TutorPlan.studentIntent is unclear_attempt/asks_for_next_step while the current step is incomplete, do not repeat the previous hint wording. Explain only the expected answer form or type if needed, add one new concrete distinction or prerequisite idea, then ask one smaller sub-question inside the active currentStep without revealing the value the student should get.",
         "Validation contract: when the student asks whether their work is right, internally evaluate it but do not give a direct correctness verdict unless teacher policy explicitly allows answer checking. Avoid `correct`, `incorrect`, `right`, `wrong`, `yes`, `no`, `that's the answer`, `your first part is right`, and `the mistake is` as student-facing verdicts. Use neutral process language such as `You're using a relevant idea`, `This is a useful direction`, `One place to tighten is`, `Check this part carefully`, `Can you justify this step?`, or `What would make this implication valid?`.",
         "Depth 1 response: one conceptual nudge and one question; no full route, no multiple methods, no proof skeleton, no worked algebra unless extremely small.",
         "Depth 2 response: a guided hint, possibly naming the relevant object or theorem, with one clear next action; still leave the main work to the student.",
@@ -2716,7 +2769,7 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
         "For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short: at most one brief orientation sentence plus one conceptual hint or one request for the student's attempted step.",
         "Before an attempt, do not provide task-specific next steps, intermediate values, thesis claims, code, solution structure, or submission-ready wording unless the student explicitly wants concept explanation or source lookup.",
         "For first help on an exact task with no shown attempt, keep the hint conceptual: ask about the relevant objects, definitions, constraints, evidence, or relationship to compare. Do not name the specific method, structure, or first executable move.",
-        "Follow-ups like `I still need help`, `yes`, `tell me more`, or `explain like I am 5` are not attempts. Keep the help conceptual or use a clearly different similar example.",
+        "Follow-ups like `I still need help`, `yes`, `tell me more`, `that hint is too vague`, `that hint is not adding more`, or `explain like I am 5` are not attempts. Keep the help conceptual or use a clearly different similar example.",
         "Do not give a full solution, final answer, or a chain of multiple intermediate steps for the student's exact task before they show work.",
         "This final answer call cannot search again. If selected page assets and OCR metadata are insufficient or mismatched, say what exact source, page, problem, or pasted text is needed.",
         "For ambiguous numbered locators, preserve plausible page, section, and problem interpretations in separate focused searches.",
@@ -2739,7 +2792,7 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
             "a fixed template, and include only sections that add value. Decide the order by why the student needs each part: task text/context first, "
             "then the direct reply, then supporting rule, concept, example, or work check, with the immediate action last. Put each idea in its natural section: problem text in `Problem:`, "
             "formulas or symbolic rules in `Formula:`, conceptual reasoning in `Why this works:`, similar-but-different practice in `Example:`, "
-            "source/context notes in `sourceNote`, and neutral review of shown student work in `Check your work:`. Use optional sections only when they add new value; never output sections just because the schema supports them. For guided tutoring replies, include a brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when each part has a different job. Orientation names the kind of task or thinking move without repeating the hint; `Hint:` gives one key idea tied to the exact student task; `nextStep` asks for one small, checkable student action. If the main answer already gives the key clue, equation, theorem, or method, omit `Hint:`. If `Hint:` already gives the action, omit `nextStep` or make it a meaningfully different request such as showing the student's attempt. For broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`; if `Hint:` would restate a definition, fact list, or summary already in the main reply, omit it entirely. Before using `Problem:`, classify the candidate text and use that section only for the found or student-supplied academic exercise/question/task statement, "
+            "source/context notes in `sourceNote`, and neutral review of shown student work in `Check your work:`. Use optional sections only when they add new value; never output sections just because the schema supports them. For guided tutoring replies, include a brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when each part has a different job. Orientation names the kind of task or thinking move without repeating the hint; `Hint:` gives one key idea tied to the exact student task; `nextStep` asks for one small, checkable student action. If the student says the previous hint was unhelpful, repetitive, too vague, or did not add more, do not restate it; make the next help narrower by naming the specific missing object, definition, target space, assumption, comparison, representation, or notation choice. If the main answer already gives the key clue, equation, theorem, or method, omit `Hint:`. If `Hint:` already gives the action, omit `nextStep` or make it a meaningfully different request such as showing the student's attempt. For broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`; if `Hint:` would restate a definition, fact list, or summary already in the main reply, omit it entirely. Before using `Problem:`, classify the candidate text and use that section only for the found or student-supplied academic exercise/question/task statement, "
             "not for an issue/error, status update, clarification, or source lookup progress. If you use `Problem:`, put only the problem statement there and place `problem` first in sectionOrder; never put `You said...`, offers, hints, next steps, "
             "attempt requests, requests for source details, source context, or commentary inside that section. For bare stuck follow-ups, do not use both `Hint:` and `nextStep` unless `nextStep` only asks the student to show work; otherwise prefer one short `Hint:` and leave `nextStep` empty. Use `Hint:` for one short nudge or leading question, usually one sentence, "
             "not definitions, citations, offers, or multiple ideas. Use `Why this works:` for concept reasoning, but do not include "

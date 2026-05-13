@@ -139,7 +139,14 @@ def test_referenced_sources_block_is_not_sent_to_student() -> None:
 
     assert "Referenced sources" not in response["content"]
     assert "Problem context" not in response["content"]
-    assert response["sources"] == [{"title": "Rank Worksheet", "materialType": "assignment", "pageNumber": 80}]
+    assert response["sources"] == [
+        {
+            "title": "Rank Worksheet",
+            "materialType": "assignment",
+            "pageNumber": 80,
+            "problemNumbers": ["2.14"],
+        }
+    ]
 
 
 def test_saves_theorem_definition_and_example_reference_pages() -> None:

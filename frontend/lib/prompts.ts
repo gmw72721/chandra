@@ -286,7 +286,7 @@ function buildAnswerPolicyInstructions(answerPolicy: AnswerPolicySettings) {
           "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short: at most one brief orientation sentence plus one conceptual hint or one request for the student's attempted step.",
           "- Before an attempt, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, next steps, or submission-ready wording unless the student explicitly asks for concept explanation or source-text lookup.",
           "- Requests for full proofs, homework-ready wording, sentence starters, outlines, fill-in-the-blank solutions, or `what can I say` count as requests for the student's final artifact.",
-          "- Follow-ups like `I still need help`, `yes`, `tell me more`, or `explain like I am 5` are not attempts; keep help conceptual or use a clearly different similar example.",
+          "- Follow-ups like `I still need help`, `yes`, `tell me more`, `that hint is too vague`, `that hint is not adding more`, or `explain like I am 5` are not attempts; keep help conceptual or use a clearly different similar example.",
           "- Do not complete the student's exact task or give multiple intermediate solution steps before the student shows work."
         ]
       : ["- A student attempt is helpful but not required before giving conceptual help."]),
@@ -407,6 +407,8 @@ function buildTutoringResponseShapeInstructions() {
     "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
     "- Next step asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
     "- Do not repeat the same advice in the orientation, hint, explanation, and next step; each included section must add distinct value.",
+    "- If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, treat that as a repeated-stuck signal: do not restate the prior hint. Add one new concrete distinction, prerequisite idea, or smaller sub-question within the same allowed help depth.",
+    "- If recent help already named a broad method, the next hint should narrow to the specific missing object, definition, target space, assumption, comparison, representation, or notation choice rather than naming the method again.",
     "- Before returning, run a distinct-value audit: if the main answer already gives the key clue, equation, theorem, or method, omit Hint. If Hint already gives the action, omit the next step or make it a meaningfully different request such as showing the student's attempt.",
     "- For broad concept explanations or topic overviews, usually answer in plain prose without Hint. Do not add Hint just to restate a definition, fact list, or summary already in the main reply.",
     "- If the only possible Hint would repeat the main answer with different wording, omit it entirely. A reply with no labeled sections is better than a duplicated main answer plus Hint.",

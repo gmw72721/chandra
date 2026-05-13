@@ -4,8 +4,10 @@ import pytest
 from fastapi import HTTPException
 
 from backend.main import (
+    ChatRequest,
     MAX_MESSAGE_CONTENT_CHARS,
     MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
+    enforce_ai_usage_reservation,
     validate_message_payload_size,
 )
 from backend.agent.openrouter_client import normalize_token_usage
@@ -36,5 +38,31 @@ def test_openrouter_usage_is_normalized_for_token_budget_tracking() -> None:
     ) == {
         "input_tokens": 120,
         "output_tokens": 30,
+        "reasoning_tokens": 0,
         "total_tokens": 150,
     }
+
+
+def test_legacy_chat_request_preserves_ai_usage_reservation() -> None:
+    request = ChatRequest(
+        aiUsageReservation={"estimatedTokens": 250, "id": "reservation-1"},
+        messages=[
+            {
+                "id": "message-1",
+                "role": "student",
+                "content": "Can you help me with problem 2?",
+                "createdAt": "2026-05-12T00:00:00.000Z",
+            }
+        ],
+    )
+
+    assert request.aiUsageReservation == {"estimatedTokens": 250, "id": "reservation-1"}
+    enforce_ai_usage_reservation(request.aiUsageReservation, student_id="student-1")
+
+
+def test_student_chat_requires_valid_ai_usage_reservation() -> None:
+    with pytest.raises(HTTPException) as raised:
+        enforce_ai_usage_reservation(None, student_id="student-1")
+
+    assert raised.value.status_code == 429
+    assert raised.value.detail == "AI usage reservation required."

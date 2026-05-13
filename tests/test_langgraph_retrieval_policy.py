@@ -393,7 +393,8 @@ def test_decision_prompt_passes_retrieval_memory_and_policy_but_not_pdf_assets()
     assert payload["active_metadata"]["title"] == "ACME VOL 1"
     assert payload["active_metadata"]["problem_numbers"] == ["1.7"]
     assert payload["failed_searches"] == [{"query": "missing example"}]
-    assert payload["answer_policy"] == {"requireAttemptBeforeAnswer": True}
+    assert payload["answer_policy"]["refuseAnswerOnlyRequests"] is True
+    assert payload["answer_policy"]["helpLimitsByUnderstandingLevel"]["0"] == "ask_for_attempt_only"
     assert payload["source_usage"] == {"useClassMaterialsFirst": True}
     assert payload["latest_student_message"] == "what's next"
     assert "file_data_url" not in messages[-1]["content"]
@@ -627,8 +628,139 @@ def test_decision_prompt_uses_evidence_based_understanding_levels() -> None:
     assert "2 = understands setup but is missing the core idea" in system_prompt
     assert "3 = understands the core idea but needs execution help" in system_prompt
     assert "4 = solution-ready, mostly needs verification or minor cleanup" in system_prompt
+    assert "once the student asks for help, shows work, asks for explanation, asks for a next step, or seeks verification on the active problem, use at least level 1" in system_prompt
+    assert "State update wording must explain the evidence for the understanding level, not teach the academic concept" in system_prompt
+    assert "Do not write definitions such as `image means...`" in system_prompt
+    assert "connected image containment to rank" in system_prompt
+    assert "asked how the concept applies but has not shown work" in system_prompt
     assert "Allowed jumps include 0->2, 0->3, 0->4, 1->3, and 1->4" in system_prompt
     assert "incorrectly claims im(KL) is contained in im(L), set understandingLevel to 2, not 1" in system_prompt
+
+
+def test_understanding_level_zero_update_does_not_reset_same_problem_progress() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    previous_state = {
+        "activeProblemId": problem_id,
+        "understandingLevel": 2,
+        "hintsGiven": 2,
+        "lastHintSummary": "Connected rank to image containment.",
+        "updatedAt": "2026-05-12T00:00:00+00:00",
+    }
+    state = {
+        "conversation_id": "conv-no-zero-reset",
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "problem_understanding_states": {problem_id: previous_state},
+        },
+        "messages": [{"role": "user", "content": "I still need help"}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "vague_help",
+        "nextHelpDepth": 2,
+        "answerSeekingRisk": "low",
+        "stateUpdates": {
+            "understandingLevel": 0,
+            "lastHelpDepth": 2,
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["understandingLevel"] == 2
+    assert understanding["hintsGiven"] == 3
+    assert "image containment" in understanding["lastHintSummary"]
+
+
+def test_active_problem_help_turn_promotes_model_zero_to_level_one() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    state = {
+        "conversation_id": "conv-zero-to-one",
+        "chat_retrieval_memory": {"active_metadata": active},
+        "messages": [{"role": "user", "content": "can you explain this?"}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "asks_for_explanation",
+        "nextHelpDepth": 1,
+        "answerSeekingRisk": "low",
+        "stateUpdates": {
+            "understandingLevel": 0,
+            "lastHelpDepth": 1,
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["understandingLevel"] == 1
+    assert understanding["hintsGiven"] == 1
+
+
+def test_source_lookup_only_can_initialize_new_problem_at_level_zero() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    state = {
+        "conversation_id": "conv-source-lookup-zero",
+        "chat_retrieval_memory": {"active_metadata": active},
+        "messages": [{"role": "user", "content": "show me problem 2.14"}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "specific_question",
+        "needsRetrieval": True,
+        "retrievalReason": "student_requested_problem",
+        "nextHelpDepth": 1,
+        "answerSeekingRisk": "low",
+        "stateUpdates": {
+            "understandingLevel": 0,
+            "lastHelpDepth": 1,
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["understandingLevel"] == 0
+    assert understanding["hintsGiven"] == 0
+
+
+def test_source_lookup_only_does_not_reset_same_problem_progress() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    previous_state = {
+        "activeProblemId": problem_id,
+        "understandingLevel": 3,
+        "hintsGiven": 2,
+        "lastStudentAttemptSummary": "Student used the right image-containment strategy.",
+        "updatedAt": "2026-05-12T00:00:00+00:00",
+    }
+    state = {
+        "conversation_id": "conv-source-lookup-preserve",
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "problem_understanding_states": {problem_id: previous_state},
+        },
+        "messages": [{"role": "user", "content": "show me the problem text again"}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "specific_question",
+        "needsRetrieval": True,
+        "retrievalReason": "student_requested_problem",
+        "nextHelpDepth": 1,
+        "answerSeekingRisk": "low",
+        "stateUpdates": {
+            "understandingLevel": 0,
+            "lastHelpDepth": 1,
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["understandingLevel"] == 3
+    assert understanding["hintsGiven"] == 2
+    assert "image-containment" in understanding["lastStudentAttemptSummary"]
 
 
 def test_understanding_level_updates_can_jump_from_zero_based_on_evidence() -> None:
@@ -800,9 +932,54 @@ def test_decision_prompt_tracks_current_step_and_substep_for_repeated_stuck() ->
     assert "Do not advance currentStep to a later problem step" in system_prompt
     assert "make currentSubstep smaller" in system_prompt
     assert "tiny or unclear answer like `2?`" in system_prompt
+    assert "complaints that the previous hint was unhelpful, repetitive, too vague, or did not add more" in system_prompt
+    assert "one new concrete distinction, prerequisite idea, or narrower sub-question" in system_prompt
     assert "explain only the expected answer form or type without revealing the value they should get" in system_prompt
     assert "do not move from computing L(2e1 - 3e2) to computing L^2(2e1 - 3e2)" in system_prompt
     assert "2L(e1), -3L(e2), then combining terms" in system_prompt
+
+
+def test_final_prompt_escalates_repeated_unhelpful_hint_without_repeating() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    state = {
+        "conversation_id": "conv-unhelpful-hint",
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "problem_understanding_states": {
+                problem_id: {
+                    "activeProblemId": problem_id,
+                    "understandingLevel": 1,
+                    "hintsGiven": 1,
+                    "repeatedStuckSignals": 1,
+                    "currentStep": "Compare rank(KL) with rank(L).",
+                    "currentSubstep": "Identify the space where im(KL) lives.",
+                    "currentStepStatus": "in_progress",
+                    "lastHintSummary": "Compare the image of KL to the image of L using rank-nullity.",
+                }
+            },
+        },
+        "messages": [
+            {"role": "assistant", "content": "Compare the image of KL to the image of L using rank-nullity."},
+            {"role": "user", "content": "that hint is too vague"},
+        ],
+        "retrieval_decision": {
+            "tutorPlan": {
+                "studentIntent": "vague_help",
+                "nextHelpDepth": 2,
+                "currentStep": "Compare rank(KL) with rank(L).",
+                "currentSubstep": "Identify the space where im(KL) lives.",
+                "currentStepStatus": "in_progress",
+            }
+        },
+    }
+
+    messages = graph_module.build_multimodal_final_messages(state)
+    instruction_text = messages[1]["content"][0]["text"]
+
+    assert "previous hint was unhelpful, repetitive, too vague, or did not add more" in instruction_text
+    assert "add one new concrete distinction or prerequisite idea" in instruction_text
+    assert "specific missing object, definition, target space, assumption, comparison, representation, or notation choice" in instruction_text
 
 
 def test_unclear_attempt_keeps_current_step_and_counts_repeated_stuck() -> None:

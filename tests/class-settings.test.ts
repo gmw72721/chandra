@@ -52,7 +52,7 @@ function loadClassSettingsModule() {
       target: ts.ScriptTarget.ES2022
     }
   }).outputText;
-  const module = { exports: {} as Record<string, any> };
-  vm.runInNewContext(transpiled, { exports: module.exports, module });
-  return module.exports;
+  const moduleShim = { exports: {} as Record<string, any> };
+  vm.runInNewContext(transpiled, { exports: moduleShim.exports, module: moduleShim });
+  return moduleShim.exports;
 }

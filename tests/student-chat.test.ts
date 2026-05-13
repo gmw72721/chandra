@@ -260,7 +260,7 @@ test("teacher roster can open a student's saved conversations", () => {
   assert.match(teacherSource, /setSelectedStudentId\(student\.id\)/);
   assert.match(teacherSource, /conversationMessages\s*\.\s*filter/);
   assert.match(teacherSource, /TeacherTranscriptMessage/);
-  assert.match(teacherSource, /Back to roster/);
+  assert.match(teacherSource, /Back to students/);
   assert.match(conversationRouteSource, /authorizeClassTeacher\(request, classId\)/);
   assert.match(conversationRouteSource, /listTeacherStudentConversations/);
   assert.match(messageRouteSource, /authorizeClassTeacher\(request, classId\)/);
@@ -333,9 +333,10 @@ test("teacher transcript uses student chat markdown formatting and readable sour
   assert.match(teacherSource, /import ReactMarkdown from "react-markdown"/);
   assert.match(teacherSource, /remarkMath/);
   assert.match(teacherSource, /rehypeKatex/);
-  assert.match(teacherSource, /assistantMessageAnswerContent\(message\)/);
-  assert.match(teacherSource, /structuredSections\.map/);
+  assert.match(teacherSource, /assistantMessageBlocks\(message\)/);
+  assert.match(teacherSource, /messageBlocks\.map/);
   assert.match(teacherSource, /condensedSourceLabels\(message\.sources\)/);
+  assert.match(messageFormatSource, /export function assistantMessageBlocks/);
   assert.match(messageFormatSource, /export function assistantStructuredSections/);
   assert.match(styles, /\.teacher-transcript-message/);
   assert.match(styles, /\.teacher-dashboard\[data-appearance="dark"\] \.teacher-transcript-sources span/);
@@ -840,10 +841,10 @@ test("student assistant renderer falls back for old messages without structured 
   const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
   const messageFormatSource = readFileSync(join(repoRoot, "frontend/lib/chat-message-format.ts"), "utf8");
 
-  assert.match(source, /assistantMessageAnswerContent\(message\)/);
+  assert.match(source, /assistantMessageBlocks\(message\)/);
   assert.match(messageFormatSource, /return message\.structuredOutput \? message\.structuredOutput\.sections\.answer : message\.content/);
-  assert.match(source, /answerContent \? \(/);
-  assert.match(source, /assistantStructuredSections\(message\)/);
+  assert.match(source, /messageBlocks\.map/);
+  assert.match(messageFormatSource, /assistantStructuredSections\(message: ChatMessage\)/);
   assert.match(messageFormatSource, /Your next step/);
   assert.doesNotMatch(source, /hintLevel|studentActionNeeded|sourceConfidence/);
 });
@@ -1094,6 +1095,42 @@ test("chat context memory saves only cited sources as sources used", () => {
   ]);
 });
 
+test("chat context memory keeps sources from earlier assistant messages", () => {
+  const context = buildChatContextMemory([
+    {
+      createdAt: "2026-05-12T08:21:00.000Z",
+      id: "assistant-1",
+      role: "assistant",
+      content: "Use the theorem on page 640.",
+      sources: [{ materialType: "reading", pageNumber: 640, title: "ACME VOL 1" }]
+    },
+    {
+      createdAt: "2026-05-12T08:23:00.000Z",
+      id: "assistant-2",
+      role: "assistant",
+      content: "It's Problem 2.15 on page 98.",
+      sources: [{ materialType: "assignment", pageNumber: 98, title: "ACME VOL 1", problemNumber: "2.15" }]
+    }
+  ]);
+
+  assert.deepEqual(context.sourcesUsed, [
+    {
+      id: undefined,
+      sourceName: "ACME VOL 1",
+      pageNumber: 98,
+      problemNumber: "2.15",
+      label: "ACME VOL 1 · p. 98 · Problem 2.15"
+    },
+    {
+      id: undefined,
+      sourceName: "ACME VOL 1",
+      pageNumber: 640,
+      problemNumber: undefined,
+      label: "ACME VOL 1 · p. 640"
+    }
+  ]);
+});
+
 test("chat context memory includes pdf knowledge items as sources used", () => {
   const context = buildChatContextMemory([
     {
@@ -1275,7 +1312,7 @@ test("student chat header uses compact context and tutoring time popovers", () =
   assert.match(stylesSource, /\.student-header-control-label/);
   assert.match(stylesSource, /max-width: 0/);
   assert.match(stylesSource, /\.student-usage-header-control \.student-header-control-label \{/);
-  assert.match(stylesSource, /\.student-usage-header-control \.student-header-control-label[\s\S]*max-width: none/);
+  assert.match(stylesSource, /\.student-usage-header-control \.student-header-usage-percent/);
   assert.match(stylesSource, /\.student-header-control:hover \.student-header-control-label/);
   assert.match(stylesSource, /\.student-workspace-shell\[data-appearance="dark"\] \.student-header-control/);
   assert.match(stylesSource, /\.student-workspace-shell\[data-appearance="dark"\] \.student-header-popover/);
@@ -1304,6 +1341,7 @@ test("student chat access controls and request quotas run before backend calls",
   assert.match(authSource, /chatBlocked/);
   assert.match(routeSource, /reserveAiTokenUsage\(\{[\s\S]*provider: "langgraph"[\s\S]*requestLimits: classModelSettings\?\.requestLimits/);
   assert.match(routeSource, /const response = await fetch\(`\$\{langGraphBackendBaseUrl\(\)\}\/api\/langgraph\/chat`/);
+  assert.match(routeSource, /if \(!reader\) \{\s*await releaseAiTokenReservationSafely\(preparedRequest\.aiUsageReservation, requestId\)/);
   assert.match(usageSource, /collection\("aiUsageRequestBuckets"\)/);
   assert.match(usageSource, /requestCount: FieldValue\.increment\(1\)/);
   assert.match(usageSource, /collection\("aiUsageEvents"\)/);
@@ -1312,8 +1350,9 @@ test("student chat access controls and request quotas run before backend calls",
   assert.match(settingsSource, /perStudentDaily: 100/);
   assert.match(settingsSource, /perClassDaily: 3_000/);
   assert.match(settingsSource, /teacherPreviewDaily: 50/);
-  assert.match(backendSource, /enforce_ai_usage_reservation\(request\.aiUsageReservation\)/);
-  assert.match(backendSource, /async def chat\(request: ChatRequest[\s\S]*enforce_ai_usage_reservation\(request\.aiUsageReservation\)[\s\S]*call_openrouter/);
+  assert.match(backendSource, /aiUsageReservation: Optional\[dict\[str, Any\]\] = None/);
+  assert.match(backendSource, /enforce_ai_usage_reservation\(request\.aiUsageReservation, student_id=scope\["uid"\] if scope\["role"\] == "student" else None\)/);
+  assert.match(backendSource, /async def chat\(request: ChatRequest[\s\S]*enforce_ai_usage_reservation\(request\.aiUsageReservation, student_id=scope\["uid"\] if scope\["role"\] == "student" else None\)[\s\S]*call_openrouter/);
 });
 
 test("teacher preview is allowed when class chat is paused but still uses preview quota", () => {
@@ -1464,6 +1503,8 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(promptSource, /one short orientation or nudge plus one clear question/);
   assert.match(promptSource, /if the main answer already gives the key clue, equation, theorem, or method, omit Hint/);
   assert.match(promptSource, /If Hint already gives the action, omit the next step/);
+  assert.match(promptSource, /previous hint was unhelpful, repetitive, too vague, or did not add more/);
+  assert.match(promptSource, /specific missing object, definition, target space, assumption, comparison, representation, or notation choice/);
   assert.match(promptSource, /broad concept explanations or topic overviews, usually answer in plain prose without Hint/);
   assert.match(promptSource, /duplicated main answer plus Hint/);
   assert.match(promptSource, /specific problem, page, or passage, treat it as source lookup/);
@@ -1499,6 +1540,8 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(routeSource, /vague stuck messages like `I am lost`/);
   assert.match(routeSource, /main answer already gives the key clue, equation, theorem, or method, omit `Hint:`/);
   assert.match(routeSource, /If `Hint:` already gives the action, omit `nextStep`/);
+  assert.match(routeSource, /previous hint was unhelpful, repetitive, too vague, or did not add more/);
+  assert.match(routeSource, /make this hint narrower instead of repeating it/);
   assert.match(routeSource, /broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`/);
   assert.match(routeSource, /duplicated main answer plus `Hint:`/);
   assert.match(routeSource, /use at most one nudge plus one question/);
@@ -1517,6 +1560,8 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(graphSource, /Depth 1 uses one short answer or Hint plus one question, especially for vague stuck messages like `I am lost`/);
   assert.match(graphSource, /answer already gives the key clue, equation, theorem, or method, omit hint/);
   assert.match(graphSource, /If hint already gives the action, omit nextStep/);
+  assert.match(graphSource, /previous hint was unhelpful, repetitive, too vague, or did not add more/);
+  assert.match(graphSource, /one new concrete distinction, prerequisite idea, or narrower sub-question/);
   assert.match(graphSource, /never output sections just because the schema supports them/);
   assert.match(graphSource, /PostgreSQL OCR metadata/);
   assert.match(graphSource, /bare numbered references like `problem 2\.14`/);
@@ -1567,19 +1612,19 @@ test("student feedback prompt avoids nagging while covering learning signals", (
 });
 
 test("student context saves the exact problem before falling back to page OCR", () => {
-  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
-  const problemTextBlock = studentSource.slice(
-    studentSource.indexOf("const pageOcrText ="),
-    studentSource.indexOf("const problem: NonNullable")
+  const contextMemorySource = readFileSync(join(repoRoot, "frontend/lib/chat-context-memory.ts"), "utf8");
+  const problemTextBlock = contextMemorySource.slice(
+    contextMemorySource.indexOf("const pageOcrText ="),
+    contextMemorySource.indexOf("const problem: NonNullable")
   );
 
   assert.ok(
     problemTextBlock.indexOf("message.structuredOutput?.sections?.problem") <
       problemTextBlock.indexOf("extractProblemTextFromPageOcr")
   );
-  assert.match(studentSource, /const problem: NonNullable<ChatContextMemory\["currentProblem"\]> \| undefined = activeProblemNumber \|\| problemText/);
-  assert.match(studentSource, /extractProblemTextFromPageOcr\(pageOcrText, activeProblemNumber\)/);
-  assert.match(studentSource, /function extractProblemTextFromPageOcr/);
+  assert.match(contextMemorySource, /const problem: NonNullable<ChatContextMemory\["currentProblem"\]> \| undefined = activeProblemNumber \|\| problemText/);
+  assert.match(contextMemorySource, /extractProblemTextFromPageOcr\(pageOcrText, activeProblemNumber\)/);
+  assert.match(contextMemorySource, /function extractProblemTextFromPageOcr/);
 });
 
 test("student understanding helper is empty before active problem and initializes at level zero", () => {
@@ -1659,7 +1704,7 @@ test("student understanding helper is empty before active problem and initialize
   ]);
 
   assert.equal(state?.level, 0);
-  assert.deepEqual(state?.reasons, ["Chandra has not seen your work yet."]);
+  assert.deepEqual(state?.reasons, ["Chandra has the problem, but has not seen your work on it yet."]);
 });
 
 test("student understanding reasons stay process-focused and safe", () => {
@@ -1676,9 +1721,29 @@ test("student understanding reasons stay process-focused and safe", () => {
       2
     ),
     [
+      "You have part of the setup; the next update depends on the main idea you use.",
+      "You showed an attempt, but the key justification is still missing",
       "You identified the main object in the problem.",
-      "A next point to clarify is the key justification.",
-      "You showed an attempt, but the key justification is still missing."
+      "Next, clarify the key justification."
+    ]
+  );
+
+  assert.deepEqual(
+    safeUnderstandingReasons(
+      {
+        activeProblemId: "problem-image",
+        understandingLevel: 1,
+        reasons: [
+          "Student asked how the concept relates to real-world applications, then specified data science.",
+          "Image means the set of outputs that can actually be produced; in data science, these are the reachable predictions or transformed results."
+        ]
+      },
+      1
+    ),
+    [
+      "Chandra has the problem and still needs to see your next step or attempt.",
+      "Student asked how the concept relates to real-world applications, then specified data science",
+      "Chandra is checking how you use image in this problem."
     ]
   );
 
@@ -1704,7 +1769,7 @@ test("student understanding reasons stay process-focused and safe", () => {
   ]);
 
   assert.equal(closeState?.level, 4);
-  assert.deepEqual(closeState?.reasons, ["You are close and mostly need cleanup."]);
+  assert.deepEqual(closeState?.reasons, ["You are close; Chandra is mostly checking notation, justification, or cleanup."]);
 });
 
 test("student understanding UI sits beside knowledge and keeps safe copy", () => {
@@ -1720,6 +1785,8 @@ test("student understanding UI sits beside knowledge and keeps safe copy", () =>
   assert.match(studentSource, /student-header-popover student-understanding-popover student-understanding-empty-tooltip/);
   assert.match(studentSource, /student-popover-empty/);
   assert.match(studentSource, /Chandra estimates how much support you need for this problem\./);
+  assert.match(studentSource, /<h3>Updates<\/h3>/);
+  assert.doesNotMatch(studentSource, /Why it changed/);
   assert.match(studentSource, /This is not a grade\./);
   const popoverSource = studentSource.slice(
     studentSource.indexOf("const UnderstandingPopover"),
