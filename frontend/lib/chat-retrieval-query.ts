@@ -79,10 +79,11 @@ export function getRecentSourceHints(messages: RetrievalQueryMessage[]) {
 }
 
 function formatSourceHint(source: TutorSource) {
+  const pageNumber = source.printedPageStart ?? source.printedPageNumber ?? source.pageNumber;
   return [
     source.title,
     source.problemNumber ? `problem ${source.problemNumber}` : "",
-    source.pageNumber ? `page ${source.pageNumber}` : ""
+    pageNumber ? `${source.printedPageStart ?? source.printedPageNumber ? "printed page" : "page"} ${pageNumber}` : ""
   ]
     .filter(Boolean)
     .join(", ");

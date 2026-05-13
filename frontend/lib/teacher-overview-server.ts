@@ -1,4 +1,5 @@
 import { adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
+import { conversationNeedsTeacherReview as conversationNeedsTeacherReviewNow } from "./conversation-review-utils";
 import {
   listTeacherClassConversations,
   listTeacherRosterActivity,
@@ -155,8 +156,14 @@ function buildPriorityRows(
     );
 
   conversations
-    .filter((conversation) =>
-      ["needs_follow_up", "misunderstanding_spotted", "ai_answer_needs_review"].includes(conversation.reviewStatus)
+    .filter(
+      (conversation) =>
+        ["needs_follow_up", "misunderstanding_spotted", "ai_answer_needs_review"].includes(conversation.reviewStatus) &&
+        conversationNeedsTeacherReviewNow({
+          feedbackSummary: conversation.feedbackSummary,
+          followUpDueAt: conversation.review.followUpDueAt,
+          status: conversation.reviewStatus
+        })
     )
     .forEach((conversation) => {
       const row = rosterByEmail.get(conversation.studentEmail.trim().toLowerCase());
@@ -227,14 +234,14 @@ function buildReviewQueueRows(
     }));
 }
 
-function conversationNeedsTeacherReview(conversation: Pick<TeacherConversationReviewSummary, "feedbackSummary" | "reviewStatus">) {
-  return (
-    conversation.reviewStatus === "new" ||
-    conversation.reviewStatus === "needs_follow_up" ||
-    conversation.reviewStatus === "misunderstanding_spotted" ||
-    conversation.reviewStatus === "ai_answer_needs_review" ||
-    conversation.feedbackSummary.openCount > 0
-  );
+function conversationNeedsTeacherReview(
+  conversation: Pick<TeacherConversationReviewSummary, "feedbackSummary" | "review" | "reviewStatus">
+) {
+  return conversationNeedsTeacherReviewNow({
+    feedbackSummary: conversation.feedbackSummary,
+    followUpDueAt: conversation.review.followUpDueAt,
+    status: conversation.reviewStatus
+  });
 }
 
 async function buildLearningProfileRows(classId: string): Promise<TeacherClassOverviewLearningProfileRow[]> {

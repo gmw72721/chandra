@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { ConversationPersistenceError } from "@/lib/student-conversations-server";
 import { assertOverviewDate, getTeacherClassOverview } from "@/lib/teacher-overview-server";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request, { params }: { params: Promise<{ classId: string }> }) {
   try {
     const { classId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "viewOverview");
 
     const url = new URL(request.url);
     const date = url.searchParams.get("date");

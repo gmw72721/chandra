@@ -73,7 +73,7 @@ test("material upload progress is written to professor-scoped job documents", ()
   assert.match(source, /step: "embedding_chunks"/);
   assert.match(source, /completedChunks: completed/);
   assert.match(rulesSource, /match \/materialJobs\/\{jobId\}/);
-  assert.match(rulesSource, /allow read: if isTargetClassTeacher\(classId\)/);
+  assert.match(rulesSource, /allow read: if hasTargetClassAccess\(classId, "viewMaterials"\)/);
   assert.match(rulesSource, /allow write: if false/);
 });
 
@@ -145,6 +145,9 @@ test("tutor knowledge supports guarded URL ingestion", () => {
   assert.match(componentSource, /Paste URL/);
   assert.match(source, /extractChunksFromUrl/);
   assert.match(source, /downloadTutorKnowledgeUrl/);
+  assert.match(source, /uploadTutorKnowledgeUrlAsPdfSource/);
+  assert.match(source, /createPdfFromDownloadedUrlSource/);
+  assert.match(source, /sourceKind: "url"/);
   assert.match(source, /validatePublicTutorKnowledgeUrl/);
   assert.match(source, /Private, local, and internal URLs are not supported/);
   assert.match(source, /originalSourceUrl/);

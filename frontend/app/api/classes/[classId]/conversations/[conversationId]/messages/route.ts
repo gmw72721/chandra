@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { listTeacherConversationMessages } from "@/lib/student-conversations-server";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -10,7 +10,7 @@ export async function GET(
 ) {
   try {
     const { classId, conversationId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "viewConversations");
 
     const messages = await listTeacherConversationMessages({
       classId,

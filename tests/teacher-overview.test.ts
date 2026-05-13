@@ -9,7 +9,7 @@ const source = () => readFileSync(join(repoRoot, "frontend/lib/teacher-overview-
 test("teacher overview has a teacher-only route backed by the server aggregator", () => {
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/overview/route.ts"), "utf8");
 
-  assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(routeSource, /authorizeClassAccess\(request, classId, "viewOverview"\)/);
   assert.match(routeSource, /getTeacherClassOverview/);
   assert.match(routeSource, /assertOverviewDate\(date\)/);
   assert.match(routeSource, /timezone/);
@@ -45,10 +45,8 @@ test("teacher overview review queue excludes reviewed conversations even when so
   const buildReviewQueueRowsSource = serverSource.slice(buildReviewQueueRowsStart, buildReviewQueueRowsEnd);
 
   assert.match(buildReviewQueueRowsSource, /filter\(conversationNeedsTeacherReview\)/);
-  assert.match(buildReviewQueueRowsSource, /conversation\.reviewStatus === "new"/);
-  assert.match(buildReviewQueueRowsSource, /conversation\.reviewStatus === "needs_follow_up"/);
-  assert.match(buildReviewQueueRowsSource, /conversation\.reviewStatus === "misunderstanding_spotted"/);
-  assert.match(buildReviewQueueRowsSource, /conversation\.reviewStatus === "ai_answer_needs_review"/);
+  assert.match(serverSource, /conversationNeedsTeacherReviewNow/);
+  assert.match(serverSource, /followUpDueAt: conversation\.review\.followUpDueAt/);
   assert.doesNotMatch(buildReviewQueueRowsSource, /conversation\.sourceAudit\.lowSourceConfidence \|\|/);
   assert.doesNotMatch(buildReviewQueueRowsSource, /conversation\.topic\.toLowerCase\(\)\.includes\("off-topic"\)\s*\)/);
 });

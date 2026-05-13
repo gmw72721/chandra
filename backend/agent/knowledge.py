@@ -34,6 +34,7 @@ class KnowledgeItem(TypedDict):
     assignmentId: NotRequired[str]
     classId: NotRequired[str]
     sourceId: NotRequired[str]
+    fileType: NotRequired[str]
     pdfId: NotRequired[str]
     page: NotRequired[int]
     problemId: NotRequired[str]
@@ -74,6 +75,17 @@ PDF_EXAMPLE_RE = re.compile(r"\bexample|worked\s+example\b")
 PDF_THEOREM_RE = re.compile(r"\btheorem|lemma|proposition|corollary\b")
 PDF_DEFINITION_RE = re.compile(r"\bdefinition|defined\s+as|terminology\b")
 PDF_PROBLEM_RE = re.compile(r"\bexact_problem|student_requested_problem|problem\s+\d")
+PROBLEM_NUMBER_RE = re.compile(r"\b(?:problem|exercise|question|ex\.?|q)\s*#?\s*(\d{1,3}(?:\.\d{1,3})?[a-z]?)\b", re.I)
+PASTED_PROBLEM_MARKER_RE = re.compile(r"\b(?:problem|exercise|question|homework|worksheet|assignment|prompt)\b", re.I)
+PASTED_PROBLEM_TASK_RE = re.compile(
+    r"\b(?:prove|show|solve|find|compute|calculate|determine|evaluate|simplify|graph|write|explain|derive|sketch|verify)\b",
+    re.I,
+)
+MATH_MARKER_RE = re.compile(r"(?:\$|\\\(|\\\[|<=|>=|->|[A-Za-z]\([^)]*\)|\b[a-zA-Z]\s*[=<>]\s*[-\w])")
+ATTEMPT_MARKER_RE = re.compile(
+    r"\b(?:i\s+(?:tried|used|got|think|started|wrote|did)|my\s+work|here(?:'s| is)\s+my|is\s+this\s+(?:right|correct)|check\s+my)\b",
+    re.I,
+)
 OPTIONAL_IDENTITY_KEY_PAIRS = (
     ("classId", "class_id", "classId"),
     ("assignmentId", "assignment_id", "assignmentId"),
@@ -130,11 +142,91 @@ def latest_student_message(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def latest_student_visible_message(messages: list[dict[str, Any]]) -> str:
+    latest = latest_student_message(messages)
+    if "\n\nStudent uploaded homework attachments for this message:" in latest:
+        latest = latest.split("\n\nStudent uploaded homework attachments for this message:", 1)[0]
+    return compact_text(latest, limit=4000)
+
+
 def problem_request_reason(messages: list[dict[str, Any]]) -> str:
     latest = latest_student_message(messages)
     if latest:
         return f"Student asked: {compact_text(latest, limit=160)}"
     return "Student asked for help in this chat."
+
+
+def student_provided_problem_text_from_state(state: dict[str, Any]) -> str:
+    latest = latest_student_visible_message(state.get("messages", []))
+    if looks_like_pasted_problem(latest):
+        return compact_text(latest, limit=MAX_ACTIVE_PROBLEM_CHARS)
+    return ""
+
+
+def student_upload_problem_text_from_state(state: dict[str, Any]) -> str:
+    candidate = student_upload_problem_candidate(state.get("student_attachment_files", []) or [])
+    return str(candidate.get("text") or "")
+
+
+def student_upload_problem_candidate(student_uploads: list[Any]) -> dict[str, str]:
+    for upload in student_uploads:
+        if not isinstance(upload, dict):
+            continue
+
+        text = compact_text(
+            upload.get("ocrText")
+            or upload.get("ocr_text")
+            or upload.get("extractedText")
+            or upload.get("extracted_text"),
+            limit=MAX_ACTIVE_PROBLEM_CHARS,
+        )
+        if not looks_like_uploaded_problem_text(text):
+            continue
+
+        return {
+            "id": str(upload.get("id") or upload.get("attachmentId") or upload.get("attachment_id") or "").strip(),
+            "sourceName": compact_text(upload.get("fileName") or upload.get("file_name") or "Student upload", limit=180),
+            "text": text,
+        }
+
+    return {}
+
+
+def looks_like_pasted_problem(text: str) -> bool:
+    normalized = compact_text(text, limit=5000)
+    if len(normalized) < 45:
+        return False
+    if "Student message mode: Show my work." in normalized:
+        return False
+    if ATTEMPT_MARKER_RE.search(normalized):
+        return False
+
+    has_problem_marker = bool(PASTED_PROBLEM_MARKER_RE.search(normalized) or PROBLEM_NUMBER_RE.search(normalized))
+    has_task_verb = bool(PASTED_PROBLEM_TASK_RE.search(normalized))
+    has_math = bool(MATH_MARKER_RE.search(normalized))
+    sentence_like = normalized.count(".") + normalized.count("?") + normalized.count("\n") >= 1
+
+    return has_task_verb and sentence_like and (has_problem_marker or has_math or len(normalized) >= 120)
+
+
+def looks_like_uploaded_problem_text(text: str) -> bool:
+    normalized = compact_text(text, limit=5000)
+    if len(normalized) < 12:
+        return False
+    if ATTEMPT_MARKER_RE.search(normalized):
+        return False
+
+    has_problem_marker = bool(PASTED_PROBLEM_MARKER_RE.search(normalized) or PROBLEM_NUMBER_RE.search(normalized))
+    has_task_verb = bool(PASTED_PROBLEM_TASK_RE.search(normalized))
+    has_math = bool(MATH_MARKER_RE.search(normalized))
+    sentence_like = normalized.count(".") + normalized.count("?") + normalized.count("\n") >= 1
+
+    return has_task_verb and (has_problem_marker or has_math or sentence_like)
+
+
+def first_problem_number_from_text(text: str) -> str | None:
+    match = PROBLEM_NUMBER_RE.search(text or "")
+    return match.group(1) if match else None
 
 
 def infer_pdf_page_used_as(page: dict[str, Any], *, reason: str = "") -> KnowledgeUse:
@@ -268,24 +360,33 @@ def student_upload_knowledge_item(
         limit=MAX_STUDENT_UPLOAD_TEXT_CHARS,
     )
     summary = compact_text(upload.get("summary") or upload.get("description"), limit=700)
+    file_name = compact_text(upload.get("fileName") or upload.get("file_name") or "Student upload", limit=180)
+    file_type = str(upload.get("fileType") or upload.get("file_type") or "").strip().lower()
+    mime_type = str(upload.get("mimeType") or upload.get("mime_type") or "").strip().lower()
+    if not summary and (file_name or file_type or mime_type):
+        type_label = "image" if file_type == "image" or mime_type.startswith("image/") else "file"
+        summary = f"Student uploaded {type_label}: {file_name or 'homework file'}."
     if not text and not summary:
         return None
 
     chat_id = str(state.get("conversation_id") or state.get("chatId") or "").strip()
     source_id = str(upload.get("id") or upload.get("attachmentId") or upload.get("attachment_id") or "").strip()
+    used_as = infer_student_upload_used_as(upload, state, text=text, summary=summary)
     now = utc_timestamp()
     item: KnowledgeItem = {
         "id": stable_knowledge_id(chat_id, "student_upload", source_id, text[:200], summary),
         "chatId": chat_id,
         "kind": "student_upload",
-        "sourceName": compact_text(upload.get("fileName") or upload.get("file_name") or "Student upload", limit=180),
+        "sourceName": file_name or "Student upload",
         "sourceId": source_id or stable_knowledge_id(chat_id, "student_upload_source", text[:120], summary),
-        "usedAs": "student_attempt",
-        "reason": reason or "Student uploaded work for the active problem.",
+        "usedAs": used_as,
+        "reason": reason or student_upload_reason(used_as),
         "createdAt": now,
         "updatedAt": now,
     }
     add_optional_identity_fields(item, state)
+    if file_type in {"image", "pdf"}:
+        item["fileType"] = file_type
     if text:
         item["ocrText"] = text
     if summary:
@@ -293,6 +394,30 @@ def student_upload_knowledge_item(
     if linked_problem_id:
         item["linkedProblemId"] = linked_problem_id
     return item
+
+
+def infer_student_upload_used_as(upload: dict[str, Any], state: dict[str, Any], *, text: str, summary: str) -> KnowledgeUse:
+    explicit = normalize_knowledge_use(upload.get("usedAs") or upload.get("used_as"))
+    if explicit != "supporting_context":
+        return explicit
+
+    latest = latest_student_message(state.get("messages", []))
+    haystack = " ".join([latest, text, summary]).lower()
+    if re.search(r"\bhere(?:'s| is)\s+my\s+(?:problem|exercise|question|prompt|assignment|homework)\b", latest, re.I):
+        return "problem_source"
+    if ATTEMPT_MARKER_RE.search(haystack) or "student message mode: show my work" in haystack:
+        return "student_attempt"
+    if looks_like_pasted_problem(text) or PASTED_PROBLEM_MARKER_RE.search(haystack):
+        return "problem_source"
+    return "problem_source"
+
+
+def student_upload_reason(used_as: KnowledgeUse) -> str:
+    if used_as == "student_attempt":
+        return "Student uploaded work for the active problem."
+    if used_as == "problem_source":
+        return "Student uploaded problem or source context for this chat."
+    return "Student uploaded supporting context for this chat."
 
 
 def knowledge_reason_for_pdf_page(page: dict[str, Any], state: dict[str, Any]) -> str:
@@ -375,6 +500,10 @@ def normalize_knowledge_item(value: Any) -> KnowledgeItem | None:
         if raw:
             item[target_key] = str(raw)  # type: ignore[literal-required]
 
+    file_type = str(value.get("fileType") or value.get("file_type") or "").strip().lower()
+    if file_type in {"image", "pdf"}:
+        item["fileType"] = file_type
+
     page = first_positive_int(value.get("page"))
     if page:
         item["page"] = page
@@ -410,18 +539,34 @@ def knowledge_items_from_state(
     page_assets = state.get("used_page_assets") or state.get("page_assets", []) or []
     student_uploads = state.get("student_attachment_files", []) or []
     primary_page = first_page_asset_from_pages(page_assets)
+    student_provided_problem_text = student_provided_problem_text_from_state(state)
+    upload_problem = student_upload_problem_candidate(student_uploads)
+    upload_problem_text = str(upload_problem.get("text") or "")
+    resolved_active_problem_text = active_problem_text or student_provided_problem_text or upload_problem_text
 
-    if active_problem_text:
+    if resolved_active_problem_text:
+        active_source_name = source_name or str((primary_page or {}).get("title") or "")
+        if not active_source_name and student_provided_problem_text:
+            active_source_name = "Pasted problem"
+        if not active_source_name and upload_problem_text:
+            active_source_name = str(upload_problem.get("sourceName") or "Student upload")
         active = active_problem_knowledge_item(
-            problem_text=active_problem_text,
+            problem_text=resolved_active_problem_text,
             state=state,
-            source_name=source_name or str((primary_page or {}).get("title") or "Active problem"),
-            source_id=str((primary_page or {}).get("doc_id") or ""),
+            reason=(
+                "Student pasted a problem statement."
+                if student_provided_problem_text and not active_problem_text
+                else "Student uploaded a problem statement."
+                if upload_problem_text and not active_problem_text
+                else None
+            ),
+            source_name=active_source_name or "Active problem",
+            source_id=str((primary_page or {}).get("doc_id") or upload_problem.get("id") or ""),
             page=first_positive_int(
                 (primary_page or {}).get("printed_page_start"),
                 (primary_page or {}).get("page_start"),
             ),
-            problem_id=first_problem_id(primary_page or {}),
+            problem_id=first_problem_id(primary_page or {}) or first_problem_number_from_text(resolved_active_problem_text),
         )
         if active:
             items.append(active)
@@ -432,7 +577,7 @@ def knowledge_items_from_state(
             if item:
                 items.append(item)
 
-    linked_problem_id = first_problem_id(primary_page or {})
+    linked_problem_id = first_problem_id(primary_page or {}) or first_problem_number_from_text(resolved_active_problem_text)
     for upload in student_uploads:
         if isinstance(upload, dict):
             item = student_upload_knowledge_item(upload, state, linked_problem_id=linked_problem_id)

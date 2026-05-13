@@ -1,18 +1,22 @@
 import { NextResponse } from "next/server";
+import { conversationNeedsTeacherReview } from "@/lib/conversation-review-utils";
 import { listTeacherClassConversations } from "@/lib/student-conversations-server";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request, { params }: { params: Promise<{ classId: string }> }) {
   try {
     const { classId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "viewConversations");
 
     const conversations = await listTeacherClassConversations({ classId });
     const openConversations = conversations.filter((conversation) =>
-      ["new", "needs_follow_up", "misunderstanding_spotted", "ai_answer_needs_review"].includes(conversation.reviewStatus)
-      || conversation.feedbackSummary.openCount > 0
+      conversationNeedsTeacherReview({
+        feedbackSummary: conversation.feedbackSummary,
+        followUpDueAt: conversation.review.followUpDueAt,
+        status: conversation.reviewStatus
+      })
     );
     const metrics = {
       feedbackOpen: conversations.reduce((sum, conversation) => sum + conversation.feedbackSummary.openCount, 0),

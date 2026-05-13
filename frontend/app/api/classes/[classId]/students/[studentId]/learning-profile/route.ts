@@ -9,7 +9,7 @@ import {
   updateOneStudentLearningProfile
 } from "@/lib/student-learning-profiles-server";
 import { ConversationPersistenceError } from "@/lib/student-conversations-server";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -24,7 +24,7 @@ export async function GET(
 ) {
   try {
     const { classId, studentId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "manageLearningProfiles");
 
     const profile = await getStudentLearningProfile({
       classId,
@@ -43,7 +43,7 @@ export async function POST(
 ) {
   try {
     const { classId, studentId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "manageLearningProfiles");
     const data = (await request.json().catch(() => ({}))) as { force?: unknown; lookbackDays?: unknown };
 
     const result = await updateOneStudentLearningProfile({
@@ -69,7 +69,7 @@ export async function PATCH(
 ) {
   try {
     const { classId, studentId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "manageLearningProfiles");
 
     const data = (await request.json()) as { action?: unknown; profile?: unknown };
     const studentEmail = decodeURIComponent(studentId);

@@ -1,7 +1,8 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
-import { getClassSnapshotPostgresFirst, enrollStudentPostgresFirst } from "@/lib/data/server";
-import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
+import { enrollStudentPostgresFirst } from "@/lib/data/server";
+import { adminDb } from "@/lib/firebase-admin";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -11,24 +12,8 @@ export async function POST(
 ) {
   try {
     const { classId } = await params;
-    const token = getBearerToken(request);
-
-    if (!token) {
-      return NextResponse.json({ error: "Sign in as the class teacher to sync the roster." }, { status: 401 });
-    }
-
-    assertFirebaseAdminAuthReady();
-    const decodedToken = await adminAuth!.verifyIdToken(token);
+    await authorizeClassAccess(request, classId, "manageRoster");
     const classReference = adminDb!.collection("classes").doc(classId);
-    const classSnapshot = await getClassSnapshotPostgresFirst(classId);
-
-    if (!classSnapshot.exists) {
-      return NextResponse.json({ error: "Class not found." }, { status: 404 });
-    }
-
-    if (classSnapshot.data.teacherId !== decodedToken.uid) {
-      return NextResponse.json({ error: "Only the class teacher can sync this roster." }, { status: 403 });
-    }
 
     const [profileSnapshot, rosterSnapshot] = await Promise.all([
       adminDb!.collection("users").where("classId", "==", classId).get(),
@@ -77,19 +62,13 @@ export async function POST(
     }
 
     return NextResponse.json({ syncedCount });
-  } catch {
+  } catch (caughtError) {
+    if (caughtError instanceof TutorKnowledgeHttpError) {
+      return NextResponse.json({ error: caughtError.message }, { status: caughtError.status });
+    }
+
     return NextResponse.json({ error: "Roster sync failed." }, { status: 500 });
   }
-}
-
-function getBearerToken(request: Request) {
-  const authorization = request.headers.get("authorization") ?? "";
-
-  if (!authorization.startsWith("Bearer ")) {
-    return "";
-  }
-
-  return authorization.slice("Bearer ".length).trim();
 }
 
 function normalizeEmail(email: string) {

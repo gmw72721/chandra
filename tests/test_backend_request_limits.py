@@ -45,7 +45,7 @@ def test_openrouter_usage_is_normalized_for_token_budget_tracking() -> None:
 
 def test_legacy_chat_request_preserves_ai_usage_reservation() -> None:
     request = ChatRequest(
-        aiUsageReservation={"estimatedTokens": 250, "id": "reservation-1"},
+        aiUsageReservation={"estimatedTokens": 250, "id": "reservation-1", "studentId": "student-1"},
         messages=[
             {
                 "id": "message-1",
@@ -56,13 +56,24 @@ def test_legacy_chat_request_preserves_ai_usage_reservation() -> None:
         ],
     )
 
-    assert request.aiUsageReservation == {"estimatedTokens": 250, "id": "reservation-1"}
+    assert request.aiUsageReservation == {"estimatedTokens": 250, "id": "reservation-1", "studentId": "student-1"}
     enforce_ai_usage_reservation(request.aiUsageReservation, student_id="student-1")
 
 
 def test_student_chat_requires_valid_ai_usage_reservation() -> None:
     with pytest.raises(HTTPException) as raised:
         enforce_ai_usage_reservation(None, student_id="student-1")
+
+    assert raised.value.status_code == 429
+    assert raised.value.detail == "AI usage reservation required."
+
+
+def test_student_chat_rejects_reservation_for_different_student() -> None:
+    with pytest.raises(HTTPException) as raised:
+        enforce_ai_usage_reservation(
+            {"estimatedTokens": 250, "id": "reservation-1", "studentId": "student-2"},
+            student_id="student-1",
+        )
 
     assert raised.value.status_code == 429
     assert raised.value.detail == "AI usage reservation required."

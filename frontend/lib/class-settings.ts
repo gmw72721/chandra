@@ -53,12 +53,32 @@ export type SourceUsageSettings = {
   quoteSourcePassages: boolean;
 };
 
-export const classAccessRoleOptions = ["owner", "co-teacher", "viewer"] as const;
+export const classAccessRoleOptions = ["owner", "co-teacher", "viewer", "ta"] as const;
 export type ClassAccessRole = (typeof classAccessRoleOptions)[number];
+
+export const classAccessPermissionKeys = [
+  "viewOverview",
+  "viewRoster",
+  "manageRoster",
+  "viewConversations",
+  "reviewConversations",
+  "viewMaterials",
+  "manageMaterials",
+  "manageStudentSupport",
+  "manageLearningProfiles",
+  "manageClassSettings",
+  "manageClassAccess",
+  "exportStudentData",
+  "deleteStudentData",
+  "teacherPreviewChat"
+] as const;
+export type ClassAccessPermission = (typeof classAccessPermissionKeys)[number];
+export type ClassAccessPermissions = Record<ClassAccessPermission, boolean>;
 
 export type ClassCoTeacher = {
   displayName: string;
   email: string;
+  permissions: ClassAccessPermissions;
   role: Exclude<ClassAccessRole, "owner">;
   uid: string;
 };
@@ -109,8 +129,8 @@ export type NotificationSettings = {
 export const reasoningEffortOptions = ["low", "medium", "high"] as const;
 export type ReasoningEffort = (typeof reasoningEffortOptions)[number];
 
-export const responseLengthOptions = ["short", "medium", "long", "extended"] as const;
-export type ResponseLength = (typeof responseLengthOptions)[number];
+export const verboseOptions = ["brief", "standard", "detailed", "veryDetailed"] as const;
+export type VerboseLevel = (typeof verboseOptions)[number];
 
 export type AiTokenLimitSettings = {
   perHour: number;
@@ -120,6 +140,7 @@ export type AiTokenLimitSettings = {
 
 export type AiRequestLimitSettings = {
   perStudentDaily: number;
+  perStudentWeekly: number;
   perClassDaily: number;
   teacherPreviewDaily: number | null;
 };
@@ -128,7 +149,7 @@ export type ClassModelSettings = {
   modelId: string;
   reasoningEffort: ReasoningEffort;
   creativity: number;
-  responseLength: ResponseLength;
+  verbose: VerboseLevel;
   requestLimits: AiRequestLimitSettings;
   tokenLimits: AiTokenLimitSettings;
 };
@@ -137,16 +158,17 @@ export type TutorAccessSettings = {
   enabled: boolean;
 };
 
-export const readingLevelOptions = ["simple", "standard", "advanced"] as const;
-export type ReadingLevel = (typeof readingLevelOptions)[number];
-
 export const mathNotationOptions = ["plain", "balanced", "symbolic"] as const;
 export type MathNotation = (typeof mathNotationOptions)[number];
+
+export const exampleFrequencyOptions = ["rarely", "whenHelpful", "often"] as const;
+export type ExampleFrequency = (typeof exampleFrequencyOptions)[number];
 
 export type ResponseFormatSettings = {
   oneStepAtATime: boolean;
   endWithCheckQuestion: boolean;
-  readingLevel: ReadingLevel;
+  simpleWording: boolean;
+  exampleFrequency: ExampleFrequency;
   mathNotation: MathNotation;
 };
 
@@ -213,16 +235,19 @@ export const defaultAiTokenLimitSettings: AiTokenLimitSettings = {
 };
 
 export const defaultAiRequestLimitSettings: AiRequestLimitSettings = {
-  perStudentDaily: 100,
+  perStudentDaily: 50,
+  perStudentWeekly: 250,
   perClassDaily: 3_000,
   teacherPreviewDaily: 50
 };
+
+export const estimatedAiTokensPerStudentMessageLimit = 1_000;
 
 export const defaultClassModelSettings: ClassModelSettings = {
   modelId: defaultOpenRouterModelId,
   reasoningEffort: "low",
   creativity: 35,
-  responseLength: "medium",
+  verbose: "standard",
   requestLimits: defaultAiRequestLimitSettings,
   tokenLimits: defaultAiTokenLimitSettings
 };
@@ -231,10 +256,31 @@ export const defaultTutorAccessSettings: TutorAccessSettings = {
   enabled: true
 };
 
+export const emptyClassAccessPermissions = Object.fromEntries(
+  classAccessPermissionKeys.map((permission) => [permission, false])
+) as ClassAccessPermissions;
+
+export const fullClassAccessPermissions = Object.fromEntries(
+  classAccessPermissionKeys.map((permission) => [permission, true])
+) as ClassAccessPermissions;
+
+export const readOnlyClassAccessPermissions: ClassAccessPermissions = {
+  ...emptyClassAccessPermissions,
+  viewOverview: true,
+  viewRoster: true,
+  viewConversations: true,
+  viewMaterials: true
+};
+
+export const defaultTaClassAccessPermissions: ClassAccessPermissions = {
+  ...readOnlyClassAccessPermissions
+};
+
 export const defaultResponseFormatSettings: ResponseFormatSettings = {
   oneStepAtATime: true,
   endWithCheckQuestion: true,
-  readingLevel: "standard",
+  simpleWording: false,
+  exampleFrequency: "whenHelpful",
   mathNotation: "balanced"
 };
 
@@ -357,11 +403,41 @@ export function normalizeClassAccessRole(value: unknown): ClassAccessRole {
   return classAccessRoleOptions.includes(value as ClassAccessRole) ? (value as ClassAccessRole) : "viewer";
 }
 
+export function normalizeClassAccessPermissions(
+  value: unknown,
+  role: ClassAccessRole = "viewer"
+): ClassAccessPermissions {
+  if (role === "owner" || role === "co-teacher") {
+    return { ...fullClassAccessPermissions };
+  }
+
+  if (role === "viewer") {
+    return { ...readOnlyClassAccessPermissions };
+  }
+
+  const source = isRecord(value) ? value : {};
+
+  return Object.fromEntries(
+    classAccessPermissionKeys.map((permission) => [
+      permission,
+      booleanWithDefault(source[permission], defaultTaClassAccessPermissions[permission])
+    ])
+  ) as ClassAccessPermissions;
+}
+
+export function serializeClassAccessPermissions(
+  value: unknown,
+  role: ClassAccessRole
+): ClassAccessPermissions {
+  return normalizeClassAccessPermissions(value, role);
+}
+
 export function normalizeCoTeacher(value: unknown): ClassCoTeacher | null {
   const source = isRecord(value) ? value : {};
   const uid = typeof source.uid === "string" ? source.uid.trim() : "";
   const email = typeof source.email === "string" ? source.email.trim().toLowerCase() : "";
   const role = normalizeClassAccessRole(source.role);
+  const permissions = normalizeClassAccessPermissions(source.permissions ?? source, role);
 
   if (!uid || role === "owner") {
     return null;
@@ -370,6 +446,7 @@ export function normalizeCoTeacher(value: unknown): ClassCoTeacher | null {
   return {
     displayName: typeof source.displayName === "string" ? normalizeWhitespace(source.displayName) : "",
     email,
+    permissions,
     role,
     uid
   };
@@ -490,9 +567,8 @@ export function normalizeClassModelSettings(value: unknown): ClassModelSettings 
   const reasoningEffort = reasoningEffortOptions.includes(source.reasoningEffort as ReasoningEffort)
     ? (source.reasoningEffort as ReasoningEffort)
     : defaultClassModelSettings.reasoningEffort;
-  const responseLength = responseLengthOptions.includes(source.responseLength as ResponseLength)
-    ? (source.responseLength as ResponseLength)
-    : defaultClassModelSettings.responseLength;
+  const verbose = normalizeVerboseLevel(source.verbose ?? source.responseLength);
+  const requestLimits = normalizeAiRequestLimitSettings(source.requestLimits);
 
   return {
     modelId: typeof source.modelId === "string" && source.modelId.trim()
@@ -500,9 +576,9 @@ export function normalizeClassModelSettings(value: unknown): ClassModelSettings 
       : defaultClassModelSettings.modelId,
     reasoningEffort,
     creativity: clampCreativity(source.creativity),
-    responseLength,
-    requestLimits: normalizeAiRequestLimitSettings(source.requestLimits),
-    tokenLimits: normalizeAiTokenLimitSettings(source.tokenLimits)
+    verbose,
+    requestLimits,
+    tokenLimits: normalizeAiTokenLimitsForRequestLimits(source.tokenLimits, requestLimits)
   };
 }
 
@@ -511,6 +587,7 @@ export function normalizeAiRequestLimitSettings(value: unknown): AiRequestLimitS
 
   return {
     perStudentDaily: clampRequestLimit(source.perStudentDaily, defaultAiRequestLimitSettings.perStudentDaily, 1, 10_000),
+    perStudentWeekly: clampRequestLimit(source.perStudentWeekly, defaultAiRequestLimitSettings.perStudentWeekly, 1, 100_000),
     perClassDaily: clampRequestLimit(source.perClassDaily, defaultAiRequestLimitSettings.perClassDaily, 1, 500_000),
     teacherPreviewDaily: normalizeOptionalRequestLimit(
       source.teacherPreviewDaily,
@@ -531,6 +608,29 @@ export function normalizeAiTokenLimitSettings(value: unknown): AiTokenLimitSetti
   };
 }
 
+export function normalizeAiTokenLimitsForRequestLimits(
+  value: unknown,
+  requestLimits: AiRequestLimitSettings
+): AiTokenLimitSettings {
+  const tokenLimits = normalizeAiTokenLimitSettings(value);
+
+  return {
+    ...tokenLimits,
+    perDay: clampTokenLimit(
+      requestLimits.perStudentDaily * estimatedAiTokensPerStudentMessageLimit,
+      defaultAiTokenLimitSettings.perDay,
+      1_000,
+      5_000_000
+    ),
+    perWeek: clampTokenLimit(
+      requestLimits.perStudentWeekly * estimatedAiTokensPerStudentMessageLimit,
+      defaultAiTokenLimitSettings.perWeek,
+      1_000,
+      20_000_000
+    )
+  };
+}
+
 export function normalizeTutorAccessSettings(value: unknown): TutorAccessSettings {
   const source = isRecord(value) ? value : {};
 
@@ -541,17 +641,21 @@ export function normalizeTutorAccessSettings(value: unknown): TutorAccessSetting
 
 export function normalizeResponseFormatSettings(value: unknown): ResponseFormatSettings {
   const source = isRecord(value) ? value : {};
-  const readingLevel = readingLevelOptions.includes(source.readingLevel as ReadingLevel)
-    ? (source.readingLevel as ReadingLevel)
-    : defaultResponseFormatSettings.readingLevel;
   const mathNotation = mathNotationOptions.includes(source.mathNotation as MathNotation)
     ? (source.mathNotation as MathNotation)
     : defaultResponseFormatSettings.mathNotation;
+  const exampleFrequency = exampleFrequencyOptions.includes(source.exampleFrequency as ExampleFrequency)
+    ? (source.exampleFrequency as ExampleFrequency)
+    : defaultResponseFormatSettings.exampleFrequency;
+  const simpleWording = typeof source.simpleWording === "boolean"
+    ? source.simpleWording
+    : source.readingLevel === "simple";
 
   return {
     oneStepAtATime: booleanWithDefault(source.oneStepAtATime, true),
     endWithCheckQuestion: booleanWithDefault(source.endWithCheckQuestion, true),
-    readingLevel,
+    simpleWording,
+    exampleFrequency,
     mathNotation
   };
 }
@@ -578,20 +682,44 @@ export function creativityToTemperature(creativity: number) {
   return Number((Math.min(100, Math.max(0, creativity)) / 100).toFixed(2));
 }
 
-export function responseLengthToMaxTokens(responseLength: ResponseLength) {
-  if (responseLength === "short") {
+export function verboseToMaxTokens(verbose: VerboseLevel) {
+  if (verbose === "brief") {
     return 900;
   }
 
-  if (responseLength === "extended") {
+  if (verbose === "veryDetailed") {
     return 7000;
   }
 
-  if (responseLength === "long") {
+  if (verbose === "detailed") {
     return 4200;
   }
 
   return 2200;
+}
+
+function normalizeVerboseLevel(value: unknown): VerboseLevel {
+  if (verboseOptions.includes(value as VerboseLevel)) {
+    return value as VerboseLevel;
+  }
+
+  if (value === "short") {
+    return "brief";
+  }
+
+  if (value === "medium") {
+    return "standard";
+  }
+
+  if (value === "long") {
+    return "detailed";
+  }
+
+  if (value === "extended") {
+    return "veryDetailed";
+  }
+
+  return defaultClassModelSettings.verbose;
 }
 
 function clampCreativity(value: unknown) {

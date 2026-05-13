@@ -50,6 +50,52 @@ service cloud.firestore {
         );
     }
 
+    function hasClassAccess(permission) {
+      return isSignedIn()
+        && (
+          resource.data.teacherId == request.auth.uid
+          || (
+            resource.data.coTeachers is map
+            && resource.data.coTeachers[request.auth.uid] is map
+            && (
+              resource.data.coTeachers[request.auth.uid].role in ["owner", "co-teacher"]
+              || (
+                resource.data.coTeachers[request.auth.uid].role == "viewer"
+                && permission in ["viewOverview", "viewRoster", "viewConversations", "viewMaterials"]
+              )
+              || (
+                resource.data.coTeachers[request.auth.uid].role == "ta"
+                && resource.data.coTeachers[request.auth.uid].permissions is map
+                && resource.data.coTeachers[request.auth.uid].permissions[permission] == true
+              )
+            )
+          )
+        );
+    }
+
+    function hasTargetClassAccess(classId, permission) {
+      return isSignedIn()
+        && (
+          get(/databases/$(database)/documents/classes/$(classId)).data.teacherId == request.auth.uid
+          || (
+            get(/databases/$(database)/documents/classes/$(classId)).data.coTeachers is map
+            && get(/databases/$(database)/documents/classes/$(classId)).data.coTeachers[request.auth.uid] is map
+            && (
+              get(/databases/$(database)/documents/classes/$(classId)).data.coTeachers[request.auth.uid].role in ["owner", "co-teacher"]
+              || (
+                get(/databases/$(database)/documents/classes/$(classId)).data.coTeachers[request.auth.uid].role == "viewer"
+                && permission in ["viewOverview", "viewRoster", "viewConversations", "viewMaterials"]
+              )
+              || (
+                get(/databases/$(database)/documents/classes/$(classId)).data.coTeachers[request.auth.uid].role == "ta"
+                && get(/databases/$(database)/documents/classes/$(classId)).data.coTeachers[request.auth.uid].permissions is map
+                && get(/databases/$(database)/documents/classes/$(classId)).data.coTeachers[request.auth.uid].permissions[permission] == true
+              )
+            )
+          )
+        );
+    }
+
     function isTargetClassTeacher(classId) {
       return isSignedIn()
         && (
@@ -431,7 +477,7 @@ service cloud.firestore {
           "modelId",
           "reasoningEffort",
           "creativity",
-          "responseLength",
+          "verbose",
           "requestLimits",
           "tokenLimits"
         ])
@@ -442,8 +488,8 @@ service cloud.firestore {
         && modelSettings.creativity is number
         && modelSettings.creativity >= 0
         && modelSettings.creativity <= 100
-        && modelSettings.responseLength is string
-        && modelSettings.responseLength in ["short", "medium", "long", "extended"]
+        && modelSettings.verbose is string
+        && modelSettings.verbose in ["brief", "standard", "detailed", "veryDetailed"]
         && validAiRequestLimits(modelSettings.requestLimits)
         && validAiTokenLimits(modelSettings.tokenLimits);
     }
@@ -452,12 +498,16 @@ service cloud.firestore {
       return requestLimits is map
         && requestLimits.keys().hasOnly([
           "perStudentDaily",
+          "perStudentWeekly",
           "perClassDaily",
           "teacherPreviewDaily"
         ])
         && requestLimits.perStudentDaily is number
         && requestLimits.perStudentDaily >= 1
         && requestLimits.perStudentDaily <= 10000
+        && requestLimits.perStudentWeekly is number
+        && requestLimits.perStudentWeekly >= 1
+        && requestLimits.perStudentWeekly <= 100000
         && requestLimits.perClassDaily is number
         && requestLimits.perClassDaily >= 1
         && requestLimits.perClassDaily <= 500000
@@ -498,13 +548,15 @@ service cloud.firestore {
         && responseFormat.keys().hasOnly([
           "oneStepAtATime",
           "endWithCheckQuestion",
-          "readingLevel",
+          "simpleWording",
+          "exampleFrequency",
           "mathNotation"
         ])
         && responseFormat.oneStepAtATime is bool
         && responseFormat.endWithCheckQuestion is bool
-        && responseFormat.readingLevel is string
-        && responseFormat.readingLevel in ["simple", "standard", "advanced"]
+        && responseFormat.simpleWording is bool
+        && responseFormat.exampleFrequency is string
+        && responseFormat.exampleFrequency in ["rarely", "whenHelpful", "often"]
         && responseFormat.mathNotation is string
         && responseFormat.mathNotation in ["plain", "balanced", "symbolic"];
     }
@@ -628,7 +680,7 @@ service cloud.firestore {
     match /classes/{classId} {
       allow create: if isTeacher()
         && validClassCreate();
-      allow get: if isClassTeacher() || isClassEditor();
+      allow get: if isClassTeacher() || hasClassAccess("viewOverview");
       allow list: if isSignedIn()
         && resource.data.teacherId == request.auth.uid;
       allow list: if isSignedIn()
@@ -637,51 +689,51 @@ service cloud.firestore {
       allow delete: if isClassTeacher();
 
       match /students/{studentId} {
-        allow read: if isTargetClassTeacher(classId);
-        allow create, update: if isTargetClassTeacher(classId) && validRosterStudent();
-        allow delete: if isTargetClassTeacher(classId);
+        allow read: if hasTargetClassAccess(classId, "viewRoster");
+        allow create, update: if hasTargetClassAccess(classId, "manageRoster") && validRosterStudent();
+        allow delete: if hasTargetClassAccess(classId, "manageRoster");
       }
 
       match /materials/{materialId} {
-        allow read: if isTargetClassTeacher(classId)
+        allow read: if hasTargetClassAccess(classId, "viewMaterials")
           || (isStudentInClass(classId) && isStudentVisibleMaterial(resource.data));
-        allow write: if isTargetClassTeacher(classId);
+        allow write: if hasTargetClassAccess(classId, "manageMaterials");
 
         match /chunks/{chunkId} {
-          allow read: if isTargetClassTeacher(classId)
+          allow read: if hasTargetClassAccess(classId, "viewMaterials")
             || (isStudentInClass(classId) && isStudentVisibleMaterialDocument(classId, materialId));
-          allow write: if isTargetClassTeacher(classId);
+          allow write: if hasTargetClassAccess(classId, "manageMaterials");
         }
       }
 
       match /materialJobs/{jobId} {
-        allow read: if isTargetClassTeacher(classId);
+        allow read: if hasTargetClassAccess(classId, "viewMaterials");
         allow write: if false;
       }
 
       match /materialUploadSessions/{materialId} {
-        allow read: if isTargetClassTeacher(classId)
+        allow read: if hasTargetClassAccess(classId, "manageMaterials")
           && resource.data.teacherId == request.auth.uid;
         allow write: if false;
       }
 
       match /studentLearningProfiles/{profileId} {
-        allow read: if isTargetClassTeacher(classId);
+        allow read: if hasTargetClassAccess(classId, "manageLearningProfiles");
         allow write: if false;
 
         match /revisions/{revisionId} {
-          allow read: if isTargetClassTeacher(classId);
+          allow read: if hasTargetClassAccess(classId, "manageLearningProfiles");
           allow write: if false;
         }
       }
 
       match /conversationReviews/{conversationId} {
-        allow read: if isTargetClassTeacher(classId);
+        allow read: if hasTargetClassAccess(classId, "reviewConversations");
         allow write: if false;
       }
 
       match /studentFeedback/{feedbackId} {
-        allow read: if isTargetClassTeacher(classId)
+        allow read: if hasTargetClassAccess(classId, "reviewConversations")
           || (
             isStudentInClass(classId)
             && resource.data.studentId == request.auth.uid
@@ -690,7 +742,7 @@ service cloud.firestore {
       }
 
       match /conversations/{conversationId} {
-        allow get, list: if isTargetClassTeacher(classId)
+        allow get, list: if hasTargetClassAccess(classId, "viewConversations")
           || (
             isStudentInClass(classId)
             && resource.data.studentId == request.auth.uid
@@ -698,7 +750,7 @@ service cloud.firestore {
         allow write: if false;
 
         match /messages/{messageId} {
-          allow get, list: if isTargetClassTeacher(classId)
+          allow get, list: if hasTargetClassAccess(classId, "viewConversations")
             || (
               isStudentInClass(classId)
               && get(/databases/$(database)/documents/classes/$(classId)/conversations/$(conversationId)).data.studentId == request.auth.uid

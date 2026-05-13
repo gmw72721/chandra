@@ -4,7 +4,7 @@ import {
   ConversationPersistenceError,
   updateTeacherConversationReview
 } from "@/lib/student-conversations-server";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 import type { ConversationReviewStatus } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -24,9 +24,10 @@ export async function PATCH(
 ) {
   try {
     const { classId, conversationId } = await params;
-    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassAccess(request, classId, "reviewConversations");
     const data = (await request.json()) as {
       flags?: unknown;
+      followUpDueAt?: unknown;
       privateNote?: unknown;
       status?: unknown;
     };
@@ -35,11 +36,17 @@ export async function PATCH(
     if (!reviewStatuses.has(status)) {
       return NextResponse.json({ error: "Conversation review status is invalid." }, { status: 400 });
     }
+    const followUpDueAt = normalizeFollowUpDueAt(data.followUpDueAt);
+
+    if (data.followUpDueAt !== undefined && String(data.followUpDueAt ?? "").trim() && !followUpDueAt) {
+      return NextResponse.json({ error: "Follow-up due date is invalid." }, { status: 400 });
+    }
 
     const review = await updateTeacherConversationReview({
       classId,
       conversationId,
       flags: Array.isArray(data.flags) ? data.flags.map(String) : [],
+      followUpDueAt,
       privateNote: String(data.privateNote ?? "").slice(0, 1000),
       status,
       teacherId: uid
@@ -71,4 +78,14 @@ export async function PATCH(
 
     return NextResponse.json({ error: "Conversation review save failed." }, { status: 500 });
   }
+}
+
+function normalizeFollowUpDueAt(value: unknown): string | null {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const dueAt = new Date(text);
+  return Number.isNaN(dueAt.getTime()) ? null : dueAt.toISOString();
 }

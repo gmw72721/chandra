@@ -134,6 +134,7 @@ test("student PDF homework attachments are scoped, extracted, and sent with chat
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
   const chatRouteSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
   const attachmentServerSource = readFileSync(join(repoRoot, "frontend/lib/student-attachments-server.ts"), "utf8");
+  const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
   const typesSource = readFileSync(join(repoRoot, "frontend/lib/types.ts"), "utf8");
   const attachmentRouteSource = readFileSync(
     join(repoRoot, "frontend/app/api/student/conversations/[conversationId]/attachments/route.ts"),
@@ -145,8 +146,8 @@ test("student PDF homework attachments are scoped, extracted, and sent with chat
   assert.match(studentSource, /uploadHomeworkAttachmentWithProgress/);
   assert.match(studentSource, /attachmentIds: sentAttachmentIds/);
   assert.match(studentSource, /maxComposerAttachments = 3/);
-  assert.match(studentSource, /allowedComposerAttachmentExtensions = \["\.pdf"\]/);
-  assert.match(studentSource, /Only text-readable PDF homework files are supported/);
+  assert.match(studentSource, /allowedComposerAttachmentExtensions = \["\.pdf", "\.png", "\.jpg", "\.jpeg", "\.webp"\]/);
+  assert.match(studentSource, /Upload a PDF, PNG, JPG, JPEG, or WEBP homework file/);
   assert.match(attachmentRouteSource, /request\.formData\(\)/);
   assert.match(attachmentRouteSource, /maxStudentAttachmentFileBytes/);
   assert.match(attachmentRouteSource, /content-length/);
@@ -160,14 +161,42 @@ test("student PDF homework attachments are scoped, extracted, and sent with chat
   assert.match(attachmentServerSource, /scope\.uid/);
   assert.match(attachmentServerSource, /matchesMagicBytes/);
   assert.match(attachmentServerSource, /extractAttachmentText/);
+  assert.match(attachmentServerSource, /image\/png/);
+  assert.match(attachmentServerSource, /image\/jpeg/);
+  assert.match(attachmentServerSource, /image\/webp/);
   assert.match(attachmentServerSource, /PDFParse/);
   assert.match(attachmentServerSource, /extractedText/);
   assert.match(chatRouteSource, /attachmentIds: z\.array\(safeDocumentIdSchema\)/);
   assert.match(chatRouteSource, /appendAttachmentContextToStudentMessage/);
   assert.match(chatRouteSource, /buildStudentAttachmentFilePayloads/);
-  assert.match(chatRouteSource, /data:\$\{attachment\.mimeType \|\| "application\/pdf"\};base64/);
+  assert.match(chatRouteSource, /directAttachmentFilePayloadsFromMessages/);
+  assert.match(chatRouteSource, /chatMessageAttachmentSchema/);
+  assert.match(chatRouteSource, /const storageKey = String\(attachment\.storageKey \?\? ""\)\.trim\(\)/);
+  assert.match(chatRouteSource, /!storageKey/);
+  assert.match(chatRouteSource, /defaultMimeTypeForAttachment/);
   assert.match(chatRouteSource, /studentAttachmentFiles/);
   assert.match(chatRouteSource, /Extracted text:/);
+  assert.match(persistenceSource, /listConversationMessagesWithHydratedAttachments/);
+  assert.match(persistenceSource, /listPostgresConversationAttachments/);
+  assert.match(persistenceSource, /mergeMessageAttachmentRecords/);
+  assert.match(studentSource, /studentProvidedSourceLabel/);
+  assert.match(studentSource, /Student-provided/);
+});
+
+test("student attachment uploads fail loudly instead of hiding uninspectable files", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const chatRouteSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const attachmentServerSource = readFileSync(join(repoRoot, "frontend/lib/student-attachments-server.ts"), "utf8");
+
+  assert.match(chatRouteSource, /attachmentRequiresBinaryModelPayload/);
+  assert.match(chatRouteSource, /oversizedAttachmentModelMessage/);
+  assert.match(chatRouteSource, /too large for Chandra to inspect directly/);
+  assert.match(chatRouteSource, /textOnlyStudentAttachmentPayload/);
+  assert.match(chatRouteSource, /normalizeAttachmentDataUrlForModel/);
+  assert.match(studentSource, /Wait for attachments to finish uploading before sending\./);
+  assert.match(studentSource, /normalizeComposerAttachmentMimeType/);
+  assert.match(attachmentServerSource, /normalizeAttachmentMimeType/);
+  assert.match(studentSource, /attachment\.error \? <small>\{attachment\.error\}<\/small> : null/);
 });
 
 test("student view does not pin teacher assignment guidance above chat", () => {
@@ -261,9 +290,9 @@ test("teacher roster can open a student's saved conversations", () => {
   assert.match(teacherSource, /conversationMessages\s*\.\s*filter/);
   assert.match(teacherSource, /TeacherTranscriptMessage/);
   assert.match(teacherSource, /Back to students/);
-  assert.match(conversationRouteSource, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(conversationRouteSource, /authorizeClassAccess\(request, classId, "viewConversations"\)/);
   assert.match(conversationRouteSource, /listTeacherStudentConversations/);
-  assert.match(messageRouteSource, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(messageRouteSource, /authorizeClassAccess\(request, classId, "viewConversations"\)/);
   assert.match(messageRouteSource, /listTeacherConversationMessages/);
 });
 
@@ -272,7 +301,7 @@ test("teacher class conversations endpoint loads the review inbox", () => {
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/conversations/route.ts"), "utf8");
   const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
 
-  assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(routeSource, /authorizeClassAccess\(request, classId, "viewConversations"\)/);
   assert.match(routeSource, /listTeacherClassConversations\(\{ classId \}\)/);
   assert.match(routeSource, /metrics/);
   assert.match(routeSource, /const openConversations = conversations\.filter/);
@@ -292,7 +321,7 @@ test("teacher conversation review PATCH stores teacher-only metadata", () => {
   const persistenceSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
   const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
-  assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(routeSource, /authorizeClassAccess\(request, classId, "reviewConversations"\)/);
   assert.match(routeSource, /privateNote: String\(data\.privateNote \?\? ""\)\.slice\(0, 1000\)/);
   assert.match(routeSource, /updateTeacherConversationReview/);
   assert.match(persistenceSource, /export async function updateTeacherConversationReview/);
@@ -342,7 +371,7 @@ test("teacher transcript uses student chat markdown formatting and readable sour
   assert.match(styles, /\.teacher-dashboard\[data-appearance="dark"\] \.teacher-transcript-sources span/);
 });
 
-test("teacher roster active status uses Firebase presence and combines activity columns", () => {
+test("teacher roster active status uses Firebase presence and sortable activity columns", () => {
   const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
   const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
   const serverSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
@@ -356,8 +385,10 @@ test("teacher roster active status uses Firebase presence and combines activity 
   assert.match(serverSource, /collection\("userPresence"\)/);
   assert.match(serverSource, /presence\?\.isOnline \? "active"/);
   assert.doesNotMatch(serverSource, /activity\.questionsToday > 0 \? "active"/);
-  assert.match(teacherSource, /<span>Activity<\/span>/);
-  assert.doesNotMatch(teacherSource, /<span>Status<\/span>\s*<span>Last active<\/span>/);
+  assert.match(teacherSource, /activity: "Activity"/);
+  assert.match(teacherSource, /lastActive: "Last active"/);
+  assert.match(teacherSource, /sortRosterRows\(filteredRosterRows, rosterSort\)/);
+  assert.match(teacherSource, /rosterPageSize = 10/);
   assert.match(teacherSource, /roster-activity-cell/);
   assert.match(styles, /\.roster-activity-cell/);
 });
@@ -380,7 +411,7 @@ test("source labels render under tutor messages", () => {
   const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
   assert.match(source, /className="message-sources"/);
-  assert.match(source, /condensedSourceLabels\(message\.sources\)/);
+  assert.match(source, /sourceChipDetails\(message\)/);
   assert.match(messageFormatSource, /function formatSourceLabel/);
   assert.match(styles, /\.message-sources/);
 });
@@ -418,6 +449,106 @@ test("student chat response normalization preserves structured output", () => {
       studentActionNeeded: "try_next_step"
     }
   });
+});
+
+test("student chat response normalization preserves valid confusion choices", () => {
+  const response = normalizeTutorResponse({
+    content: "I see a few possible starting points for this rank problem. Pick one and I'll focus there.",
+    retrievalConfidence: "low",
+    sources: [],
+    structuredOutput: {
+      sections: {
+        answer: "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
+      },
+      confusionPrompt: "I see a few possible starting points for this rank problem. Pick one and I'll focus there.",
+      confusionChoices: [
+        { id: "notation", label: "Notation", message: "Help me understand the notation." },
+        { id: "first-step", label: "First step", message: "Help me choose the first step." },
+        { id: "check-work", label: "Check my work", message: "Check my algebra so far." },
+        { id: "smaller-hint", label: "Smaller hint", message: "Give me a smaller hint." }
+      ],
+      metadata: {
+        hintLevel: "small_hint",
+        mode: "clarification",
+        sourceConfidence: "low",
+        studentActionNeeded: "answer_question"
+      }
+    }
+  });
+
+  assert.equal(
+    response.structuredOutput?.confusionPrompt,
+    "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
+  );
+  assert.deepEqual(response.structuredOutput?.confusionChoices, [
+    { id: "notation", label: "Notation", message: "Help me understand the notation." },
+    { id: "first-step", label: "First step", message: "Help me choose the first step." },
+    { id: "check-work", label: "Check my work", message: "Check my algebra so far." },
+    { id: "smaller-hint", label: "Smaller hint", message: "Give me a smaller hint." }
+  ]);
+});
+
+test("student chat response normalization makes confusion choice prompt authoritative", () => {
+  const response = normalizeTutorResponse({
+    content: "I can help with Problem 2.14, but I need to know which part you want to start with.",
+    retrievalConfidence: "low",
+    sources: [],
+    structuredOutput: {
+      sections: {
+        answer: "I can help with Problem 2.14, but I need to know which part you want to start with.",
+        nextStep: "Choose one: the setup from Exercise 2.13, part (i), or part (ii)."
+      },
+      confusionPrompt:
+        "I see a few possible starting points for this rank problem. Pick one and I'll focus there.",
+      confusionChoices: [
+        {
+          id: "setup",
+          label: "Start with the setup",
+          message: "Help me identify the maps, spaces, and rank facts from Exercise 2.13."
+        },
+        {
+          id: "part-i",
+          label: "Work on part (i)",
+          message: "Help me start part (i) without giving the full proof."
+        },
+        {
+          id: "part-ii",
+          label: "Work on part (ii)",
+          message: "Help me understand the first move for part (ii)."
+        }
+      ]
+    }
+  });
+
+  assert.deepEqual(response.structuredOutput?.sections, {
+    answer: "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
+  });
+});
+
+test("student chat response normalization drops invalid confusion choice payloads", () => {
+  const response = normalizeTutorResponse({
+    content: "Pick a direction.",
+    retrievalConfidence: "low",
+    sources: [],
+    structuredOutput: {
+      sections: {
+        answer: "Pick a direction."
+      },
+      confusionChoices: [
+        { id: "one", label: "One", message: "Help me with one." },
+        { id: "two", label: "", message: "Help me with two." },
+        { id: "three", label: "Three", message: "" }
+      ],
+      metadata: {
+        hintLevel: "small_hint",
+        mode: "clarification",
+        sourceConfidence: "low",
+        studentActionNeeded: "answer_question"
+      }
+    } as never
+  });
+
+  assert.equal(response.structuredOutput?.confusionChoices, undefined);
 });
 
 test("student chat response normalization unwraps object-shaped section text", () => {
@@ -1088,9 +1219,10 @@ test("chat context memory saves only cited sources as sources used", () => {
     {
       id: undefined,
       sourceName: "ACME VOL 1",
+      sourceType: "class_material",
       pageNumber: 159,
       problemNumber: undefined,
-      label: "ACME VOL 1 · p. 159"
+      label: "p. 159"
     }
   ]);
 });
@@ -1117,18 +1249,79 @@ test("chat context memory keeps sources from earlier assistant messages", () => 
     {
       id: undefined,
       sourceName: "ACME VOL 1",
+      sourceType: "class_material",
       pageNumber: 98,
       problemNumber: "2.15",
-      label: "ACME VOL 1 · p. 98 · Problem 2.15"
+      label: "p. 98 · Problem 2.15"
     },
     {
       id: undefined,
       sourceName: "ACME VOL 1",
+      sourceType: "class_material",
       pageNumber: 640,
       problemNumber: undefined,
-      label: "ACME VOL 1 · p. 640"
+      label: "p. 640"
     }
   ]);
+});
+
+test("chat context memory dedupes the same saved problem across trace variants", () => {
+  const context = buildChatContextMemory([
+    {
+      createdAt: "2026-05-12T08:21:00.000Z",
+      id: "assistant-1",
+      role: "assistant",
+      content: "Problem:\n2.14. Given the setup of Exercise 2.13, prove the inequalities.",
+      structuredOutput: {
+        sections: {
+          answer: "",
+          problem: "2.14. Given the setup of Exercise 2.13, prove the inequalities."
+        },
+        metadata: {
+          hintLevel: "none",
+          mode: "source_lookup",
+          problemNumber: "2.14",
+          sourceConfidence: "high",
+          studentActionNeeded: "none"
+        }
+      },
+      sources: [{ materialType: "reading", pageNumber: 98, title: "ACME VOL 1", problemNumber: "2.14" }]
+    },
+    {
+      createdAt: "2026-05-12T08:22:00.000Z",
+      id: "assistant-2",
+      role: "assistant",
+      content: "Problem:\n2.14. Given the setup of Exercise 2.13, prove the following inequalities.",
+      langGraphTrace: {
+        knowledgeItems: [
+          {
+            chatId: "conversation-1",
+            content: "2.14. Given the setup of Exercise 2.13, prove the following inequalities.",
+            createdAt: "2026-05-12T08:22:00.000Z",
+            id: "knowledge-problem-variant",
+            kind: "problem",
+            page: 98,
+            problemId: "2.14",
+            reason: "Student asked: problem 2.14",
+            sourceId: "acme",
+            sourceName: "ACME VOL 1",
+            updatedAt: "2026-05-12T08:22:00.000Z",
+            usedAs: "active_problem"
+          }
+        ],
+        searchQueries: [],
+        selectedPages: [],
+        stages: [],
+        toolCallCount: 0
+      },
+      sources: [{ materialType: "reading", pageNumber: 98, title: "ACME VOL 1", problemNumber: "2.14" }]
+    }
+  ]);
+
+  assert.equal(context.savedProblems?.length, 1);
+  assert.equal(context.savedProblems?.[0]?.problemNumber, "2.14");
+  assert.equal(context.savedProblems?.[0]?.sourceName, "ACME VOL 1");
+  assert.equal(context.savedProblems?.[0]?.pageNumber, 98);
 });
 
 test("chat context memory includes pdf knowledge items as sources used", () => {
@@ -1168,11 +1361,91 @@ test("chat context memory includes pdf knowledge items as sources used", () => {
     {
       id: "acme",
       sourceName: "ACME VOL 1",
+      sourceType: "class_material",
       pageNumber: 159,
       problemNumber: undefined,
-      label: "ACME VOL 1 · p. 159"
+      label: "p. 159"
     }
   ]);
+});
+
+test("chat context memory includes student upload sources", () => {
+  const context = buildChatContextMemory([
+    {
+      createdAt: "2026-05-12T08:22:00.000Z",
+      id: "assistant-2",
+      role: "assistant",
+      content: "I can use the uploaded problem photo.",
+      langGraphTrace: {
+        knowledgeItems: [
+          {
+            chatId: "conversation-1",
+            createdAt: "2026-05-12T08:22:00.000Z",
+            id: "knowledge-upload",
+            kind: "student_upload",
+            reason: "Student uploaded problem or source context for this chat.",
+            sourceId: "attachment-1",
+            sourceName: "problem-photo.png",
+            summary: "Student uploaded image: problem-photo.png.",
+            updatedAt: "2026-05-12T08:22:00.000Z",
+            usedAs: "problem_source"
+          }
+        ],
+        searchQueries: [],
+        selectedPages: [],
+        stages: [],
+        toolCallCount: 0
+      }
+    }
+  ]);
+
+  assert.deepEqual(context.sourcesUsed, [
+    {
+      id: "attachment-1",
+      sourceName: "problem-photo.png",
+      sourceType: "student_upload",
+      pageNumber: undefined,
+      problemNumber: undefined,
+      label: "Student upload · problem-photo.png"
+    }
+  ]);
+});
+
+test("chat context memory saves pasted problems as current problems", () => {
+  const context = buildChatContextMemory([
+    {
+      createdAt: "2026-05-12T08:22:00.000Z",
+      id: "assistant-2",
+      role: "assistant",
+      content: "Let's work one step at a time.",
+      langGraphTrace: {
+        knowledgeItems: [
+          {
+            chatId: "conversation-1",
+            content: "Problem 3.7. Prove that if A is invertible, then rank(AB) = rank(B).",
+            createdAt: "2026-05-12T08:22:00.000Z",
+            id: "knowledge-problem",
+            kind: "problem",
+            problemId: "3.7",
+            reason: "Student pasted a problem statement.",
+            sourceName: "Pasted problem",
+            updatedAt: "2026-05-12T08:22:00.000Z",
+            usedAs: "active_problem"
+          }
+        ],
+        searchQueries: [],
+        selectedPages: [],
+        stages: [],
+        toolCallCount: 0
+      }
+    }
+  ]);
+
+  assert.equal(context.currentProblem?.problemNumber, "3.7");
+  assert.equal(context.currentProblem?.sourceName, "Pasted problem");
+  assert.equal(context.currentProblem?.sourceType, "pasted_problem");
+  assert.match(context.currentProblem?.problemText ?? "", /rank\(AB\)/);
+  assert.equal(context.sourcesUsed?.[0]?.label, "Pasted problem");
 });
 
 test("student chat does not surface raw backend fetch failures", () => {
@@ -1210,12 +1483,74 @@ test("student chat accepts legacy null structured output in message history", ()
   assert.match(source, /structuredOutput: z[\s\S]*\]\)\s*\.nullable\(\)\s*\.optional\(\)/);
 });
 
+test("student chat route schema accepts structured output with confusion choices in history", () => {
+  const source = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+
+  assert.match(source, /const tutorConfusionChoiceSchema = z\.object/);
+  assert.match(source, /confusionPrompt: z\.string\(\)\.max\(240\)\.optional\(\)/);
+  assert.match(source, /confusionChoices: z\.array\(tutorConfusionChoiceSchema\)\.min\(2\)\.max\(6\)\.optional\(\)/);
+});
+
 test("student chat tolerates partial structured output in message history", () => {
   const source = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
 
   assert.match(source, /z\.record\(z\.unknown\(\)\)/);
   assert.match(source, /event\.type === "quick_response"/);
   assert.match(source, /normalizeStructuredTutorOutput\(event\.structuredOutput, message\)/);
+});
+
+test("student UI renders confusion choice buttons and sends the selected message", () => {
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+
+  assert.match(source, /function TutorConfusionChoices/);
+  assert.match(source, /message\.structuredOutput\?\.confusionChoices/);
+  assert.match(source, /visibleConfusionPrompt/);
+  assert.match(source, /sameDisplayedText\(block\.content, confusionPrompt\)/);
+  assert.match(source, /assistant-confusion-choice-description/);
+  assert.match(source, /onChoiceSelect\(choice\.message\)/);
+  assert.match(source, /void sendStudentMessage\(choiceMessage\)/);
+  assert.match(source, /aria-label=\{`Send: \$\{choice\.message\}`\}/);
+  assert.match(styles, /\.assistant-confusion-choice-grid\s*\{\s*display: grid;/);
+  assert.match(styles, /grid-template-columns: minmax\(0, 1fr\);/);
+});
+
+test("teacher debug mode exposes tutor behavior controls in the composer", () => {
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+
+  assert.match(source, /function TutorDebugComposerControl/);
+  assert.match(source, /Force confusion choices/);
+  assert.match(source, /Force retrieval/);
+  assert.match(source, /Force no retrieval/);
+  assert.match(source, /forcedTutorDebugAiUsageStatus\(tutorDebugOptions\)/);
+  assert.match(source, /showUsageHeader = !isTeacherPreview \|\| \(isTeacherDebugMode && Boolean\(debugAiUsageStatus\)\)/);
+  assert.match(source, /showExactSearches = isTeacherPreview && isTeacherDebugMode/);
+  assert.match(source, /label: "Exact searches"/);
+  assert.match(source, /label: "Primary tutor turn"/);
+  assert.match(source, /label: "Tutor plan"/);
+  assert.match(source, /label: "Understanding state"/);
+  assert.match(source, /label: "Selected pages"/);
+  assert.match(source, /debugOptions:\s*[\s\S]*forceStudentView: tutorDebugOptions\.forceStudentView/);
+  assert.match(source, /forceConfusionChoices: tutorDebugOptions\.forceConfusionChoices/);
+  assert.match(source, /forceNoRetrieval: tutorDebugOptions\.forceNoRetrieval/);
+  assert.match(source, /forceRetrieval: tutorDebugOptions\.forceRetrieval/);
+  assert.match(routeSource, /forceConfusionChoices: scope\.role === "teacher" && data\.debugOptions\?\.forceConfusionChoices === true/);
+  assert.match(routeSource, /forceNoRetrieval: scope\.role === "teacher" && data\.debugOptions\?\.forceNoRetrieval === true/);
+  assert.match(routeSource, /forceRetrieval: scope\.role === "teacher" && data\.debugOptions\?\.forceRetrieval === true/);
+  assert.match(source, /forceAiUsageNearLimit: tutorDebugOptions\.forceAiUsageNearLimit/);
+  assert.match(source, /forceAiUsageBlocked: tutorDebugOptions\.forceAiUsageBlocked/);
+  assert.match(source, /forceStudentView: false/);
+  assert.match(source, /forceAiUsageBlocked: false/);
+  assert.match(source, /forceAiUsageNearLimit: false/);
+  assert.match(source, /forceNoRetrieval: false/);
+  assert.match(source, /forceRetrieval: false/);
+  assert.match(routeSource, /const chatDebugOptionsSchema = z\.object/);
+  assert.match(routeSource, /preparedRequest\.debugOptions\.forceStudentView/);
+  assert.match(routeSource, /withTutorDebugResponseOverrides/);
+  assert.match(routeSource, /forcedTutorDebugAiUsageStatus/);
+  assert.doesNotMatch(routeSource, /debug-setup/);
+  assert.doesNotMatch(routeSource, /What part should Chandra focus on\?/);
 });
 
 test("streamed backend setup failures map to setup incomplete errors", () => {
@@ -1278,7 +1613,7 @@ test("student chat header uses compact context and tutoring time popovers", () =
   assert.match(studentSource, /student-header-usage-percent/);
   assert.match(studentSource, /student-header-control-label/);
   assert.match(studentSource, /Feedback/);
-  assert.match(studentSource, /!isTeacherPreview \? \(\s*<div className="student-header-control-wrap">[\s\S]*student-usage-popover/);
+  assert.match(studentSource, /showUsageHeader \? \(\s*<div className="student-header-control-wrap">[\s\S]*student-usage-popover/);
   assert.doesNotMatch(studentSource, /const StudentAiUsagePanel/);
   assert.doesNotMatch(studentSource, /StudentAiUsageMeter/);
   assert.doesNotMatch(studentSource, /student-ai-usage-meters/);
@@ -1347,7 +1682,8 @@ test("student chat access controls and request quotas run before backend calls",
   assert.match(usageSource, /collection\("aiUsageEvents"\)/);
   assert.match(usageSource, /modelId/);
   assert.match(usageSource, /provider/);
-  assert.match(settingsSource, /perStudentDaily: 100/);
+  assert.match(settingsSource, /perStudentDaily: 50/);
+  assert.match(settingsSource, /perStudentWeekly: 250/);
   assert.match(settingsSource, /perClassDaily: 3_000/);
   assert.match(settingsSource, /teacherPreviewDaily: 50/);
   assert.match(backendSource, /aiUsageReservation: Optional\[dict\[str, Any\]\] = None/);
@@ -1423,14 +1759,14 @@ test("student tutoring-time buckets are anchored to first class AI use", () => {
   assert.match(typesSource, /weeklyResetAt\?: string/);
 });
 
-test("student chat response length settings leave room for math-heavy examples", () => {
+test("student chat verbose settings leave room for math-heavy examples", () => {
   const source = readFileSync(join(repoRoot, "frontend/lib/class-settings.ts"), "utf8");
 
   assert.match(source, /return 900/);
   assert.match(source, /return 2200/);
   assert.match(source, /return 4200/);
   assert.match(source, /return 7000/);
-  assert.match(source, /"extended"/);
+  assert.match(source, /"veryDetailed"/);
 });
 
 test("student chat does not drop generated answers when assistant persistence fails", () => {
@@ -1519,6 +1855,10 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(promptSource, /brief orientation, one targeted hint, one concrete next step/);
   assert.match(routeSource, /relationships, family conflict, emotional support, unrelated coding/);
   assert.match(routeSource, /Briefly redirect those to course material/);
+  assert.match(routeSource, /unrelated uploaded photos or personal images such as pets/);
+  assert.match(routeSource, /also use search_pdf_pages when the student asks for a specific class source item/);
+  assert.match(promptSource, /Treat student uploads as class context only/);
+  assert.match(promptSource, /Do not describe, rate, compliment, identify, or discuss unrelated uploaded photos/);
   assert.match(routeSource, /quote the requested visible text exactly/);
   assert.match(routeSource, /generic copyright grounds/);
   assert.match(promptSource, /quoteSourcePassages/);
@@ -1555,7 +1895,7 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(promptSource, /similar example or the student's attempted step/);
   assert.match(promptSource, /Only help with this class, its materials/);
   assert.match(promptSource, /unrelated code/);
-  assert.match(graphSource, /tutor decision step/);
+  assert.match(graphSource, /primary tutor turn/);
   assert.match(graphSource, /bare stuck\/start follow-up/);
   assert.match(graphSource, /Depth 1 uses one short answer or Hint plus one question, especially for vague stuck messages like `I am lost`/);
   assert.match(graphSource, /answer already gives the key clue, equation, theorem, or method, omit hint/);
@@ -1588,7 +1928,7 @@ test("student feedback is submitted through server routes and kept separate from
   assert.match(feedbackServerSource, /authorizeStudentFeedbackRequest/);
   assert.doesNotMatch(feedbackServerSource, /assertStudentChatAccess/);
   assert.match(studentFeedbackRoute, /createStudentFeedback/);
-  assert.match(teacherFeedbackRoute, /authorizeClassTeacher/);
+  assert.match(teacherFeedbackRoute, /authorizeClassAccess\(request, classId, "reviewConversations"\)/);
   assert.match(teacherFeedbackRoute, /updateTeacherStudentFeedback/);
   assert.match(feedbackServerSource, /collection\("studentFeedback"\)/);
   assert.match(feedbackServerSource, /conversationId/);
@@ -1780,6 +2120,8 @@ test("student understanding UI sits beside knowledge and keeps safe copy", () =>
   assert.match(studentSource, /aria-describedby=\{hasState \? undefined : emptyTooltipId\}/);
   assert.match(studentSource, /aria-disabled=\{!hasState\}/);
   assert.match(studentSource, /data-understanding-level=\{state\?\.level\}/);
+  assert.match(studentSource, /<span className="student-header-control-label">Understanding<\/span>/);
+  assert.doesNotMatch(studentSource, /`Understanding \$\{state\?\.level\}`/);
   assert.match(studentSource, /Understanding starts once a problem is loaded\./);
   assert.match(studentSource, /role="tooltip"/);
   assert.match(studentSource, /student-header-popover student-understanding-popover student-understanding-empty-tooltip/);

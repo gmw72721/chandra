@@ -3,6 +3,8 @@ import { adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
 import type { LearningStrategyProfileContext } from "./learning-strategy-telemetry";
 import { defaultOpenRouterModelId } from "./model-options";
 import { ConversationPersistenceError, listTeacherConversationMessages } from "./student-conversations-server";
+import { compileLangfuseTextPrompt, compileLangfuseTextPromptWithMetadata } from "./langfuse-prompts";
+import { langfuseTraceTags, traceLangfuseGeneration } from "./langfuse-tracing";
 import { tryPostgresData } from "./data/server";
 import {
   listStudentConversations as listPostgresStudentConversations,
@@ -55,6 +57,7 @@ const evidenceObservationTypes = new Set<StudentLearningEvidenceObservationType>
 ]);
 const confidenceValues = new Set<StudentLearningProfileConfidence>(["low", "medium", "high"]);
 const unsafeStudentLabels = /\b(lazy|weak|anxious|disabled|unmotivated|slow|low[-\s]?ability|adhd|autistic|depressed|traumatized)\b/i;
+export const profileUpdateLangfusePromptName = "chandra/memory/student-learning-profile-update";
 
 export type StudentLearningProfileUpdateResult = {
   attempted: boolean;
@@ -837,47 +840,89 @@ async function generateProfileUpdateWithOpenRouter(input: {
     throw new ConversationPersistenceError("Learning profile model updates require OPENROUTER_API_KEY.", 503);
   }
 
-  const response = await fetch(`${process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1"}/chat/completions`, {
-    body: JSON.stringify({
-      model: process.env.LEARNING_PROFILE_MODEL || process.env.DEFAULT_MODEL || defaultOpenRouterModelId,
-      messages: [
-        {
-          role: "system",
-          content: buildProfileUpdateSystemPrompt()
-        },
-        {
-          role: "user",
-          content: JSON.stringify(input)
-        }
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0.2
-    }),
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      ...(process.env.OPENROUTER_HTTP_REFERER ? { "HTTP-Referer": process.env.OPENROUTER_HTTP_REFERER } : {}),
-      ...(process.env.OPENROUTER_APP_TITLE ? { "X-Title": process.env.OPENROUTER_APP_TITLE } : {})
+  const model = process.env.LEARNING_PROFILE_MODEL || process.env.DEFAULT_MODEL || defaultOpenRouterModelId;
+  const systemPrompt = await buildProfileUpdateSystemPromptWithMetadata();
+  const messages = [
+    {
+      role: "system",
+      content: systemPrompt.text
     },
-    method: "POST"
+    {
+      role: "user",
+      content: JSON.stringify(input)
+    }
+  ];
+
+  return traceLangfuseGeneration({
+    input: {
+      conversationCount: input.conversations.length,
+      hasPreviousProfile: Boolean(input.previousProfile),
+      messageCounts: input.conversations.map((conversation) => conversation.messages.length)
+    },
+    metadata: {
+      purpose: "student_learning_profile_update",
+      responseFormat: "json_object",
+      temperature: 0.2
+    },
+    model,
+    name: "next.student-learning-profile-update",
+    prompt: systemPrompt.prompt,
+    tags: langfuseTraceTags({
+      feature: "student-learning-profile",
+      route: "server-job",
+      workflow: "profile-update"
+    }),
+    run: async (generation) => {
+      const response = await fetch(`${process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1"}/chat/completions`, {
+        body: JSON.stringify({
+          model,
+          messages,
+          response_format: { type: "json_object" },
+          temperature: 0.2
+        }),
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          ...(process.env.OPENROUTER_HTTP_REFERER ? { "HTTP-Referer": process.env.OPENROUTER_HTTP_REFERER } : {}),
+          ...(process.env.OPENROUTER_APP_TITLE ? { "X-Title": process.env.OPENROUTER_APP_TITLE } : {})
+        },
+        method: "POST"
+      });
+
+      if (!response.ok) {
+        throw new ConversationPersistenceError("Learning profile model update failed.", response.status);
+      }
+
+      const data = (await response.json()) as {
+        choices?: Array<{ finish_reason?: string; message?: { content?: string } }>;
+        usage?: Record<string, number>;
+      };
+      const content = data.choices?.[0]?.message?.content ?? "";
+
+      try {
+        const parsed = JSON.parse(content) as unknown;
+        generation.update({
+          output: summarizeProfileUpdateOutput(parsed),
+          usageDetails: openRouterUsageForLangfuse(data.usage),
+          metadata: {
+            finishReason: data.choices?.[0]?.finish_reason,
+            purpose: "student_learning_profile_update",
+            responseParseStatus: "valid_json"
+          }
+        });
+        return parsed;
+      } catch {
+        generation.update({
+          output: { responseParseStatus: "invalid_json" },
+          metadata: { responseParseStatus: "invalid_json" }
+        });
+        throw new ConversationPersistenceError("Learning profile model returned invalid JSON.", 502);
+      }
+    }
   });
-
-  if (!response.ok) {
-    throw new ConversationPersistenceError("Learning profile model update failed.", response.status);
-  }
-
-  const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
-  const content = data.choices?.[0]?.message?.content ?? "";
-
-  try {
-    return JSON.parse(content) as unknown;
-  } catch {
-    throw new ConversationPersistenceError("Learning profile model returned invalid JSON.", 502);
-  }
 }
 
-function buildProfileUpdateSystemPrompt() {
-  return [
+export const profileUpdateLangfuseTemplate = [
     "Update a private student_learning_profile from recent tutor conversations. Return strict JSON only.",
     "The profile describes observed tutoring supports and interaction patterns, never fixed judgments about the student.",
     "Use phrasing like 'the student benefits from...' or 'try...'. Do not label the student lazy, weak, anxious, disabled, unmotivated, or similar.",
@@ -892,6 +937,42 @@ function buildProfileUpdateSystemPrompt() {
     "JSON fields: summary, learningSignals, effectiveSupports, lessEffectiveSupports, strategiesToTryNext, avoid, openQuestions, notableImprovements, profileChangeNotes, triedStrategies, evidence.",
     "Keep summary under 800 characters, arrays concise, evidence at most 20 items, and triedStrategies at most 12 items."
   ].join("\n");
+
+async function buildProfileUpdateSystemPrompt() {
+  return compileLangfuseTextPrompt({
+    fallback: profileUpdateLangfuseTemplate,
+    name: profileUpdateLangfusePromptName
+  });
+}
+
+async function buildProfileUpdateSystemPromptWithMetadata() {
+  return compileLangfuseTextPromptWithMetadata({
+    fallback: profileUpdateLangfuseTemplate,
+    name: profileUpdateLangfusePromptName
+  });
+}
+
+function openRouterUsageForLangfuse(usage: Record<string, number> | undefined) {
+  if (!usage) {
+    return undefined;
+  }
+
+  return {
+    input: usage.prompt_tokens ?? usage.input_tokens ?? 0,
+    output: usage.completion_tokens ?? usage.output_tokens ?? 0,
+    total: usage.total_tokens ?? 0
+  };
+}
+
+function summarizeProfileUpdateOutput(value: unknown) {
+  const source = isRecord(value) ? value : {};
+  return {
+    evidenceCount: Array.isArray(source.evidence) ? source.evidence.length : 0,
+    hasSummary: typeof source.summary === "string" && source.summary.trim().length > 0,
+    learningSignalsCount: Array.isArray(source.learningSignals) ? source.learningSignals.length : 0,
+    profileChangeNotesCount: Array.isArray(source.profileChangeNotes) ? source.profileChangeNotes.length : 0,
+    triedStrategiesCount: Array.isArray(source.triedStrategies) ? source.triedStrategies.length : 0
+  };
 }
 
 function normalizeTriedStrategy(value: unknown): StudentLearningTriedStrategy {

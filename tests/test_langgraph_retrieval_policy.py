@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 import backend.agent.graph as graph_module
+import backend.langfuse_prompts as langfuse_prompts
 from backend.agent.graph import run_pdf_rag_agent, run_pdf_rag_agent_stream
 
 
@@ -75,7 +76,6 @@ def clear_retrieval_memory_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(graph_module, "start_active_problem_context_prefetch", lambda _state: None)
     monkeypatch.setattr(graph_module, "finish_active_problem_context_prefetch", lambda _state: _noop_async())
     monkeypatch.setattr(graph_module, "save_active_problem_context", lambda _context, _state: None)
-    monkeypatch.setattr(graph_module, "apply_leak_guard_with_model", lambda **kwargs: _return_async(kwargs["answer"]))
     monkeypatch.setattr(graph_module, "save_chat_retrieval_memory", lambda memory, state: graph_module._CHAT_RETRIEVAL_MEMORY_CACHE.update({state.get("conversation_id") or "test": memory}))
 
 
@@ -120,7 +120,7 @@ def test_decision_prompt_searches_source_lookup_before_asking_for_more_detail() 
         memory_used=False,
     )
 
-    messages = graph_module.build_tutor_decision_messages(
+    messages = graph_module.build_primary_tutor_messages(
         {
             "answer_policy": {"refuseAnswerOnlyRequests": True},
             "chat_retrieval_memory": {},
@@ -137,6 +137,49 @@ def test_decision_prompt_searches_source_lookup_before_asking_for_more_detail() 
     assert "Do not answer with a request for the page image" in system_prompt
     assert "For find-similar-example requests" in system_prompt
     assert "rather than only the assigned problem number" in system_prompt
+    assert "uploaded homework attachments" in system_prompt
+    assert "uploaded files, active Knowledge, and available class OCR/PDF search should all be considered" in system_prompt
+
+
+def test_langfuse_prompt_helper_falls_back_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_HOST", raising=False)
+    langfuse_prompts._get_langfuse_client.cache_clear()
+
+    assert (
+        langfuse_prompts.compile_langfuse_text_prompt(
+            "chandra/test",
+            fallback="local fallback",
+            variables={"value": "remote"},
+        )
+        == "local fallback"
+    )
+
+
+def test_langfuse_prompt_helper_compiles_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakePrompt:
+        def compile(self, **variables: str) -> str:
+            return f"Hello {variables['student_name']}."
+
+    class FakeClient:
+        def get_prompt(self, name: str, **kwargs: Any) -> FakePrompt:
+            assert name == "chandra/test"
+            assert kwargs["label"] == "production"
+            assert kwargs["type"] == "text"
+            assert kwargs["fallback"] == "Hello {{student_name}}."
+            return FakePrompt()
+
+    monkeypatch.setattr(langfuse_prompts, "_get_langfuse_client", lambda: FakeClient())
+
+    assert (
+        langfuse_prompts.compile_langfuse_text_prompt(
+            "chandra/test",
+            fallback="Hello {{student_name}}.",
+            variables={"student_name": "Maya"},
+        )
+        == "Hello Maya."
+    )
 
 
 def test_search_batch_skips_duplicate_queries_before_execution() -> None:
@@ -273,8 +316,8 @@ def test_example_search_filters_active_problem_page_when_alternatives_exist() ->
     assert pages == [example_page]
 
 
-def test_tutor_decision_can_return_one_search_per_distinct_need() -> None:
-    decision = graph_module.parse_tutor_decision_response(
+def test_primary_tutor_turn_can_return_one_search_per_distinct_need() -> None:
+    decision = graph_module.parse_primary_tutor_response(
         {
             "content": json.dumps(
                 {
@@ -323,7 +366,7 @@ def test_decision_json_with_latex_backslashes_is_parsed_not_surfaced() -> None:
         '"sectionOrder":["hint","nextStep"],"metadata":{"problem":"1.7"}}'
     )
 
-    decision = graph_module.parse_tutor_decision_response(
+    decision = graph_module.parse_primary_tutor_response(
         {"content": content},
         {},
     )
@@ -332,6 +375,312 @@ def test_decision_json_with_latex_backslashes_is_parsed_not_surfaced() -> None:
     assert decision["student_response"] == "Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2]$."
     assert decision["structuredOutput"]["sections"]["hint"] == "Use $\\operatorname{span}(S)$, not the raw list."
     assert not decision["student_response"].startswith("{")
+
+
+def test_primary_tutor_turn_preserves_two_to_six_valid_confusion_choices() -> None:
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "can_answer_now": True,
+                    "needs_search": False,
+                    "student_response": "I see a few possible starting points for this rank problem. Pick one and I'll focus there.",
+                    "structuredOutput": {
+                        "sections": {
+                            "answer": "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
+                        },
+                        "confusionPrompt": "I see a few possible starting points for this rank problem. Pick one and I'll focus there.",
+                        "confusionChoices": [
+                            {"label": "Notation", "message": "Help me understand the notation."},
+                            {"id": "first-step", "label": "First step", "message": "Help me choose the first step."},
+                        ],
+                    },
+                }
+            )
+        },
+        {},
+    )
+
+    assert decision["needs_search"] is False
+    assert (
+        decision["structuredOutput"]["confusionPrompt"]
+        == "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
+    )
+    assert decision["structuredOutput"]["confusionChoices"] == [
+        {"id": "choice-1", "label": "Notation", "message": "Help me understand the notation."},
+        {"id": "first-step", "label": "First step", "message": "Help me choose the first step."},
+    ]
+
+
+def test_primary_tutor_turn_drops_choice_counts_outside_two_to_five() -> None:
+    structured_output = graph_module.normalize_backend_structured_output(
+        {
+            "sections": {"answer": "Pick a direction."},
+            "confusionChoices": [
+                {"id": "one", "label": "One", "message": "Help me with one."},
+            ],
+        }
+    )
+
+    assert structured_output is not None
+    assert "confusionChoices" not in structured_output
+
+
+def test_decision_prompt_says_choices_are_not_triggered_by_student_confusion_keywords() -> None:
+    messages = graph_module.build_primary_tutor_messages(
+        {
+            "chat_retrieval_memory": {},
+            "messages": [{"role": "user", "content": "I'm lost"}],
+        },
+        {},
+    )
+
+    system_prompt = messages[0]["content"]
+    assert "not triggered by student confusion keywords" in system_prompt
+    assert "Do not trigger it just because the student says they are lost, confused, stuck" in system_prompt
+    assert "Prefer a normal helpful nudge or one focused question" in system_prompt
+
+
+def test_decision_prompt_can_force_real_confusion_choices_for_teacher_debug() -> None:
+    messages = graph_module.build_primary_tutor_messages(
+        {
+            "chat_retrieval_memory": {},
+            "debug_options": {"forceConfusionChoices": True},
+            "messages": [{"role": "user", "content": "help me"}],
+        },
+        {},
+    )
+
+    system_prompt = messages[0]["content"]
+    payload = json.loads(messages[1]["content"])
+
+    assert "force the Chandra uncertainty choice flow" in system_prompt
+    assert "do not answer the academic question normally" in system_prompt
+    assert "context-specific confusionPrompt" in system_prompt
+    assert "Do not reuse a canned generic prompt" in system_prompt
+    assert "first interpret and acknowledge the latest student message" in system_prompt
+    assert "If the student asks a follow-up such as `how would that work?`" in system_prompt
+    assert "different useful way Chandra could answer the student's latest question" in system_prompt
+    assert "2 to 6 context-specific structuredOutput.confusionChoices" in system_prompt
+    assert "do not pad the list to reach the maximum" in system_prompt
+    assert "must not list, summarize, or describe every button choice" in system_prompt
+    assert "descriptive label of 4 to 10 words" in system_prompt
+    assert payload["debug_options"] == {
+        "forceConfusionChoices": True,
+        "forceNoRetrieval": False,
+        "forceRetrieval": False,
+    }
+
+
+def test_decision_prompt_can_force_retrieval_for_teacher_debug() -> None:
+    messages = graph_module.build_primary_tutor_messages(
+        {
+            "chat_retrieval_memory": {},
+            "debug_options": {"forceRetrieval": True},
+            "messages": [{"role": "user", "content": "explain the rank nullity theorem"}],
+        },
+        {},
+    )
+
+    system_prompt = messages[0]["content"]
+    payload = json.loads(messages[1]["content"])
+
+    assert "debug_options.forceRetrieval is true" in system_prompt
+    assert "Return needs_search true" in system_prompt
+    assert "at least one searches entry with a non-empty query" in system_prompt
+    assert payload["debug_options"] == {
+        "forceConfusionChoices": False,
+        "forceNoRetrieval": False,
+        "forceRetrieval": True,
+    }
+
+
+def test_decision_prompt_can_force_no_retrieval_for_teacher_debug() -> None:
+    messages = graph_module.build_primary_tutor_messages(
+        {
+            "chat_retrieval_memory": {},
+            "debug_options": {"forceNoRetrieval": True},
+            "messages": [{"role": "user", "content": "what does problem 2.14 say?"}],
+        },
+        {},
+    )
+
+    system_prompt = messages[0]["content"]
+    payload = json.loads(messages[1]["content"])
+
+    assert "debug_options.forceNoRetrieval is true" in system_prompt
+    assert "Do not retrieve for this turn" in system_prompt
+    assert "Return needs_search false" in system_prompt
+    assert payload["debug_options"] == {
+        "forceConfusionChoices": False,
+        "forceNoRetrieval": True,
+        "forceRetrieval": False,
+    }
+
+
+def test_debug_force_retrieval_overrides_chat_memory_decision() -> None:
+    decision = graph_module.enforce_debug_retrieval_options(
+        {
+            "can_answer_now": True,
+            "decision_source": "chat_memory",
+            "memory_used": True,
+            "needs_search": False,
+            "student_response": "Use rank-nullity here.",
+        },
+        {
+            "chat_retrieval_memory": {},
+            "debug_options": {"forceRetrieval": True},
+            "messages": [{"role": "user", "content": "explain rank nullity"}],
+        },
+    )
+
+    assert decision["needs_search"] is True
+    assert decision["can_answer_now"] is False
+    assert decision["searches"][0]["query"]
+    assert decision["retrieval_reason"] in graph_module.ALLOWED_RETRIEVAL_REASONS
+
+
+def test_debug_force_no_retrieval_overrides_search_decision() -> None:
+    decision = graph_module.enforce_debug_retrieval_options(
+        {
+            "can_answer_now": False,
+            "decision_source": "search_required",
+            "memory_used": False,
+            "needs_search": True,
+            "query": "find exact problem page OCR metadata problem 2.14",
+            "retrieval_reason": "student_requested_problem",
+            "searches": [
+                {
+                    "query": "find exact problem page OCR metadata problem 2.14",
+                    "retrieval_reason": "student_requested_problem",
+                    "top_k": 1,
+                }
+            ],
+            "student_response": "I'm checking the class materials for that problem.",
+        },
+        {
+            "debug_options": {"forceNoRetrieval": True},
+            "messages": [{"role": "user", "content": "what does problem 2.14 say?"}],
+        },
+    )
+
+    assert decision["needs_search"] is False
+    assert decision["searches"] == []
+    assert decision["query"] == ""
+    assert "debug mode" in decision["student_response"]
+
+
+@pytest.mark.asyncio
+async def test_debug_forced_confusion_choices_become_the_response() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": True,
+                        "memory_used": False,
+                        "needs_search": False,
+                        "student_response": "I can help with Problem 2.14, but I need to know which part you want to start with.",
+                        "structuredOutput": {
+                            "sections": {
+                                "answer": "I can help with Problem 2.14, but I need to know which part you want to start with.",
+                                "nextStep": "Choose one: the setup from Exercise 2.13, part (i), or part (ii).",
+                            },
+                            "confusionPrompt": (
+                                "I see a few possible starting points for this rank problem. "
+                                "Pick one and I'll focus there."
+                            ),
+                            "confusionChoices": [
+                                {
+                                    "id": "setup",
+                                    "label": "Map setup",
+                                    "message": "Help me identify the spaces and maps in this rank problem.",
+                                },
+                                {
+                                    "id": "image",
+                                    "label": "Image idea",
+                                    "message": "Help me understand which image containment to use.",
+                                },
+                                {
+                                    "id": "work",
+                                    "label": "My attempt",
+                                    "message": "Help me check the proof step I wrote.",
+                                },
+                            ],
+                            "metadata": {
+                                "hintLevel": "small_hint",
+                                "mode": "clarification",
+                                "sourceConfidence": "low",
+                                "studentActionNeeded": "answer_question",
+                            },
+                        },
+                    }
+                )
+            }
+        ]
+    )
+
+    response = await run_pdf_rag_agent(
+        class_id="class-linear",
+        conversation_id="conv-debug-choices",
+        debug_options={"forceConfusionChoices": True},
+        messages=[{"role": "user", "content": "help me"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        professor_id="teacher-1",
+        retriever=FakeRetriever([]),
+    )
+
+    assert len(client.calls) == 1
+    assert response["content"] == (
+        "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
+    )
+    assert response["structuredOutput"]["sections"] == {
+        "answer": (
+            "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
+        )
+    }
+    assert response["structuredOutput"]["confusionPrompt"] == (
+        "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
+    )
+    assert [choice["label"] for choice in response["structuredOutput"]["confusionChoices"]] == [
+        "Map setup",
+        "Image idea",
+        "My attempt",
+    ]
+    assert "Hint:" not in response["content"]
+    assert "nextStep" not in response["structuredOutput"]["sections"]
+
+
+def test_retrieval_needed_decision_does_not_preserve_confusion_choices() -> None:
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "can_answer_now": False,
+                    "needs_search": True,
+                    "retrieval_reason": "student_requested_problem",
+                    "search_query": "find exact problem page OCR metadata problem 2.14",
+                    "student_response": "Pick a direction.",
+                    "structuredOutput": {
+                        "sections": {"answer": "Pick a direction."},
+                        "confusionPrompt": "Pick one.",
+                        "confusionChoices": [
+                            {"id": "one", "label": "One", "message": "Help me with one."},
+                            {"id": "two", "label": "Two", "message": "Help me with two."},
+                            {"id": "three", "label": "Three", "message": "Help me with three."},
+                            {"id": "four", "label": "Four", "message": "Help me with four."},
+                        ],
+                    },
+                }
+            )
+        },
+        {},
+    )
+
+    assert decision["needs_search"] is True
+    assert decision["structuredOutput"] is None
+    assert decision["student_response"] == "Pick a direction."
 
 
 def test_example_request_cannot_be_downgraded_to_no_search_refusal() -> None:
@@ -344,7 +693,7 @@ def test_example_request_cannot_be_downgraded_to_no_search_refusal() -> None:
         memory_used=False,
     )
 
-    decision = graph_module.parse_tutor_decision_response(
+    decision = graph_module.parse_primary_tutor_response(
         {
             "content": json.dumps(
                 {
@@ -387,7 +736,7 @@ def test_decision_prompt_passes_retrieval_memory_and_policy_but_not_pdf_assets()
     }
     heuristic = graph_module.build_retrieval_decision(state)
 
-    messages = graph_module.build_tutor_decision_messages(state, heuristic)
+    messages = graph_module.build_primary_tutor_messages(state, heuristic)
     payload = json.loads(messages[-1]["content"])
 
     assert payload["active_metadata"]["title"] == "ACME VOL 1"
@@ -441,7 +790,7 @@ def test_first_llm_prompt_owns_tutor_plan_and_state_updates() -> None:
     }
     heuristic = graph_module.build_retrieval_decision(state)
 
-    messages = graph_module.build_tutor_decision_messages(state, heuristic)
+    messages = graph_module.build_primary_tutor_messages(state, heuristic)
     payload = json.loads(messages[-1]["content"])
     system_prompt = messages[0]["content"]
 
@@ -470,7 +819,7 @@ def test_first_vague_help_plan_depth_one_updates_understanding_state() -> None:
     )
     problem_id = fallback["tutorPlan"]["activeProblemId"]
 
-    decision = graph_module.parse_tutor_decision_response(
+    decision = graph_module.parse_primary_tutor_response(
         {
             "content": json.dumps(
                 {
@@ -523,7 +872,7 @@ def test_first_vague_help_plan_depth_one_updates_understanding_state() -> None:
     assert "<Ru" not in decision["student_response"]
 
 
-def test_repeated_stuck_plan_can_escalate_to_depth_two() -> None:
+def test_repeated_stuck_plan_can_escalate_help_without_increasing_understanding() -> None:
     active = ocr_page(problem_numbers=["3.9"])
     problem_id = graph_module.active_problem_id_from_record(active)
     previous_state = {
@@ -567,7 +916,7 @@ def test_repeated_stuck_plan_can_escalate_to_depth_two() -> None:
     assert understanding["repeatedStuckSignals"] == 1
     assert understanding["hintsGiven"] == 2
     assert understanding["lastHelpDepth"] == 2
-    assert understanding["understandingLevel"] == 2
+    assert understanding["understandingLevel"] == 1
 
 
 def test_help_limit_clamps_tutor_plan_depth_for_effective_understanding_level() -> None:
@@ -601,6 +950,54 @@ def test_help_limit_clamps_tutor_plan_depth_for_effective_understanding_level() 
     assert "light hint" in clamped["responseStrategy"]
 
 
+def test_help_limit_clamping_uses_protected_understanding_level() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    previous_state = {
+        "activeProblemId": problem_id,
+        "understandingLevel": 1,
+        "hintsGiven": 1,
+        "lastHintSummary": "Asked the student to connect rank to image.",
+        "updatedAt": "2026-05-12T00:00:00+00:00",
+    }
+    state = {
+        "answer_policy": {
+            "helpLimitsByUnderstandingLevel": {
+                "1": "light_hint",
+                "2": "targeted_hint_next_action",
+            }
+        },
+        "conversation_id": "conv-clamp-protected-level",
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "problem_understanding_states": {problem_id: previous_state},
+        },
+        "messages": [{"role": "user", "content": "I still do not get it."}],
+    }
+    decision = {
+        "tutorPlan": {
+            "activeProblemId": problem_id,
+            "studentIntent": "vague_help",
+            "nextHelpDepth": 2,
+            "shouldAskQuestion": False,
+            "shouldGiveWorkedStep": False,
+            "shouldAvoidFullSolution": False,
+            "responseStrategy": "Give a targeted hint.",
+            "stateUpdates": {
+                "understandingLevel": 2,
+                "lastHelpDepth": 2,
+                "lastHintSummary": "Gave a more concrete distinction.",
+            },
+        }
+    }
+
+    clamped = graph_module.clamp_decision_to_help_limits(decision, state)
+
+    assert clamped["tutorPlan"]["stateUpdates"]["understandingLevel"] == 1
+    assert clamped["tutorPlan"]["nextHelpDepth"] == 1
+    assert clamped["tutorPlan"]["shouldAskQuestion"] is True
+
+
 def test_decision_prompt_uses_evidence_based_understanding_levels() -> None:
     state = {
         "chat_retrieval_memory": {
@@ -618,10 +1015,14 @@ def test_decision_prompt_uses_evidence_based_understanding_levels() -> None:
     }
     heuristic = graph_module.build_retrieval_decision(state)
 
-    messages = graph_module.build_tutor_decision_messages(state, heuristic)
+    messages = graph_module.build_primary_tutor_messages(state, heuristic)
     system_prompt = messages[0]["content"]
 
-    assert "not from turn count and not by incrementing one level at a time" in system_prompt
+    assert "not from turn count, number of hints, repeated stuck signals, or by incrementing one level at a time" in system_prompt
+    assert "Preserve the previous understanding level for the same problem unless the latest student message clearly proves a different level" in system_prompt
+    assert "Do not lower the understanding level for the same active problem unless the student explicitly retracts prior work" in system_prompt
+    assert "Increase the level only when the student's own message supplies enough evidence" in system_prompt
+    assert "Do not increase understandingLevel merely because Chandra gave another hint" in system_prompt
     assert "The level may jump by more than 1 in a single update" in system_prompt
     assert "0 = problem loaded, no student understanding observed yet" in system_prompt
     assert "1 = needs first nudge or little/no useful work shown" in system_prompt
@@ -671,6 +1072,78 @@ def test_understanding_level_zero_update_does_not_reset_same_problem_progress() 
     assert understanding["understandingLevel"] == 2
     assert understanding["hintsGiven"] == 3
     assert "image containment" in understanding["lastHintSummary"]
+
+
+def test_understanding_level_decrease_is_ignored_for_same_problem_without_retraction() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    previous_state = {
+        "activeProblemId": problem_id,
+        "understandingLevel": 3,
+        "hintsGiven": 2,
+        "lastStudentAttemptSummary": "Student used the right image-containment strategy.",
+        "updatedAt": "2026-05-12T00:00:00+00:00",
+    }
+    state = {
+        "conversation_id": "conv-no-decrease",
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "problem_understanding_states": {problem_id: previous_state},
+        },
+        "messages": [{"role": "user", "content": "I am still confused by the notation."}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "vague_help",
+        "nextHelpDepth": 2,
+        "answerSeekingRisk": "low",
+        "stateUpdates": {
+            "understandingLevel": 1,
+            "lastHelpDepth": 2,
+            "lastHintSummary": "Narrowed the notation question.",
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["understandingLevel"] == 3
+    assert understanding["lastHelpDepth"] == 2
+
+
+def test_understanding_level_increase_requires_student_work_evidence() -> None:
+    active = ocr_page(problem_numbers=["2.14"])
+    problem_id = graph_module.active_problem_id_from_record(active)
+    previous_state = {
+        "activeProblemId": problem_id,
+        "understandingLevel": 1,
+        "hintsGiven": 1,
+        "lastHintSummary": "Asked the student to connect rank to image.",
+        "updatedAt": "2026-05-12T00:00:00+00:00",
+    }
+    state = {
+        "conversation_id": "conv-no-unsupported-increase",
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "problem_understanding_states": {problem_id: previous_state},
+        },
+        "messages": [{"role": "user", "content": "I still do not get it."}],
+    }
+    plan = {
+        "activeProblemId": problem_id,
+        "studentIntent": "vague_help",
+        "nextHelpDepth": 2,
+        "answerSeekingRisk": "low",
+        "stateUpdates": {
+            "understandingLevel": 2,
+            "lastHelpDepth": 2,
+            "lastHintSummary": "Gave a more concrete distinction about image containment.",
+        },
+    }
+
+    understanding = graph_module.state_after_tutor_plan(state, plan)
+
+    assert understanding["understandingLevel"] == 1
+    assert understanding["lastHelpDepth"] == 2
 
 
 def test_active_problem_help_turn_promotes_model_zero_to_level_one() -> None:
@@ -923,7 +1396,7 @@ def test_decision_prompt_tracks_current_step_and_substep_for_repeated_stuck() ->
     }
     heuristic = graph_module.build_retrieval_decision(state)
 
-    messages = graph_module.build_tutor_decision_messages(state, heuristic)
+    messages = graph_module.build_primary_tutor_messages(state, heuristic)
     payload = json.loads(messages[-1]["content"])
     system_prompt = messages[0]["content"]
 
@@ -974,8 +1447,8 @@ def test_final_prompt_escalates_repeated_unhelpful_hint_without_repeating() -> N
         },
     }
 
-    messages = graph_module.build_multimodal_final_messages(state)
-    instruction_text = messages[1]["content"][0]["text"]
+    messages = graph_module.build_context_grounded_answer_messages(state)
+    instruction_text = messages[0]["content"][1]["text"]
 
     assert "previous hint was unhelpful, repetitive, too vague, or did not add more" in instruction_text
     assert "add one new concrete distinction or prerequisite idea" in instruction_text
@@ -1120,6 +1593,23 @@ def test_loaded_problem_context_initializes_understanding_level_zero() -> None:
     assert understanding["activeProblemId"] == active_context["problem_id"]
     assert understanding["understandingLevel"] == 0
     assert understanding["hintsGiven"] == 0
+
+
+def test_visible_structured_problem_keeps_source_lookup_understanding_state() -> None:
+    state = {
+        "tutor_plan": {
+            "studentIntent": "specific_question",
+            "needsRetrieval": True,
+            "retrievalReason": "student_requested_problem",
+        },
+    }
+
+    assert not graph_module.should_suppress_problem_understanding_for_response(
+        state,
+        {},
+        visible_problem_text="Problem 2.14. Prove the rank inequalities.",
+    )
+    assert graph_module.should_suppress_problem_understanding_for_response(state, {})
 
 
 def test_help_plan_state_survives_active_problem_id_sync() -> None:
@@ -1311,7 +1801,7 @@ def test_normalize_backend_structured_output_keeps_actual_problem_section() -> N
 
 
 def test_retrieval_decision_drops_status_next_step() -> None:
-    decision = graph_module.parse_tutor_decision_response(
+    decision = graph_module.parse_primary_tutor_response(
         {
             "content": json.dumps(
                 {
@@ -1342,7 +1832,7 @@ def test_retrieval_decision_drops_status_next_step() -> None:
 
 
 def test_retrieval_decision_suppresses_source_request_while_searching() -> None:
-    decision = graph_module.parse_tutor_decision_response(
+    decision = graph_module.parse_primary_tutor_response(
         {
             "content": json.dumps(
                 {
@@ -1367,7 +1857,7 @@ def test_retrieval_decision_suppresses_source_request_while_searching() -> None:
 
 
 def test_retrieval_decision_removes_page_photo_next_step_while_searching() -> None:
-    decision = graph_module.parse_tutor_decision_response(
+    decision = graph_module.parse_primary_tutor_response(
         {
             "content": json.dumps(
                 {
@@ -1406,7 +1896,7 @@ def test_decision_prompt_forbids_source_request_while_searching() -> None:
         memory_used=False,
     )
 
-    messages = graph_module.build_tutor_decision_messages(
+    messages = graph_module.build_primary_tutor_messages(
         {
             "answer_policy": {"refuseAnswerOnlyRequests": True},
             "chat_retrieval_memory": {},
@@ -1992,7 +2482,7 @@ async def test_bare_problem_lookup_returns_problem_statement_not_solving_hint() 
 
 
 @pytest.mark.asyncio
-async def test_empty_final_answer_extracts_unlabeled_numbered_problem_statement() -> None:
+async def test_empty_context_grounded_answer_extracts_unlabeled_numbered_problem_statement() -> None:
     client = FakeOpenRouterClient(
         [
             {
@@ -2283,7 +2773,7 @@ async def test_final_llm_payload_contains_page_asset_and_ocr_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_garbled_problem_lookup_still_sends_page_asset_to_final_model() -> None:
+async def test_garbled_problem_lookup_still_sends_page_asset_to_context_grounded_model() -> None:
     client = FakeOpenRouterClient(
         [
             {
@@ -2441,7 +2931,7 @@ async def test_follow_up_fetches_referenced_exercise_before_helping() -> None:
 
 
 @pytest.mark.asyncio
-async def test_student_uploaded_pdf_file_is_sent_to_final_model() -> None:
+async def test_student_uploaded_pdf_file_is_sent_to_primary_tutor_model() -> None:
     client = FakeOpenRouterClient(
         [
             {
@@ -2454,7 +2944,6 @@ async def test_student_uploaded_pdf_file_is_sent_to_final_model() -> None:
                     }
                 )
             },
-            {"content": "I read the uploaded PDF file."},
         ]
     )
 
@@ -2475,10 +2964,204 @@ async def test_student_uploaded_pdf_file_is_sent_to_final_model() -> None:
         ],
     )
 
-    final_content = client.calls[1]["messages"][-1]["content"]
-    assert any(part.get("type") == "file" for part in final_content)
-    assert "dXBsb2FkZWQtcGRm" in json.dumps(final_content)
+    primary_content = client.calls[0]["messages"][-1]["content"]
+    assert len(client.calls) == 1
+    assert any(part.get("type") == "file" for part in primary_content)
+    assert "dXBsb2FkZWQtcGRm" in json.dumps(primary_content)
     assert "dXBsb2FkZWQtcGRm" not in json.dumps(response["langGraphTrace"])
+
+
+@pytest.mark.asyncio
+async def test_student_upload_can_still_search_class_pdf_problem_context() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": False,
+                        "memory_used": False,
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "searches": [
+                            {
+                                "query": "find this uploaded problem in class materials",
+                                "retrieval_reason": "student_requested_problem",
+                                "top_k": 1,
+                            }
+                        ],
+                        "student_response": "I'm checking the class materials for that problem.",
+                    }
+                )
+            },
+            {"content": "Problem:\nProblem 2.14. Prove rank(KL) <= rank(L)."},
+        ]
+    )
+    retriever = FakeRetriever([ocr_page()])
+
+    response = await run_pdf_rag_agent(
+        class_id="class-linear",
+        messages=[{"role": "user", "content": "here is my problem"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        professor_id="teacher-1",
+        retriever=retriever,
+        student_attachment_files=[
+            {
+                "dataUrl": "data:image/jpeg;base64,aW1hZ2UtYnl0ZXM=",
+                "fileName": "problem.jpg",
+                "fileSize": 11,
+                "fileType": "image",
+                "mimeType": "image/jpeg",
+            }
+        ],
+    )
+
+    assert retriever.calls == [
+        {
+            "class_id": "class-linear",
+            "professor_id": "teacher-1",
+            "query": "find this uploaded problem in class materials",
+            "top_k": 1,
+        }
+    ]
+    assert response["langGraphTrace"]["retrievalDecision"]["decision_source"] == "search_required"
+    assert response["langGraphTrace"]["searchQueries"] == ["find this uploaded problem in class materials"]
+    assert response["langGraphTrace"]["toolCallCount"] == 1
+    assert any(item.get("kind") == "problem" for item in response["langGraphTrace"]["knowledgeItems"])
+
+
+@pytest.mark.asyncio
+async def test_student_uploaded_pdf_extracted_text_without_file_is_sent_to_primary_tutor_model() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": True,
+                        "memory_used": False,
+                        "needs_search": False,
+                        "student_response": "I can use the uploaded PDF text.",
+                    }
+                )
+            },
+        ]
+    )
+
+    await run_pdf_rag_agent(
+        class_id="class-linear",
+        messages=[{"role": "user", "content": "help me with the attached PDF"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        professor_id="teacher-1",
+        retriever=FakeRetriever([]),
+        student_attachment_files=[
+            {
+                "extractedText": "Problem 2.14. Prove rank(KL) <= rank(L).",
+                "fileName": "large-homework.pdf",
+                "fileSize": 12_000_000,
+                "fileType": "pdf",
+                "mimeType": "application/pdf",
+            }
+        ],
+    )
+
+    primary_content = client.calls[0]["messages"][-1]["content"]
+    assert len(client.calls) == 1
+    assert any(
+        part.get("type") == "text" and "Problem 2.14. Prove rank(KL) <= rank(L)." in part.get("text", "")
+        for part in primary_content
+    )
+    assert not any(part.get("type") == "file" for part in primary_content)
+
+
+@pytest.mark.asyncio
+async def test_student_uploaded_pdf_extracted_problem_is_saved_to_knowledge() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": True,
+                        "memory_used": False,
+                        "needs_search": False,
+                        "student_response": "I can use the uploaded PDF text.",
+                    }
+                )
+            },
+        ]
+    )
+
+    response = await run_pdf_rag_agent(
+        class_id="class-linear",
+        messages=[{"role": "user", "content": "help me with the attached PDF"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        professor_id="teacher-1",
+        retriever=FakeRetriever([]),
+        student_attachment_files=[
+            {
+                "extractedText": "Problem 2.14. Prove rank(KL) <= rank(L).",
+                "fileName": "large-homework.pdf",
+                "fileSize": 12_000_000,
+                "fileType": "pdf",
+                "mimeType": "application/pdf",
+            }
+        ],
+    )
+
+    knowledge_items = response["langGraphTrace"]["knowledgeItems"]
+    assert any(
+        item.get("kind") == "problem"
+        and item.get("usedAs") == "active_problem"
+        and item.get("content") == "Problem 2.14. Prove rank(KL) <= rank(L)."
+        for item in knowledge_items
+    )
+    assert any(item.get("kind") == "student_upload" and item.get("usedAs") == "problem_source" for item in knowledge_items)
+
+
+@pytest.mark.asyncio
+async def test_student_uploaded_image_is_sent_to_primary_tutor_model_without_followup_call() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": True,
+                        "memory_used": False,
+                        "needs_search": False,
+                        "student_response": "I can inspect the uploaded image.",
+                    }
+                )
+            },
+        ]
+    )
+
+    response = await run_pdf_rag_agent(
+        class_id="class-linear",
+        messages=[{"role": "user", "content": "what is this image"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        professor_id="teacher-1",
+        retriever=FakeRetriever([]),
+        student_attachment_files=[
+            {
+                "dataUrl": "data:image/jpeg;base64,aW1hZ2UtYnl0ZXM=",
+                "fileName": "dog.jpg",
+                "fileSize": 11,
+                "fileType": "image",
+                "mimeType": "image/jpeg",
+            }
+        ],
+    )
+
+    primary_content = client.calls[0]["messages"][-1]["content"]
+    assert len(client.calls) == 1
+    assert isinstance(primary_content, list)
+    assert any(part.get("type") == "text" and "what is this image" in part.get("text", "") for part in primary_content)
+    assert any(part.get("type") == "image_url" for part in primary_content)
+    assert "aW1hZ2UtYnl0ZXM=" in json.dumps(primary_content)
+    assert "Do not describe, rate, react to, compliment, identify, or discuss unrelated uploaded photos" in client.calls[0]["messages"][0]["content"]
+    assert "aW1hZ2UtYnl0ZXM=" not in json.dumps(response["langGraphTrace"])
 
 
 @pytest.mark.asyncio
@@ -2509,7 +3192,7 @@ async def test_streaming_matches_non_streaming_retrieval_decision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retries_tutor_decision_with_double_tokens_after_length_stop() -> None:
+async def test_retries_primary_tutor_turn_with_double_tokens_after_length_stop() -> None:
     decision = {
         "can_answer_now": True,
         "memory_used": False,
@@ -2542,7 +3225,7 @@ async def test_retries_tutor_decision_with_double_tokens_after_length_stop() -> 
 
 
 @pytest.mark.asyncio
-async def test_streaming_retries_tutor_decision_with_double_tokens_after_length_stop() -> None:
+async def test_streaming_retries_primary_tutor_turn_with_double_tokens_after_length_stop() -> None:
     decision = {
         "can_answer_now": True,
         "memory_used": False,

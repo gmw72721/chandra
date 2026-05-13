@@ -1,12 +1,16 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
-import { classAccessRoleOptions, normalizeClassAccessRole } from "@/lib/class-settings";
+import {
+  classAccessRoleOptions,
+  normalizeClassAccessPermissions,
+  normalizeClassAccessRole
+} from "@/lib/class-settings";
 import { getAccountByEmail, getAccountById } from "@/lib/data/accounts";
 import { removeCoTeacher, updateCoTeacherRole, upsertCoTeacher } from "@/lib/data/classes";
 import { tryPostgresData } from "@/lib/data/server";
 import { adminDb } from "@/lib/firebase-admin";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -20,13 +24,15 @@ export async function POST(
 ) {
   try {
     const { classId } = await params;
-    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassAccess(request, classId, "manageClassAccess");
     const body = (await request.json().catch(() => ({}))) as {
       email?: unknown;
+      permissions?: unknown;
       role?: unknown;
       uid?: unknown;
     };
     const role = normalizeAssignableRole(body.role);
+    const permissions = normalizeClassAccessPermissions(body.permissions, role);
     const targetTeacher = await resolveTeacher(body.uid, body.email);
 
     if (!targetTeacher.uid) {
@@ -43,6 +49,7 @@ export async function POST(
         displayName: targetTeacher.displayName,
         email: targetTeacher.email,
         invitedBy: uid,
+        permissions,
         role,
         teacherId: targetTeacher.uid
       })
@@ -54,6 +61,7 @@ export async function POST(
           [targetTeacher.uid]: {
             displayName: targetTeacher.displayName,
             email: targetTeacher.email,
+            permissions,
             role,
             uid: targetTeacher.uid
           }
@@ -65,7 +73,7 @@ export async function POST(
     await writeAuditLog({
       actor: { email: actorEmail, uid },
       eventType: "class.co_teacher.added",
-      metadata: { role },
+      metadata: { permissions, role },
       route: "/api/classes/[classId]/co-teachers",
       target: {
         classId,
@@ -77,6 +85,7 @@ export async function POST(
       coTeacher: {
         displayName: targetTeacher.displayName,
         email: targetTeacher.email,
+        permissions,
         role,
         uid: targetTeacher.uid
       }
@@ -92,16 +101,18 @@ export async function PATCH(
 ) {
   try {
     const { classId } = await params;
-    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassAccess(request, classId, "manageClassAccess");
     const body = (await request.json().catch(() => ({}))) as {
+      permissions?: unknown;
       role?: unknown;
       uid?: unknown;
     };
     const targetUid = String(body.uid ?? "").trim();
     const role = normalizeAssignableRole(body.role);
+    const permissions = normalizeClassAccessPermissions(body.permissions, role);
 
     if (!targetUid) {
-      return NextResponse.json({ error: "Choose a co-teacher." }, { status: 400 });
+      return NextResponse.json({ error: "Choose a class staff member." }, { status: 400 });
     }
 
     if (targetUid === uid) {
@@ -109,16 +120,17 @@ export async function PATCH(
     }
 
     await tryPostgresData("class.co_teacher.role.write", () =>
-      updateCoTeacherRole({ classId, role, teacherId: targetUid })
+      updateCoTeacherRole({ classId, permissions, role, teacherId: targetUid })
     );
     await adminDb!.collection("classes").doc(classId).update({
+      [`coTeachers.${targetUid}.permissions`]: permissions,
       [`coTeachers.${targetUid}.role`]: role
     });
 
     await writeAuditLog({
       actor: { email: actorEmail, uid },
       eventType: "class.co_teacher.updated",
-      metadata: { role },
+      metadata: { permissions, role },
       route: "/api/classes/[classId]/co-teachers",
       target: {
         classId,
@@ -126,7 +138,7 @@ export async function PATCH(
       }
     });
 
-    return NextResponse.json({ role, uid: targetUid });
+    return NextResponse.json({ permissions, role, uid: targetUid });
   } catch (caughtError) {
     return coTeacherErrorResponse(caughtError, "Co-teacher update failed.");
   }
@@ -138,14 +150,14 @@ export async function DELETE(
 ) {
   try {
     const { classId } = await params;
-    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassAccess(request, classId, "manageClassAccess");
     const body = (await request.json().catch(() => ({}))) as {
       uid?: unknown;
     };
     const targetUid = String(body.uid ?? "").trim();
 
     if (!targetUid) {
-      return NextResponse.json({ error: "Choose a co-teacher." }, { status: 400 });
+      return NextResponse.json({ error: "Choose a class staff member." }, { status: 400 });
     }
 
     if (targetUid === uid) {

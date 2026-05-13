@@ -26,7 +26,9 @@ if (!databaseUrl) {
 
 const pool = new Pool({
   connectionString: databaseUrl,
+  connectionTimeoutMillis: readPositiveIntegerEnv("POSTGRES_MIGRATION_CONNECTION_TIMEOUT_MS", 5000),
   max: 1,
+  query_timeout: readPositiveIntegerEnv("POSTGRES_MIGRATION_QUERY_TIMEOUT_MS", 30000),
   ssl: readPostgresSslConfig(databaseUrl)
 });
 
@@ -118,6 +120,7 @@ async function withRetry(callback) {
         throw caughtError;
       }
 
+      console.log(`[postgres-migrate] Postgres is not ready (${caughtError.code}); retrying ${attempt}/${attempts}`);
       await sleep(delayMs);
     }
   }
@@ -127,7 +130,17 @@ async function withRetry(callback) {
 
 function isRetryableConnectionError(caughtError) {
   const code = caughtError && typeof caughtError === "object" ? caughtError.code : "";
-  return code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EHOSTUNREACH";
+  const message = caughtError instanceof Error ? caughtError.message : "";
+  return code === "ECONNREFUSED"
+    || code === "ENOTFOUND"
+    || code === "EHOSTUNREACH"
+    || code === "ETIMEDOUT"
+    || message.includes("connection timeout");
+}
+
+function readPositiveIntegerEnv(name, fallback) {
+  const value = Number(process.env[name] || "");
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 function sleep(durationMs) {

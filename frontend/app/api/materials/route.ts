@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
 import {
   TutorKnowledgeHttpError,
-  authorizeClassTeacher,
+  authorizeClassAccess,
   saveTutorKnowledge
 } from "@/lib/tutor-knowledge-server";
 
@@ -17,7 +17,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Choose a class before saving tutor knowledge." }, { status: 400 });
     }
 
-    const { classSnapshot, email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
+    const { classSnapshot, email: actorEmail, uid } = await authorizeClassAccess(request, classId, "manageMaterials");
     const classData = classSnapshot.data() ?? {};
     const professorName = String(classData.teacherName ?? classData.professorName ?? "").trim();
     const jobId = String(formData.get("jobId") ?? "").trim();

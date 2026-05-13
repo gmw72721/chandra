@@ -38,7 +38,7 @@ export async function POST(
     const contentLength = Number(request.headers.get("content-length") ?? 0);
 
     if (Number.isFinite(contentLength) && contentLength > maxStudentAttachmentFileBytes() + 1024 * 1024) {
-      return NextResponse.json({ error: "PDFs must be 25 MB or smaller." }, { status: 413 });
+      return NextResponse.json({ error: "Homework files must be 25 MB or smaller." }, { status: 413 });
     }
 
     const formData = await request.formData().catch(() => null);

@@ -318,7 +318,15 @@ export type TutorStructuredMetadata = {
 export type TutorStructuredOutput = {
   sections: TutorStructuredSections;
   sectionOrder?: TutorStructuredSectionKey[];
+  confusionPrompt?: string;
+  confusionChoices?: TutorConfusionChoice[];
   metadata: TutorStructuredMetadata;
+};
+
+export type TutorConfusionChoice = {
+  id: string;
+  label: string;
+  message: string;
 };
 
 export type TutorSource = {
@@ -326,9 +334,19 @@ export type TutorSource = {
   title: string;
   materialType: string;
   citationsRequired?: boolean;
+  pageEnd?: number;
   pageNumber?: number;
+  pageStart?: number;
+  pdfId?: string;
+  printedPageEnd?: number;
+  printedPageNumber?: number;
+  printedPageStart?: number;
   problemNumber?: string;
   problemNumbers?: string[];
+  reason?: string;
+  retrievalReason?: string;
+  sourceId?: string;
+  usedAs?: KnowledgeItemUsedAs;
 };
 
 export type KnowledgeItemKind = "problem" | "pdf_page" | "student_upload";
@@ -352,6 +370,7 @@ export type KnowledgeItem = {
   kind: KnowledgeItemKind;
   sourceName: string;
   sourceId?: string;
+  fileType?: "image" | "pdf";
   pdfId?: string;
   page?: number;
   problemId?: string;
@@ -399,6 +418,8 @@ export type StudentFeedback = {
   rating?: StudentFeedbackRating;
   comment: string;
   status: StudentFeedbackStatus;
+  studentVisibleResponse?: string;
+  studentVisibleResponseSentAt?: unknown;
   teacherNote?: string;
   createdAt: unknown;
   updatedAt: unknown;
@@ -422,6 +443,7 @@ export type TeacherConversationReview = {
   classId: string;
   teacherId: string;
   status: ConversationReviewStatus;
+  followUpDueAt?: unknown;
   privateNote: string;
   reviewedAt: unknown;
   updatedAt: unknown;
@@ -634,6 +656,7 @@ export type ChatContextMemory = {
     problemNumber?: string;
     title?: string;
     sourceName?: string;
+    sourceType?: "class_material" | "pasted_problem" | "student_upload";
     pageNumber?: number;
     sectionTitle?: string;
     ocrConfidence?: number;
@@ -644,6 +667,7 @@ export type ChatContextMemory = {
     problemNumber?: string;
     title?: string;
     sourceName?: string;
+    sourceType?: "class_material" | "pasted_problem" | "student_upload";
     pageNumber?: number;
     sectionTitle?: string;
     ocrConfidence?: number;
@@ -652,6 +676,8 @@ export type ChatContextMemory = {
   sourcesUsed?: Array<{
     id?: string;
     sourceName?: string;
+    sourceType?: "class_material" | "pasted_problem" | "student_upload";
+    fileType?: "image" | "pdf";
     pageNumber?: number;
     problemNumber?: string;
     label?: string;

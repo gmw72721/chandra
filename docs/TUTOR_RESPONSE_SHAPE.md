@@ -4,7 +4,7 @@ Student-facing tutoring replies are shaped by:
 
 - `frontend/lib/prompts.ts` for the standard tutor system prompt.
 - `frontend/app/api/chat/route.ts` for the PDF retrieval tool prompt.
-- `backend/agent/graph.py` for LangGraph routing/final-answer prompts and structured output cleanup.
+- `backend/agent/graph.py` for the primary tutor turn, context-grounded answer prompt, and structured output cleanup.
 - `frontend/lib/tutor-response.ts` for client-side structured output normalization.
 
 For substantive tutoring help, the target shape is:

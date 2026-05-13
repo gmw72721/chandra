@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { getTeacherClassProblems } from "@/lib/teacher-problems-server";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request, { params }: { params: Promise<{ classId: string }> }) {
   try {
     const { classId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "viewConversations");
 
     const problems = await getTeacherClassProblems({ classId });
 

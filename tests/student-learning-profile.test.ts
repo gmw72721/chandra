@@ -114,10 +114,10 @@ test("teacher-only learning profile routes enforce authorization", () => {
   );
   const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
 
-  assert.match(routeSource, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(routeSource, /authorizeClassAccess\(request, classId, "manageLearningProfiles"\)/);
   assert.match(routeSource, /updateOneStudentLearningProfile/);
   assert.match(routeSource, /approveStudentLearningProfile/);
   assert.match(rules, /match \/studentLearningProfiles\/\{profileId\}/);
-  assert.match(rules, /allow read: if isTargetClassTeacher\(classId\)/);
+  assert.match(rules, /allow read: if hasTargetClassAccess\(classId, "manageLearningProfiles"\)/);
   assert.match(rules, /allow write: if false/);
 });

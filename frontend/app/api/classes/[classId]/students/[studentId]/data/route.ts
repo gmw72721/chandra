@@ -9,7 +9,7 @@ import {
   softDeleteConversation
 } from "@/lib/data/conversations";
 import { adminDb, adminStorage } from "@/lib/firebase-admin";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -24,7 +24,7 @@ export async function GET(
 ) {
   try {
     const { classId, studentId } = await params;
-    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassAccess(request, classId, "exportStudentData");
     const exportData = await buildStudentClassDataExport({ classId, encodedStudentId: studentId });
     const studentEmail = "email" in exportData.student ? String(exportData.student.email ?? "") : "";
     const fileName = `${classId}-${studentEmail || studentId}-export.json`.replace(/[^a-zA-Z0-9._-]/g, "-");
@@ -56,7 +56,7 @@ export async function DELETE(
 ) {
   try {
     const { classId, studentId } = await params;
-    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassAccess(request, classId, "deleteStudentData");
     const body = (await request.json().catch(() => ({}))) as { confirm?: unknown };
 
     if (body.confirm !== "DELETE_STUDENT_CLASS_DATA") {

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { createMaterialUploadSession } from "@/lib/data/materials";
 import { tryPostgresData } from "@/lib/data/server";
-import { TutorKnowledgeHttpError, authorizeClassTeacher } from "@/lib/tutor-knowledge-server";
+import { TutorKnowledgeHttpError, authorizeClassAccess } from "@/lib/tutor-knowledge-server";
 import { adminDb } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -21,7 +21,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid tutor knowledge material id." }, { status: 400 });
     }
 
-    const { uid } = await authorizeClassTeacher(request, classId);
+    const { uid } = await authorizeClassAccess(request, classId, "manageMaterials");
     const expiresAt = Timestamp.fromMillis(Date.now() + 30 * 60 * 1000);
     await tryPostgresData("material.upload_session.write", () =>
       createMaterialUploadSession({

@@ -1,5 +1,5 @@
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
-import { normalizeTutorAccessSettings } from "./class-settings";
+import { normalizeClassAccessPermissions, normalizeClassAccessRole, normalizeTutorAccessSettings } from "./class-settings";
 import { resolveStudentChatClassId, StudentChatScopeError } from "./student-chat-scope";
 
 export type AuthorizedTutorChatScope = {
@@ -124,8 +124,11 @@ async function getClassProfessorScope(classId: string) {
     allowedTeacherIds.add(professorId);
   }
 
-  for (const [uid, role] of Object.entries(readCoTeacherRoles(classData.coTeachers))) {
-    if (role === "owner" || role === "co-teacher") {
+  for (const [uid, staff] of Object.entries(readCoTeacherAccess(classData.coTeachers))) {
+    const role = normalizeClassAccessRole(staff.role);
+    const permissions = normalizeClassAccessPermissions(staff.permissions ?? staff, role);
+
+    if (role === "owner" || role === "co-teacher" || (role === "ta" && permissions.teacherPreviewChat)) {
       allowedTeacherIds.add(uid);
     }
   }
@@ -196,7 +199,7 @@ async function assertStudentChatAccess({
   }
 }
 
-function readCoTeacherRoles(coTeachers: unknown): Record<string, string> {
+function readCoTeacherAccess(coTeachers: unknown): Record<string, Record<string, unknown>> {
   if (!coTeachers || typeof coTeachers !== "object" || Array.isArray(coTeachers)) {
     return {};
   }
@@ -207,9 +210,10 @@ function readCoTeacherRoles(coTeachers: unknown): Record<string, string> {
         return [];
       }
 
-      const role = (coTeacher as Record<string, unknown>).role;
+      const staff = coTeacher as Record<string, unknown>;
+      const role = staff.role;
 
-      return typeof role === "string" ? [[uid, role]] : [];
+      return typeof role === "string" ? [[uid, staff]] : [];
     })
   );
 }

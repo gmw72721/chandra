@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import {
   TutorKnowledgeHttpError,
   assertTutorKnowledgeTextWithinLimit,
-  authorizeClassTeacher,
+  authorizeClassAccess,
   validateTutorKnowledgeFile
 } from "@/lib/tutor-knowledge-server";
 
@@ -18,7 +18,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Choose a class before extracting material text." }, { status: 400 });
     }
 
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "manageMaterials");
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Upload a material file." }, { status: 400 });

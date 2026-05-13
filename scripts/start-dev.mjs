@@ -67,7 +67,6 @@ function stopPreviousStack() {
 
   if (stoppedKnownProcess) {
     sleepSync(120);
-    return;
   }
 
   stopExistingListeners();
@@ -206,6 +205,8 @@ function isPortListening(port) {
 }
 
 function stopExistingListeners() {
+  let stoppedListener = false;
+
   for (const port of ports) {
     const result = spawnSync("lsof", [`-tiTCP:${port}`, "-sTCP:LISTEN"], {
       encoding: "utf8"
@@ -217,7 +218,12 @@ function stopExistingListeners() {
 
     for (const pid of pids) {
       stopProcess(Number(pid), ` on port ${port}`);
+      stoppedListener = true;
     }
+  }
+
+  if (stoppedListener) {
+    waitForPortsToClose();
   }
 }
 
@@ -228,6 +234,39 @@ function stopProcess(pid, context = "") {
   } catch {
     // The process may already be gone.
   }
+}
+
+function waitForPortsToClose() {
+  const deadline = Date.now() + 3000;
+
+  while (Date.now() < deadline) {
+    if (ports.every((port) => !isPortListening(port))) {
+      return;
+    }
+
+    sleepSync(100);
+  }
+
+  for (const port of ports) {
+    const result = spawnSync("lsof", [`-tiTCP:${port}`, "-sTCP:LISTEN"], {
+      encoding: "utf8"
+    });
+    const pids = result.stdout
+      .split(/\s+/)
+      .map((pid) => pid.trim())
+      .filter(Boolean);
+
+    for (const pid of pids) {
+      try {
+        process.kill(Number(pid), "SIGKILL");
+        console.log(`[dev] force-stopped existing process ${pid} on port ${port}`);
+      } catch {
+        // The process may already be gone.
+      }
+    }
+  }
+
+  sleepSync(120);
 }
 
 function start(name, command, args) {

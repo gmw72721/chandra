@@ -98,6 +98,7 @@ type RequestQuotaSpec = {
   id: string;
   limit: number;
   modelId: string;
+  period: "day" | "week";
   provider: string;
   reference: DocumentReference;
   role: "student" | "teacher";
@@ -300,6 +301,7 @@ export async function reserveAiTokenUsage({
           estimatedTotalTokens: FieldValue.increment(cleanEstimate),
           limitRequests: bucket.limit,
           modelId: bucket.modelId,
+          period: bucket.period,
           provider: bucket.provider,
           requestCount: FieldValue.increment(1),
           role: bucket.role,
@@ -984,6 +986,7 @@ function requestQuotaBucketSpecs({
   userId: string;
 }): RequestQuotaSpec[] {
   const dayBucket = dayBucketKey(now);
+  const weekBucket = weekBucketKey(now);
   const classHash = stableHash(classId);
   const specs: RequestQuotaSpec[] = [
     requestQuotaBucketSpec({
@@ -991,6 +994,7 @@ function requestQuotaBucketSpecs({
       dayBucket,
       limit: requestLimits.perClassDaily,
       modelId,
+      period: "day",
       provider,
       role,
       scope: "class",
@@ -1006,6 +1010,19 @@ function requestQuotaBucketSpecs({
         dayBucket,
         limit: requestLimits.perStudentDaily,
         modelId,
+        period: "day",
+        provider,
+        role,
+        scope: "student",
+        scopeHash: stableHash(`${classId}:${userId}`),
+        userId
+      }),
+      requestQuotaBucketSpec({
+        classId,
+        dayBucket: weekBucket,
+        limit: requestLimits.perStudentWeekly,
+        modelId,
+        period: "week",
         provider,
         role,
         scope: "student",
@@ -1020,6 +1037,7 @@ function requestQuotaBucketSpecs({
         dayBucket,
         limit: requestLimits.teacherPreviewDaily,
         modelId,
+        period: "day",
         provider,
         role,
         scope: "teacherPreview",
@@ -1037,13 +1055,14 @@ function requestQuotaBucketSpec({
   dayBucket,
   limit,
   modelId,
+  period,
   provider,
   role,
   scope,
   scopeHash,
   userId
 }: Omit<RequestQuotaSpec, "id" | "reference">): RequestQuotaSpec {
-  const documentId = `${scope}_${scopeHash}_day_${dayBucket}`;
+  const documentId = `${scope}_${scopeHash}_${period}_${dayBucket}`;
 
   return {
     classId,
@@ -1051,6 +1070,7 @@ function requestQuotaBucketSpec({
     id: documentId,
     limit,
     modelId,
+    period,
     provider,
     reference: adminDb!.collection("aiUsageRequestBuckets").doc(documentId),
     role,

@@ -13,12 +13,16 @@ import {
 } from "./data/conversations";
 
 const maxDocumentIdLength = 200;
-const maxPdfFileBytes = 25 * 1024 * 1024;
+const maxAttachmentFileBytes = 25 * 1024 * 1024;
 const maxExtractedAttachmentTextCharacters = 12000;
 const maxAttachmentsPerMessage = 3;
 
 const allowedAttachmentTypes = new Map([
-  [".pdf", { fileType: "pdf" as const, mimeType: "application/pdf", maxBytes: maxPdfFileBytes }]
+  [".pdf", { fileType: "pdf" as const, mimeType: "application/pdf", maxBytes: maxAttachmentFileBytes }],
+  [".png", { fileType: "image" as const, mimeType: "image/png", maxBytes: maxAttachmentFileBytes }],
+  [".jpg", { fileType: "image" as const, mimeType: "image/jpeg", maxBytes: maxAttachmentFileBytes }],
+  [".jpeg", { fileType: "image" as const, mimeType: "image/jpeg", maxBytes: maxAttachmentFileBytes }],
+  [".webp", { fileType: "image" as const, mimeType: "image/webp", maxBytes: maxAttachmentFileBytes }]
 ]);
 
 type AllowedAttachmentType = (typeof allowedAttachmentTypes extends Map<string, infer Value> ? Value : never);
@@ -37,7 +41,7 @@ export function maxStudentAttachmentsPerMessage() {
 }
 
 export function maxStudentAttachmentFileBytes() {
-  return maxPdfFileBytes;
+  return maxAttachmentFileBytes;
 }
 
 export async function uploadStudentConversationAttachment({
@@ -156,6 +160,39 @@ export async function getStudentConversationAttachment({
 
   const attachment = await readStudentAttachment({ attachmentId, conversationId, scope });
   return attachment;
+}
+
+export async function downloadStudentConversationAttachment({
+  attachmentId,
+  conversationId,
+  scope
+}: {
+  attachmentId: string;
+  conversationId: string;
+  scope: AuthorizedTutorChatScope;
+}) {
+  const attachment = await getStudentConversationAttachment({ attachmentId, conversationId, scope });
+
+  if (attachment.uploadStatus !== "ready") {
+    throw new StudentAttachmentError("Attachment is not ready to open yet.", 409);
+  }
+
+  try {
+    const [buffer] = await adminStorage!.bucket().file(attachment.storageKey).download();
+
+    return {
+      attachment,
+      buffer,
+      contentType: attachment.mimeType || defaultAttachmentMimeType(attachment.fileType)
+    };
+  } catch (caughtError) {
+    console.error("Student attachment download failed.", {
+      attachmentId,
+      caughtError,
+      conversationId
+    });
+    throw new StudentAttachmentError("Attachment could not be opened.", 502);
+  }
 }
 
 export async function deleteStudentConversationAttachment({
@@ -331,12 +368,16 @@ function attachmentRecordToMessageAttachment(record: Awaited<ReturnType<typeof g
   };
 }
 
+function defaultAttachmentMimeType(fileType: MessageAttachment["fileType"]) {
+  return fileType === "pdf" ? "application/pdf" : "image/jpeg";
+}
+
 function validateAttachmentMetadata(file: File): AllowedAttachmentType {
   const extension = fileExtension(file.name);
   const allowedType = allowedAttachmentTypes.get(extension);
 
   if (!allowedType) {
-    throw new StudentAttachmentError("Only text-readable PDF homework files are supported.", 400);
+    throw new StudentAttachmentError("Upload a PDF, PNG, JPG, JPEG, or WEBP homework file.", 400);
   }
 
   if (file.size <= 0) {
@@ -345,12 +386,12 @@ function validateAttachmentMetadata(file: File): AllowedAttachmentType {
 
   if (file.size > allowedType.maxBytes) {
     throw new StudentAttachmentError(
-      `PDFs must be ${Math.floor(allowedType.maxBytes / 1024 / 1024)} MB or smaller.`,
+      `Homework files must be ${Math.floor(allowedType.maxBytes / 1024 / 1024)} MB or smaller.`,
       413
     );
   }
 
-  const providedMimeType = file.type.trim().toLowerCase();
+  const providedMimeType = normalizeAttachmentMimeType(file.type);
 
   if (providedMimeType && providedMimeType !== allowedType.mimeType) {
     throw new StudentAttachmentError("The uploaded file type is not supported.", 400);
@@ -393,19 +434,12 @@ async function extractAttachmentText({
   fileType: "image" | "pdf";
 }) {
   if (fileType !== "pdf") {
-    throw new StudentAttachmentError("Only text-readable PDF homework files are supported.", 400);
+    return null;
   }
 
-  const text = await extractPdfText(buffer);
+  const text = await extractPdfText(buffer).catch(() => "");
 
-  if (!text) {
-    throw new StudentAttachmentError(
-      "That PDF does not contain readable text. Export or upload a text-selectable PDF before sending it to Chandra.",
-      400
-    );
-  }
-
-  return text.slice(0, maxExtractedAttachmentTextCharacters);
+  return text ? text.slice(0, maxExtractedAttachmentTextCharacters) : null;
 }
 
 async function extractPdfText(buffer: Buffer) {
@@ -435,6 +469,18 @@ function matchesMagicBytes(buffer: Buffer, mimeType: string) {
     return buffer.length >= 5 && buffer.subarray(0, 5).toString("ascii") === "%PDF-";
   }
 
+  if (mimeType === "image/png") {
+    return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+
+  if (mimeType === "image/jpeg") {
+    return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  }
+
+  if (mimeType === "image/webp") {
+    return buffer.length >= 12 && buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP";
+  }
+
   return false;
 }
 
@@ -454,6 +500,20 @@ function sanitizeFileName(fileName: string) {
 function fileExtension(fileName: string) {
   const match = fileName.toLowerCase().match(/\.[a-z0-9]+$/);
   return match?.[0] ?? "";
+}
+
+function normalizeAttachmentMimeType(value: string) {
+  const normalized = value.trim().toLowerCase();
+
+  if (normalized === "image/jpg" || normalized === "image/pjpeg") {
+    return "image/jpeg";
+  }
+
+  if (normalized === "application/x-pdf") {
+    return "application/pdf";
+  }
+
+  return normalized;
 }
 
 function assertSafeDocumentId(value: string, label: string) {

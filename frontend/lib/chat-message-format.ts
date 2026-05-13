@@ -128,18 +128,34 @@ export function condensedSourceLabels(sources: NonNullable<ChatMessage["sources"
   const groupedSources = new Map<string, { pages: Set<number>; source: MessageSource }>();
 
   for (const source of sources) {
-    const key = [source.title, source.materialType, source.problemNumber ?? ""].join("|");
+    const key = [
+      source.title,
+      source.materialType,
+      source.problemNumber ?? "",
+      source.printedPageStart ?? source.printedPageNumber ?? "",
+      source.pageStart ?? ""
+    ].join("|");
     const existing = groupedSources.get(key) ?? { pages: new Set<number>(), source };
 
-    if (source.pageNumber) {
-      existing.pages.add(source.pageNumber);
+    const groupingPage = source.printedPageStart ?? source.printedPageNumber ?? source.pageNumber;
+    if (groupingPage) {
+      existing.pages.add(groupingPage);
     }
 
     groupedSources.set(key, existing);
   }
 
   const labels = Array.from(groupedSources.values()).map(
-    ({ pages, source }) => formatSourceLabel({ ...source, pageNumber: undefined }) + formatPageRange(Array.from(pages))
+    ({ pages, source }) =>
+      formatSourceLabel({
+        ...source,
+        pageEnd: undefined,
+        pageNumber: undefined,
+        pageStart: undefined,
+        printedPageEnd: undefined,
+        printedPageNumber: undefined,
+        printedPageStart: undefined
+      }) + formatPageRange(Array.from(pages), source)
   );
   const visibleLabels = labels.slice(0, 3);
 
@@ -262,11 +278,24 @@ function formatSourceLabel(source: MessageSource) {
   return [
     source.title,
     source.problemNumber ? `problem ${source.problemNumber}` : "",
-    source.pageNumber ? `p. ${source.pageNumber}` : ""
+    formatSourcePageLabel(source)
   ].filter(Boolean).join(" · ");
 }
 
-function formatPageRange(pages: number[]) {
+function formatSourcePageLabel(source: MessageSource) {
+  const printedPage = source.printedPageStart ?? source.printedPageNumber;
+  const printedEnd = source.printedPageEnd ?? printedPage;
+  const pdfPage = source.pageStart ?? source.pageNumber;
+
+  if (printedPage) {
+    const printedLabel = printedPage === printedEnd ? `printed p. ${printedPage}` : `printed pp. ${printedPage}-${printedEnd}`;
+    return pdfPage && pdfPage !== printedPage ? `${printedLabel} / PDF p. ${pdfPage}` : printedLabel;
+  }
+
+  return pdfPage ? `p. ${pdfPage}` : "";
+}
+
+function formatPageRange(pages: number[], source?: MessageSource) {
   const sortedPages = [...new Set(pages)].sort((first, second) => first - second);
 
   if (!sortedPages.length) {
@@ -290,5 +319,7 @@ function formatPageRange(pages: number[]) {
 
   ranges.push(rangeStart === previousPage ? `${rangeStart}` : `${rangeStart}-${previousPage}`);
 
-  return ` · ${ranges.length === 1 && !ranges[0].includes("-") ? "p." : "pp."} ${ranges.join(", ")}`;
+  const isPrinted = Boolean(source?.printedPageStart ?? source?.printedPageNumber);
+  const prefix = ranges.length === 1 && !ranges[0].includes("-") ? "p." : "pp.";
+  return ` · ${isPrinted ? "printed " : ""}${prefix} ${ranges.join(", ")}`;
 }

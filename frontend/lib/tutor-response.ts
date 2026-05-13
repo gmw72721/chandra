@@ -1,4 +1,4 @@
-import type { RetrievalConfidence, TutorApiResponse, TutorStructuredOutput } from "./types";
+import type { RetrievalConfidence, TutorApiResponse, TutorConfusionChoice, TutorStructuredOutput } from "./types";
 
 export const tutorHintLevels = ["none", "small_hint", "guided_step", "worked_example", "refusal"] as const;
 export const tutorStudentActions = [
@@ -97,10 +97,19 @@ export function normalizeStructuredTutorOutput(
   const sectionOrder = normalizeSectionOrder(record.sectionOrder ?? sectionsRecord.sectionOrder).filter(
     (key) => key in dedupedSections
   );
+  const confusionPrompt = stringValue(record.confusionPrompt ?? record.confusion_prompt).slice(0, 240);
+  const confusionChoices = normalizeConfusionChoices(record.confusionChoices ?? record.confusion_choices);
+  const finalSections =
+    confusionPrompt && confusionChoices
+      ? { answer: preferredConfusionChoicePrompt(dedupedSections.answer, confusionPrompt) }
+      : dedupedSections;
+  const finalSectionOrder = confusionChoices ? [] : sectionOrder;
 
   return {
-    sections: dedupedSections,
-    ...(sectionOrder.length ? { sectionOrder } : {}),
+    sections: finalSections,
+    ...(finalSectionOrder.length ? { sectionOrder: finalSectionOrder } : {}),
+    ...(confusionPrompt ? { confusionPrompt } : {}),
+    ...(confusionChoices ? { confusionChoices } : {}),
     metadata: {
       hintLevel: includesString(tutorHintLevels, metadataRecord.hintLevel) ? metadataRecord.hintLevel : "guided_step",
       ...optionalProblemMetadata(metadataRecord),
@@ -111,6 +120,37 @@ export function normalizeStructuredTutorOutput(
       mode
     }
   };
+}
+
+function preferredConfusionChoicePrompt(answer: string | undefined, confusionPrompt: string): string {
+  if (answer && /\b(?:not sure|unclear|unsure|pick one|choose one)\b/i.test(answer)) {
+    return answer;
+  }
+  return confusionPrompt;
+}
+
+function normalizeConfusionChoices(value: unknown): TutorConfusionChoice[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const choices: TutorConfusionChoice[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+
+    const label = stringValue(item.label).slice(0, 80);
+    const message = stringValue(item.message ?? item.value ?? item.content).slice(0, 240);
+    if (!label || !message) {
+      continue;
+    }
+
+    const id = stringValue(item.id).slice(0, 80) || `choice-${choices.length + 1}`;
+    choices.push({ id, label, message });
+  }
+
+  return choices.length >= 2 && choices.length <= 6 ? choices : undefined;
 }
 
 function splitProblemSectionFollowup(problem: string) {

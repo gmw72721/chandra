@@ -1,3 +1,8 @@
+import {
+  normalizeClassAccessPermissions,
+  normalizeClassAccessRole,
+  type ClassAccessPermissions
+} from "../class-settings.ts";
 import { runPostgresQuery, type PostgresQueryClient } from "./postgres.ts";
 
 export type ClassRecord = {
@@ -40,7 +45,8 @@ export type ClassEnrollmentRecord = {
 export type CoTeacherRecord = {
   displayName: string;
   email: string;
-  role: "co-teacher" | "viewer";
+  permissions: ClassAccessPermissions;
+  role: "co-teacher" | "viewer" | "ta";
   uid: string;
 };
 
@@ -416,6 +422,7 @@ export async function upsertCoTeacher({
   displayName,
   email,
   invitedBy,
+  permissions,
   role,
   teacherId
 }: {
@@ -423,9 +430,11 @@ export async function upsertCoTeacher({
   displayName: string;
   email: string;
   invitedBy?: string;
-  role: "co-teacher" | "viewer";
+  permissions?: Partial<ClassAccessPermissions>;
+  role: "co-teacher" | "viewer" | "ta";
   teacherId: string;
 }, client?: PostgresQueryClient) {
+  const normalizedPermissions = normalizeClassAccessPermissions(permissions, role);
   const result = await runPostgresQuery<CoTeacherRow>(
     client,
     `INSERT INTO co_teachers (
@@ -440,7 +449,14 @@ export async function upsertCoTeacher({
       permissions = EXCLUDED.permissions,
       removed_at = NULL
     RETURNING *`,
-    [classId, teacherId, email.trim().toLowerCase(), displayName.trim(), invitedBy ?? null, JSON.stringify({ role })]
+    [
+      classId,
+      teacherId,
+      email.trim().toLowerCase(),
+      displayName.trim(),
+      invitedBy ?? null,
+      JSON.stringify({ ...normalizedPermissions, role })
+    ]
   );
 
   return rowToCoTeacher(result.rows[0]);
@@ -467,20 +483,23 @@ export async function updateCoTeacherProfile({
 
 export async function updateCoTeacherRole({
   classId,
+  permissions,
   role,
   teacherId
 }: {
   classId: string;
-  role: "co-teacher" | "viewer";
+  permissions?: Partial<ClassAccessPermissions>;
+  role: "co-teacher" | "viewer" | "ta";
   teacherId: string;
 }, client?: PostgresQueryClient) {
+  const normalizedPermissions = normalizeClassAccessPermissions(permissions, role);
   const result = await runPostgresQuery<CoTeacherRow>(
     client,
     `UPDATE co_teachers
     SET permissions = permissions || $3::jsonb
     WHERE class_id = $1 AND teacher_id = $2 AND status = 'active'
     RETURNING *`,
-    [classId, teacherId, JSON.stringify({ role })]
+    [classId, teacherId, JSON.stringify({ ...normalizedPermissions, role })]
   );
 
   return result.rows[0] ? rowToCoTeacher(result.rows[0]) : null;
@@ -552,12 +571,15 @@ function rowToEnrollment(row: ClassEnrollmentRow): ClassEnrollmentRecord {
 }
 
 function rowToCoTeacher(row: CoTeacherRow): CoTeacherRecord {
-  const role = row.permissions.role === "viewer" ? "viewer" : "co-teacher";
+  const role = normalizeClassAccessRole(row.permissions.role);
+  const assignableRole = role === "viewer" || role === "ta" ? role : "co-teacher";
+  const permissions = normalizeClassAccessPermissions(row.permissions, assignableRole);
 
   return {
     displayName: row.display_name,
     email: row.email,
-    role,
+    permissions,
+    role: assignableRole,
     uid: row.teacher_id
   };
 }

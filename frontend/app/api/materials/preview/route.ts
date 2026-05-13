@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   TutorKnowledgeHttpError,
-  authorizeClassTeacher,
+  authorizeClassAccess,
   buildTutorKnowledgePreview
 } from "@/lib/tutor-knowledge-server";
 
@@ -16,7 +16,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Choose a class before previewing tutor knowledge." }, { status: 400 });
     }
 
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "manageMaterials");
     const preview = await buildTutorKnowledgePreview(formData);
 
     return NextResponse.json(preview);

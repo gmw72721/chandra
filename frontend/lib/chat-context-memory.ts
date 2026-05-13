@@ -119,12 +119,14 @@ function contextProblemFromMessage(message: ChatMessage) {
   const primaryMetadata = metadataRecords[0];
   const primarySource = message.sources?.[0];
   const primaryPage = trace?.selectedPages?.[0];
+  const activeKnowledgeProblem = activeProblemKnowledgeItem(trace?.knowledgeItems);
   const activeProblemNumbers = trace?.activeProblemNumbers ?? stringArrayFromRecord(retrievalDecision.active_problem_numbers);
   const rawActiveProblemNumber =
     stringFromRecord(retrievalDecision.active_problem_id) ||
     stringFromRecord(primaryMetadata?.problem_number) ||
     stringFromRecord(primaryMetadata?.problemNumber) ||
     primarySource?.problemNumber ||
+    activeKnowledgeProblem?.problemNumber ||
     activeProblemNumbers[0];
   const activePageNumber =
     numberFromRecord(trace?.activePage) ??
@@ -134,25 +136,29 @@ function contextProblemFromMessage(message: ChatMessage) {
     numberFromRecord(primaryMetadata?.pageStart) ??
     numberFromRecord(primaryPage?.printedPageStart) ??
     numberFromRecord(primaryPage?.pageStart);
-  const sourceName = primarySource?.title || stringFromRecord(primaryMetadata?.title) || primaryPage?.title;
+  const sourceName = primarySource?.title || stringFromRecord(primaryMetadata?.title) || primaryPage?.title || activeKnowledgeProblem?.sourceName;
   const pageOcrText = stringFromRecord(primaryMetadata?.ocr_text) || stringFromRecord(primaryMetadata?.ocrText);
   const structuredProblemText = normalizeContextProblemText(stringFromRecord(message.structuredOutput?.sections?.problem));
   const metadataProblemText =
     normalizeContextProblemText(stringFromRecord(primaryMetadata?.problem_text)) ||
     normalizeContextProblemText(stringFromRecord(primaryMetadata?.problemText));
+  const knowledgeProblemText = normalizeContextProblemText(activeKnowledgeProblem?.problemText);
   const activeProblemNumber =
     rawActiveProblemNumber ||
     extractProblemNumberFromContextText(structuredProblemText) ||
-    extractProblemNumberFromContextText(metadataProblemText);
+    extractProblemNumberFromContextText(metadataProblemText) ||
+    extractProblemNumberFromContextText(knowledgeProblemText);
   const problemText =
     structuredProblemText ||
     metadataProblemText ||
+    knowledgeProblemText ||
     extractProblemTextFromPageOcr(pageOcrText, activeProblemNumber);
   const problem: NonNullable<ChatContextMemory["currentProblem"]> | undefined = activeProblemNumber || problemText
     ? {
         label: activeProblemNumber ? `Problem ${activeProblemNumber}` : sourceName,
         problemNumber: activeProblemNumber,
         sourceName,
+        sourceType: activeKnowledgeProblem?.sourceType,
         pageNumber: activePageNumber,
         sectionTitle:
           stringFromRecord(primaryMetadata?.section_title) ||
@@ -174,11 +180,12 @@ function contextSourcesFromTutorSources(message: ChatMessage): NonNullable<ChatC
   return (message.sources ?? []).map((source) => ({
     id: source.id,
     sourceName: source.title,
-    pageNumber: source.pageNumber,
+    sourceType: "class_material",
+    pageNumber: source.printedPageStart ?? source.printedPageNumber ?? source.pageNumber,
     problemNumber: source.problemNumber,
     label: formatContextSource({
       sourceName: source.title,
-      pageNumber: source.pageNumber,
+      pageNumber: source.printedPageStart ?? source.printedPageNumber ?? source.pageNumber,
       problemNumber: source.problemNumber
     })
   }));
@@ -186,18 +193,67 @@ function contextSourcesFromTutorSources(message: ChatMessage): NonNullable<ChatC
 
 function contextSourcesFromKnowledgeItems(message: ChatMessage): NonNullable<ChatContextMemory["sourcesUsed"]> {
   return (message.langGraphTrace?.knowledgeItems ?? [])
-    .filter((item) => item.kind === "pdf_page")
+    .filter((item) => item.kind === "pdf_page" || item.kind === "student_upload" || item.kind === "problem")
     .map((item) => ({
       id: item.sourceId || item.pdfId || item.id,
       sourceName: item.sourceName,
+      sourceType: knowledgeItemContextSourceType(item),
+      ...(knowledgeItemFileType(item) ? { fileType: knowledgeItemFileType(item) } : {}),
       pageNumber: item.page,
       problemNumber: item.usedAs === "problem_source" ? item.problemId : undefined,
       label: formatContextSource({
         sourceName: item.sourceName,
+        sourceType: knowledgeItemContextSourceType(item),
         pageNumber: item.page,
         problemNumber: item.usedAs === "problem_source" ? item.problemId : undefined
       })
     }));
+}
+
+function knowledgeItemContextSourceType(item: NonNullable<NonNullable<ChatMessage["langGraphTrace"]>["knowledgeItems"]>[number]) {
+  if (item.kind === "student_upload") {
+    return "student_upload" as const;
+  }
+
+  if (item.kind === "problem" && item.usedAs === "active_problem" && item.sourceName === "Pasted problem") {
+    return "pasted_problem" as const;
+  }
+
+  return "class_material" as const;
+}
+
+function knowledgeItemFileType(item: NonNullable<NonNullable<ChatMessage["langGraphTrace"]>["knowledgeItems"]>[number]) {
+  if (item.fileType === "image" || item.fileType === "pdf") {
+    return item.fileType;
+  }
+
+  const sourceText = [item.sourceName, item.summary].filter(Boolean).join(" ").toLowerCase();
+  if (/\.(?:png|jpe?g|webp)(?:\b|$)/.test(sourceText) || /\bstudent uploaded image\b/.test(sourceText)) {
+    return "image" as const;
+  }
+  if (/\.pdf(?:\b|$)/.test(sourceText)) {
+    return "pdf" as const;
+  }
+
+  return undefined;
+}
+
+function activeProblemKnowledgeItem(items: NonNullable<ChatMessage["langGraphTrace"]>["knowledgeItems"] | undefined) {
+  if (!Array.isArray(items)) {
+    return undefined;
+  }
+
+  const item = items.find((knowledgeItem) => knowledgeItem.kind === "problem" && knowledgeItem.usedAs === "active_problem");
+  if (!item) {
+    return undefined;
+  }
+
+  return {
+    problemNumber: extractProblemNumberFromContextText(item.content) || (looksLikeHumanProblemId(item.problemId) ? item.problemId : undefined),
+    problemText: item.content,
+    sourceName: item.sourceName || "Pasted problem",
+    sourceType: item.sourceName === "Pasted problem" ? "pasted_problem" as const : "class_material" as const
+  };
 }
 
 function compactContextMemory(contextMemory: ChatContextMemory): ChatContextMemory {
@@ -247,6 +303,7 @@ function normalizeContextProblem(value: unknown): NonNullable<ChatContextMemory[
     problemNumber: stringFromRecord(value.problemNumber),
     title: stringFromRecord(value.title),
     sourceName: stringFromRecord(value.sourceName),
+    sourceType: normalizeContextSourceType(value.sourceType),
     pageNumber: numberFromRecord(value.pageNumber),
     sectionTitle: stringFromRecord(value.sectionTitle),
     ocrConfidence: numberFromRecord(value.ocrConfidence),
@@ -267,6 +324,8 @@ function normalizeContextSources(value: unknown): NonNullable<ChatContextMemory[
       .map((source) => ({
         id: stringFromRecord(source.id),
         sourceName: stringFromRecord(source.sourceName),
+        sourceType: normalizeContextSourceType(source.sourceType),
+        fileType: normalizeContextFileType(source.fileType),
         pageNumber: numberFromRecord(source.pageNumber),
         problemNumber: stringFromRecord(source.problemNumber),
         label: stringFromRecord(source.label)
@@ -340,15 +399,9 @@ function dedupeContextProblems(problems: NonNullable<ChatContextMemory["savedPro
   const deduped: NonNullable<ChatContextMemory["savedProblems"]> = [];
 
   for (const problem of problems) {
-    const normalizedProblemText = normalizeComparableProblemText(problem.problemText);
-    const key = [
-      problem.sourceName?.toLowerCase() ?? "",
-      problem.problemNumber?.toLowerCase() ?? "",
-      problem.pageNumber ?? "",
-      normalizedProblemText || problem.label?.toLowerCase() || ""
-    ].join("|");
+    const key = contextProblemDedupeKey(problem);
 
-    if (seen.has(key) || (!problem.sourceName && !problem.pageNumber && !problem.problemNumber && !problem.label)) {
+    if (!key || seen.has(key)) {
       continue;
     }
 
@@ -357,6 +410,32 @@ function dedupeContextProblems(problems: NonNullable<ChatContextMemory["savedPro
   }
 
   return deduped.slice(0, 8);
+}
+
+function contextProblemDedupeKey(problem: NonNullable<ChatContextMemory["savedProblems"]>[number]) {
+  const sourceName = normalizeComparableProblemIdentity(problem.sourceName);
+  const problemNumber = normalizeComparableProblemIdentity(problem.problemNumber);
+  const pageNumber = problem.pageNumber ?? "";
+  const label = normalizeComparableProblemIdentity(problem.label);
+  const text = normalizeComparableProblemText(problem.problemText);
+
+  if (!sourceName && !pageNumber && !problemNumber && !label && !text) {
+    return "";
+  }
+
+  if (sourceName && (problemNumber || pageNumber)) {
+    return ["source-problem", sourceName, problemNumber, pageNumber].join("|");
+  }
+
+  if (problemNumber && text) {
+    return ["number-text", problemNumber, text].join("|");
+  }
+
+  return ["fallback", sourceName, problemNumber, pageNumber, text || label].join("|");
+}
+
+function normalizeComparableProblemIdentity(value?: string) {
+  return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function normalizeComparableProblemText(text?: string) {
@@ -371,11 +450,11 @@ function dedupeContextSources(sources: NonNullable<ChatContextMemory["sourcesUse
   const deduped: NonNullable<ChatContextMemory["sourcesUsed"]> = [];
 
   for (const source of sources) {
-    const sourceIdentity = source.sourceName?.toLowerCase() || source.id || "";
+    const sourceIdentity = [source.sourceType ?? "", source.sourceName?.toLowerCase() || source.id || ""].join(":");
     const pageOrProblem = source.pageNumber ?? (source.problemNumber ? `problem:${source.problemNumber.toLowerCase()}` : "");
     const key = [sourceIdentity, pageOrProblem].join("|");
     const existingIndex = deduped.findIndex((dedupedSource) => {
-      const dedupedIdentity = dedupedSource.sourceName?.toLowerCase() || dedupedSource.id || "";
+      const dedupedIdentity = [dedupedSource.sourceType ?? "", dedupedSource.sourceName?.toLowerCase() || dedupedSource.id || ""].join(":");
       const dedupedPageOrProblem =
         dedupedSource.pageNumber ??
         (dedupedSource.problemNumber ? `problem:${dedupedSource.problemNumber.toLowerCase()}` : "");
@@ -392,10 +471,13 @@ function dedupeContextSources(sources: NonNullable<ChatContextMemory["sourcesUse
       deduped[existingIndex] = {
         id: existing.id || source.id,
         sourceName: existing.sourceName || source.sourceName,
+        sourceType: existing.sourceType || source.sourceType,
+        fileType: existing.fileType || source.fileType,
         pageNumber: existing.pageNumber ?? source.pageNumber,
         problemNumber: existing.problemNumber || source.problemNumber,
         label: formatContextSource({
           sourceName: existing.sourceName || source.sourceName,
+          sourceType: existing.sourceType || source.sourceType,
           pageNumber: existing.pageNumber ?? source.pageNumber,
           problemNumber: existing.problemNumber || source.problemNumber
         })
@@ -410,13 +492,32 @@ function dedupeContextSources(sources: NonNullable<ChatContextMemory["sourcesUse
 }
 
 function formatContextSource(source: NonNullable<ChatContextMemory["sourcesUsed"]>[number]) {
+  if (source.sourceType === "student_upload") {
+    return ["Student upload", source.sourceName].filter(Boolean).join(" · ");
+  }
+
+  if (source.sourceType === "pasted_problem") {
+    return "Pasted problem";
+  }
+
   return [
-    source.sourceName,
     formatPageNumber(source.pageNumber),
     source.problemNumber ? `Problem ${source.problemNumber}` : undefined
   ]
     .filter(Boolean)
-    .join(" · ");
+    .join(" · ") || source.sourceName || "Class material";
+}
+
+function looksLikeHumanProblemId(value?: string) {
+  return Boolean(value && /^(?:\d{1,3}(?:\.\d{1,3})?[a-z]?|[A-Z]\d{1,3})$/i.test(value));
+}
+
+function normalizeContextSourceType(value: unknown): NonNullable<NonNullable<ChatContextMemory["sourcesUsed"]>[number]["sourceType"]> | undefined {
+  return value === "class_material" || value === "pasted_problem" || value === "student_upload" ? value : undefined;
+}
+
+function normalizeContextFileType(value: unknown): "image" | "pdf" | undefined {
+  return value === "image" || value === "pdf" ? value : undefined;
 }
 
 function formatPageNumber(pageNumber?: number) {

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
 import {
   TutorKnowledgeHttpError,
-  authorizeClassTeacher,
+  authorizeClassAccess,
   deleteTutorKnowledge,
   getTutorKnowledgeDetails,
   updateTutorKnowledgeSettings,
@@ -23,7 +23,7 @@ export async function GET(
       return NextResponse.json({ error: "Choose a class before viewing tutor knowledge." }, { status: 400 });
     }
 
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "viewMaterials");
     const details = await getTutorKnowledgeDetails({ classId, materialId });
 
     return NextResponse.json(details);
@@ -45,7 +45,7 @@ export async function PATCH(
       return NextResponse.json({ error: "Choose a class before updating tutor knowledge." }, { status: 400 });
     }
 
-    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassAccess(request, classId, "manageMaterials");
     const material = await updateTutorKnowledgeSettings({
       classId,
       materialId,
@@ -91,7 +91,7 @@ export async function DELETE(
       return NextResponse.json({ error: "Choose a class before deleting tutor knowledge." }, { status: 400 });
     }
 
-    const { email: actorEmail, uid } = await authorizeClassTeacher(request, classId);
+    const { email: actorEmail, uid } = await authorizeClassAccess(request, classId, "manageMaterials");
     await deleteTutorKnowledge({ classId, materialId });
 
     await writeAuditLog({

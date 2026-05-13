@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ChangeEvent, DragEvent, FormEvent, KeyboardEvent, Suspense, memo, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FocusEvent, FormEvent, KeyboardEvent, Suspense, memo, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
@@ -22,7 +22,6 @@ import {
 import { normalizeOpeningMessage } from "@/lib/class-settings";
 import {
   assistantMessageBlocks,
-  condensedSourceLabels,
   normalizeMarkdownMath,
   normalizeStructuredSectionMarkdown
 } from "@/lib/chat-message-format";
@@ -43,8 +42,11 @@ import type {
   StudentFeedbackKind,
   StudentFeedbackPromptReason,
   StudentFeedbackRating,
+  StudentFeedback,
   TutorApiResponse,
+  TutorConfusionChoice,
   TutorInputTokenSection,
+  TutorSource,
   UnderstandingState,
   UsageSummary
 } from "@/lib/types";
@@ -106,6 +108,7 @@ type StudentVisibleClass = {
 type StudentClassSummary = StudentVisibleClass;
 
 type ComposerAttachment = MessageAttachment & {
+  dataUrl?: string;
   error?: string;
   localUrl?: string;
   progress: number;
@@ -115,12 +118,13 @@ const studentComposerTextareaMaxHeight = 156;
 const markdownRemarkPlugins = [remarkMath];
 const markdownRehypePlugins = [rehypeKatex];
 const maxComposerAttachments = 3;
-const allowedComposerAttachmentExtensions = [".pdf"];
-const allowedComposerAttachmentAccept = ".pdf,application/pdf";
+const maxTeacherPreviewAttachmentInlineBytes = 8 * 1024 * 1024;
+const allowedComposerAttachmentExtensions = [".pdf", ".png", ".jpg", ".jpeg", ".webp"];
+const allowedComposerAttachmentAccept = ".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp";
 const maxComposerPdfBytes = 25 * 1024 * 1024;
 const aiUsageIncreaseRequestComment =
   "Tutoring time request: I am out of tutoring time and would like my professor to allow more time.";
-const teacherPreviewDebugStorageKey = "chandra.teacherPreviewDebugMode";
+const teacherPreviewTutorDebugOptionsStorageKey = "chandra.teacherPreviewTutorDebugOptions";
 
 const welcomeMessageId = "welcome";
 
@@ -144,6 +148,33 @@ type FeedbackModalState = {
   promptReason?: StudentFeedbackPromptReason;
 };
 type HeaderDropdown = "context" | "feedback" | "understanding" | "usage" | null;
+type TutorDebugOptions = {
+  forceAiUsageBlocked: boolean;
+  forceAiUsageNearLimit: boolean;
+  forceConfusionChoices: boolean;
+  forceNoRetrieval: boolean;
+  forceRetrieval: boolean;
+  forceStudentView: boolean;
+  showExactSearches: boolean;
+  showTutorDecision: boolean;
+  showTutorPlan: boolean;
+  showUnderstandingState: boolean;
+  showSelectedSources: boolean;
+};
+
+const defaultTutorDebugOptions: TutorDebugOptions = {
+  forceAiUsageBlocked: false,
+  forceAiUsageNearLimit: false,
+  forceConfusionChoices: false,
+  forceNoRetrieval: false,
+  forceRetrieval: false,
+  forceStudentView: false,
+  showExactSearches: true,
+  showTutorDecision: true,
+  showTutorPlan: true,
+  showUnderstandingState: true,
+  showSelectedSources: true
+};
 
 export default function StudentPage() {
   return (
@@ -169,6 +200,8 @@ export function StudentWorkspace() {
   const [messages, setMessages] = useState<ChatMessage[]>(() => buildInitialStudentMessages(null));
   const [draft, setDraft] = useState("");
   const [studentMessageMode, setStudentMessageMode] = useState<StudentMessageMode>("ask");
+  const [isMessageModeMenuOpen, setIsMessageModeMenuOpen] = useState(false);
+  const messageModeMenuRef = useRef<HTMLDivElement | null>(null);
   const draftTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
@@ -215,10 +248,13 @@ export function StudentWorkspace() {
   const [feedbackRating, setFeedbackRating] = useState<StudentFeedbackRating>("helpful");
   const [feedbackComment, setFeedbackComment] = useState("");
   const [feedbackMessage, setFeedbackMessage] = useState("");
+  const [studentFeedbackResponses, setStudentFeedbackResponses] = useState<StudentFeedback[]>([]);
   const [isSendingFeedback, setIsSendingFeedback] = useState(false);
   const [usageIncreaseRequestMessage, setUsageIncreaseRequestMessage] = useState("");
   const [isRequestingUsageIncrease, setIsRequestingUsageIncrease] = useState(false);
   const [isTeacherDebugMode, setIsTeacherDebugMode] = useState(false);
+  const [isTutorDebugPanelOpen, setIsTutorDebugPanelOpen] = useState(false);
+  const [tutorDebugOptions, setTutorDebugOptions] = useState<TutorDebugOptions>(defaultTutorDebugOptions);
   const isTeacherPreview = pathname.startsWith("/teacher/student-view");
   const queryClassId = searchParams.get("classId");
   const activeCourseId = isTeacherPreview ? queryClassId ?? "" : profile?.classId ?? "";
@@ -312,6 +348,35 @@ export function StudentWorkspace() {
     };
   }, [activeCourseId, firebaseReady, isTeacherPreview, profile?.role, user]);
 
+  useEffect(() => {
+    if (!firebaseReady || !activeCourseId || !user || profile?.role !== "student" || isTeacherPreview) {
+      setStudentFeedbackResponses([]);
+      return;
+    }
+
+    let isCancelled = false;
+
+    user
+      .getIdToken()
+      .then((token) => fetchStudentFeedbackResponses({ classId: activeCourseId, token }))
+      .then((feedback) => {
+        if (!isCancelled) {
+          setStudentFeedbackResponses(
+            feedback.filter((item) => Boolean(item.studentVisibleResponse && item.studentVisibleResponseSentAt))
+          );
+        }
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setStudentFeedbackResponses([]);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeCourseId, firebaseReady, isTeacherPreview, profile?.role, user]);
+
   const activeStudentClass = useMemo(
     () => studentClasses.find((studentClass) => studentClass.id === activeCourseId) ?? null,
     [activeCourseId, studentClasses]
@@ -377,13 +442,16 @@ export function StudentWorkspace() {
   const accountEmailValue = accountEmailDraft ?? accountEmail;
   const accountUsernameValue = profile?.username ?? accountEmail;
   const accountLastSignInAt = user?.metadata.lastSignInTime ?? "";
-  const usageSummary = useMemo(() => usageSummaryFromStatus(aiUsageStatus), [aiUsageStatus]);
-  const tutoringTimeHeaderText = aiUsageStatus
+  const debugAiUsageStatus = isTeacherPreview && isTeacherDebugMode ? forcedTutorDebugAiUsageStatus(tutorDebugOptions) : null;
+  const displayedAiUsageStatus = debugAiUsageStatus ?? aiUsageStatus;
+  const showUsageHeader = !isTeacherPreview || (isTeacherDebugMode && Boolean(debugAiUsageStatus));
+  const usageSummary = useMemo(() => usageSummaryFromStatus(displayedAiUsageStatus), [displayedAiUsageStatus]);
+  const tutoringTimeHeaderText = displayedAiUsageStatus
     ? `Tutoring time · ${usageSummary.todayPercentLeft}% left`
     : aiUsageError
       ? "Tutoring time unavailable"
       : "Loading tutoring time";
-  const tutoringTimeHeaderLabel = aiUsageStatus
+  const tutoringTimeHeaderLabel = displayedAiUsageStatus
     ? `Tutoring time: ${usageSummary.todayPercentLeft}% left today`
     : aiUsageError
       ? `Tutoring time unavailable: ${aiUsageError}`
@@ -393,6 +461,7 @@ export function StudentWorkspace() {
   const understandingState = useMemo(() => buildUnderstandingState(messages), [messages]);
   const latestKnowledgeMessageId = useMemo(() => latestKnowledgeAssistantMessageId(messages), [messages]);
   const previousKnowledgeKeysRef = useRef<string[] | null>(null);
+  const teacherPreviewConversationIdRef = useRef("");
   const [knowledgeAnimationLines, setKnowledgeAnimationLines] = useState<KnowledgeAnimationLine[]>([]);
   const { isUploadingAttachment, readyComposerAttachments } = useMemo(() => {
     const readyAttachments: ComposerAttachment[] = [];
@@ -488,12 +557,43 @@ export function StudentWorkspace() {
   }, [isSendingFeedback, openHeaderDropdown]);
 
   useEffect(() => {
-    if (!isTeacherPreview) {
-      setIsTeacherDebugMode(false);
+    if (!isMessageModeMenuOpen) {
       return;
     }
 
-    setIsTeacherDebugMode(window.localStorage.getItem(teacherPreviewDebugStorageKey) === "true");
+    function closeMessageModeMenuOnOutsidePointer(event: PointerEvent) {
+      if (messageModeMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+
+      setIsMessageModeMenuOpen(false);
+    }
+
+    function closeMessageModeMenuOnEscape(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsMessageModeMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", closeMessageModeMenuOnOutsidePointer);
+    document.addEventListener("keydown", closeMessageModeMenuOnEscape);
+
+    return () => {
+      document.removeEventListener("pointerdown", closeMessageModeMenuOnOutsidePointer);
+      document.removeEventListener("keydown", closeMessageModeMenuOnEscape);
+    };
+  }, [isMessageModeMenuOpen]);
+
+  useEffect(() => {
+    if (!isTeacherPreview) {
+      setIsTeacherDebugMode(false);
+      setIsTutorDebugPanelOpen(false);
+      return;
+    }
+
+    setIsTeacherDebugMode(false);
+    setIsTutorDebugPanelOpen(false);
+    setTutorDebugOptions(readStoredTutorDebugOptions());
   }, [isTeacherPreview]);
 
   useEffect(() => {
@@ -501,8 +601,18 @@ export function StudentWorkspace() {
       return;
     }
 
-    window.localStorage.setItem(teacherPreviewDebugStorageKey, String(isTeacherDebugMode));
+    if (!isTeacherDebugMode) {
+      setIsTutorDebugPanelOpen(false);
+    }
   }, [isTeacherDebugMode, isTeacherPreview]);
+
+  useEffect(() => {
+    if (!isTeacherPreview) {
+      return;
+    }
+
+    window.localStorage.setItem(teacherPreviewTutorDebugOptionsStorageKey, JSON.stringify(tutorDebugOptions));
+  }, [isTeacherPreview, tutorDebugOptions]);
 
   useEffect(() => {
     if (!firebaseReady || !user || profile?.role !== "student" || isTeacherPreview) {
@@ -687,9 +797,14 @@ export function StudentWorkspace() {
       return;
     }
 
+    if (isTeacherPreview && filesToUpload.some((file) => file.size > maxTeacherPreviewAttachmentInlineBytes)) {
+      setAttachmentError("Teacher preview attachments must be 8 MB or smaller.");
+      return;
+    }
+
     try {
       const token = await user.getIdToken();
-      const conversationId = await ensureAttachmentConversation(token);
+      const conversationId = isTeacherPreview ? ensureTeacherPreviewConversationId() : await ensureAttachmentConversation(token);
 
       await Promise.all(filesToUpload.map((file) => uploadSingleComposerAttachment({ conversationId, file, token })));
     } catch (caughtError) {
@@ -716,6 +831,14 @@ export function StudentWorkspace() {
     );
 
     return conversation.id;
+  }
+
+  function ensureTeacherPreviewConversationId() {
+    if (!teacherPreviewConversationIdRef.current) {
+      teacherPreviewConversationIdRef.current = crypto.randomUUID();
+    }
+
+    return teacherPreviewConversationIdRef.current;
   }
 
   async function uploadSingleComposerAttachment({
@@ -751,17 +874,26 @@ export function StudentWorkspace() {
     setComposerAttachments((currentAttachments) => [...currentAttachments, temporaryAttachment]);
 
     try {
-      const attachment = await uploadHomeworkAttachmentWithProgress({
-        classId: activeCourseId,
-        conversationId,
-        file,
-        token,
-        onProgress: (progress) => {
-          setComposerAttachments((currentAttachments) =>
-            currentAttachments.map((item) => (item.id === temporaryId ? { ...item, progress } : item))
-          );
-        }
-      });
+      const onProgress = (progress: number) => {
+        setComposerAttachments((currentAttachments) =>
+          currentAttachments.map((item) => (item.id === temporaryId ? { ...item, progress } : item))
+        );
+      };
+      const attachment = isTeacherPreview
+        ? await prepareTeacherPreviewAttachment({
+            classId: activeCourseId,
+            conversationId,
+            file,
+            id: temporaryId,
+            onProgress
+          })
+        : await uploadHomeworkAttachmentWithProgress({
+            classId: activeCourseId,
+            conversationId,
+            file,
+            token,
+            onProgress
+          });
 
       setComposerAttachments((currentAttachments) =>
         currentAttachments.map((item) =>
@@ -797,7 +929,7 @@ export function StudentWorkspace() {
 
     setComposerAttachments((currentAttachments) => currentAttachments.filter((item) => item.id !== attachment.id));
 
-    if (attachment.uploadStatus !== "ready" || !user) {
+    if (attachment.uploadStatus !== "ready" || !user || isTeacherPreview) {
       return;
     }
 
@@ -929,8 +1061,43 @@ export function StudentWorkspace() {
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
+    const hasPendingAttachment = composerAttachments.some((attachment) => attachment.uploadStatus === "uploading");
+
+    if (hasPendingAttachment) {
+      setAttachmentError("Wait for attachments to finish uploading before sending.");
+      return;
+    }
 
     if (!canSendMessage || sendInFlightRef.current) {
+      return;
+    }
+
+    await sendStudentMessage(content || "Can you help me with this attached homework material?", {
+      attachments: readyComposerAttachments,
+      clearComposer: true,
+      studentMessageMode
+    });
+  }
+
+  async function sendStudentMessage(
+    content: string,
+    options: {
+      attachments?: ComposerAttachment[];
+      clearComposer?: boolean;
+      studentMessageMode?: StudentMessageMode;
+    } = {}
+  ) {
+    const trimmedContent = content.trim();
+    const attachments = options.attachments ?? [];
+
+    if (
+      !activeCourseId ||
+      !trimmedContent ||
+      sendInFlightRef.current ||
+      studentChatPaused ||
+      (!isTeacherPreview && aiUsageStatus?.blocked) ||
+      attachments.some((attachment) => attachment.uploadStatus !== "ready")
+    ) {
       return;
     }
 
@@ -941,17 +1108,19 @@ export function StudentWorkspace() {
     const studentMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "student",
-      attachments: readyComposerAttachments,
-      content: content || "Can you help me with this attached homework material?",
+      attachments,
+      content: trimmedContent,
       createdAt: new Date().toISOString(),
-      studentMessageMode
+      studentMessageMode: options.studentMessageMode ?? "ask"
     };
 
-    const sentAttachmentIds = readyComposerAttachments.map((attachment) => attachment.id);
+    const sentAttachmentIds = attachments.map((attachment) => attachment.id);
     const nextMessages = [...messages, studentMessage];
     setMessages(nextMessages);
-    setDraft("");
-    clearComposerAttachments({ revokeLocalUrls: false });
+    if (options.clearComposer) {
+      setDraft("");
+      clearComposerAttachments({ revokeLocalUrls: false });
+    }
     sendInFlightRef.current = true;
     setIsSending(true);
     setChatProgress({
@@ -971,8 +1140,20 @@ export function StudentWorkspace() {
         },
         body: JSON.stringify({
           attachmentIds: sentAttachmentIds,
+          attachmentFiles: isTeacherPreview ? buildTeacherPreviewAttachmentFiles(attachments) : undefined,
           conversationId: activeSelectedConversationId || undefined,
           courseId: activeCourseId,
+          debugOptions:
+            isTeacherPreview && isTeacherDebugMode
+              ? {
+                  forceAiUsageBlocked: tutorDebugOptions.forceAiUsageBlocked,
+                  forceAiUsageNearLimit: tutorDebugOptions.forceAiUsageNearLimit,
+                  forceConfusionChoices: tutorDebugOptions.forceConfusionChoices,
+                  forceNoRetrieval: tutorDebugOptions.forceNoRetrieval,
+                  forceRetrieval: tutorDebugOptions.forceRetrieval,
+                  forceStudentView: tutorDebugOptions.forceStudentView
+                }
+              : undefined,
           messages: nextMessages,
           stream: true
         })
@@ -986,6 +1167,7 @@ export function StudentWorkspace() {
         throw new Error(data.error ?? "Chat request failed");
       }
 
+      const showExactSearches = isTeacherPreview && isTeacherDebugMode;
       const data = await readChatStream(response, (event) => {
         if (event.type === "step") {
           setChatProgress((current) => ({
@@ -1018,9 +1200,11 @@ export function StudentWorkspace() {
           setChatProgress((current) =>
             appendProgressSearches(current, event.message, [
               {
-                description: studentSearchPurposeLabel(event.retrievalReason, event.query, event.description),
+                description: showExactSearches
+                  ? `Query: ${event.query}`
+                  : studentSearchPurposeLabel(event.retrievalReason, event.query, event.description),
                 query: event.query,
-                retrievalReason: event.retrievalReason,
+                retrievalReason: showExactSearches ? undefined : event.retrievalReason,
                 searchNumber: event.searchNumber
               }
             ])
@@ -1031,7 +1215,7 @@ export function StudentWorkspace() {
           const searches =
             event.searches ??
             event.queries.map((query, index) => ({
-              description: studentSearchPurposeLabel(undefined, query),
+              description: showExactSearches ? `Query: ${query}` : studentSearchPurposeLabel(undefined, query),
               query,
               retrievalReason: undefined,
               searchNumber: event.searchNumbers?.[index]
@@ -1043,7 +1227,10 @@ export function StudentWorkspace() {
               event.message,
               searches.map((search) => ({
                 ...search,
-                description: studentSearchPurposeLabel(search.retrievalReason, search.query, search.description)
+                description: showExactSearches
+                  ? `Query: ${search.query}`
+                  : studentSearchPurposeLabel(search.retrievalReason, search.query, search.description),
+                retrievalReason: showExactSearches ? undefined : search.retrievalReason
               }))
             )
           );
@@ -1530,7 +1717,7 @@ export function StudentWorkspace() {
                 </h1>
               </div>
               <div className="student-main-header-actions" ref={headerActionsRef}>
-                {!isTeacherPreview ? (
+                {showUsageHeader ? (
                   <div className="student-header-control-wrap">
                     <button
                       aria-label={tutoringTimeHeaderLabel}
@@ -1544,14 +1731,12 @@ export function StudentWorkspace() {
                       }
                     >
                       <HeaderControlIcon kind="tutoringTime" />
-                      {aiUsageStatus ? (
-                        <>
-                          <span className="student-header-control-label">Tutoring time · </span>
-                          <span className="student-header-usage-percent">{usageSummary.todayPercentLeft}%</span>
-                          <span className="student-header-control-label">left</span>
-                        </>
+                      {displayedAiUsageStatus ? (
+                        <span className="student-header-control-label is-always-visible">
+                          {usageSummary.todayPercentLeft}% left
+                        </span>
                       ) : (
-                        <span className="student-header-control-label">{tutoringTimeHeaderText}</span>
+                        <span className="student-header-control-label is-always-visible">{tutoringTimeHeaderText}</span>
                       )}
                     </button>
                     {openHeaderDropdown === "usage" ? (
@@ -1561,8 +1746,8 @@ export function StudentWorkspace() {
                         isRequestingMoreUsage={isRequestingUsageIncrease}
                         requestMessage={usageIncreaseRequestMessage}
                         summary={usageSummary}
-                        status={aiUsageStatus}
-                        onRequestMoreUsage={requestUsageIncrease}
+                        status={displayedAiUsageStatus}
+                        onRequestMoreUsage={isTeacherPreview ? undefined : requestUsageIncrease}
                       />
                     ) : null}
                   </div>
@@ -1581,7 +1766,9 @@ export function StudentWorkspace() {
                   />
                   {openHeaderDropdown === "context" ? (
                     <StudentContextPopover
+                      classId={activeCourseId}
                       contextMemory={chatContextMemory}
+                      conversationId={activeSelectedConversationId}
                       id="student-context-popover"
                     />
                   ) : null}
@@ -1628,13 +1815,14 @@ export function StudentWorkspace() {
                     <span className="student-header-control-label">Feedback</span>
                   </button>
                   {feedbackModal && openHeaderDropdown === "feedback" ? (
-                    <StudentFeedbackPopover
-                      comment={feedbackComment}
-                      id="student-feedback-popover"
-                      isSending={isSendingFeedback}
-                      message={feedbackMessage}
-                      rating={feedbackRating}
-                      onClose={() => {
+	                    <StudentFeedbackPopover
+	                      comment={feedbackComment}
+	                      id="student-feedback-popover"
+	                      isSending={isSendingFeedback}
+	                      message={feedbackMessage}
+	                      rating={feedbackRating}
+	                      responses={studentFeedbackResponses}
+	                      onClose={() => {
                         if (!isSendingFeedback) {
                           setFeedbackModal(null);
                           setOpenHeaderDropdown(null);
@@ -1655,9 +1843,12 @@ export function StudentWorkspace() {
               {messages.map((message) => (
                 <StudentChatMessage
                   debugEnabled={isTeacherPreview && isTeacherDebugMode}
+                  debugOptions={tutorDebugOptions}
                   isLatestKnowledgeMessage={latestKnowledgeMessageId === message.id}
+                  isSending={isSending}
                   message={message}
                   key={message.id}
+                  onChoiceSelect={(choiceMessage) => void sendStudentMessage(choiceMessage)}
                 />
               ))}
               {isSending && chatProgress ? <ChatProgressMessage progress={chatProgress} /> : null}
@@ -1689,31 +1880,28 @@ export function StudentWorkspace() {
                 ref={attachmentInputRef}
                 accept={allowedComposerAttachmentAccept}
                 className="student-attachment-input"
+                disabled={isSending || studentChatPaused}
                 multiple
                 type="file"
                 onChange={(event) => void handleAttachmentSelection(event)}
               />
-              <div className="student-message-mode-control" role="radiogroup" aria-label="Message type">
-                <button
-                  aria-checked={studentMessageMode === "ask"}
-                  className={studentMessageMode === "ask" ? "is-active" : ""}
-                  disabled={isSending || studentChatPaused}
-                  role="radio"
-                  type="button"
-                  onClick={() => setStudentMessageMode("ask")}
-                >
-                  Ask
-                </button>
-                <button
-                  aria-checked={studentMessageMode === "work"}
-                  className={studentMessageMode === "work" ? "is-active" : ""}
-                  disabled={isSending || studentChatPaused}
-                  role="radio"
-                  type="button"
-                  onClick={() => setStudentMessageMode("work")}
-                >
-                  Show my work
-                </button>
+              <div className="student-composer-mode-row">
+                <MessageModeMenu
+                  isDisabled={isSending || studentChatPaused}
+                  isOpen={isMessageModeMenuOpen}
+                  menuRef={messageModeMenuRef}
+                  mode={studentMessageMode}
+                  onModeChange={setStudentMessageMode}
+                  onOpenChange={setIsMessageModeMenuOpen}
+                />
+                {isTeacherPreview && isTeacherDebugMode ? (
+                  <TutorDebugComposerControl
+                    isOpen={isTutorDebugPanelOpen}
+                    options={tutorDebugOptions}
+                    onOpenChange={setIsTutorDebugPanelOpen}
+                    onOptionsChange={setTutorDebugOptions}
+                  />
+                ) : null}
               </div>
               <button
                 className="student-composer-add"
@@ -1746,7 +1934,9 @@ export function StudentWorkspace() {
                     : !isTeacherPreview && aiUsageStatus?.blocked
                     ? "Ask your professor for more tutoring time."
                     : activeCourseId
-                      ? "Ask about a problem, step, or equation..."
+                      ? studentMessageMode === "work"
+                        ? "Paste your attempt or upload work..."
+                        : "Ask about a problem, step, or equation..."
                       : "Join a class to start chatting."
                 }
                 rows={1}
@@ -1773,12 +1963,114 @@ function resizeStudentComposerTextarea(textarea: HTMLTextAreaElement | null) {
   textarea.style.overflowY = textarea.scrollHeight > studentComposerTextareaMaxHeight ? "auto" : "hidden";
 }
 
+function MessageModeMenu({
+  isDisabled,
+  isOpen,
+  menuRef,
+  mode,
+  onModeChange,
+  onOpenChange
+}: {
+  isDisabled: boolean;
+  isOpen: boolean;
+  menuRef: { current: HTMLDivElement | null };
+  mode: StudentMessageMode;
+  onModeChange: (mode: StudentMessageMode) => void;
+  onOpenChange: (isOpen: boolean) => void;
+}) {
+  const selectedOption = studentMessageModeOptions.find((option) => option.mode === mode) ?? studentMessageModeOptions[0];
+
+  function closeOnBlur(event: FocusEvent<HTMLDivElement>) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      onOpenChange(false);
+    }
+  }
+
+  return (
+    <div
+      className="student-message-mode-menu"
+      ref={menuRef}
+      onBlur={closeOnBlur}
+      onFocus={() => onOpenChange(true)}
+      onMouseEnter={() => onOpenChange(true)}
+    >
+      <button
+        aria-controls="student-message-mode-options"
+        aria-expanded={isOpen}
+        aria-haspopup="menu"
+        className="student-message-mode-trigger"
+        disabled={isDisabled}
+        type="button"
+        onClick={() => onOpenChange(!isOpen)}
+      >
+        <StudentMessageModeIcon mode={selectedOption.mode} />
+        <span>{selectedOption.label}</span>
+        <svg className="student-message-mode-chevron" aria-hidden="true" viewBox="0 0 16 16">
+          <path d="m4 6 4 4 4-4" />
+        </svg>
+      </button>
+      {isOpen && !isDisabled ? (
+        <div
+          className="student-message-mode-options"
+          id="student-message-mode-options"
+          role="menu"
+          aria-label="Message type"
+        >
+          {studentMessageModeOptions.map((option) => (
+            <button
+              aria-checked={mode === option.mode}
+              className={mode === option.mode ? "is-active" : ""}
+              key={option.mode}
+              role="menuitemradio"
+              type="button"
+              onClick={() => {
+                onModeChange(option.mode);
+                onOpenChange(false);
+              }}
+            >
+              <StudentMessageModeIcon mode={option.mode} />
+              <span>{option.label}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+const studentMessageModeOptions: Array<{ label: string; mode: StudentMessageMode }> = [
+  { label: "Ask", mode: "ask" },
+  { label: "Check my work", mode: "work" }
+];
+
+function StudentMessageModeIcon({ mode }: { mode: StudentMessageMode }) {
+  return (
+    <svg className="student-message-mode-icon" aria-hidden="true" viewBox="0 0 20 20">
+      {mode === "work" ? (
+        <>
+          <path d="M6.2 3.2h6.6l2 2v11.6H6.2z" />
+          <path d="M12.8 3.2v2h2" />
+          <path d="m7.9 11 1.5 1.5 3.1-3.2" />
+          <path d="M8 7.4h3.2" />
+        </>
+      ) : (
+        <>
+          <path d="M4 5.1h12v8H9.2L5.1 16v-2.9H4z" />
+          <path d="M8.1 8.1a2 2 0 0 1 3.8.8c0 1.5-1.8 1.5-1.8 2.8" />
+          <path d="M10.1 14h.01" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 function StudentFeedbackPopover({
   comment,
   id,
   isSending,
   message,
   rating,
+  responses,
   onClose,
   onCommentChange,
   onRatingChange,
@@ -1789,6 +2081,7 @@ function StudentFeedbackPopover({
   isSending: boolean;
   message: string;
   rating: StudentFeedbackRating;
+  responses: StudentFeedback[];
   onClose: () => void;
   onCommentChange: (comment: string) => void;
   onRatingChange: (rating: StudentFeedbackRating) => void;
@@ -1815,6 +2108,17 @@ function StudentFeedbackPopover({
           <span aria-hidden="true">x</span>
         </button>
       </div>
+      {responses.length ? (
+        <div className="student-popover-section student-feedback-responses">
+          <h3>Teacher responses</h3>
+          {responses.slice(0, 3).map((response) => (
+            <article key={response.id}>
+              <span>{formatConversationDate(response.studentVisibleResponseSentAt) || "Sent"}</span>
+              <p>{response.studentVisibleResponse}</p>
+            </article>
+          ))}
+        </div>
+      ) : null}
       <div className="student-popover-section">
         <h3>Rating</h3>
         <div className="student-feedback-rating-grid" role="radiogroup" aria-label="Feedback rating">
@@ -1856,12 +2160,18 @@ function StudentFeedbackPopover({
 
 const StudentChatMessage = memo(function StudentChatMessage({
   debugEnabled,
+  debugOptions,
   isLatestKnowledgeMessage,
+  isSending,
+  onChoiceSelect,
   message
 }: {
   debugEnabled: boolean;
+  debugOptions: TutorDebugOptions;
   isLatestKnowledgeMessage: boolean;
+  isSending: boolean;
   message: ChatMessage;
+  onChoiceSelect: (message: string) => void;
 }) {
   if (message.role === "student") {
     return (
@@ -1870,7 +2180,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
           <div className="message-meta-row">
             <div className="message-meta">You</div>
             <StudentMessageModeBadge mode={message.studentMessageMode} />
-            {debugEnabled ? <MessageDebugDetails message={message} /> : null}
+            {debugEnabled ? <MessageDebugDetails message={message} options={debugOptions} /> : null}
           </div>
           <div className="student-message-bubble">
             <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
@@ -1884,7 +2194,13 @@ const StudentChatMessage = memo(function StudentChatMessage({
   }
 
   const messageBlocks = assistantMessageBlocks(message);
-  const sourceLabels = message.sources?.length ? condensedSourceLabels(message.sources) : [];
+  const sourceChips = message.sources?.length ? sourceChipDetails(message) : [];
+  const confusionChoices = message.structuredOutput?.confusionChoices;
+  const confusionPrompt = message.structuredOutput?.confusionPrompt?.trim();
+  const visibleConfusionPrompt =
+    confusionPrompt && !messageBlocks.some((block) => sameDisplayedText(block.content, confusionPrompt))
+      ? confusionPrompt
+      : undefined;
 
   return (
     <article className={`student-workspace-message assistant${isLatestKnowledgeMessage ? " has-new-knowledge" : ""}`}>
@@ -1894,7 +2210,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
       <div className="assistant-message-stack">
         <div className="message-meta-row">
           <div className="message-meta">Chandra</div>
-          {debugEnabled ? <MessageDebugDetails message={message} /> : null}
+          {debugEnabled ? <MessageDebugDetails message={message} options={debugOptions} /> : null}
         </div>
         {messageBlocks.map((block) =>
           block.kind === "answer" ? (
@@ -1920,19 +2236,27 @@ const StudentChatMessage = memo(function StudentChatMessage({
             </div>
           )
         )}
-        {sourceLabels.length ? (
+        {confusionChoices?.length ? (
+          <TutorConfusionChoices
+            choices={confusionChoices}
+            disabled={isSending}
+            prompt={visibleConfusionPrompt}
+            onChoiceSelect={onChoiceSelect}
+          />
+        ) : null}
+        {sourceChips.length ? (
           <div className="message-sources" aria-label="Sources used">
-            <strong>
-              <KnowledgeItemTypeIcon isEmphasized={isLatestKnowledgeMessage} role="source" />
-              Sources:
-            </strong>
-            {sourceLabels.map((label, index) => (
-              <span key={`${label}-${index}`}>
-                <KnowledgeItemTypeIcon
-                  isEmphasized={isLatestKnowledgeMessage}
-                  role={label.toLowerCase().includes("problem") ? "problem" : "source"}
-                />
-                {label}
+            <strong>{sourceChips.length === 1 ? "Source" : "Sources"}</strong>
+            {sourceChips.map((source) => (
+              <span
+                aria-label={`${source.label}. ${source.why}`}
+                className="message-source-chip"
+                key={source.key}
+                tabIndex={0}
+                title={`${source.what}\n${source.why}`}
+              >
+                <KnowledgeItemTypeIcon isEmphasized={isLatestKnowledgeMessage} role="source" />
+                {source.label}
               </span>
             ))}
           </div>
@@ -1942,6 +2266,197 @@ const StudentChatMessage = memo(function StudentChatMessage({
   );
 });
 
+function sameDisplayedText(left: string, right: string) {
+  return compactDisplayedText(left) === compactDisplayedText(right);
+}
+
+function compactDisplayedText(value: string) {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function TutorConfusionChoices({
+  choices,
+  disabled,
+  prompt,
+  onChoiceSelect
+}: {
+  choices: TutorConfusionChoice[];
+  disabled: boolean;
+  prompt?: string;
+  onChoiceSelect: (message: string) => void;
+}) {
+  return (
+    <div className="assistant-confusion-choice-panel">
+      {prompt ? <p>{prompt}</p> : null}
+      <div className="assistant-confusion-choice-grid" aria-label="Choose what Chandra should focus on">
+        {choices.map((choice) => (
+          <button
+            aria-label={`Send: ${choice.message}`}
+            disabled={disabled}
+            key={choice.id}
+            type="button"
+            onClick={() => onChoiceSelect(choice.message)}
+          >
+            <span className="assistant-confusion-choice-label">{choice.label}</span>
+            {!sameDisplayedText(choice.label, choice.message) ? (
+              <span className="assistant-confusion-choice-description">{choice.message}</span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type SourceChipDetail = {
+  key: string;
+  label: string;
+  what: string;
+  why: string;
+};
+
+function sourceChipDetails(message: ChatMessage): SourceChipDetail[] {
+  const sources = message.sources ?? [];
+  const groupedSources = new Map<string, { pages: Set<number>; source: TutorSource }>();
+
+  for (const source of sources) {
+    const key = [
+      source.sourceId ?? source.pdfId ?? source.id ?? source.title,
+      source.materialType,
+      source.problemNumber ?? source.problemNumbers?.join(",") ?? ""
+    ].join("|");
+    const existing = groupedSources.get(key) ?? { pages: new Set<number>(), source };
+
+    if (source.pageNumber) {
+      existing.pages.add(source.pageNumber);
+    }
+
+    groupedSources.set(key, existing);
+  }
+
+  const details = Array.from(groupedSources.values()).map(({ pages, source }, index) => {
+    const pageNumbers = Array.from(pages);
+    const representativeSource = pageNumbers.length ? { ...source, pageNumber: undefined } : source;
+    const matchedKnowledge = matchingKnowledgeItemForSource(source, message.langGraphTrace?.knowledgeItems ?? []);
+    const label = formatTutorSourceLabel(representativeSource) + formatSourcePageRange(pageNumbers);
+
+    return {
+      key: `${source.sourceId ?? source.pdfId ?? source.id ?? source.title}-${source.pageNumber ?? index}`,
+      label,
+      what: formatSourceWhat(source, pageNumbers, matchedKnowledge),
+      why: matchedKnowledge?.reason || source.reason || fallbackSourceReason(source, matchedKnowledge)
+    };
+  });
+  const visibleDetails = details.slice(0, 3);
+
+  if (details.length <= visibleDetails.length) {
+    return visibleDetails;
+  }
+
+  const hiddenDetails = details.slice(visibleDetails.length);
+  return [
+    ...visibleDetails,
+    {
+      key: "additional-sources",
+      label: `+${hiddenDetails.length} more`,
+      what: hiddenDetails.map((source) => source.label).join(", "),
+      why: "Chandra also used these retrieved knowledge pages while composing this response."
+    }
+  ];
+}
+
+function matchingKnowledgeItemForSource(source: TutorSource, items: KnowledgeItem[]) {
+  return items.find((item) => {
+    const sourceIds = [source.sourceId, source.pdfId, source.id].filter(Boolean);
+    const itemIds = [item.sourceId, item.pdfId, item.id].filter(Boolean);
+    const idsMatch = sourceIds.length > 0 && sourceIds.some((id) => itemIds.includes(id));
+    const namesMatch = item.sourceName.trim().toLowerCase() === source.title.trim().toLowerCase();
+    const pagesMatch = !source.pageNumber || !item.page || source.pageNumber === item.page;
+    const sourceProblem = source.problemNumber ?? source.problemNumbers?.[0];
+    const problemsMatch = !sourceProblem || !item.problemId || sourceProblem === item.problemId;
+
+    return (idsMatch || namesMatch) && pagesMatch && problemsMatch;
+  });
+}
+
+function formatTutorSourceLabel(source: TutorSource) {
+  return [
+    source.title,
+    source.problemNumber ? `problem ${source.problemNumber}` : "",
+    source.pageNumber ? `p. ${source.pageNumber}` : ""
+  ].filter(Boolean).join(" · ");
+}
+
+function formatSourcePageRange(pages: number[]) {
+  const sortedPages = [...new Set(pages)].sort((first, second) => first - second);
+
+  if (!sortedPages.length) {
+    return "";
+  }
+
+  const ranges: string[] = [];
+  let rangeStart = sortedPages[0];
+  let previousPage = sortedPages[0];
+
+  for (const page of sortedPages.slice(1)) {
+    if (page === previousPage + 1) {
+      previousPage = page;
+      continue;
+    }
+
+    ranges.push(rangeStart === previousPage ? `${rangeStart}` : `${rangeStart}-${previousPage}`);
+    rangeStart = page;
+    previousPage = page;
+  }
+
+  ranges.push(rangeStart === previousPage ? `${rangeStart}` : `${rangeStart}-${previousPage}`);
+  return ` · p. ${ranges.join(", ")}`;
+}
+
+function formatSourceWhat(source: TutorSource, pages: number[], knowledgeItem?: KnowledgeItem) {
+  const sourceType = readableSourceType(source.materialType || knowledgeItem?.kind || "class material");
+  const pageText = formatSourcePageRange(pages.length ? pages : source.pageNumber ? [source.pageNumber] : []).replace(
+    /^ · /,
+    ""
+  );
+  const problemText = source.problemNumber
+    ? `Problem ${source.problemNumber}`
+    : source.problemNumbers?.length
+      ? `Problems ${source.problemNumbers.join(", ")}`
+      : knowledgeItem?.problemId
+        ? `Problem ${knowledgeItem.problemId}`
+        : "";
+
+  return [source.title || knowledgeItem?.sourceName || "Class material", sourceType, pageText, problemText]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function readableSourceType(value: string) {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\bpdf\b/i, "PDF")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function fallbackSourceReason(source: TutorSource, knowledgeItem?: KnowledgeItem) {
+  const usedAs = source.usedAs || knowledgeItem?.usedAs;
+
+  if (usedAs === "problem_source" || usedAs === "active_problem") {
+    return "Chandra used this page as the source for the active problem.";
+  }
+
+  if (usedAs === "example_reference") {
+    return "Chandra used this page as an example reference.";
+  }
+
+  if (usedAs === "definition_reference" || usedAs === "theorem_reference") {
+    return "Chandra used this page for the definition, theorem, or rule needed in the response.";
+  }
+
+  return "Chandra used this retrieved class material as source context for the response.";
+}
+
 function StudentMessageModeBadge({ mode }: { mode?: StudentMessageMode }) {
   if (!mode) {
     return null;
@@ -1949,12 +2464,12 @@ function StudentMessageModeBadge({ mode }: { mode?: StudentMessageMode }) {
 
   return (
     <span className="student-message-mode-badge" data-mode={mode}>
-      {mode === "work" ? "Work" : "Question"}
+      {mode === "work" ? "Check my work" : "Question"}
     </span>
   );
 }
 
-function MessageDebugDetails({ message }: { message: ChatMessage }) {
+function MessageDebugDetails({ message, options }: { message: ChatMessage; options: TutorDebugOptions }) {
   const debug = buildMessageDebugDisplay(message);
   const [selectedInputSectionId, setSelectedInputSectionId] = useState(
     debug.inputTokenBreakdown[0]?.id ?? ""
@@ -1963,74 +2478,191 @@ function MessageDebugDetails({ message }: { message: ChatMessage }) {
     debug.inputTokenBreakdown.find((section) => section.id === selectedInputSectionId) ??
     debug.inputTokenBreakdown[0];
 
+  const revealTraceDebug = message.role === "assistant" && hasEnabledTutorTraceDebugOption(options);
+
   return (
-    <details className="message-debug-details">
+    <details className="message-debug-details" open={revealTraceDebug ? true : undefined}>
       <summary aria-label={`Show debug details for ${message.role} message`}>
         Debug · {debug.summary}
       </summary>
       <div className="message-debug-panel">
-        <dl>
-          {debug.rows.map((row) => (
+        <div className="message-debug-panel-header">
+          <strong>{message.role === "assistant" ? "Tutor debug" : "Message debug"}</strong>
+          <span>{debug.summary}</span>
+        </div>
+        <dl className="message-debug-metrics">
+          {debug.featuredRows.map((row) => (
             <div key={row.label}>
               <dt>{row.label}</dt>
               <dd>{row.value}</dd>
             </div>
           ))}
         </dl>
-        {debug.stages.length ? (
-          <div className="message-debug-stages" aria-label="Debug stages">
-            {debug.stages.map((stage, index) => (
-              <span key={`${stage}-${index}`}>{stage}</span>
-            ))}
-          </div>
-        ) : null}
+        {message.role === "assistant" ? <TutorTraceDebugSections message={message} options={options} /> : null}
         {debug.modelCallUsage.length ? (
-          <div className="message-debug-calls" aria-label="Model call token usage">
-            {debug.modelCallUsage.map((call, index) => (
-              <div className="message-debug-call" key={`${call.stage}-${call.purpose}-${index}`}>
-                <strong>{call.purpose || call.stage || `Call ${index + 1}`}</strong>
-                <span>{call.stage || "unknown stage"}</span>
-                <span>{call.model || "unknown model"}</span>
-                <span>Reasoning: {call.reasoningEffort || "default"}</span>
-                <span>In {formatInteger(call.inputTokens)} · Reasoning {formatInteger(call.reasoningTokens)} · Out {formatInteger(call.outputTokens)} · Total {formatInteger(call.totalTokens)}</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
-        {debug.inputTokenBreakdown.length ? (
-          <div className="message-debug-input-breakdown" aria-label="Estimated input token breakdown">
-            <div className="message-debug-section-heading">
-              <strong>Input token sections</strong>
-              <span>{formatInteger(debug.inputBreakdownTotal)} estimated tokens</span>
+          <section className="message-debug-section" aria-labelledby={`debug-model-calls-${message.id}`}>
+            <h3 id={`debug-model-calls-${message.id}`}>Model calls</h3>
+            <div className="message-debug-calls" aria-label="Model call token usage">
+              {debug.modelCallUsage.map((call, index) => (
+                <div className="message-debug-call" key={`${call.stage}-${call.purpose}-${index}`}>
+                  <strong>{call.purpose || call.stage || `Call ${index + 1}`}</strong>
+                  <span>{call.stage || "unknown stage"} · {call.model || "unknown model"}</span>
+                  <span>Reasoning: {call.reasoningEffort || "default"}</span>
+                  <span>In {formatInteger(call.inputTokens)} · R {formatInteger(call.reasoningTokens)} · Out {formatInteger(call.outputTokens)} · Total {formatInteger(call.totalTokens)}</span>
+                </div>
+              ))}
             </div>
-            <label>
-              <span>Inspect section</span>
-              <select
-                value={selectedInputSection?.id ?? ""}
-                onChange={(event) => setSelectedInputSectionId(event.target.value)}
-              >
-                {debug.inputTokenBreakdown.map((section) => (
-                  <option key={section.id} value={section.id}>
-                    {formatInteger(section.estimatedTokens)} · {section.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {selectedInputSection ? (
-              <div className="message-debug-selected-section">
-                <strong>{selectedInputSection.label}</strong>
-                <span>Estimated input tokens: {formatInteger(selectedInputSection.estimatedTokens)}</span>
-                <span>Characters: {formatInteger(selectedInputSection.characters ?? 0)}</span>
-                <span>Stage: {selectedInputSection.stage || "not recorded"}</span>
-                <span>Kind: {selectedInputSection.kind || "not recorded"}</span>
-                {selectedInputSection.detail ? <p>{selectedInputSection.detail}</p> : null}
-              </div>
+          </section>
+        ) : null}
+        {debug.advancedRows.length || debug.stages.length || debug.inputTokenBreakdown.length ? (
+          <details className="message-debug-advanced">
+            <summary>Advanced telemetry</summary>
+            <dl className="message-debug-metrics message-debug-advanced-metrics">
+              {debug.advancedRows.map((row) => (
+                <div key={row.label}>
+                  <dt>{row.label}</dt>
+                  <dd>{row.value}</dd>
+                </div>
+              ))}
+            </dl>
+            {debug.stages.length ? (
+              <section className="message-debug-section" aria-labelledby={`debug-stages-${message.id}`}>
+                <h3 id={`debug-stages-${message.id}`}>Stages</h3>
+                <div className="message-debug-stages" aria-label="Debug stages">
+                  {debug.stages.map((stage, index) => (
+                    <span key={`${stage}-${index}`}>{stage}</span>
+                  ))}
+                </div>
+              </section>
             ) : null}
-          </div>
+            {debug.inputTokenBreakdown.length ? (
+              <section className="message-debug-section message-debug-input-breakdown" aria-labelledby={`debug-input-${message.id}`}>
+                <div className="message-debug-section-heading">
+                  <h3 id={`debug-input-${message.id}`}>Input sections</h3>
+                  <span>{formatInteger(debug.inputBreakdownTotal)} estimated tokens</span>
+                </div>
+                <label>
+                  <span>Inspect section</span>
+                  <select
+                    value={selectedInputSection?.id ?? ""}
+                    onChange={(event) => setSelectedInputSectionId(event.target.value)}
+                  >
+                    {debug.inputTokenBreakdown.map((section) => (
+                      <option key={section.id} value={section.id}>
+                        {formatInteger(section.estimatedTokens)} · {section.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {selectedInputSection ? (
+                  <div className="message-debug-selected-section">
+                    <strong>{selectedInputSection.label}</strong>
+                    <span>Estimated input tokens: {formatInteger(selectedInputSection.estimatedTokens)}</span>
+                    <span>Characters: {formatInteger(selectedInputSection.characters ?? 0)}</span>
+                    <span>Stage: {selectedInputSection.stage || "not recorded"}</span>
+                    <span>Kind: {selectedInputSection.kind || "not recorded"}</span>
+                    {selectedInputSection.detail ? <p>{selectedInputSection.detail}</p> : null}
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+          </details>
         ) : null}
       </div>
     </details>
   );
+}
+
+function TutorTraceDebugSections({ message, options }: { message: ChatMessage; options: TutorDebugOptions }) {
+  const trace = message.langGraphTrace;
+
+  if (!trace) {
+    return null;
+  }
+
+  const sections = [
+    options.showExactSearches
+      ? {
+          content: trace.searchQueries?.length
+            ? trace.searchQueries.map((query, index) => `${index + 1}. ${query}`).join("\n")
+            : "No retrieval queries were recorded for this message.",
+          label: "Exact searches"
+        }
+      : null,
+    options.showTutorDecision
+      ? {
+          content: hasDebugValue(trace.retrievalDecision)
+            ? formatDebugJson(trace.retrievalDecision)
+            : "No primary tutor turn was recorded for this message.",
+          label: "Primary tutor turn"
+        }
+      : null,
+    options.showTutorPlan
+      ? {
+          content: hasDebugValue(trace.tutorPlan) ? formatDebugJson(trace.tutorPlan) : "No tutor plan was recorded for this message.",
+          label: "Tutor plan"
+        }
+      : null,
+    options.showUnderstandingState
+      ? {
+          content: hasDebugValue(trace.problemUnderstandingState)
+            ? formatDebugJson(trace.problemUnderstandingState)
+            : "No understanding state was recorded for this message.",
+          label: "Understanding state"
+        }
+      : null,
+    options.showSelectedSources
+      ? {
+          content: trace.selectedPages?.length ? formatDebugJson(trace.selectedPages) : "No selected source pages were recorded for this message.",
+          label: "Selected pages"
+        }
+      : null,
+    options.showSelectedSources
+      ? {
+          content: trace.selectedMetadataRecords?.length
+            ? formatDebugJson(trace.selectedMetadataRecords)
+            : "No selected metadata records were recorded for this message.",
+          label: "Selected metadata records"
+        }
+      : null
+  ].filter((section): section is { content: string; label: string } => Boolean(section));
+
+  if (!sections.length) {
+    return null;
+  }
+
+  return (
+    <div className="message-debug-trace-sections" aria-label="Tutor behavior debug data">
+      {sections.map((section) => (
+        <details className="message-debug-trace-section" key={section.label}>
+          <summary>{section.label}</summary>
+          <pre>{section.content}</pre>
+        </details>
+      ))}
+    </div>
+  );
+}
+
+function hasEnabledTutorTraceDebugOption(options: TutorDebugOptions) {
+  return (
+    options.showExactSearches ||
+    options.showTutorDecision ||
+    options.showTutorPlan ||
+    options.showUnderstandingState ||
+    options.showSelectedSources
+  );
+}
+
+function hasDebugValue(value: unknown) {
+  if (!value) {
+    return false;
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+
+  return typeof value !== "object" || Object.keys(value).length > 0;
 }
 
 function buildMessageDebugDisplay(message: ChatMessage) {
@@ -2065,27 +2697,37 @@ function buildMessageDebugDisplay(message: ChatMessage) {
       { label: "Request ID", value: debugInfo?.requestId || "Not recorded" },
       { label: "Finish reason", value: debugInfo?.finishReason || message.langGraphTrace?.finishReason || "Not recorded" }
     ];
+    const featuredRows = [
+      { label: "Tokens", value: formatInteger(displayTokens) },
+      { label: "Requests", value: formatInteger(requestCount) },
+      { label: "Duration", value: debugInfo ? formatDuration(debugInfo.durationMs) : "Not recorded" },
+      { label: "Model", value: debugInfo?.modelId || modelCallUsage[0]?.model || "Not recorded" }
+    ];
 
     return {
+      advancedRows: rows,
+      featuredRows,
       inputBreakdownTotal,
       inputTokenBreakdown,
       modelCallUsage,
-      rows,
       stages: debugInfo?.stages ?? message.langGraphTrace?.stages ?? [],
       summary: `${formatInteger(displayTokens)} tokens · ${formatInteger(requestCount)} req`
     };
   }
 
+  const rows = [
+    { label: "Message tokens", value: formatInteger(estimatedMessageTokens) },
+    { label: "Characters", value: formatInteger(message.content.length) },
+    { label: "Attachments", value: formatInteger(message.attachments?.length ?? 0) },
+    { label: "Created", value: formatAccountActivityTime(message.createdAt) }
+  ];
+
   return {
+    advancedRows: rows.slice(2),
+    featuredRows: rows.slice(0, 2),
     inputBreakdownTotal: 0,
     inputTokenBreakdown: [],
     modelCallUsage: [],
-    rows: [
-      { label: "Message tokens", value: formatInteger(estimatedMessageTokens) },
-      { label: "Characters", value: formatInteger(message.content.length) },
-      { label: "Attachments", value: formatInteger(message.attachments?.length ?? 0) },
-      { label: "Created", value: formatAccountActivityTime(message.createdAt) }
-    ],
     stages: [],
     summary: `${formatInteger(estimatedMessageTokens)} tokens`
   };
@@ -2115,6 +2757,36 @@ function inferMessageRequestCount(message: ChatMessage) {
 function inferProviderRequestCount(message: ChatMessage) {
   const providerStages = message.langGraphTrace?.stages?.filter((stage) => stage.startsWith("openrouter_")).length ?? 0;
   return Math.max(providerStages, message.role === "assistant" ? 1 : 0);
+}
+
+function formatDebugJson(value: unknown) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function readStoredTutorDebugOptions(): TutorDebugOptions {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(teacherPreviewTutorDebugOptionsStorageKey) ?? "{}") as Partial<TutorDebugOptions>;
+
+    return {
+      forceAiUsageBlocked: false,
+      forceAiUsageNearLimit: false,
+      forceConfusionChoices: parsed.forceConfusionChoices === true,
+      forceNoRetrieval: parsed.forceNoRetrieval === true && parsed.forceRetrieval !== true,
+      forceRetrieval: parsed.forceRetrieval === true,
+      forceStudentView: false,
+      showExactSearches: true,
+      showTutorDecision: true,
+      showTutorPlan: true,
+      showUnderstandingState: true,
+      showSelectedSources: true
+    };
+  } catch {
+    return defaultTutorDebugOptions;
+  }
 }
 
 function formatInteger(value: unknown) {
@@ -2531,6 +3203,29 @@ function ComposerAttachmentPreview({
   attachment: ComposerAttachment;
   onRemove: () => void;
 }) {
+  const thumbnailUrl = attachment.fileType === "image" ? attachment.localUrl || attachment.dataUrl : "";
+
+  if (attachment.fileType === "image" && thumbnailUrl) {
+    return (
+      <div className="student-attachment-preview is-image" data-status={attachment.uploadStatus}>
+        <div className="student-attachment-image-frame">
+          <span className="student-attachment-image" style={{ backgroundImage: `url(${thumbnailUrl})` }} aria-hidden="true" />
+          <button className="student-attachment-remove" type="button" aria-label={`Remove ${attachment.fileName}`} onClick={onRemove}>
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M6 6l12 12M18 6 6 18" />
+            </svg>
+          </button>
+          {attachment.uploadStatus === "uploading" ? (
+            <span className="student-attachment-progress" aria-label={`Upload ${attachment.progress}% complete`}>
+              <span style={{ width: `${attachment.progress}%` }} />
+            </span>
+          ) : null}
+        </div>
+        {attachment.error ? <small className="student-attachment-error-text">{attachment.error}</small> : null}
+      </div>
+    );
+  }
+
   return (
     <div className="student-attachment-preview" data-status={attachment.uploadStatus}>
       <AttachmentVisual attachment={attachment} />
@@ -2557,24 +3252,185 @@ function MessageAttachmentList({ attachments }: { attachments: Array<MessageAtta
   return (
     <div className="student-message-attachments" aria-label="Message attachments">
       {attachments.map((attachment) => (
-        <div className="student-message-attachment" key={attachment.id}>
+        <div
+          aria-label={attachment.fileType === "image" ? `Uploaded image ${attachment.fileName}` : undefined}
+          className={`student-message-attachment${attachment.fileType === "image" ? " is-image-only" : ""}`}
+          key={attachment.id}
+        >
           <AttachmentVisual attachment={attachment} />
-          <span>
-            <strong>{attachment.fileName}</strong>
-            <small>{formatAttachmentMeta(attachment)}</small>
-          </span>
+          {attachment.fileType === "pdf" ? (
+            <span>
+              <strong>{attachment.fileName}</strong>
+              <small>{formatAttachmentMeta(attachment)}</small>
+            </span>
+          ) : null}
         </div>
       ))}
     </div>
   );
 }
 
+function TutorDebugComposerControl({
+  isOpen,
+  options,
+  onOpenChange,
+  onOptionsChange
+}: {
+  isOpen: boolean;
+  options: TutorDebugOptions;
+  onOpenChange: (isOpen: boolean) => void;
+  onOptionsChange: (options: TutorDebugOptions) => void;
+}) {
+  return (
+    <div className="student-tutor-debug-control">
+      <button
+        aria-controls="student-tutor-debug-popover"
+        aria-expanded={isOpen}
+        className="student-tutor-debug-button"
+        type="button"
+        onClick={() => onOpenChange(!isOpen)}
+      >
+        Tutor debug
+      </button>
+      {isOpen ? (
+        <div className="student-tutor-debug-popover" id="student-tutor-debug-popover">
+          <section className="student-tutor-debug-section" aria-labelledby="student-tutor-debug-answer">
+            <h3 id="student-tutor-debug-answer">Next answer</h3>
+            <TutorDebugToggle
+              checked={options.forceConfusionChoices}
+              description="Add sample uncertainty choices to the next tutor answer."
+              label="Force confusion choices"
+              onChange={(checked) => onOptionsChange({ ...options, forceConfusionChoices: checked })}
+            />
+            <TutorDebugToggle
+              checked={options.forceRetrieval}
+              description="Make the next primary tutor turn search class materials."
+              label="Force retrieval"
+              onChange={(checked) =>
+                onOptionsChange({
+                  ...options,
+                  forceNoRetrieval: checked ? false : options.forceNoRetrieval,
+                  forceRetrieval: checked
+                })
+              }
+            />
+            <TutorDebugToggle
+              checked={options.forceNoRetrieval}
+              description="Make the next tutor answer from visible context only."
+              label="Force no retrieval"
+              onChange={(checked) =>
+                onOptionsChange({
+                  ...options,
+                  forceNoRetrieval: checked,
+                  forceRetrieval: checked ? false : options.forceRetrieval
+                })
+              }
+            />
+          </section>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TutorDebugToggle({
+  checked,
+  description,
+  label,
+  onChange
+}: {
+  checked: boolean;
+  description: string;
+  label: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="student-tutor-debug-toggle">
+      <input checked={checked} type="checkbox" onChange={(event) => onChange(event.target.checked)} />
+      <span>
+        <strong>{label}</strong>
+        <small>{description}</small>
+      </span>
+    </label>
+  );
+}
+
 function AttachmentVisual({ attachment }: { attachment: Partial<ComposerAttachment> & Pick<MessageAttachment, "fileType" | "fileName"> }) {
-  if (attachment.fileType === "image" && attachment.localUrl) {
+  const { user } = useAuth();
+  const [downloadedThumbnailUrl, setDownloadedThumbnailUrl] = useState("");
+  const attachmentClassId = attachment.classId;
+  const attachmentConversationId = attachment.conversationId;
+  const attachmentFileType = attachment.fileType;
+  const attachmentId = attachment.id;
+  const attachmentLocalUrl = attachment.localUrl;
+
+  useEffect(() => {
+    if (
+      attachmentFileType !== "image" ||
+      attachmentLocalUrl ||
+      !attachmentId ||
+      !attachmentConversationId ||
+      !attachmentClassId ||
+      !user
+    ) {
+      return;
+    }
+
+    let isCancelled = false;
+    let objectUrl = "";
+    const controller = new AbortController();
+
+    user
+      .getIdToken()
+      .then((token) =>
+        fetch(attachmentContentUrl({
+          classId: attachmentClassId,
+          conversationId: attachmentConversationId,
+          id: attachmentId
+        }), {
+          headers: {
+            Authorization: `Bearer ${token}`
+          },
+          signal: controller.signal
+        })
+      )
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Attachment thumbnail failed to load.");
+        }
+
+        return response.blob();
+      })
+      .then((blob) => {
+        if (isCancelled) {
+          return;
+        }
+
+        objectUrl = URL.createObjectURL(blob);
+        setDownloadedThumbnailUrl(objectUrl);
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setDownloadedThumbnailUrl("");
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+      controller.abort();
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [attachmentClassId, attachmentConversationId, attachmentFileType, attachmentId, attachmentLocalUrl, user]);
+
+  const thumbnailUrl = attachment.localUrl || downloadedThumbnailUrl;
+
+  if (attachment.fileType === "image" && thumbnailUrl) {
     return (
       <span
         className="student-attachment-thumbnail"
-        style={{ backgroundImage: `url(${attachment.localUrl})` }}
+        style={{ backgroundImage: `url(${thumbnailUrl})` }}
         aria-hidden="true"
       />
     );
@@ -2584,6 +3440,14 @@ function AttachmentVisual({ attachment }: { attachment: Partial<ComposerAttachme
     <span className="student-attachment-file-icon" data-file-type={attachment.fileType} aria-hidden="true">
       {attachment.fileType === "pdf" ? "PDF" : "IMG"}
     </span>
+  );
+}
+
+function attachmentContentUrl(attachment: Pick<MessageAttachment, "classId" | "conversationId" | "id">) {
+  return apiUrl(
+    `/api/student/conversations/${encodeURIComponent(String(attachment.conversationId))}/attachments/${encodeURIComponent(
+      String(attachment.id)
+    )}/content?courseId=${encodeURIComponent(String(attachment.classId))}`
   );
 }
 
@@ -2917,10 +3781,14 @@ function HeaderControlIcon({ kind }: { kind: "feedback" | "tutoringTime" }) {
 }
 
 const StudentContextPopover = memo(function StudentContextPopover({
+  classId,
   contextMemory,
+  conversationId,
   id
 }: {
+  classId?: string;
   contextMemory: ChatContextMemory;
+  conversationId?: string;
   id: string;
 }) {
   const hasContext = hasChatContextMemory(contextMemory);
@@ -2992,11 +3860,13 @@ const StudentContextPopover = memo(function StudentContextPopover({
               <h3>Sources</h3>
               <ul className="student-context-source-list">
                 {contextMemory.sourcesUsed.map((source, index) => (
-                  <li key={`${source.id ?? source.sourceName ?? "source"}-${source.pageNumber ?? index}`}>
-                    <span>{source.sourceName ?? "Class material"}</span>
-                    {formatPageNumber(source.pageNumber) ? <strong>{formatPageNumber(source.pageNumber)}</strong> : null}
-                    {source.problemNumber ? <small>Problem {source.problemNumber}</small> : null}
-                  </li>
+                  <StudentContextSourceItem
+                    classId={classId}
+                    conversationId={conversationId}
+                    index={index}
+                    key={`${source.id ?? source.sourceName ?? "source"}-${source.pageNumber ?? index}`}
+                    source={source}
+                  />
                 ))}
               </ul>
             </div>
@@ -3021,6 +3891,49 @@ const StudentContextPopover = memo(function StudentContextPopover({
   );
 });
 
+function StudentContextSourceItem({
+  classId,
+  conversationId,
+  index,
+  source
+}: {
+  classId?: string;
+  conversationId?: string;
+  index: number;
+  source: NonNullable<ChatContextMemory["sourcesUsed"]>[number];
+}) {
+  const sourceLabel = formatKnowledgeSourceListLabel(source);
+  const shouldShowImage = source.sourceType === "student_upload" && isImageContextSource(source);
+
+  return (
+    <li className={shouldShowImage ? "is-image-source" : undefined}>
+      {shouldShowImage ? (
+        <span className="student-context-source-image" title={sourceLabel}>
+          <AttachmentVisual
+            attachment={{
+              classId,
+              conversationId,
+              fileName: source.sourceName || sourceLabel || `Upload ${index + 1}`,
+              fileType: "image",
+              id: source.id
+            }}
+          />
+          <span className="sr-only">{sourceLabel}</span>
+        </span>
+      ) : (
+        <span className="student-context-source-label">{sourceLabel}</span>
+      )}
+      {!source.label && source.sourceType === "class_material" && formatPageNumber(source.pageNumber) ? (
+        <strong>{formatPageNumber(source.pageNumber)}</strong>
+      ) : null}
+      {!source.label && source.problemNumber ? <small>Problem {source.problemNumber}</small> : null}
+      {source.sourceType === "student_upload" || source.sourceType === "pasted_problem" ? (
+        <small>{studentProvidedSourceLabel(source.sourceType)}</small>
+      ) : null}
+    </li>
+  );
+}
+
 function ContextDetail({ label, value }: { label: string; value?: string | number | null }) {
   if (value === undefined || value === null || value === "") {
     return null;
@@ -3032,6 +3945,18 @@ function ContextDetail({ label, value }: { label: string; value?: string | numbe
       <dd>{value}</dd>
     </>
   );
+}
+
+function studentProvidedSourceLabel(sourceType: NonNullable<ChatContextMemory["sourcesUsed"]>[number]["sourceType"]) {
+  return sourceType === "student_upload" ? "Student-provided" : "Pasted";
+}
+
+function isImageContextSource(source: NonNullable<ChatContextMemory["sourcesUsed"]>[number]) {
+  if (source.fileType === "image") {
+    return true;
+  }
+
+  return /\.(?:png|jpe?g|webp)$/i.test(source.sourceName ?? "");
 }
 
 const StudentUsagePopover = memo(function StudentUsagePopover({
@@ -3196,6 +4121,38 @@ function usageSummaryFromStatus(status: StudentAiUsageStatus | null): UsageSumma
   };
 }
 
+function forcedTutorDebugAiUsageStatus(options: TutorDebugOptions): StudentAiUsageStatus | null {
+  if (options.forceAiUsageBlocked) {
+    return {
+      blocked: true,
+      dailyLimit: 100,
+      dailyUsed: 100,
+      nearLimit: false,
+      resetHint: "today",
+      todayPercentRemaining: 0,
+      weekPercentRemaining: 0,
+      weeklyLimit: 400,
+      weeklyUsed: 400
+    };
+  }
+
+  if (options.forceAiUsageNearLimit) {
+    return {
+      blocked: false,
+      dailyLimit: 100,
+      dailyUsed: 92,
+      nearLimit: true,
+      resetHint: "today",
+      todayPercentRemaining: 8,
+      weekPercentRemaining: 12,
+      weeklyLimit: 400,
+      weeklyUsed: 352
+    };
+  }
+
+  return null;
+}
+
 function buildKnowledgeLines(messages: ChatMessage[]): KnowledgeLine[] {
   const lines: KnowledgeLine[] = [];
   const seen = new Set<string>();
@@ -3282,6 +4239,24 @@ function formatProblemLabel(problem: NonNullable<ChatContextMemory["currentProbl
 
 function formatProblemMeta(problem: NonNullable<ChatContextMemory["currentProblem"]>) {
   return [problem.sourceName, formatPageNumber(problem.pageNumber), problem.sectionTitle].filter(Boolean).join(" · ");
+}
+
+function formatKnowledgeSourceListLabel(source: NonNullable<ChatContextMemory["sourcesUsed"]>[number]) {
+  if (source.sourceType !== "class_material") {
+    return source.label || source.sourceName || "Class material";
+  }
+
+  return (
+    [
+      formatPageNumber(source.pageNumber),
+      source.problemNumber ? `Problem ${source.problemNumber}` : undefined
+    ]
+      .filter(Boolean)
+      .join(" · ") ||
+    source.label ||
+    source.sourceName ||
+    "Class material"
+  );
 }
 
 function formatRetrievalReason(reason: string) {
@@ -3538,6 +4513,27 @@ async function sendStudentFeedback({
   }
 }
 
+async function fetchStudentFeedbackResponses({
+  classId,
+  token
+}: {
+  classId: string;
+  token: string;
+}) {
+  const response = await fetch(apiUrl(`/api/student/feedback?courseId=${encodeURIComponent(classId)}`), {
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+  const data = (await response.json()) as { error?: string; feedback?: StudentFeedback[] };
+
+  if (!response.ok) {
+    throw new Error(data.error ?? "Feedback failed to load.");
+  }
+
+  return data.feedback ?? [];
+}
+
 function buildFeedbackPromptCandidate({
   assistantMessage,
   classId,
@@ -3665,6 +4661,83 @@ function uploadHomeworkAttachmentWithProgress({
   });
 }
 
+async function prepareTeacherPreviewAttachment({
+  classId,
+  conversationId,
+  file,
+  id,
+  onProgress
+}: {
+  classId: string;
+  conversationId: string;
+  file: File;
+  id: string;
+  onProgress: (progress: number) => void;
+}): Promise<ComposerAttachment> {
+  if (file.size > maxTeacherPreviewAttachmentInlineBytes) {
+    throw new Error("Teacher preview attachments must be 8 MB or smaller.");
+  }
+
+  const dataUrl = await readFileAsDataUrl(file, onProgress);
+  const now = new Date().toISOString();
+  const fileType = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf") ? "pdf" : "image";
+
+  return {
+    classId,
+    conversationId,
+    createdAt: now,
+    dataUrl,
+    fileName: file.name,
+    fileSize: file.size,
+    fileType,
+    id,
+    messageId: null,
+    mimeType: file.type || contentTypeFromFileName(file.name),
+    pageCount: null,
+    progress: 100,
+    storageKey: "",
+    studentId: "",
+    updatedAt: now,
+    uploadStatus: "ready"
+  };
+}
+
+function readFileAsDataUrl(file: File, onProgress: (progress: number) => void) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        return;
+      }
+
+      onProgress(Math.min(99, Math.round((event.loaded / Math.max(event.total, 1)) * 100)));
+    };
+    reader.onerror = () => reject(new Error("Teacher preview attachment could not be read."));
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("Teacher preview attachment could not be read."));
+        return;
+      }
+
+      resolve(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function buildTeacherPreviewAttachmentFiles(attachments: ComposerAttachment[]) {
+  return attachments
+    .filter((attachment) => attachment.uploadStatus === "ready" && attachment.dataUrl)
+    .map((attachment) => ({
+      dataUrl: attachment.dataUrl,
+      fileName: attachment.fileName,
+      fileSize: attachment.fileSize,
+      fileType: attachment.fileType,
+      id: attachment.id,
+      mimeType: attachment.mimeType || contentTypeFromFileName(attachment.fileName)
+    }));
+}
+
 async function deleteHomeworkAttachment({
   attachmentId,
   classId,
@@ -3755,16 +4828,18 @@ function validateComposerAttachmentFile(file: File) {
   const extension = fileExtension(file.name);
 
   if (!allowedComposerAttachmentExtensions.includes(extension)) {
-    return "Only text-readable PDF homework files are supported.";
+    return "Upload a PDF, PNG, JPG, JPEG, or WEBP homework file.";
   }
 
   if (file.size > maxComposerPdfBytes) {
-    return `PDFs must be ${Math.floor(maxComposerPdfBytes / 1024 / 1024)} MB or smaller.`;
+    return `Homework files must be ${Math.floor(maxComposerPdfBytes / 1024 / 1024)} MB or smaller.`;
   }
 
   const expectedContentType = contentTypeFromFileName(file.name);
 
-  if (file.type && file.type !== expectedContentType) {
+  const providedContentType = normalizeComposerAttachmentMimeType(file.type);
+
+  if (providedContentType && providedContentType !== expectedContentType) {
     return "That file type does not match the selected homework file.";
   }
 
@@ -3778,7 +4853,33 @@ function contentTypeFromFileName(fileName: string) {
     return "application/pdf";
   }
 
+  if (extension === ".png") {
+    return "image/png";
+  }
+
+  if (extension === ".jpg" || extension === ".jpeg") {
+    return "image/jpeg";
+  }
+
+  if (extension === ".webp") {
+    return "image/webp";
+  }
+
   return "";
+}
+
+function normalizeComposerAttachmentMimeType(value: string) {
+  const normalized = value.trim().toLowerCase();
+
+  if (normalized === "image/jpg" || normalized === "image/pjpeg") {
+    return "image/jpeg";
+  }
+
+  if (normalized === "application/x-pdf") {
+    return "application/pdf";
+  }
+
+  return normalized;
 }
 
 function fileExtension(fileName: string) {

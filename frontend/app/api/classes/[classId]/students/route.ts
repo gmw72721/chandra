@@ -2,7 +2,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
 import { enrollStudentPostgresFirst } from "@/lib/data/server";
 import { adminDb } from "@/lib/firebase-admin";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -12,7 +12,7 @@ export async function POST(
 ) {
   try {
     const { classId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "manageRoster");
     const body = (await request.json().catch(() => ({}))) as {
       displayName?: unknown;
       email?: unknown;

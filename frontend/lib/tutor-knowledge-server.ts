@@ -2,13 +2,19 @@ import { randomUUID } from "crypto";
 import { lookup } from "dns/promises";
 import { FieldValue, type DocumentReference } from "firebase-admin/firestore";
 import { isIP } from "net";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, StandardFonts, type PDFFont } from "pdf-lib";
 import { adminAuth, adminDb, adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
 import {
   buildPdfOcrMetadataRecords,
   runGoogleDocumentAiPdfOcr
 } from "./google-document-ai-ocr";
-import { sourceDefaultsForMaterialKind } from "./class-settings";
+import {
+  emptyClassAccessPermissions,
+  normalizeClassAccessPermissions,
+  normalizeClassAccessRole,
+  sourceDefaultsForMaterialKind,
+  type ClassAccessPermission
+} from "./class-settings";
 import {
   assertPdfOcrPostgresConfigured,
   deletePdfOcrMetadata,
@@ -154,11 +160,15 @@ export type TutorKnowledgeDetails = {
   sampleChunks: TutorKnowledgeDetailChunk[];
 };
 
-export async function authorizeClassTeacher(request: Request, classId: string) {
+export async function authorizeClassAccess(
+  request: Request,
+  classId: string,
+  permission: ClassAccessPermission
+) {
   const token = getBearerToken(request);
 
   if (!token) {
-    throw new TutorKnowledgeHttpError("Sign in as the class teacher to manage tutor knowledge.", 401);
+    throw new TutorKnowledgeHttpError("Sign in as class staff to use this class.", 401);
   }
 
   assertFirebaseAdminReady();
@@ -171,37 +181,71 @@ export async function authorizeClassTeacher(request: Request, classId: string) {
   }
 
   const classData = classSnapshot.data;
-  const coTeacherRole = readCoTeacherRole(classData.coTeachers, decodedToken.uid);
+  const access = readClassAccess(classData, decodedToken.uid);
 
-  if (classData.teacherId !== decodedToken.uid && coTeacherRole !== "owner" && coTeacherRole !== "co-teacher") {
-    throw new TutorKnowledgeHttpError("Only the class teacher can manage tutor knowledge.", 403);
+  if (!access.permissions[permission]) {
+    throw new TutorKnowledgeHttpError("You do not have permission to use this class feature.", 403);
   }
 
   return {
+    accessRole: access.role,
     classSnapshot: {
       id: classSnapshot.id,
       exists: classSnapshot.exists,
       data: () => classData
     },
     email: decodedToken.email,
+    permissions: access.permissions,
     uid: decodedToken.uid
   };
 }
 
-function readCoTeacherRole(coTeachers: unknown, uid: string) {
+export async function authorizeClassTeacher(request: Request, classId: string) {
+  const authorization = await authorizeClassAccess(request, classId, "manageClassSettings");
+
+  if (authorization.accessRole !== "owner" && authorization.accessRole !== "co-teacher") {
+    throw new TutorKnowledgeHttpError("Only the class teacher can manage tutor knowledge.", 403);
+  }
+
+  return authorization;
+}
+
+function readClassAccess(classData: Record<string, unknown>, uid: string) {
+  if (classData.teacherId === uid) {
+    return {
+      permissions: normalizeClassAccessPermissions({}, "owner"),
+      role: "owner" as const
+    };
+  }
+
+  const coTeacher = readCoTeacher(classData.coTeachers, uid);
+  const role = normalizeClassAccessRole(coTeacher?.role);
+
+  if (!coTeacher || role === "owner") {
+    return {
+      permissions: { ...emptyClassAccessPermissions },
+      role: "viewer" as const
+    };
+  }
+
+  return {
+    permissions: normalizeClassAccessPermissions(coTeacher.permissions ?? coTeacher, role),
+    role
+  };
+}
+
+function readCoTeacher(coTeachers: unknown, uid: string): Record<string, unknown> | null {
   if (!coTeachers || typeof coTeachers !== "object" || Array.isArray(coTeachers)) {
-    return "";
+    return null;
   }
 
   const coTeacher = (coTeachers as Record<string, unknown>)[uid];
 
   if (!coTeacher || typeof coTeacher !== "object" || Array.isArray(coTeacher)) {
-    return "";
+    return null;
   }
 
-  const role = (coTeacher as Record<string, unknown>).role;
-
-  return typeof role === "string" ? role : "";
+  return coTeacher as Record<string, unknown>;
 }
 
 export async function buildTutorKnowledgePreview(formData: FormData): Promise<TutorKnowledgePreview> {
@@ -335,7 +379,19 @@ export async function saveTutorKnowledge({
         })
       : null;
     fileMetadata = storedSource?.metadata
-      ?? (file ? await uploadTutorKnowledgeFile({ classId, file, materialId: materialRef.id, updateProgress }) : {})
+      ?? (
+        file
+          ? await uploadTutorKnowledgeFile({ classId, file, materialId: materialRef.id, updateProgress })
+          : sourceUrl
+            ? await uploadTutorKnowledgeUrlAsPdfSource({
+                classId,
+                materialId: materialRef.id,
+                sourceUrl,
+                title,
+                updateProgress
+              })
+            : {}
+      )
       ?? {};
   } catch (caughtError) {
     await updateProgress({
@@ -1447,6 +1503,85 @@ async function uploadTutorKnowledgeFile({
   } satisfies TutorKnowledgeOriginalSource;
 }
 
+async function uploadTutorKnowledgeUrlAsPdfSource({
+  classId,
+  materialId,
+  sourceUrl,
+  title,
+  updateProgress
+}: {
+  classId: string;
+  materialId: string;
+  sourceUrl: string;
+  title: string;
+  updateProgress?: (progress: MaterialJobProgressUpdate) => Promise<void>;
+}) {
+  await updateProgress?.({
+    detail: "Downloading the URL and preparing a PDF source.",
+    percent: 20,
+    step: "upload_received"
+  });
+
+  const downloaded = await downloadTutorKnowledgeUrl(sourceUrl);
+  const originalContentType = downloaded.contentType || contentTypeFromFileName(downloaded.fileName);
+  const isDownloadedPdf = isPdfSource(downloaded.fileName, originalContentType);
+  const pdfBuffer = isDownloadedPdf
+    ? downloaded.buffer
+    : await createPdfFromDownloadedUrlSource({
+        buffer: downloaded.buffer,
+        contentType: originalContentType,
+        fileName: downloaded.fileName,
+        finalUrl: downloaded.finalUrl,
+        title
+      });
+  const pdfFileName = isDownloadedPdf
+    ? ensurePdfFileName(downloaded.fileName)
+    : pdfFileNameForUrlSource(downloaded.fileName, title);
+  const safeFileName = sanitizeFileName(pdfFileName);
+
+  try {
+    const asset = await saveGcsPdfAsset({
+      buffer: pdfBuffer,
+      contentType: "application/pdf",
+      metadata: {
+        classId,
+        materialId,
+        originalContentType,
+        originalSourceUrl: sourceUrl,
+        sourceKind: "url",
+        sourceUrl: downloaded.finalUrl
+      },
+      path: canonicalOriginalPdfPath({
+        classId,
+        materialId,
+        safeFileName
+      })
+    });
+
+    return {
+      contentType: asset.mimeType,
+      fileName: pdfFileName,
+      filePath: asset.path,
+      fileSha256: asset.sha256,
+      fileSize: asset.size,
+      fileUrl: `https://storage.googleapis.com/${asset.bucket}/${asset.path.split("/").map((segment) => encodeURIComponent(segment)).join("/")}`,
+      originalSourceUrl: sourceUrl,
+      sourceKind: "url",
+      sourceUrl: downloaded.finalUrl,
+      storageBucket: asset.bucket
+    } satisfies TutorKnowledgeOriginalSource;
+  } catch (caughtError) {
+    console.error("Tutor knowledge URL PDF upload failed.", caughtError);
+
+    throw new TutorKnowledgeHttpError(
+      caughtError instanceof Error
+        ? `URL source PDF could not be saved: ${caughtError.message}`
+        : "URL source PDF could not be saved.",
+      502
+    );
+  }
+}
+
 async function deleteMaterialStorageFiles({
   classId,
   filePath,
@@ -2545,6 +2680,159 @@ function fileNameFromUrl(url: URL, contentType: string) {
   const fileName = pathName && getFileExtension(pathName) ? pathName : `url-source${fallbackExtension}`;
 
   return sanitizeFileName(fileName);
+}
+
+async function createPdfFromDownloadedUrlSource({
+  buffer,
+  contentType,
+  fileName,
+  finalUrl,
+  title
+}: {
+  buffer: Buffer;
+  contentType: string;
+  fileName: string;
+  finalUrl: string;
+  title: string;
+}) {
+  const extractedText = isHtmlSource(contentType, fileName)
+    ? extractReadableHtmlText(buffer.toString("utf8"))
+    : buffer.toString("utf8").trim();
+
+  assertTutorKnowledgeTextWithinLimit(extractedText, "Extracted URL text");
+
+  if (!extractedText) {
+    throw new TutorKnowledgeHttpError("No readable text was found at this URL.", 400);
+  }
+
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const boldFont = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const pageWidth = 612;
+  const pageHeight = 792;
+  const margin = 54;
+  const lineHeight = 14;
+  const fontSize = 11;
+  const maxLineWidth = pageWidth - margin * 2;
+  let page = pdf.addPage([pageWidth, pageHeight]);
+  let y = pageHeight - margin;
+
+  const drawLine = (line: string, options?: { bold?: boolean; size?: number }) => {
+    const size = options?.size ?? fontSize;
+
+    if (y < margin) {
+      page = pdf.addPage([pageWidth, pageHeight]);
+      y = pageHeight - margin;
+    }
+
+    page.drawText(sanitizePdfText(line), {
+      font: options?.bold ? boldFont : font,
+      size,
+      x: margin,
+      y
+    });
+    y -= options?.size ? lineHeight + 4 : lineHeight;
+  };
+
+  drawLine(title.trim() || fileName || "URL source", { bold: true, size: 15 });
+  drawLine(finalUrl, { size: 9 });
+  y -= 8;
+
+  for (const paragraph of extractedText.split(/\n{2,}/)) {
+    const lines = wrapPdfText(paragraph.replace(/\s+/g, " ").trim(), font, fontSize, maxLineWidth);
+
+    if (!lines.length) {
+      y -= lineHeight;
+      continue;
+    }
+
+    for (const line of lines) {
+      drawLine(line);
+    }
+
+    y -= 6;
+  }
+
+  return Buffer.from(await pdf.save());
+}
+
+function wrapPdfText(text: string, font: PDFFont, fontSize: number, maxWidth: number) {
+  const words = sanitizePdfText(text).split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let currentLine = "";
+
+  for (const word of words) {
+    const candidate = currentLine ? `${currentLine} ${word}` : word;
+
+    if (font.widthOfTextAtSize(candidate, fontSize) <= maxWidth) {
+      currentLine = candidate;
+      continue;
+    }
+
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+
+    if (font.widthOfTextAtSize(word, fontSize) <= maxWidth) {
+      currentLine = word;
+      continue;
+    }
+
+    const pieces = splitLongPdfWord(word, font, fontSize, maxWidth);
+    lines.push(...pieces.slice(0, -1));
+    currentLine = pieces.at(-1) ?? "";
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines;
+}
+
+function splitLongPdfWord(
+  word: string,
+  font: PDFFont,
+  fontSize: number,
+  maxWidth: number
+) {
+  const pieces: string[] = [];
+  let currentPiece = "";
+
+  for (const character of word) {
+    const candidate = `${currentPiece}${character}`;
+
+    if (font.widthOfTextAtSize(candidate, fontSize) <= maxWidth) {
+      currentPiece = candidate;
+      continue;
+    }
+
+    if (currentPiece) {
+      pieces.push(currentPiece);
+    }
+
+    currentPiece = character;
+  }
+
+  if (currentPiece) {
+    pieces.push(currentPiece);
+  }
+
+  return pieces;
+}
+
+function sanitizePdfText(text: string) {
+  return text.replace(/[^\x09\x0a\x0d\x20-\x7e]/g, " ");
+}
+
+function ensurePdfFileName(fileName: string) {
+  return getFileExtension(fileName) === ".pdf" ? fileName : `${fileName || "url-source"}.pdf`;
+}
+
+function pdfFileNameForUrlSource(fileName: string, title: string) {
+  const baseName = (title.trim() || fileName || "url-source").replace(/\.[^.]+$/, "");
+
+  return sanitizeFileName(`${baseName}.pdf`);
 }
 
 function extractReadableHtmlText(html: string) {

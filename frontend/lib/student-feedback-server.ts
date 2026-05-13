@@ -288,13 +288,17 @@ export async function updateTeacherStudentFeedback({
   classId,
   feedbackId,
   status,
+  sendStudentVisibleResponse = false,
+  studentVisibleResponse,
   teacherId,
   teacherNote,
   usageAllowancePercent
 }: {
   classId: string;
   feedbackId: string;
-  status: StudentFeedbackStatus;
+  status?: StudentFeedbackStatus;
+  sendStudentVisibleResponse?: boolean;
+  studentVisibleResponse?: string;
   teacherId: string;
   teacherNote?: string;
   usageAllowancePercent?: number;
@@ -302,7 +306,7 @@ export async function updateTeacherStudentFeedback({
   assertSafeDocumentId(feedbackId, "Feedback id");
   assertFirebaseAdminAuthReady();
 
-  if (!feedbackStatuses.has(status) || status === "new") {
+  if (status !== undefined && (!feedbackStatuses.has(status) || status === "new")) {
     throw new StudentFeedbackPersistenceError("Feedback status is invalid.", 400);
   }
 
@@ -319,9 +323,22 @@ export async function updateTeacherStudentFeedback({
     throw new StudentFeedbackPersistenceError("Feedback does not belong to this class.", 403);
   }
 
+  const nextStatus = status ?? normalizeFeedbackStatus(feedback.status);
+  const normalizedStudentVisibleResponse = String(
+    studentVisibleResponse ?? feedback.studentVisibleResponse ?? feedback.studentVisibleResponseDraft ?? ""
+  ).slice(0, maxTeacherFeedbackNoteLength);
+  if (sendStudentVisibleResponse && !normalizedStudentVisibleResponse.trim()) {
+    throw new StudentFeedbackPersistenceError("Add a response before sending it to the student.", 400);
+  }
+  const existingStudentVisibleResponseSentAt = serializeFirestoreValue(feedback.studentVisibleResponseSentAt);
+  const studentVisibleResponseSentAt = sendStudentVisibleResponse
+    ? new Date().toISOString()
+    : typeof existingStudentVisibleResponseSentAt === "string"
+      ? existingStudentVisibleResponseSentAt
+      : "";
   const normalizedUsageAllowancePercent = normalizeUsageAllowancePercent(usageAllowancePercent);
   const shouldGrantUsageAllowance =
-    feedback.kind === "usage_request" && status === "resolved" && normalizedUsageAllowancePercent > 0;
+    feedback.kind === "usage_request" && nextStatus === "resolved" && normalizedUsageAllowancePercent > 0;
   const usageAllowance = shouldGrantUsageAllowance
     ? await grantStudentAiUsageAllowance({
         classId,
@@ -333,10 +350,12 @@ export async function updateTeacherStudentFeedback({
     : null;
 
   const updateData = compactFirestoreData({
-    reviewedAt: FieldValue.serverTimestamp(),
+    reviewedAt: status ? FieldValue.serverTimestamp() : undefined,
     reviewedBy: teacherId,
-    resolvedAt: status === "resolved" ? FieldValue.serverTimestamp() : null,
-    status,
+    resolvedAt: nextStatus === "resolved" ? FieldValue.serverTimestamp() : undefined,
+    status: nextStatus,
+    studentVisibleResponse: normalizedStudentVisibleResponse,
+    studentVisibleResponseSentAt: sendStudentVisibleResponse ? FieldValue.serverTimestamp() : undefined,
     teacherNote: String(teacherNote ?? feedback.teacherNote ?? "").slice(0, maxTeacherFeedbackNoteLength),
     usageAllowanceDayBucket: usageAllowance?.dayBucket,
     usageAllowancePercent: usageAllowance?.percent,
@@ -354,13 +373,18 @@ export async function updateTeacherStudentFeedback({
       messageId: stringOrNull(feedback.messageId),
       promptReason: normalizeFeedbackPromptReason(feedback.promptReason),
       rating: normalizeFeedbackRating(feedback.rating),
-      status,
+      status: nextStatus,
       studentEmail: String(feedback.studentEmail ?? "").trim().toLowerCase(),
       studentId: String(feedback.studentId ?? ""),
       studentName: String(feedback.studentName ?? "Student"),
+      studentVisibleResponse: normalizedStudentVisibleResponse,
+      studentVisibleResponseSentAt,
       teacherNote: String(teacherNote ?? feedback.teacherNote ?? "").slice(0, maxTeacherFeedbackNoteLength),
       metadata: {
+        reviewedAt: status ? new Date().toISOString() : undefined,
         reviewedBy: teacherId,
+        studentVisibleResponse: normalizedStudentVisibleResponse,
+        studentVisibleResponseSentAt,
         usageAllowanceDayBucket: usageAllowance?.dayBucket,
         usageAllowancePercent: usageAllowance?.percent
       }
@@ -401,6 +425,8 @@ function feedbackDocToStudentFeedback(id: string, data: Record<string, unknown>)
     reviewedAt: serializeFirestoreValue(data.reviewedAt),
     reviewedBy: stringOrNull(data.reviewedBy),
     status: normalizeFeedbackStatus(data.status),
+    studentVisibleResponse: String(data.studentVisibleResponse ?? data.studentVisibleResponseDraft ?? "").slice(0, maxTeacherFeedbackNoteLength),
+    studentVisibleResponseSentAt: serializeFirestoreValue(data.studentVisibleResponseSentAt),
     studentEmail: String(data.studentEmail ?? "").trim().toLowerCase(),
     studentId: String(data.studentId ?? ""),
     studentName: String(data.studentName ?? "Student"),
@@ -426,6 +452,8 @@ function feedbackRecordToStudentFeedback(record: Awaited<ReturnType<typeof listF
     reviewedAt: serializeFirestoreValue(record.metadata.reviewedAt),
     reviewedBy: stringOrNull(record.metadata.reviewedBy),
     status: normalizeFeedbackStatus(record.status),
+    studentVisibleResponse: String(record.metadata.studentVisibleResponse ?? record.metadata.studentVisibleResponseDraft ?? "").slice(0, maxTeacherFeedbackNoteLength),
+    studentVisibleResponseSentAt: serializeFirestoreValue(record.metadata.studentVisibleResponseSentAt),
     studentEmail: record.studentEmail,
     studentId: record.studentId ?? "",
     studentName: record.studentName,
@@ -437,9 +465,20 @@ function feedbackRecordToStudentFeedback(record: Awaited<ReturnType<typeof listF
 }
 
 function sanitizeStudentVisibleFeedback(feedback: StudentFeedback): StudentFeedback {
-  const { reviewedBy: _reviewedBy, teacherNote: _teacherNote, ...visibleFeedback } = feedback;
+  const isResponseSent = Boolean(feedback.studentVisibleResponseSentAt && feedback.studentVisibleResponse);
+  const {
+    reviewedBy: _reviewedBy,
+    teacherNote: _teacherNote,
+    ...visibleFeedback
+  } = feedback;
 
-  return visibleFeedback;
+  return isResponseSent
+    ? visibleFeedback
+    : {
+        ...visibleFeedback,
+        studentVisibleResponse: "",
+        studentVisibleResponseSentAt: ""
+      };
 }
 
 async function assertStudentFeedbackRateLimit(scope: AuthorizedTutorChatScope) {

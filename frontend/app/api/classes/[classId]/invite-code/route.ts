@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { resolveClassCodePostgresFirst, tryPostgresData } from "@/lib/data/server";
 import { updateClassJoinCode } from "@/lib/data/classes";
 import { adminDb } from "@/lib/firebase-admin";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -16,7 +16,7 @@ export async function POST(
 ) {
   try {
     const { classId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "manageClassAccess");
     const joinCode = await createUniqueClassCode();
 
     await tryPostgresData("class.join_code.write", () => updateClassJoinCode({ classId, joinCode }));

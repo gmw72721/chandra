@@ -318,7 +318,13 @@ export async function listStudentClassIdsPostgresFirst({
 
 function classRecordToData(
   record: ClassRecord,
-  coTeachers: Array<{ displayName: string; email: string; role: string; uid: string }>
+  coTeachers: Array<{
+    displayName: string;
+    email: string;
+    permissions: Record<string, boolean>;
+    role: string;
+    uid: string;
+  }>
 ) {
   const coTeacherMap = Object.fromEntries(coTeachers.map((coTeacher) => [coTeacher.uid, coTeacher]));
 

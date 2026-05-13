@@ -15,7 +15,10 @@ import {
 } from "@/lib/class-theme";
 import {
   defaultRefusalStyle,
+  defaultTaClassAccessPermissions,
+  exampleFrequencyOptions,
   mathNotationOptions,
+  normalizeClassAccessPermissions,
   normalizeAnswerPolicySettings,
   normalizeClassCoTeachers,
   normalizeClassModelSettings,
@@ -33,13 +36,14 @@ import {
   materialSourceTypeKeys,
   materialSourceTypePreferenceOptions,
   preferredSourceTypeOptions,
-  readingLevelOptions,
   reasoningEffortOptions,
-  responseLengthOptions,
   tutorBehaviorOptions,
   understandingLevelOptions,
+  verboseOptions,
   type AnswerPolicySettings,
   type ClassAccessRole,
+  type ClassAccessPermission,
+  type ClassAccessPermissions,
   type ClassCoTeacher,
   type AiTokenLimitSettings,
   type AiRequestLimitSettings,
@@ -72,6 +76,7 @@ import {
   type TeacherClass
 } from "@/lib/classes";
 import { capitalizeLabel, coerceDate, formatConversationDate } from "@/lib/display-format";
+import { conversationNeedsTeacherReview } from "@/lib/conversation-review-utils";
 import { defaultModelOptions } from "@/lib/model-options";
 import {
   formatBytes,
@@ -111,6 +116,22 @@ type MaterialUploadProgress = {
 type MaterialUploadDisplayStep = "upload" | "read" | "prepare" | "ready";
 
 const materialUploadDisplaySteps: MaterialUploadDisplayStep[] = ["upload", "read", "prepare", "ready"];
+const classAccessPermissionLabels: Record<ClassAccessPermission, string> = {
+  viewOverview: "View overview",
+  viewRoster: "View roster",
+  manageRoster: "Manage roster",
+  viewConversations: "View conversations",
+  reviewConversations: "Review conversations",
+  viewMaterials: "View materials",
+  manageMaterials: "Manage materials",
+  manageStudentSupport: "Manage student support",
+  manageLearningProfiles: "Manage learning profiles",
+  manageClassSettings: "Manage class settings",
+  manageClassAccess: "Manage class access",
+  exportStudentData: "Export student data",
+  deleteStudentData: "Delete student data",
+  teacherPreviewChat: "Preview student chat"
+};
 type ActiveMaterialUpload = {
   jobId: string;
   kind: TutorKnowledgeKind;
@@ -171,20 +192,21 @@ type SettingsPane =
   | "general"
   | "classAccess"
   | "privacy"
-  | "sourceDefaults"
   | "notifications"
-  | "guidance"
-  | "answerPolicy"
-  | "model"
-  | "response"
-  | "sources"
+  | "usage"
   | "invites"
   | "account"
   | "appearance";
-type AiTutorSection = "sources" | "access" | "behavior" | "answerPolicy" | "response" | "model";
+type AiTutorSection = "sources" | "sourceSettings" | "access" | "behavior" | "answerPolicy" | "model";
 type KnowledgeTypeFilter = "Assignments" | "Textbook" | "Notes" | "Worked Examples" | "Rubrics" | "Answer Keys";
 type KnowledgeFilter = "All" | KnowledgeTypeFilter;
 type RosterFilter = "all" | "active" | "inactive" | "highQuestions" | "noConversations";
+type RosterSortColumn = "student" | "activity" | "questions" | "lastActive" | "conversations";
+type SortDirection = "asc" | "desc";
+type RosterSort = {
+  column: RosterSortColumn;
+  direction: SortDirection;
+} | null;
 type RosterDetailFocus = "activity" | "notes";
 type ConversationFilter =
   | "all"
@@ -210,6 +232,7 @@ type ConversationReviewRow = {
   id: string;
   lastMessageAt: unknown;
   lastMessageLabel: string;
+  followUpDueAt?: unknown;
   messageCount: number;
   modelId: string;
   status: ConversationReviewStatus;
@@ -239,6 +262,7 @@ type RosterRow = {
   hasConversations: boolean;
   highQuestions: boolean;
   lastActive: string;
+  lastActiveAtMs: number | null;
   lastChatTopic: string;
   questionsLabel: string;
   questionsPerDay: number;
@@ -314,28 +338,28 @@ const settingsPanes: Array<{
   label: string;
 }> = [
   {
-    description: "Name, section, opening copy",
+    description: "Name and section",
     icon: <BookOpenIcon />,
     id: "general",
-    label: "General"
+    label: "Class Details"
   },
   {
-    description: "Invite codes and co-teachers",
+    description: "Class codes and co-teachers",
     icon: <UserGroupIcon />,
     id: "classAccess",
-    label: "Class Access"
+    label: "People & Access"
+  },
+  {
+    description: "Student and preview message caps",
+    icon: <SettingsIcon />,
+    id: "usage",
+    label: "Usage Limits"
   },
   {
     description: "Retention, export, deletion",
     icon: <ShieldIcon />,
     id: "privacy",
     label: "Privacy & Data"
-  },
-  {
-    description: "New material defaults",
-    icon: <DocumentIcon />,
-    id: "sourceDefaults",
-    label: "Source Defaults"
   },
   {
     description: "Saved notification preferences",
@@ -391,11 +415,11 @@ const aiTutorSections: Array<{
   label: string;
 }> = [
   { icon: <DocumentIcon />, id: "sources", label: "Sources" },
+  { icon: <SettingsIcon />, id: "sourceSettings", label: "Source Settings" },
   { icon: <ShieldIcon />, id: "access", label: "Access" },
-  { icon: <ChatIcon />, id: "behavior", label: "Behavior" },
-  { icon: <CheckCircleIcon />, id: "answerPolicy", label: "Answer Policy" },
-  { icon: <NoteIcon />, id: "response", label: "Response" },
-  { icon: <SettingsIcon />, id: "model", label: "Model" }
+  { icon: <ChatIcon />, id: "behavior", label: "Teaching Style" },
+  { icon: <CheckCircleIcon />, id: "answerPolicy", label: "Help Rules" },
+  { icon: <NoteIcon />, id: "model", label: "Advanced" }
 ];
 
 const defaultAiTutorHiddenInstructions = [
@@ -420,6 +444,14 @@ const conversationReviewActions: Array<{ label: string; status: ConversationRevi
   { label: "Misunderstanding spotted", status: "misunderstanding_spotted" },
   { label: "Good learning moment", status: "good_learning_moment" },
   { label: "AI answer needs review", status: "ai_answer_needs_review" }
+];
+const conversationReviewStatusOptions: ConversationReviewStatus[] = [
+  "new",
+  "reviewed",
+  "needs_follow_up",
+  "misunderstanding_spotted",
+  "good_learning_moment",
+  "ai_answer_needs_review"
 ];
 
 const markdownRemarkPlugins = [remarkMath];
@@ -464,8 +496,8 @@ const responseStructureSettings = [
   {
     id: "endWithCheckQuestion",
     name: "responseFormat.endWithCheckQuestion",
-    title: "End with a check question",
-    description: "Close replies with a quick question that checks understanding."
+    title: "End with a student action",
+    description: "Close replies with one small next step or check question when it fits."
   }
 ] as const;
 
@@ -473,22 +505,22 @@ const sourceUsageSettings = [
   {
     id: "useClassMaterialsFirst",
     title: "Use class materials first",
-    description: "Prefer uploaded materials and textbook content."
+    description: "Search uploaded assignments, textbooks, notes, and examples before using general knowledge."
   },
   {
     id: "citeSourcePages",
     title: "Cite source pages",
-    description: "Include page numbers or section references."
+    description: "Show page numbers or section references when a reply uses class materials."
   },
   {
     id: "askClarificationIfSourceUnclear",
-    title: "Ask clarification if source is unclear",
-    description: "Confirm intent when materials are ambiguous."
+    title: "Ask when the right source is unclear",
+    description: "Prompt the student to name the assignment, page, or source instead of guessing."
   },
   {
     id: "quoteSourcePassages",
-    title: "Quote source passages",
-    description: "Allow exact excerpts from uploaded class materials when students ask."
+    title: "Allow short quoted passages",
+    description: "Let Chandra quote brief excerpts from uploaded materials when that helps explain the source."
   }
 ] as const;
 
@@ -503,12 +535,31 @@ const helpLimitLabels: Record<HelpLimitOptionId, string> = {
   full_explanation_allowed: "Full explanation allowed"
 };
 
+const helpLimitDescriptions: Record<HelpLimitOptionId, string> = {
+  ask_for_attempt_only: "Only ask what the student has tried or what part is confusing.",
+  conceptual_orientation: "Explain the relevant idea without touching the exact task steps.",
+  guiding_question: "Ask one question that helps the student decide the next move.",
+  light_hint: "Give a small hint, but leave the setup and work to the student.",
+  targeted_hint_next_action: "Name the next action and what to look for while doing it.",
+  one_worked_step: "Work through one step, then stop and ask the student to continue.",
+  check_work_explain_gaps: "Review submitted work and explain the specific gap or correction.",
+  full_explanation_allowed: "Provide a complete explanation when the student is ready for it."
+};
+
 const helpLimitLevelLabels: Record<(typeof understandingLevelOptions)[number], string> = {
-  0: "Level 0: no evidence yet",
-  1: "Level 1: first nudge",
-  2: "Level 2: setup forming",
-  3: "Level 3: execution help",
-  4: "Level 4: verification"
+  0: "No work shown",
+  1: "Just getting started",
+  2: "Has a plan",
+  3: "Working through steps",
+  4: "Checking or nearly done"
+};
+
+const helpLimitLevelDescriptions: Record<(typeof understandingLevelOptions)[number], string> = {
+  0: "Use when Chandra has not seen any attempt or reasoning yet.",
+  1: "Use when the student names confusion but has little setup.",
+  2: "Use when the student has picked a method or started the setup.",
+  3: "Use when the student is doing the work and needs a targeted correction.",
+  4: "Use when the student mainly needs verification, gap checks, or refinement."
 };
 
 const selectableModelOptions = defaultModelOptions.filter((modelOption) => modelOption.provider === "openrouter");
@@ -541,12 +592,6 @@ const knowledgeStatusClasses: Record<ClassMaterial["status"], string> = {
   ready: "ready",
   uploaded: "review"
 };
-const conversationReviewRequiredStatuses = new Set<ConversationReviewStatus>([
-  "ai_answer_needs_review",
-  "misunderstanding_spotted",
-  "needs_follow_up",
-  "new"
-]);
 const reviewedConversationStatuses = new Set<ConversationReviewStatus>(["good_learning_moment", "reviewed"]);
 const conversationStatusClasses: Record<ConversationReviewStatus, string> = {
   ai_answer_needs_review: "ai-review",
@@ -577,6 +622,19 @@ const teacherInviteEmptyMessages: Record<TeacherInviteFilter, string> = {
   expired: "No expired invites.",
   revoked: "No revoked invites.",
   used: "No used invites yet."
+};
+const rosterPageSize = 10;
+const rosterSortLabels: Record<RosterSortColumn, string> = {
+  activity: "Activity",
+  conversations: "Conversations",
+  lastActive: "Last active",
+  questions: "Questions asked",
+  student: "Student"
+};
+const rosterStatusSortPriority: Record<RosterRow["status"], number> = {
+  Active: 0,
+  Inactive: 1,
+  "No activity": 2
 };
 
 export function TeacherClassManager({
@@ -640,6 +698,8 @@ export function TeacherClassManager({
   const [activeSettingsPane, setActiveSettingsPane] = useState<SettingsPane>("general");
   const [coTeacherEmail, setCoTeacherEmail] = useState("");
   const [coTeacherRole, setCoTeacherRole] = useState<Exclude<ClassAccessRole, "owner">>("co-teacher");
+  const [coTeacherPermissions, setCoTeacherPermissions] =
+    useState<ClassAccessPermissions>(defaultTaClassAccessPermissions);
   const [classAccessMessage, setClassAccessMessage] = useState("");
   const [savingClassAccessAction, setSavingClassAccessAction] = useState("");
   const [privacyDataMessage, setPrivacyDataMessage] = useState("");
@@ -650,12 +710,14 @@ export function TeacherClassManager({
   const [isSidebarDrawerOpen, setIsSidebarDrawerOpen] = useState(false);
   const [isClassSwitcherOpen, setIsClassSwitcherOpen] = useState(false);
   const [isSecondarySidebarOpen, setIsSecondarySidebarOpen] = useState(false);
-  const [aiTutorResponseLengthPreview, setAiTutorResponseLengthPreview] = useState<{
+  const [aiTutorVerbosePreview, setAiTutorVerbosePreview] = useState<{
     classId: string;
     value: string;
   } | null>(null);
   const [rosterSearchQuery, setRosterSearchQuery] = useState("");
   const [rosterFilter, setRosterFilter] = useState<RosterFilter>("all");
+  const [rosterSort, setRosterSort] = useState<RosterSort>(null);
+  const [rosterPageState, setRosterPageState] = useState({ page: 1, resetKey: "" });
   const [conversationFilter, setConversationFilter] = useState<ConversationFilter>("all");
   const [conversationSearchQuery, setConversationSearchQuery] = useState("");
   const [problemSearchQuery, setProblemSearchQuery] = useState("");
@@ -669,10 +731,15 @@ export function TeacherClassManager({
   const [isProfessorReviewOpen, setIsProfessorReviewOpen] = useState(false);
   const [teacherNotesByStudentId, setTeacherNotesByStudentId] = useState<Record<string, string>>({});
   const [conversationNotesById, setConversationNotesById] = useState<Record<string, string>>({});
+  const [conversationFollowUpDueById, setConversationFollowUpDueById] = useState<Record<string, string>>({});
+  const [checkedConversationIds, setCheckedConversationIds] = useState<string[]>([]);
   const [feedbackTeacherNotesById, setFeedbackTeacherNotesById] = useState<Record<string, string>>({});
+  const [feedbackResponsesById, setFeedbackResponsesById] = useState<Record<string, string>>({});
   const [feedbackUsageAllowanceById, setFeedbackUsageAllowanceById] = useState<Record<string, string>>({});
   const [savingNotesStudentId, setSavingNotesStudentId] = useState("");
   const [savingReviewConversationId, setSavingReviewConversationId] = useState("");
+  const [isSavingBulkConversationReviews, setIsSavingBulkConversationReviews] = useState(false);
+  const [bulkConversationStatus, setBulkConversationStatus] = useState<ConversationReviewStatus>("reviewed");
   const [savingFeedbackId, setSavingFeedbackId] = useState("");
   const [reviewSaveMessage, setReviewSaveMessage] = useState("");
   const [highlightedNoteConversationId, setHighlightedNoteConversationId] = useState("");
@@ -716,6 +783,8 @@ export function TeacherClassManager({
     themeColor?: unknown;
   } | null>(null);
   const [isSavingAccountSettings, setIsSavingAccountSettings] = useState(false);
+  const [isResettingAccountPassword, setIsResettingAccountPassword] = useState(false);
+  const [isSigningOutAllSessions, setIsSigningOutAllSessions] = useState(false);
   const [isCreatingTeacherInvite, setIsCreatingTeacherInvite] = useState(false);
   const [isLoadingTeacherInvites, setIsLoadingTeacherInvites] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
@@ -848,6 +917,38 @@ export function TeacherClassManager({
     () => filterRosterRows(rosterRows, rosterSearchQuery, rosterFilter),
     [rosterFilter, rosterRows, rosterSearchQuery]
   );
+  const sortedRosterRows = useMemo(
+    () => sortRosterRows(filteredRosterRows, rosterSort),
+    [filteredRosterRows, rosterSort]
+  );
+  const rosterPageCount = Math.max(1, Math.ceil(sortedRosterRows.length / rosterPageSize));
+  const rosterPageResetKey = [
+    activeClassId,
+    rosterFilter,
+    rosterRows.length,
+    rosterSearchQuery,
+    rosterSort?.column ?? "",
+    rosterSort?.direction ?? ""
+  ].join("|");
+  const rosterPage =
+    rosterPageState.resetKey === rosterPageResetKey ? Math.min(rosterPageState.page, rosterPageCount) : 1;
+  const visibleRosterRows = useMemo(() => {
+    const firstRowIndex = (rosterPage - 1) * rosterPageSize;
+
+    return sortedRosterRows.slice(firstRowIndex, firstRowIndex + rosterPageSize);
+  }, [rosterPage, sortedRosterRows]);
+  const rosterVisibleStart = sortedRosterRows.length ? (rosterPage - 1) * rosterPageSize + 1 : 0;
+  const rosterVisibleEnd = sortedRosterRows.length
+    ? Math.min(rosterVisibleStart + visibleRosterRows.length - 1, sortedRosterRows.length)
+    : 0;
+  const handleRosterSort = useCallback((column: RosterSortColumn) => {
+    setRosterSort((currentSort) =>
+      currentSort?.column === column
+        ? { column, direction: currentSort.direction === "asc" ? "desc" : "asc" }
+        : { column, direction: "asc" }
+    );
+  }, []);
+
   const selectedRosterRow = useMemo(
     () =>
       isRosterDetailOpen
@@ -863,13 +964,13 @@ export function TeacherClassManager({
   const checkedStudentIdSet = useMemo(() => new Set(availableCheckedStudentIds), [availableCheckedStudentIds]);
   const checkedVisibleStudentIds = useMemo(
     () =>
-      filteredRosterRows
+      visibleRosterRows
         .map((row) => row.student.id)
         .filter((studentId) => checkedStudentIdSet.has(studentId)),
-    [checkedStudentIdSet, filteredRosterRows]
+    [checkedStudentIdSet, visibleRosterRows]
   );
   const allVisibleStudentsChecked =
-    filteredRosterRows.length > 0 && checkedVisibleStudentIds.length === filteredRosterRows.length;
+    visibleRosterRows.length > 0 && checkedVisibleStudentIds.length === visibleRosterRows.length;
   const someVisibleStudentsChecked = checkedVisibleStudentIds.length > 0;
   const conversationReviewRows = useMemo(
     () => buildConversationReviewRows(classConversations, activeClassId),
@@ -917,6 +1018,18 @@ export function TeacherClassManager({
       conversationTopicFilter
     ]
   );
+  const checkedConversationIdSet = useMemo(() => new Set(checkedConversationIds), [checkedConversationIds]);
+  const checkedVisibleConversationIds = useMemo(
+    () => filteredConversationReviewRows.map((row) => row.id).filter((conversationId) => checkedConversationIdSet.has(conversationId)),
+    [checkedConversationIdSet, filteredConversationReviewRows]
+  );
+  const checkedConversationRows = useMemo(
+    () => checkedConversationIds.map((conversationId) => conversationReviewRowById.get(conversationId)).filter(Boolean) as ConversationReviewRow[],
+    [checkedConversationIds, conversationReviewRowById]
+  );
+  const allVisibleConversationsChecked =
+    filteredConversationReviewRows.length > 0 && checkedVisibleConversationIds.length === filteredConversationReviewRows.length;
+  const someVisibleConversationsChecked = checkedVisibleConversationIds.length > 0;
   const activeSelectedConversationId = useMemo(
     () => {
       if (activeTab === "conversations") {
@@ -1100,10 +1213,10 @@ export function TeacherClassManager({
     settingsCreativityPreview?.classId === activeClassId
       ? settingsCreativityPreview.value
       : selectedModelSettings.creativity;
-  const displayedResponseLength =
-    aiTutorResponseLengthPreview?.classId === activeClassId
-      ? aiTutorResponseLengthPreview.value
-      : selectedModelSettings.responseLength;
+  const displayedVerbose =
+    aiTutorVerbosePreview?.classId === activeClassId
+      ? aiTutorVerbosePreview.value
+      : selectedModelSettings.verbose;
   const displayedSourceSettings = selectedMaterialSettings ?? fallbackKnowledgeSourceSettings;
   const activeSettingsSection =
     settingsPanes.find((settingsPane) => settingsPane.id === activeSettingsPane) ?? settingsPanes[0];
@@ -1754,7 +1867,8 @@ export function TeacherClassManager({
       const responseFormat: ResponseFormatSettings = normalizeResponseFormatSettings({
         oneStepAtATime: formData.has("responseFormat.oneStepAtATime"),
         endWithCheckQuestion: formData.has("responseFormat.endWithCheckQuestion"),
-        readingLevel: String(formData.get("responseFormat.readingLevel") ?? ""),
+        simpleWording: formData.has("responseFormat.simpleWording"),
+        exampleFrequency: String(formData.get("responseFormat.exampleFrequency") ?? ""),
         mathNotation: String(formData.get("responseFormat.mathNotation") ?? "")
       });
       const privacySettings: ClassPrivacySettings = normalizePrivacySettings({
@@ -1793,10 +1907,11 @@ export function TeacherClassManager({
           creativity: formValue("modelSettings.creativity"),
           modelId: formValue("modelSettings.modelId"),
           reasoningEffort: formValue("modelSettings.reasoningEffort"),
-          responseLength: formValue("modelSettings.responseLength"),
+          verbose: formValue("modelSettings.verbose"),
           requestLimits: {
             perClassDaily: formValue("modelSettings.requestLimits.perClassDaily"),
             perStudentDaily: formValue("modelSettings.requestLimits.perStudentDaily"),
+            perStudentWeekly: formValue("modelSettings.requestLimits.perStudentWeekly"),
             teacherPreviewDaily: formValue("modelSettings.requestLimits.teacherPreviewDaily")
           },
           tokenLimits: {
@@ -2048,25 +2163,31 @@ export function TeacherClassManager({
         },
         body: JSON.stringify({
           email: coTeacherEmail,
+          permissions: normalizeClassAccessPermissions(coTeacherPermissions, coTeacherRole),
           role: coTeacherRole
         })
       });
       const data = (await response.json()) as { error?: string };
 
       if (!response.ok) {
-        throw new Error(data.error ?? "Co-teacher update failed.");
+        throw new Error(data.error ?? "Class staff update failed.");
       }
 
       setCoTeacherEmail("");
-      setClassAccessMessage("Co-teacher access saved.");
+      setCoTeacherPermissions(defaultTaClassAccessPermissions);
+      setClassAccessMessage("Class staff access saved.");
     } catch (caughtError) {
-      setError(formatClassError(caughtError, "Co-teacher update failed."));
+      setError(formatClassError(caughtError, "Class staff update failed."));
     } finally {
       setSavingClassAccessAction("");
     }
   }
 
-  async function updateCoTeacherRole(coTeacher: ClassCoTeacher, role: Exclude<ClassAccessRole, "owner">) {
+  async function updateCoTeacherRole(
+    coTeacher: ClassCoTeacher,
+    role: Exclude<ClassAccessRole, "owner">,
+    permissions?: ClassAccessPermissions
+  ) {
     if (!activeClassId || !user) {
       return;
     }
@@ -2077,6 +2198,8 @@ export function TeacherClassManager({
 
     try {
       const token = await user.getIdToken();
+      const nextPermissions =
+        permissions ?? (role === "ta" && coTeacher.role !== "ta" ? defaultTaClassAccessPermissions : coTeacher.permissions);
       const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/co-teachers`), {
         method: "PATCH",
         headers: {
@@ -2084,6 +2207,7 @@ export function TeacherClassManager({
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
+          permissions: normalizeClassAccessPermissions(nextPermissions, role),
           role,
           uid: coTeacher.uid
         })
@@ -2091,12 +2215,12 @@ export function TeacherClassManager({
       const data = (await response.json()) as { error?: string };
 
       if (!response.ok) {
-        throw new Error(data.error ?? "Co-teacher update failed.");
+        throw new Error(data.error ?? "Class staff update failed.");
       }
 
-      setClassAccessMessage("Co-teacher permission saved.");
+      setClassAccessMessage("Class staff permission saved.");
     } catch (caughtError) {
-      setError(formatClassError(caughtError, "Co-teacher update failed."));
+      setError(formatClassError(caughtError, "Class staff update failed."));
     } finally {
       setSavingClassAccessAction("");
     }
@@ -2130,12 +2254,12 @@ export function TeacherClassManager({
       const data = (await response.json()) as { error?: string };
 
       if (!response.ok) {
-        throw new Error(data.error ?? "Co-teacher removal failed.");
+        throw new Error(data.error ?? "Class staff removal failed.");
       }
 
-      setClassAccessMessage("Co-teacher removed.");
+      setClassAccessMessage("Class staff member removed.");
     } catch (caughtError) {
-      setError(formatClassError(caughtError, "Co-teacher removal failed."));
+      setError(formatClassError(caughtError, "Class staff removal failed."));
     } finally {
       setSavingClassAccessAction("");
     }
@@ -2259,7 +2383,7 @@ export function TeacherClassManager({
     }
   }
 
-  async function saveAccountSettings() {
+  async function saveAccountSettings({ resetPassword = false }: { resetPassword?: boolean } = {}) {
     if (!user) {
       return;
     }
@@ -2268,11 +2392,16 @@ export function TeacherClassManager({
     setAccountSettingsMessage("");
 
     const nextEmail = accountEmailValue.trim().toLowerCase();
-    const passwordChanged = Boolean(newAccountPassword);
+    const passwordChanged = resetPassword;
     const emailChanged = Boolean(nextEmail && nextEmail !== accountEmail.trim().toLowerCase());
 
-    if (!nextEmail) {
+    if (!resetPassword && !nextEmail) {
       setError("Enter an email address.");
+      return;
+    }
+
+    if (resetPassword && !newAccountPassword) {
+      setError("Enter a new password.");
       return;
     }
 
@@ -2291,35 +2420,55 @@ export function TeacherClassManager({
       return;
     }
 
-    setIsSavingAccountSettings(true);
+    if (!resetPassword && (newAccountPassword || confirmAccountPassword)) {
+      setError("Use Confirm reset password to change your password.");
+      return;
+    }
+
+    if (resetPassword) {
+      setIsResettingAccountPassword(true);
+    } else {
+      setIsSavingAccountSettings(true);
+    }
 
     try {
-      const nextUsername =
-        !accountUsername && accountUsernameValue === accountEmail && emailChanged
-          ? nextEmail
-          : accountUsername ?? accountUsernameValue;
+      if (resetPassword) {
+        await updateUserAccountSettings({
+          currentPassword: currentAccountPassword,
+          newPassword: newAccountPassword,
+          uid: user.uid
+        });
+      } else {
+        const nextUsername =
+          !accountUsername && accountUsernameValue === accountEmail && emailChanged
+            ? nextEmail
+            : accountUsername ?? accountUsernameValue;
 
-      await updateUserAccountSettings({
-        appearance: selectedAppearance,
-        currentPassword: currentAccountPassword,
-        displayName: accountDisplayName ?? accountName,
-        email: nextEmail,
-        newPassword: newAccountPassword,
-        themeColor: selectedThemeColor,
-        uid: user.uid,
-        username: nextUsername
-      });
-      setAccountDisplayName(null);
-      setAccountEmailDraft(null);
-      setAccountUsername(null);
+        await updateUserAccountSettings({
+          appearance: selectedAppearance,
+          currentPassword: currentAccountPassword,
+          displayName: accountDisplayName ?? accountName,
+          email: nextEmail,
+          themeColor: selectedThemeColor,
+          uid: user.uid,
+          username: nextUsername
+        });
+        setAccountDisplayName(null);
+        setAccountEmailDraft(null);
+        setAccountUsername(null);
+      }
       setCurrentAccountPassword("");
       setNewAccountPassword("");
       setConfirmAccountPassword("");
-      setAccountSettingsMessage("Account settings saved.");
+      setAccountSettingsMessage(resetPassword ? "Password reset confirmed." : "Account settings saved.");
     } catch (caughtError) {
       setError(formatClassError(caughtError, "Account settings failed."));
     } finally {
-      setIsSavingAccountSettings(false);
+      if (resetPassword) {
+        setIsResettingAccountPassword(false);
+      } else {
+        setIsSavingAccountSettings(false);
+      }
     }
   }
 
@@ -2329,8 +2478,17 @@ export function TeacherClassManager({
   }
 
   async function handleSignOutAllSessions() {
-    await signOutAllSessions();
-    router.push("/auth");
+    setError("");
+    setAccountSettingsMessage("");
+    setIsSigningOutAllSessions(true);
+
+    try {
+      await signOutAllSessions();
+      router.push("/auth");
+    } catch (caughtError) {
+      setError(formatClassError(caughtError, "Session sign-out failed."));
+      setIsSigningOutAllSessions(false);
+    }
   }
 
   async function handleDeleteAccount() {
@@ -2340,6 +2498,13 @@ export function TeacherClassManager({
 
     setError("");
     setAccountSettingsMessage("");
+
+    const confirmed = window.confirm("Delete this account permanently? This cannot be undone.");
+
+    if (!confirmed) {
+      return;
+    }
+
     setIsDeletingAccount(true);
 
     try {
@@ -2398,7 +2563,7 @@ export function TeacherClassManager({
         apiUrl(
           `/api/classes/${encodeURIComponent(activeClassId)}/students/${encodeURIComponent(
             row.studentEmail
-          )}/chat-access`
+          )}/support`
         ),
         {
           method: "PATCH",
@@ -2457,7 +2622,7 @@ export function TeacherClassManager({
         apiUrl(
           `/api/classes/${encodeURIComponent(activeClassId)}/students/${encodeURIComponent(
             row.studentEmail
-          )}/support`
+          )}/chat-access`
         ),
         {
           method: "PATCH",
@@ -2500,12 +2665,23 @@ export function TeacherClassManager({
     }
   }
 
-  async function saveConversationReview(row: ConversationReviewRow, status: ConversationReviewStatus = row.status) {
+  async function saveConversationReview(
+    row: ConversationReviewRow,
+    status: ConversationReviewStatus = row.status,
+    followUpDueAt?: string | null
+  ) {
     if (!activeClassId || !user || savingReviewConversationId) {
       return;
     }
 
     const privateNote = conversationNotesById[row.id] ?? row.review.privateNote;
+    const nextFollowUpDueAt =
+      status === "needs_follow_up"
+        ? followUpDueAt ??
+          conversationFollowUpDueById[row.id] ??
+          normalizeDateTimeLocalValue(row.review.followUpDueAt) ??
+          defaultFollowUpDateTimeLocal("tomorrow")
+        : null;
 
     setSavingReviewConversationId(row.id);
     setReviewSaveMessage(status === row.status ? "Saving note..." : "Saving review status...");
@@ -2525,6 +2701,7 @@ export function TeacherClassManager({
           },
           body: JSON.stringify({
             flags: row.review.flags,
+            followUpDueAt: nextFollowUpDueAt ? new Date(nextFollowUpDueAt).toISOString() : null,
             privateNote,
             status
           })
@@ -2554,8 +2731,13 @@ export function TeacherClassManager({
         ...currentNotes,
         [row.id]: data.review!.privateNote
       }));
+      setConversationFollowUpDueById((currentDueDates) => ({
+        ...currentDueDates,
+        [row.id]: normalizeDateTimeLocalValue(data.review!.followUpDueAt) ?? ""
+      }));
       const updatedRow = {
         ...row,
+        followUpDueAt: data.review!.followUpDueAt,
         review: data.review!,
         status: data.review!.status
       };
@@ -2668,6 +2850,10 @@ export function TeacherClassManager({
         ...currentNotes,
         [savedFeedback.id]: savedFeedback.teacherNote ?? ""
       }));
+      setFeedbackResponsesById((currentResponses) => ({
+        ...currentResponses,
+        [savedFeedback.id]: savedFeedback.studentVisibleResponse ?? ""
+      }));
       setFeedbackUsageAllowanceById((currentAllowances) => ({
         ...currentAllowances,
         [savedFeedback.id]: String(savedFeedback.usageAllowancePercent || usageAllowancePercent || 25)
@@ -2686,6 +2872,175 @@ export function TeacherClassManager({
       setError(formatClassError(caughtError, "Feedback update failed."));
     } finally {
       setSavingFeedbackId("");
+    }
+  }
+
+  async function sendStudentFeedbackResponse(feedback: StudentFeedback) {
+    if (!activeClassId || !user || savingFeedbackId) {
+      return;
+    }
+
+    const studentVisibleResponse = feedbackResponsesById[feedback.id] ?? feedback.studentVisibleResponse ?? "";
+    const teacherNote = feedbackTeacherNotesById[feedback.id] ?? feedback.teacherNote ?? "";
+
+    if (!studentVisibleResponse.trim()) {
+      setReviewSaveMessage("");
+      setError("Add a response before sending it to the student.");
+      return;
+    }
+
+    setSavingFeedbackId(feedback.id);
+    setReviewSaveMessage("Sending response...");
+    setError("");
+
+    try {
+      const token = await getTeacherToken();
+      const response = await fetch(
+        apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/feedback/${encodeURIComponent(feedback.id)}`),
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            sendStudentVisibleResponse: true,
+            studentVisibleResponse,
+            teacherNote
+          })
+        }
+      );
+      const data = (await response.json()) as {
+        error?: string;
+        feedback?: StudentFeedback;
+      };
+
+      if (!response.ok || !data.feedback) {
+        throw new Error(data.error ?? "Response send failed.");
+      }
+
+      const savedFeedback = data.feedback;
+      setClassConversations((currentConversations) =>
+        currentConversations.map((conversation) => {
+          if (conversation.id !== savedFeedback.conversationId) {
+            return conversation;
+          }
+
+          const feedback = conversation.feedback.map((item) =>
+            item.id === savedFeedback.id ? savedFeedback : item
+          );
+
+          return {
+            ...conversation,
+            feedback,
+            feedbackSummary: summarizeStudentFeedback(feedback)
+          };
+        })
+      );
+      setFeedbackResponsesById((currentResponses) => ({
+        ...currentResponses,
+        [savedFeedback.id]: savedFeedback.studentVisibleResponse ?? ""
+      }));
+      setFeedbackTeacherNotesById((currentNotes) => ({
+        ...currentNotes,
+        [savedFeedback.id]: savedFeedback.teacherNote ?? ""
+      }));
+      setReviewSaveMessage("Response sent to student.");
+    } catch (caughtError) {
+      setReviewSaveMessage("");
+      setError(formatClassError(caughtError, "Response send failed."));
+    } finally {
+      setSavingFeedbackId("");
+    }
+  }
+
+  async function saveBulkConversationReviews(status: ConversationReviewStatus) {
+    if (!activeClassId || !user || isSavingBulkConversationReviews || !checkedConversationRows.length) {
+      return;
+    }
+
+    setIsSavingBulkConversationReviews(true);
+    setReviewSaveMessage(`Updating ${checkedConversationRows.length} conversations...`);
+    setError("");
+
+    try {
+      const token = await getTeacherToken();
+      const savedReviews = await Promise.all(
+        checkedConversationRows.map(async (row) => {
+          const privateNote = conversationNotesById[row.id] ?? row.review.privateNote;
+          const followUpDueAt =
+            status === "needs_follow_up"
+              ? conversationFollowUpDueById[row.id] ??
+                normalizeDateTimeLocalValue(row.review.followUpDueAt) ??
+                defaultFollowUpDateTimeLocal("tomorrow")
+              : null;
+          const response = await fetch(
+            apiUrl(
+              `/api/classes/${encodeURIComponent(activeClassId)}/conversations/${encodeURIComponent(row.id)}/review`
+            ),
+            {
+              method: "PATCH",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                flags: row.review.flags,
+                followUpDueAt: followUpDueAt ? new Date(followUpDueAt).toISOString() : null,
+                privateNote,
+                status
+              })
+            }
+          );
+          const data = (await response.json()) as {
+            error?: string;
+            review?: TeacherConversationReviewSummary["review"];
+          };
+
+          if (!response.ok || !data.review) {
+            throw new Error(data.error ?? "Bulk conversation review save failed.");
+          }
+
+          return { conversationId: row.id, review: data.review };
+        })
+      );
+      const savedReviewByConversationId = new Map(savedReviews.map((item) => [item.conversationId, item.review]));
+
+      setClassConversations((currentConversations) =>
+        currentConversations.map((conversation) => {
+          const review = savedReviewByConversationId.get(conversation.id);
+          return review
+            ? {
+                ...conversation,
+                review,
+                reviewStatus: review.status
+              }
+            : conversation;
+        })
+      );
+      setConversationNotesById((currentNotes) => {
+        const nextNotes = { ...currentNotes };
+        savedReviews.forEach(({ conversationId, review }) => {
+          nextNotes[conversationId] = review.privateNote;
+        });
+        return nextNotes;
+      });
+      setConversationFollowUpDueById((currentDueDates) => {
+        const nextDueDates = { ...currentDueDates };
+        savedReviews.forEach(({ conversationId, review }) => {
+          nextDueDates[conversationId] = normalizeDateTimeLocalValue(review.followUpDueAt) ?? "";
+        });
+        return nextDueDates;
+      });
+      setCheckedConversationIds([]);
+      setClassOverview(null);
+      setClassConversationMetrics(null);
+      setReviewSaveMessage(`Marked ${savedReviews.length} ${formatConversationStatus(status)}`);
+    } catch (caughtError) {
+      setReviewSaveMessage("");
+      setError(formatClassError(caughtError, "Bulk conversation review save failed."));
+    } finally {
+      setIsSavingBulkConversationReviews(false);
     }
   }
 
@@ -2794,7 +3149,7 @@ export function TeacherClassManager({
     }
 
     if (!hasTutorKnowledgeSource) {
-      setError("Add a supported file or paste tutor knowledge text before saving.");
+      setError("Add a supported file, paste a URL, or paste tutor knowledge text before saving.");
       return;
     }
 
@@ -3925,6 +4280,129 @@ export function TeacherClassManager({
                     key={selectedClass.id}
                     onSubmit={submitSettings}
                   >
+                    <div hidden aria-hidden="true">
+                      <input
+                        name="defaultAssignmentContext"
+                        type="hidden"
+                        defaultValue={selectedClass.defaultAssignmentContext ?? ""}
+                      />
+                      <input name="openingMessage" type="hidden" defaultValue={selectedOpeningMessage} />
+                      <input
+                        name="studentFacingInstructions"
+                        type="hidden"
+                        defaultValue={selectedStudentFacingInstructions}
+                      />
+                      <input name="behaviorTitle" type="hidden" defaultValue={selectedTutorBehavior} />
+                      <input name="behaviorInstructions" type="hidden" defaultValue={selectedBehaviorInstructions} />
+                      <input name="refusalStyle" type="hidden" defaultValue={selectedRefusalStyle} />
+                      {selectedTutorAccess.enabled ? (
+                        <input defaultChecked name="tutorAccess.enabled" type="checkbox" />
+                      ) : null}
+                      {academicIntegritySettings.map((setting) =>
+                        selectedAnswerPolicy[setting.id] ? (
+                          <input
+                            defaultChecked
+                            key={setting.id}
+                            name={`answerPolicy.${setting.id}`}
+                            type="checkbox"
+                          />
+                        ) : null
+                      )}
+                      {understandingLevelOptions.map((level) => (
+                        <input
+                          key={level}
+                          name={`answerPolicy.helpLimitsByUnderstandingLevel.${level}`}
+                          type="hidden"
+                          defaultValue={selectedAnswerPolicy.helpLimitsByUnderstandingLevel[level]}
+                        />
+                      ))}
+                      {sourceUsageSettings.map((setting) =>
+                        selectedSourceUsage[setting.id] ? (
+                          <input
+                            defaultChecked
+                            key={setting.id}
+                            name={`sourceUsage.${setting.id}`}
+                            type="checkbox"
+                          />
+                        ) : null
+                      )}
+                      <input
+                        name="sourceUsage.preferredSourceType"
+                        type="hidden"
+                        defaultValue={selectedSourceUsage.preferredSourceType}
+                      />
+                      {selectedSourceDefaults.activeForStudents ? (
+                        <input defaultChecked name="sourceDefaults.activeForStudents" type="checkbox" />
+                      ) : null}
+                      {selectedSourceDefaults.teacherOnly ? (
+                        <input defaultChecked name="sourceDefaults.teacherOnly" type="checkbox" />
+                      ) : null}
+                      {selectedSourceDefaults.citationsRequired ? (
+                        <input defaultChecked name="sourceDefaults.citationsRequired" type="checkbox" />
+                      ) : null}
+                      {selectedSourceDefaults.answerKeysTeacherReviewOnly ? (
+                        <input defaultChecked name="sourceDefaults.answerKeysTeacherReviewOnly" type="checkbox" />
+                      ) : null}
+                      <input
+                        name="sourceDefaults.priority"
+                        type="hidden"
+                        defaultValue={selectedSourceDefaults.priority}
+                      />
+                      {materialSourceTypeKeys.map((kind) => (
+                        <input
+                          key={kind}
+                          name={`sourceDefaults.sourceTypePreferences.${kind}`}
+                          type="hidden"
+                          defaultValue={selectedSourceDefaults.sourceTypePreferences[kind]}
+                        />
+                      ))}
+                      {selectedResponseFormat.oneStepAtATime ? (
+                        <input defaultChecked name="responseFormat.oneStepAtATime" type="checkbox" />
+                      ) : null}
+                      {selectedResponseFormat.endWithCheckQuestion ? (
+                        <input defaultChecked name="responseFormat.endWithCheckQuestion" type="checkbox" />
+                      ) : null}
+                      {selectedResponseFormat.simpleWording ? (
+                        <input defaultChecked name="responseFormat.simpleWording" type="checkbox" />
+                      ) : null}
+                      {selectedAnswerPolicy.askGuidingQuestionBeforeExplaining ? (
+                        <input
+                          defaultChecked
+                          name="answerPolicy.askGuidingQuestionBeforeExplaining"
+                          type="checkbox"
+                        />
+                      ) : null}
+                      <input
+                        name="responseFormat.exampleFrequency"
+                        type="hidden"
+                        defaultValue={selectedResponseFormat.exampleFrequency}
+                      />
+                      <input
+                        name="responseFormat.mathNotation"
+                        type="hidden"
+                        defaultValue={selectedResponseFormat.mathNotation}
+                      />
+                      <input
+                        name="modelSettings.modelId"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.modelId}
+                      />
+                      <input
+                        name="modelSettings.reasoningEffort"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.reasoningEffort}
+                      />
+                      <input
+                        name="modelSettings.creativity"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.creativity}
+                      />
+                      <input
+                        name="modelSettings.verbose"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.verbose}
+                      />
+                    </div>
                     <section className="settings-detail ai-tutor-section-panel" aria-labelledby="settings-detail-title">
                       <div className="ai-tutor-section-heading settings-page-heading">
                         <div>
@@ -3953,51 +4431,9 @@ export function TeacherClassManager({
                               </div>
                             </div>
 
-                            <label className="field-label" htmlFor="default-assignment-context">
-                              Default assignment context
-                            </label>
-                            <textarea
-                              id="default-assignment-context"
-                              name="defaultAssignmentContext"
-                              rows={4}
-                              defaultValue={selectedClass.defaultAssignmentContext ?? ""}
-                              placeholder="Limits and introductory derivatives"
-                            />
-
-                            <label className="field-label" htmlFor="opening-message">
-                              Student opening message
-                            </label>
-                            <textarea
-                              id="opening-message"
-                              name="openingMessage"
-                              rows={3}
-                              defaultValue={selectedOpeningMessage}
-                              placeholder="Hi. I can help with Algebra step by step. What problem are you on?"
-                            />
-
-                            <label className="field-label" htmlFor="student-facing-instructions">
-                              Student-facing instructions
-                            </label>
-                            <textarea
-                              id="student-facing-instructions"
-                              name="studentFacingInstructions"
-                              rows={4}
-                              defaultValue={selectedStudentFacingInstructions}
-                              placeholder="Show your work. Use exact values unless asked for decimals."
-                            />
-
-                            <div className="settings-toggle-list">
-                              <SettingsToggle
-                                defaultChecked={selectedTutorAccess.enabled}
-                                description={
-                                  selectedTutorAccess.enabled
-                                    ? "Students can send messages. Teacher preview remains available if paused."
-                                    : "Students see that chat is paused. Teacher preview remains available."
-                                }
-                                name="tutorAccess.enabled"
-                                title={selectedTutorAccess.enabled ? "Student chat enabled" : "Student chat paused"}
-                              />
-                            </div>
+                            <p className="settings-helper-note">
+                              Student-facing messages, tutoring behavior, sources, and answer limits now live in AI Tutor.
+                            </p>
                           </section>
                         </div>
 
@@ -4080,8 +4516,8 @@ export function TeacherClassManager({
                           </section>
 
                           <section className="settings-group settings-co-teachers-card" aria-labelledby="settings-co-teachers">
-                            <h3 id="settings-co-teachers">Co-teachers</h3>
-                            <p>Owner access belongs to the primary class teacher. Added teachers can help manage or view the class.</p>
+                            <h3 id="settings-co-teachers">Class Staff</h3>
+                            <p>Owner access belongs to the primary class teacher. Add teachers as co-teachers, viewers, or TAs with scoped access.</p>
                             <div className="settings-field-pair">
                               <div>
                                 <label className="field-label" htmlFor="co-teacher-email">
@@ -4106,9 +4542,17 @@ export function TeacherClassManager({
                                 >
                                   <option value="co-teacher">Co-teacher</option>
                                   <option value="viewer">Viewer</option>
+                                  <option value="ta">TA</option>
                                 </select>
                               </div>
                             </div>
+                            {coTeacherRole === "ta" ? (
+                              <ClassAccessPermissionToggles
+                                disabled={savingClassAccessAction === "add-co-teacher"}
+                                permissions={coTeacherPermissions}
+                                onChange={setCoTeacherPermissions}
+                              />
+                            ) : null}
                             <button
                               className="teacher-action-button"
                               disabled={!coTeacherEmail.trim() || savingClassAccessAction === "add-co-teacher"}
@@ -4116,7 +4560,7 @@ export function TeacherClassManager({
                               onClick={() => void addCoTeacher()}
                             >
                               <UserPlusIcon />
-                              {savingClassAccessAction === "add-co-teacher" ? "Adding" : "Add co-teacher"}
+                              {savingClassAccessAction === "add-co-teacher" ? "Adding" : "Add staff"}
                             </button>
 
                             <div className="class-invite-list">
@@ -4131,8 +4575,9 @@ export function TeacherClassManager({
                                   disabled={savingClassAccessAction.includes(coTeacher.uid)}
                                   key={coTeacher.uid}
                                   onRemove={() => void removeCoTeacher(coTeacher)}
+                                  onPermissionsChange={(permissions) => void updateCoTeacherRole(coTeacher, "ta", permissions)}
                                   onRoleChange={(role) => void updateCoTeacherRole(coTeacher, role)}
-                                  role={coTeacher.role === "co-teacher" ? "Co-teacher" : "Viewer"}
+                                  role={formatClassStaffRole(coTeacher.role)}
                                 />
                               ))}
                             </div>
@@ -4235,77 +4680,6 @@ export function TeacherClassManager({
                           </section>
                         </div>
 
-                        <div className="settings-pane" hidden={activeSettingsPane !== "sourceDefaults"}>
-                          <section className="settings-group" aria-labelledby="settings-source-defaults">
-                            <h3 id="settings-source-defaults">New Material Defaults</h3>
-                            <p>Uploads inherit these defaults unless a material-specific setting overrides them later.</p>
-                            <div className="settings-toggle-list">
-                              <SettingsToggle
-                                defaultChecked={selectedSourceDefaults.activeForStudents}
-                                description="New sources are visible to students after processing unless teacher-only is enabled."
-                                name="sourceDefaults.activeForStudents"
-                                title="Active for students"
-                              />
-                              <SettingsToggle
-                                defaultChecked={selectedSourceDefaults.teacherOnly}
-                                description="New sources are saved for teacher review and hidden from student retrieval."
-                                name="sourceDefaults.teacherOnly"
-                                title="Teacher only"
-                              />
-                              <SettingsToggle
-                                defaultChecked={selectedSourceDefaults.citationsRequired}
-                                description="New sources should require citations when Chandra uses them."
-                                name="sourceDefaults.citationsRequired"
-                                title="Citations required"
-                              />
-                              <SettingsToggle
-                                defaultChecked={selectedSourceDefaults.answerKeysTeacherReviewOnly}
-                                description="Answer keys and solution materials default to teacher review only."
-                                name="sourceDefaults.answerKeysTeacherReviewOnly"
-                                title="Use answer keys only for teacher review"
-                              />
-                            </div>
-
-                            <label className="settings-control-label" htmlFor="source-default-priority">
-                              Default priority
-                            </label>
-                            <select
-                              id="source-default-priority"
-                              name="sourceDefaults.priority"
-                              defaultValue={selectedSourceDefaults.priority}
-                            >
-                              <option value="primary">Primary</option>
-                              <option value="normal">Normal</option>
-                              <option value="low">Low</option>
-                            </select>
-                          </section>
-
-                          <section className="settings-group" aria-labelledby="settings-source-type-preferences">
-                            <h3 id="settings-source-type-preferences">Source-type Preferences</h3>
-                            <p>Choose whether common source types should inherit the defaults or use a stricter visibility preference.</p>
-                            <div className="settings-field-pair">
-                              {materialSourceTypeKeys.map((kind) => (
-                                <div key={kind}>
-                                  <label className="field-label" htmlFor={`source-type-${kind}`}>
-                                    {kind}
-                                  </label>
-                                  <select
-                                    id={`source-type-${kind}`}
-                                    name={`sourceDefaults.sourceTypePreferences.${kind}`}
-                                    defaultValue={selectedSourceDefaults.sourceTypePreferences[kind]}
-                                  >
-                                    {materialSourceTypePreferenceOptions.map((preference) => (
-                                      <option key={preference} value={preference}>
-                                        {formatSourceTypePreference(preference)}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </div>
-                              ))}
-                            </div>
-                          </section>
-                        </div>
-
                         <div className="settings-pane" hidden={activeSettingsPane !== "notifications"}>
                           <section className="settings-group" aria-labelledby="settings-notifications">
                             <h3 id="settings-notifications">Notification Preferences</h3>
@@ -4333,128 +4707,11 @@ export function TeacherClassManager({
                           </section>
                         </div>
 
-                        <div className="settings-pane" hidden={activeSettingsPane !== "guidance"}>
-                          <section className="settings-group compact-settings-group" aria-labelledby="settings-tutor-behavior">
-                            <h3 id="settings-tutor-behavior">Tutor Behavior</h3>
-                            <p>Choose the general tutoring approach Chandra should use.</p>
-                            <div className="settings-pill-group" role="radiogroup" aria-label="Tutor behavior">
-                              {tutorBehaviorOptions.map((option) => (
-                                <label className="settings-choice-pill" key={option}>
-                                  <input
-                                    defaultChecked={selectedTutorBehavior === option}
-                                    name="behaviorTitle"
-                                    type="radio"
-                                    value={option}
-                                  />
-                                  <span>{option}</span>
-                                </label>
-                              ))}
-                            </div>
-                          </section>
-
-                          <section className="settings-group" aria-labelledby="settings-hidden-instructions">
-                            <h3 id="settings-hidden-instructions">Hidden Tutor Instructions</h3>
-                            <p>Teacher-only instructions not shown to students.</p>
-                            <textarea
-                              id="behavior-instructions"
-                              name="behaviorInstructions"
-                              rows={6}
-                              defaultValue={selectedClass.behaviorInstructions ?? ""}
-                            />
-                          </section>
-
-                        </div>
-
-                        <div className="settings-pane" hidden={activeSettingsPane !== "answerPolicy"}>
-                          <section className="settings-group" aria-labelledby="settings-academic-integrity">
-                            <h3 id="settings-academic-integrity">Academic Integrity</h3>
-                            <p>Set what kinds of answer help Chandra may provide.</p>
-                            <div className="settings-toggle-list">
-                              {academicIntegritySettings.map((setting) => (
-                                <SettingsToggle
-                                  defaultChecked={selectedAnswerPolicy[setting.id]}
-                                  key={setting.title}
-                                  name={`answerPolicy.${setting.id}`}
-                                  {...setting}
-                                />
-                              ))}
-                            </div>
-                          </section>
-
-                          <section className="settings-group" aria-labelledby="settings-help-limits">
-                            <h3 id="settings-help-limits">Help Limits by Understanding Level</h3>
-                            <p>Set the most help Chandra may provide. Chandra can choose lighter support when appropriate.</p>
-                            <HelpLimitSelectors
-                              idPrefix="settings-help-limit"
-                              labelClassName="settings-control-label"
-                              selectedAnswerPolicy={selectedAnswerPolicy}
-                            />
-                          </section>
-
-                          <section className="settings-group" aria-labelledby="settings-refusal-style">
-                            <h3 id="settings-refusal-style">Direct-answer Redirect</h3>
-                            <p>Tell Chandra how to respond when students ask for answers only.</p>
-                            <textarea
-                              id="refusal-style"
-                              name="refusalStyle"
-                              rows={5}
-                              defaultValue={selectedRefusalStyle}
-                            />
-                          </section>
-                        </div>
-
-                        <div className="settings-pane" hidden={activeSettingsPane !== "model"}>
-                          <section className="settings-group" aria-labelledby="settings-model">
-                            <h3 id="settings-model">Model Settings</h3>
-                            <p>Configure the AI model and response style.</p>
-                            <label className="settings-control-label" htmlFor="class-model">
-                              Model
-                            </label>
-                            <select id="class-model" name="modelSettings.modelId" defaultValue={selectedModelSettings.modelId}>
-                              {selectableModelOptions.map((modelOption) => (
-                                <option key={modelOption.id} value={modelOption.id}>
-                                  {modelOption.label}
-                                </option>
-                              ))}
-                            </select>
-
-                            <label className="settings-control-label" htmlFor="reasoning-effort">
-                              Thinking time
-                            </label>
-                            <select
-                              id="reasoning-effort"
-                              name="modelSettings.reasoningEffort"
-                              defaultValue={selectedModelSettings.reasoningEffort}
-                            >
-                              {reasoningEffortOptions.map((effort) => (
-                                <option key={effort} value={effort}>
-                                  {capitalizeLabel(effort)}
-                                </option>
-                              ))}
-                            </select>
-
-                            <div className="settings-slider-heading">
-                              <span>Creativity</span>
-                              <strong>{displayedCreativity}%</strong>
-                            </div>
-                            <input
-                              aria-label="Creativity"
-                              className="settings-slider"
-                              name="modelSettings.creativity"
-                              type="range"
-                              min="0"
-                              max="100"
-                              defaultValue={selectedModelSettings.creativity}
-                              style={{ "--settings-slider-fill": `${displayedCreativity}%` } as CSSProperties}
-                              onChange={(event) =>
-                                setSettingsCreativityPreview({
-                                  classId: activeClassId,
-                                  value: Number(event.target.value)
-                                })
-                              }
-                            />
-
-                            <div className="ai-tutor-control-grid">
+                        <div className="settings-pane" hidden={activeSettingsPane !== "usage"}>
+                          <section className="settings-group" aria-labelledby="settings-usage-limits">
+                            <h3 id="settings-usage-limits">AI Usage</h3>
+                            <p>Set how many tutor messages each student can send.</p>
+                            <div className="ai-tutor-control-grid usage-limit-grid">
                               <TokenLimitInputs
                                 idPrefix="settings-token-limit"
                                 labelClassName="settings-control-label"
@@ -4462,111 +4719,6 @@ export function TeacherClassManager({
                                 tokenLimits={selectedModelSettings.tokenLimits}
                               />
                             </div>
-                          </section>
-                        </div>
-
-                        <div className="settings-pane" hidden={activeSettingsPane !== "response"}>
-                          <section className="settings-group" aria-labelledby="settings-reply-structure">
-                            <h3 id="settings-reply-structure">Reply Structure</h3>
-                            <p>Control how allowed help is delivered in normal tutoring replies.</p>
-                            <div className="settings-toggle-list">
-                              {responseStructureSettings.map((setting) => (
-                                <SettingsToggle
-                                  defaultChecked={
-                                    setting.id === "askGuidingQuestionBeforeExplaining"
-                                      ? selectedAnswerPolicy.askGuidingQuestionBeforeExplaining
-                                      : selectedResponseFormat[setting.id]
-                                  }
-                                  key={setting.title}
-                                  name={setting.name}
-                                  title={setting.title}
-                                  description={setting.description}
-                                />
-                              ))}
-                            </div>
-                          </section>
-
-                          <section className="settings-group" aria-labelledby="settings-reading-notation">
-                            <h3 id="settings-reading-notation">Reading & Notation</h3>
-                            <label className="settings-control-label" htmlFor="reading-level">
-                              Reading level
-                            </label>
-                            <select
-                              id="reading-level"
-                              name="responseFormat.readingLevel"
-                              defaultValue={selectedResponseFormat.readingLevel}
-                            >
-                              {readingLevelOptions.map((readingLevel) => (
-                                <option key={readingLevel} value={readingLevel}>
-                                  {capitalizeLabel(readingLevel)}
-                                </option>
-                              ))}
-                            </select>
-
-                            <label className="settings-control-label" htmlFor="math-notation">
-                              Math notation
-                            </label>
-                            <select
-                              id="math-notation"
-                              name="responseFormat.mathNotation"
-                              defaultValue={selectedResponseFormat.mathNotation}
-                            >
-                              {mathNotationOptions.map((notation) => (
-                                <option key={notation} value={notation}>
-                                  {formatMathNotationLabel(notation)}
-                                </option>
-                              ))}
-                            </select>
-                          </section>
-
-                          <section className="settings-group" aria-labelledby="settings-response-length">
-                            <h3 id="settings-response-length">Length</h3>
-                            <label className="settings-control-label" htmlFor="max-response-length">
-                              Max response length
-                            </label>
-                            <select
-                              id="max-response-length"
-                              name="modelSettings.responseLength"
-                              defaultValue={selectedModelSettings.responseLength}
-                            >
-                              {responseLengthOptions.map((responseLength) => (
-                                <option key={responseLength} value={responseLength}>
-                                  {capitalizeLabel(responseLength)}
-                                </option>
-                              ))}
-                            </select>
-                          </section>
-                        </div>
-
-                        <div className="settings-pane" hidden={activeSettingsPane !== "sources"}>
-                          <section className="settings-group" aria-labelledby="settings-source-usage">
-                            <h3 id="settings-source-usage">Source Usage</h3>
-                            <p>Control how Chandra uses class materials.</p>
-                            <div className="settings-toggle-list">
-                              {sourceUsageSettings.map((setting) => (
-                                <SettingsToggle
-                                  defaultChecked={selectedSourceUsage[setting.id]}
-                                  key={setting.title}
-                                  name={`sourceUsage.${setting.id}`}
-                                  {...setting}
-                                />
-                              ))}
-                            </div>
-
-                            <label className="settings-control-label" htmlFor="preferred-source-type">
-                              Preferred source type
-                            </label>
-                            <select
-                              id="preferred-source-type"
-                              name="sourceUsage.preferredSourceType"
-                              defaultValue={selectedSourceUsage.preferredSourceType}
-                            >
-                              {preferredSourceTypeOptions.map((sourceType) => (
-                                <option key={sourceType} value={sourceType}>
-                                  {sourceType}
-                                </option>
-                              ))}
-                            </select>
                           </section>
                         </div>
 
@@ -4777,32 +4929,44 @@ export function TeacherClassManager({
                                 />
                               </div>
                             </div>
-                            <button
-                              className="teacher-action-button teacher-account-save-button"
-                              disabled={isSavingAccountSettings}
-                              type="button"
-                              onClick={() => void saveAccountSettings()}
-                            >
-                              <UserIcon />
-                              {isSavingAccountSettings ? "Saving" : "Save account"}
-                            </button>
-                            <button
-                              className="teacher-action-button teacher-account-save-button"
-                              type="button"
-                              onClick={() => void handleSignOutAllSessions()}
-                            >
-                              <UserIcon />
-                              Sign out all sessions
-                            </button>
-                            <button
-                              className="teacher-danger-button teacher-account-save-button"
-                              disabled={isDeletingAccount}
-                              type="button"
-                              onClick={() => void handleDeleteAccount()}
-                            >
-                              <TrashIcon />
-                              {isDeletingAccount ? "Deleting account" : "Delete account"}
-                            </button>
+                            <div className="teacher-account-actions-row">
+                              <button
+                                className="teacher-action-button"
+                                disabled={isSavingAccountSettings || isResettingAccountPassword}
+                                type="button"
+                                onClick={() => void saveAccountSettings()}
+                              >
+                                <UserIcon />
+                                {isSavingAccountSettings ? "Saving" : "Save account"}
+                              </button>
+                              <button
+                                className="teacher-action-button"
+                                disabled={isSavingAccountSettings || isResettingAccountPassword}
+                                type="button"
+                                onClick={() => void saveAccountSettings({ resetPassword: true })}
+                              >
+                                <KeyIcon />
+                                {isResettingAccountPassword ? "Resetting password" : "Confirm reset password"}
+                              </button>
+                              <button
+                                className="teacher-action-button"
+                                disabled={isSigningOutAllSessions}
+                                type="button"
+                                onClick={() => void handleSignOutAllSessions()}
+                              >
+                                <UserIcon />
+                                {isSigningOutAllSessions ? "Signing out" : "Sign out all sessions"}
+                              </button>
+                              <button
+                                className="teacher-danger-button"
+                                disabled={isDeletingAccount}
+                                type="button"
+                                onClick={() => void handleDeleteAccount()}
+                              >
+                                <TrashIcon />
+                                {isDeletingAccount ? "Deleting account" : "Delete account"}
+                              </button>
+                            </div>
                             {accountSettingsMessage ? <p className="settings-status-message">{accountSettingsMessage}</p> : null}
                           </section>
                         </div>
@@ -4993,7 +5157,7 @@ export function TeacherClassManager({
                                   checked={allVisibleStudentsChecked}
                                   type="checkbox"
                                   onChange={(event) => {
-                                    const visibleStudentIds = filteredRosterRows.map((row) => row.student.id);
+                                    const visibleStudentIds = visibleRosterRows.map((row) => row.student.id);
 
                                     setCheckedStudentIds((currentIds) =>
                                       event.target.checked
@@ -5016,16 +5180,43 @@ export function TeacherClassManager({
 
                             <div className="roster-table" role="table" aria-label="Students">
                               <div className="roster-table-header" role="row">
-                                <span aria-hidden="true" />
-                                <span>Student</span>
-                                <span>Activity</span>
-                                <span>Questions asked</span>
-                                <span>Last chat topic</span>
-                                <span>Conversations</span>
-                                <span>Actions</span>
+                                <span aria-hidden="true" role="columnheader" />
+                                {(["student", "activity", "questions", "lastActive", "conversations"] as const).map(
+                                  (column) => {
+                                    const isSorted = rosterSort?.column === column;
+                                    const sortDirection = isSorted ? rosterSort.direction : undefined;
+
+                                    return (
+                                      <span
+                                        aria-sort={
+                                          isSorted ? (sortDirection === "asc" ? "ascending" : "descending") : "none"
+                                        }
+                                        key={column}
+                                        role="columnheader"
+                                      >
+                                        <button
+                                          aria-label={`Sort by ${rosterSortLabels[column]}${
+                                            isSorted
+                                              ? `, currently ${sortDirection === "asc" ? "ascending" : "descending"}`
+                                              : ""
+                                          }`}
+                                          className={`roster-sort-button${isSorted ? " is-sorted" : ""}`}
+                                          type="button"
+                                          onClick={() => handleRosterSort(column)}
+                                        >
+                                          <span>{rosterSortLabels[column]}</span>
+                                          <span aria-hidden="true" className="roster-sort-indicator">
+                                            {isSorted ? (sortDirection === "asc" ? "↑" : "↓") : ""}
+                                          </span>
+                                        </button>
+                                      </span>
+                                    );
+                                  }
+                                )}
+                                <span role="columnheader">Actions</span>
                               </div>
 
-                              {filteredRosterRows.map((row) => {
+                              {visibleRosterRows.map((row) => {
                                 const isChecked = checkedStudentIdSet.has(row.student.id);
                                 const isSelected = selectedRosterRow?.student.id === row.student.id;
 
@@ -5067,10 +5258,9 @@ export function TeacherClassManager({
                                     </span>
                                     <span className="roster-cell roster-activity-cell" role="cell">
                                       <span className={`roster-status-pill ${row.statusTone}`}>{row.status}</span>
-                                      <span>{row.lastActive}</span>
                                     </span>
                                     <span className="roster-cell" role="cell">{row.questionsLabel}</span>
-                                    <span className="roster-cell" role="cell">{row.lastChatTopic}</span>
+                                    <span className="roster-cell" role="cell">{row.lastActive}</span>
                                     <span className="roster-cell" role="cell">{row.conversationsLabel}</span>
                                     <span className="roster-cell roster-actions-cell" role="cell">
                                       <button
@@ -5119,7 +5309,7 @@ export function TeacherClassManager({
                                 );
                               })}
 
-                              {!filteredRosterRows.length ? (
+                              {!sortedRosterRows.length ? (
                                 <div className="empty-state roster-empty-state">
                                   <strong>No matching students</strong>
                                   <span>Adjust the search or filter to see more roster rows.</span>
@@ -5129,16 +5319,38 @@ export function TeacherClassManager({
 
                             <div className="roster-table-footer">
                               <span>
-                                {filteredRosterRows.length
-                                  ? `1-${filteredRosterRows.length} of ${rosterRows.length} students`
-                                  : `0 of ${rosterRows.length} students`}
+                                {sortedRosterRows.length
+                                  ? `${rosterVisibleStart}-${rosterVisibleEnd} of ${sortedRosterRows.length} students`
+                                  : "0 of 0 students"}
                               </span>
                               <div className="roster-pagination" aria-label="Roster pages">
-                                <button aria-label="Previous page" disabled type="button">
+                                <button
+                                  aria-label="Previous page"
+                                  disabled={rosterPage <= 1}
+                                  type="button"
+                                  onClick={() =>
+                                    setRosterPageState({
+                                      page: Math.max(1, rosterPage - 1),
+                                      resetKey: rosterPageResetKey
+                                    })
+                                  }
+                                >
                                   <ChevronLeftIcon />
                                 </button>
-                                <button aria-current="page" type="button">1</button>
-                                <button aria-label="Next page" disabled type="button">
+                                <button aria-current="page" type="button">
+                                  {rosterPage}
+                                </button>
+                                <button
+                                  aria-label="Next page"
+                                  disabled={rosterPage >= rosterPageCount || !sortedRosterRows.length}
+                                  type="button"
+                                  onClick={() =>
+                                    setRosterPageState({
+                                      page: Math.min(rosterPageCount, rosterPage + 1),
+                                      resetKey: rosterPageResetKey
+                                    })
+                                  }
+                                >
                                   <ChevronRightIcon />
                                 </button>
                               </div>
@@ -5160,35 +5372,56 @@ export function TeacherClassManager({
                   >
                     <input name="name" type="hidden" defaultValue={selectedClass.name} />
                     <input name="section" type="hidden" defaultValue={selectedClass.section} />
-                    <input
-                      name="defaultAssignmentContext"
-                      type="hidden"
-                      defaultValue={selectedClass.defaultAssignmentContext ?? ""}
-                    />
-                    <input name="openingMessage" type="hidden" defaultValue={selectedOpeningMessage} />
-                    <input
-                      name="studentFacingInstructions"
-                      type="hidden"
-                      defaultValue={selectedStudentFacingInstructions}
-                    />
                     <div hidden>
-                      {sourceUsageSettings.map((setting) =>
-                        selectedSourceUsage[setting.id] ? (
-                          <input
-                            defaultChecked
-                            key={setting.id}
-                            name={`sourceUsage.${setting.id}`}
-                            type="checkbox"
-                          />
-                        ) : null
-                      )}
-                      <select name="sourceUsage.preferredSourceType" defaultValue={selectedSourceUsage.preferredSourceType}>
-                        {preferredSourceTypeOptions.map((sourceType) => (
-                          <option key={sourceType} value={sourceType}>
-                            {sourceType}
-                          </option>
-                        ))}
-                      </select>
+                      <input
+                        name="privacySettings.conversationRetention"
+                        type="hidden"
+                        defaultValue={selectedPrivacySettings.conversationRetention}
+                      />
+                      {selectedNotificationSettings.weeklyDigest ? (
+                        <input defaultChecked name="notificationSettings.weeklyDigest" type="checkbox" />
+                      ) : null}
+                      {selectedNotificationSettings.followUpReminders ? (
+                        <input defaultChecked name="notificationSettings.followUpReminders" type="checkbox" />
+                      ) : null}
+                      {selectedNotificationSettings.newStudentJoinedClass ? (
+                        <input defaultChecked name="notificationSettings.newStudentJoinedClass" type="checkbox" />
+                      ) : null}
+                      <input
+                        name="modelSettings.requestLimits.perStudentDaily"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.requestLimits.perStudentDaily}
+                      />
+                      <input
+                        name="modelSettings.requestLimits.perStudentWeekly"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.requestLimits.perStudentWeekly}
+                      />
+                      <input
+                        name="modelSettings.requestLimits.perClassDaily"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.requestLimits.perClassDaily}
+                      />
+                      <input
+                        name="modelSettings.requestLimits.teacherPreviewDaily"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.requestLimits.teacherPreviewDaily ?? ""}
+                      />
+                      <input
+                        name="modelSettings.tokenLimits.perHour"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.tokenLimits.perHour}
+                      />
+                      <input
+                        name="modelSettings.tokenLimits.perDay"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.tokenLimits.perDay}
+                      />
+                      <input
+                        name="modelSettings.tokenLimits.perWeek"
+                        type="hidden"
+                        defaultValue={selectedModelSettings.tokenLimits.perWeek}
+                      />
                     </div>
 
                     {materialSuccess ? <p className="form-success">{materialSuccess}</p> : null}
@@ -5390,6 +5623,121 @@ export function TeacherClassManager({
                               ) : null}
                             </div>
                           </section>
+                        </section>
+
+                        <section
+                          className="ai-tutor-section-panel"
+                          hidden={activeAiTutorSection !== "sourceSettings"}
+                          aria-labelledby="ai-tutor-source-settings-title"
+                        >
+                          <div className="ai-tutor-section-heading">
+                            <div>
+                              <h2 id="ai-tutor-source-settings-title">Source Settings</h2>
+                              <span>Control how Chandra finds, cites, quotes, and defaults class materials.</span>
+                            </div>
+                          </div>
+
+                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-source-usage-title">
+                            <h3 id="ai-tutor-source-usage-title">How Chandra Uses Sources</h3>
+                            <p>These settings affect answers in student chat after materials have finished processing.</p>
+                            <div className="ai-tutor-control-grid single">
+                              <div>
+                                <label className="ai-tutor-control-label" htmlFor="ai-preferred-source-type">
+                                  Preferred source type
+                                </label>
+                                <select
+                                  id="ai-preferred-source-type"
+                                  name="sourceUsage.preferredSourceType"
+                                  defaultValue={selectedSourceUsage.preferredSourceType}
+                                >
+                                  {preferredSourceTypeOptions.map((sourceType) => (
+                                    <option key={sourceType} value={sourceType}>
+                                      {sourceType}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+                            <div className="settings-toggle-list">
+                              {sourceUsageSettings.map((setting) => (
+                                <SettingsToggle
+                                  defaultChecked={selectedSourceUsage[setting.id]}
+                                  key={setting.title}
+                                  name={`sourceUsage.${setting.id}`}
+                                  {...setting}
+                                />
+                              ))}
+                            </div>
+                          </section>
+
+                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-source-defaults-title">
+                            <h3 id="ai-tutor-source-defaults-title">New Upload Defaults</h3>
+                            <p>These are the starting settings for newly uploaded materials. You can still change each source later.</p>
+                            <div className="settings-source-default-grid">
+                              <SettingsToggle
+                                defaultChecked={selectedSourceDefaults.activeForStudents}
+                                description="Make processed uploads available to student chat by default."
+                                name="sourceDefaults.activeForStudents"
+                                title="Student-visible after processing"
+                              />
+                              <SettingsToggle
+                                defaultChecked={selectedSourceDefaults.teacherOnly}
+                                description="Keep new uploads hidden from students until a teacher changes the source."
+                                name="sourceDefaults.teacherOnly"
+                                title="Keep new uploads teacher-only"
+                              />
+                              <SettingsToggle
+                                defaultChecked={selectedSourceDefaults.citationsRequired}
+                                description="Require page or section references when Chandra uses these materials."
+                                name="sourceDefaults.citationsRequired"
+                                title="Require citations"
+                              />
+                              <SettingsToggle
+                                defaultChecked={selectedSourceDefaults.answerKeysTeacherReviewOnly}
+                                description="Treat answer keys and solution sets as teacher-review materials by default."
+                                name="sourceDefaults.answerKeysTeacherReviewOnly"
+                                title="Keep answer keys out of student chat"
+                              />
+                            </div>
+
+                            <label className="ai-tutor-control-label" htmlFor="ai-source-default-priority">
+                              Default source priority
+                            </label>
+                            <select
+                              id="ai-source-default-priority"
+                              name="sourceDefaults.priority"
+                              defaultValue={selectedSourceDefaults.priority}
+                            >
+                              <option value="primary">Primary</option>
+                              <option value="normal">Normal</option>
+                              <option value="low">Low</option>
+                            </select>
+                          </section>
+
+                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-source-type-preferences-title">
+                            <h3 id="ai-tutor-source-type-preferences-title">Defaults by Source Type</h3>
+                            <p>Use stricter defaults for sensitive material types, or let them inherit the upload defaults above.</p>
+                            <div className="settings-source-type-grid">
+                              {materialSourceTypeKeys.map((kind) => (
+                                <div className="settings-source-type-control" key={kind}>
+                                  <label className="ai-tutor-control-label" htmlFor={`ai-source-type-${kind}`}>
+                                    {kind}
+                                  </label>
+                                  <select
+                                    id={`ai-source-type-${kind}`}
+                                    name={`sourceDefaults.sourceTypePreferences.${kind}`}
+                                    defaultValue={selectedSourceDefaults.sourceTypePreferences[kind]}
+                                  >
+                                    {materialSourceTypePreferenceOptions.map((preference) => (
+                                      <option key={preference} value={preference}>
+                                        {formatSourceTypePreference(preference)}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              ))}
+                            </div>
+                          </section>
 
                         </section>
 
@@ -5426,12 +5774,12 @@ export function TeacherClassManager({
                         >
                           <div className="ai-tutor-section-heading">
                             <div>
-                              <h2 id="ai-tutor-behavior-title">Behavior</h2>
-                              <span>Choose how Chandra should guide students.</span>
+                              <h2 id="ai-tutor-behavior-title">Teaching Style</h2>
+                              <span>Choose how Chandra guides students and shapes replies.</span>
                             </div>
                           </div>
                           <section className="ai-tutor-card" aria-labelledby="ai-tutor-behavior-card-title">
-                            <h3 id="ai-tutor-behavior-card-title">Tutor Behavior</h3>
+                            <h3 id="ai-tutor-behavior-card-title">Tutor Mode</h3>
                             <div className="settings-pill-group" role="radiogroup" aria-label="Tutor behavior">
                               {tutorBehaviorOptions.map((option) => (
                                 <label className="settings-choice-pill" key={option}>
@@ -5446,6 +5794,39 @@ export function TeacherClassManager({
                               ))}
                             </div>
 
+                            <label className="ai-tutor-control-label" htmlFor="ai-default-assignment-context">
+                              Default assignment context
+                            </label>
+                            <textarea
+                              id="ai-default-assignment-context"
+                              name="defaultAssignmentContext"
+                              rows={3}
+                              defaultValue={selectedClass.defaultAssignmentContext ?? ""}
+                              placeholder="Limits and introductory derivatives"
+                            />
+
+                            <label className="ai-tutor-control-label" htmlFor="ai-opening-message">
+                              Student opening message
+                            </label>
+                            <textarea
+                              id="ai-opening-message"
+                              name="openingMessage"
+                              rows={3}
+                              defaultValue={selectedOpeningMessage}
+                              placeholder="Hi. I can help with Algebra step by step. What problem are you on?"
+                            />
+
+                            <label className="ai-tutor-control-label" htmlFor="ai-student-facing-instructions">
+                              Student-facing instructions
+                            </label>
+                            <textarea
+                              id="ai-student-facing-instructions"
+                              name="studentFacingInstructions"
+                              rows={3}
+                              defaultValue={selectedStudentFacingInstructions}
+                              placeholder="Show your work. Use exact values unless asked for decimals."
+                            />
+
                             <label className="ai-tutor-control-label" htmlFor="ai-behavior-instructions">
                               Hidden tutor instructions
                             </label>
@@ -5458,6 +5839,90 @@ export function TeacherClassManager({
                             />
 
                           </section>
+                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-response-card-title">
+                            <h3 id="ai-tutor-response-card-title">Reply Style</h3>
+                            <div className="settings-toggle-list">
+                              {responseStructureSettings.map((setting) => (
+                                <SettingsToggle
+                                  defaultChecked={
+                                    setting.id === "askGuidingQuestionBeforeExplaining"
+                                      ? selectedAnswerPolicy.askGuidingQuestionBeforeExplaining
+                                      : selectedResponseFormat[setting.id]
+                                  }
+                                  key={setting.title}
+                                  name={setting.name}
+                                  title={setting.title}
+                                  description={setting.description}
+                                />
+                              ))}
+                              <SettingsToggle
+                                defaultChecked={selectedResponseFormat.simpleWording}
+                                description="Use shorter sentences and define specialized terms briefly."
+                                name="responseFormat.simpleWording"
+                                title="Use simpler wording"
+                              />
+                            </div>
+                          </section>
+
+                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-response-detail-title">
+                            <h3 id="ai-tutor-response-detail-title">Response Detail</h3>
+                            <div className="ai-tutor-control-grid">
+                              <div>
+                                <label className="ai-tutor-control-label" htmlFor="ai-response-length">
+                                  Verbose
+                                </label>
+                                <select
+                                  id="ai-response-length"
+                                  name="modelSettings.verbose"
+                                  value={displayedVerbose}
+                                  onChange={(event) =>
+                                    setAiTutorVerbosePreview({
+                                      classId: activeClassId,
+                                      value: event.target.value
+                                    })
+                                  }
+                                >
+                                  {verboseOptions.map((verbose) => (
+                                    <option key={verbose} value={verbose}>
+                                      {formatVerboseLabel(verbose)}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="ai-tutor-control-label" htmlFor="ai-example-frequency">
+                                  Use examples
+                                </label>
+                                <select
+                                  id="ai-example-frequency"
+                                  name="responseFormat.exampleFrequency"
+                                  defaultValue={selectedResponseFormat.exampleFrequency}
+                                >
+                                  {exampleFrequencyOptions.map((frequency) => (
+                                    <option key={frequency} value={frequency}>
+                                      {formatExampleFrequencyLabel(frequency)}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="ai-tutor-control-label" htmlFor="ai-math-notation">
+                                  Show formulas
+                                </label>
+                                <select
+                                  id="ai-math-notation"
+                                  name="responseFormat.mathNotation"
+                                  defaultValue={selectedResponseFormat.mathNotation}
+                                >
+                                  {mathNotationOptions.map((notation) => (
+                                    <option key={notation} value={notation}>
+                                      {formatMathNotationLabel(notation)}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+                          </section>
                         </section>
 
                         <section
@@ -5467,8 +5932,8 @@ export function TeacherClassManager({
                         >
                           <div className="ai-tutor-section-heading">
                             <div>
-                              <h2 id="ai-tutor-answer-policy-title">Answer Policy</h2>
-                              <span>Set guardrails for how Chandra responds to student questions.</span>
+                              <h2 id="ai-tutor-answer-policy-title">Help Rules</h2>
+                              <span>Set academic integrity guardrails and how much help Chandra may give.</span>
                             </div>
                           </div>
                           <section className="ai-tutor-card" aria-labelledby="ai-tutor-answer-policy-card-title">
@@ -5507,113 +5972,17 @@ export function TeacherClassManager({
 
                         <section
                           className="ai-tutor-section-panel"
-                          hidden={activeAiTutorSection !== "response"}
-                          aria-labelledby="ai-tutor-response-title"
-                        >
-                          <div className="ai-tutor-section-heading">
-                            <div>
-                              <h2 id="ai-tutor-response-title">Response</h2>
-                              <span>Control the structure and reading style of tutoring replies.</span>
-                            </div>
-                          </div>
-                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-response-card-title">
-                            <h3 id="ai-tutor-response-card-title">Reply Structure</h3>
-                            <div className="settings-toggle-list">
-                              {responseStructureSettings.map((setting) => (
-                                <SettingsToggle
-                                  defaultChecked={
-                                    setting.id === "askGuidingQuestionBeforeExplaining"
-                                      ? selectedAnswerPolicy.askGuidingQuestionBeforeExplaining
-                                      : selectedResponseFormat[setting.id]
-                                  }
-                                  key={setting.title}
-                                  name={setting.name}
-                                  title={setting.title}
-                                  description={setting.description}
-                                />
-                              ))}
-                            </div>
-                          </section>
-
-                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-reading-notation-title">
-                            <h3 id="ai-tutor-reading-notation-title">Reading & Notation</h3>
-                            <div className="ai-tutor-control-grid">
-                              <div>
-                                <label className="ai-tutor-control-label" htmlFor="ai-reading-level">
-                                  Reading level
-                                </label>
-                                <select
-                                  id="ai-reading-level"
-                                  name="responseFormat.readingLevel"
-                                  defaultValue={selectedResponseFormat.readingLevel}
-                                >
-                                  {readingLevelOptions.map((readingLevel) => (
-                                    <option key={readingLevel} value={readingLevel}>
-                                      {capitalizeLabel(readingLevel)}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                              <div>
-                                <label className="ai-tutor-control-label" htmlFor="ai-math-notation">
-                                  Math notation
-                                </label>
-                                <select
-                                  id="ai-math-notation"
-                                  name="responseFormat.mathNotation"
-                                  defaultValue={selectedResponseFormat.mathNotation}
-                                >
-                                  {mathNotationOptions.map((notation) => (
-                                    <option key={notation} value={notation}>
-                                      {formatMathNotationLabel(notation)}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            </div>
-                          </section>
-                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-response-length-title">
-                            <h3 id="ai-tutor-response-length-title">Length</h3>
-                            <div className="ai-tutor-control-grid single">
-                              <div>
-                                <label className="ai-tutor-control-label" htmlFor="ai-response-length">
-                                  Max response length
-                                </label>
-                                <select
-                                  id="ai-response-length"
-                                  name="modelSettings.responseLength"
-                                  value={displayedResponseLength}
-                                  onChange={(event) =>
-                                    setAiTutorResponseLengthPreview({
-                                      classId: activeClassId,
-                                      value: event.target.value
-                                    })
-                                  }
-                                >
-                                  {responseLengthOptions.map((responseLength) => (
-                                    <option key={responseLength} value={responseLength}>
-                                      {formatResponseLengthLabel(responseLength)}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            </div>
-                          </section>
-                        </section>
-
-                        <section
-                          className="ai-tutor-section-panel"
                           hidden={activeAiTutorSection !== "model"}
                           aria-labelledby="ai-tutor-model-title"
                         >
                           <div className="ai-tutor-section-heading">
                             <div>
-                              <h2 id="ai-tutor-model-title">Model</h2>
-                              <span>Configure the model behavior for this class.</span>
+                              <h2 id="ai-tutor-model-title">Advanced</h2>
+                              <span>Configure provider-level tutor settings for this class.</span>
                             </div>
                           </div>
                           <section className="ai-tutor-card ai-tutor-model-card" aria-labelledby="ai-tutor-model-card-title">
-                            <h3 id="ai-tutor-model-card-title">Model Behavior</h3>
+                            <h3 id="ai-tutor-model-card-title">Advanced Model Settings</h3>
                             <div className="ai-tutor-control-grid">
                               <div>
                                 <label className="ai-tutor-control-label" htmlFor="ai-class-model">
@@ -5629,7 +5998,7 @@ export function TeacherClassManager({
                               </div>
                               <div>
                                 <label className="ai-tutor-control-label" htmlFor="ai-reasoning-effort">
-                                  Thinking time
+                                  Tutor speed
                                 </label>
                                 <select
                                   id="ai-reasoning-effort"
@@ -5646,11 +6015,11 @@ export function TeacherClassManager({
                             </div>
 
                             <div className="settings-slider-heading">
-                              <span>Creativity</span>
+                              <span>Answer variety</span>
                               <strong>{displayedCreativity}%</strong>
                             </div>
                             <input
-                              aria-label="Creativity"
+                              aria-label="Answer variety"
                               className="settings-slider"
                               name="modelSettings.creativity"
                               type="range"
@@ -5666,14 +6035,6 @@ export function TeacherClassManager({
                               }
                             />
 
-                            <div className="ai-tutor-control-grid">
-                              <TokenLimitInputs
-                                idPrefix="ai-token-limit"
-                                labelClassName="ai-tutor-control-label"
-                                requestLimits={selectedModelSettings.requestLimits}
-                                tokenLimits={selectedModelSettings.tokenLimits}
-                              />
-                            </div>
                           </section>
                         </section>
 
@@ -5904,52 +6265,138 @@ export function TeacherClassManager({
                             onChange={(event) => setConversationSearchQuery(event.target.value)}
                           />
                         </label>
-                        <div className="conversation-inbox-table" aria-label="Conversation summaries">
-                          {filteredConversationReviewRows.map((conversation) => (
+                        {checkedConversationRows.length ? (
+                          <div className="conversation-bulk-bar" aria-label="Bulk conversation review actions">
+                            <span>{checkedConversationRows.length} selected</span>
                             <button
-                              aria-pressed={conversation.id === selectedConversationReviewRow?.id}
+                              disabled={isSavingBulkConversationReviews}
+                              type="button"
+                              onClick={() => void saveBulkConversationReviews("reviewed")}
+                            >
+                              Mark reviewed
+                            </button>
+                            <button
+                              disabled={isSavingBulkConversationReviews}
+                              type="button"
+                              onClick={() => void saveBulkConversationReviews("needs_follow_up")}
+                            >
+                              Needs follow-up
+                            </button>
+                            <label>
+                              <span className="sr-only">Set selected status</span>
+                              <select
+                                disabled={isSavingBulkConversationReviews}
+                                value={bulkConversationStatus}
+                                onChange={(event) => setBulkConversationStatus(event.target.value as ConversationReviewStatus)}
+                              >
+                                {conversationReviewStatusOptions.map((status) => (
+                                  <option key={status} value={status}>
+                                    {formatConversationStatus(status)}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <button
+                              disabled={isSavingBulkConversationReviews}
+                              type="button"
+                              onClick={() => void saveBulkConversationReviews(bulkConversationStatus)}
+                            >
+                              Set status
+                            </button>
+                          </div>
+                        ) : null}
+                        <div className="conversation-inbox-table" aria-label="Conversation summaries">
+                          {filteredConversationReviewRows.length ? (
+                            <label className="conversation-select-all-row">
+                              <input
+                                checked={allVisibleConversationsChecked}
+                                ref={(input) => {
+                                  if (input) {
+                                    input.indeterminate = someVisibleConversationsChecked && !allVisibleConversationsChecked;
+                                  }
+                                }}
+                                type="checkbox"
+                                onChange={(event) => {
+                                  const visibleIds = filteredConversationReviewRows.map((conversation) => conversation.id);
+                                  setCheckedConversationIds((currentIds) =>
+                                    event.target.checked
+                                      ? Array.from(new Set([...currentIds, ...visibleIds]))
+                                      : currentIds.filter((conversationId) => !visibleIds.includes(conversationId))
+                                  );
+                                }}
+                              />
+                              <span>Select visible conversations</span>
+                            </label>
+                          ) : null}
+                          {filteredConversationReviewRows.map((conversation) => (
+                            <div
+                              aria-selected={conversation.id === selectedConversationReviewRow?.id}
                               className="conversation-inbox-row"
                               key={conversation.id}
-                              type="button"
-                              onClick={() => {
-                                setSelectedStudentId(conversation.studentId);
-                                setSelectedStudentClassId(activeClassId);
-                                setSelectedConversationId(conversation.id);
-                                setSelectedConversationClassId(activeClassId);
-                                setIsRosterDetailOpen(true);
-                                setIsProfessorReviewOpen(false);
-                              }}
                             >
-                              <span className="conversation-inbox-primary">
-                                <strong>{conversation.title}</strong>
-                                <span className={`conversation-status-pill ${conversationStatusClass(conversation.status)}`}>
-                                  {formatConversationStatus(conversation.status)}
-                                </span>
-                                {conversation.feedbackSummary.openCount > 0 ? (
-                                  <span className="conversation-status-pill feedback">
-                                    {conversation.feedbackSummary.openCount} feedback
+                              <label className="conversation-row-check">
+                                <input
+                                  checked={checkedConversationIdSet.has(conversation.id)}
+                                  type="checkbox"
+                                  onChange={(event) => {
+                                    setCheckedConversationIds((currentIds) =>
+                                      event.target.checked
+                                        ? Array.from(new Set([...currentIds, conversation.id]))
+                                        : currentIds.filter((conversationId) => conversationId !== conversation.id)
+                                    );
+                                  }}
+                                />
+                                <span className="sr-only">Select {conversation.title}</span>
+                              </label>
+                              <button
+                                aria-pressed={conversation.id === selectedConversationReviewRow?.id}
+                                className="conversation-inbox-row-button"
+                                type="button"
+                                onClick={() => {
+                                  setSelectedStudentId(conversation.studentId);
+                                  setSelectedStudentClassId(activeClassId);
+                                  setSelectedConversationId(conversation.id);
+                                  setSelectedConversationClassId(activeClassId);
+                                  setIsRosterDetailOpen(true);
+                                  setIsProfessorReviewOpen(false);
+                                }}
+                              >
+                                <span className="conversation-inbox-primary">
+                                  <strong>{conversation.title}</strong>
+                                  <span className={`conversation-status-pill ${conversationStatusClass(conversation.status)}`}>
+                                    {formatConversationStatus(conversation.status)}
                                   </span>
-                                ) : null}
-                              </span>
-                              <span className="conversation-inbox-meta">
-                                <span>
-                                  <em>Student</em>
-                                  {conversation.studentName}
+                                  {conversation.status === "needs_follow_up" && conversation.followUpDueAt ? (
+                                    <span className="conversation-status-pill follow-up-due">
+                                      Due {formatFollowUpDueLabel(conversation.followUpDueAt)}
+                                    </span>
+                                  ) : null}
+                                  {conversation.feedbackSummary.openCount > 0 ? (
+                                    <span className="conversation-status-pill feedback">
+                                      {conversation.feedbackSummary.openCount} feedback
+                                    </span>
+                                  ) : null}
                                 </span>
-                                <span>
-                                  <em>Last</em>
-                                  {conversation.lastMessageLabel}
+                                <span className="conversation-inbox-meta">
+                                  <span>
+                                    <em>Student</em>
+                                    {conversation.studentName}
+                                  </span>
+                                  <span>
+                                    <em>Last</em>
+                                    {conversation.lastMessageLabel}
+                                  </span>
+                                  <span>
+                                    <em>Messages</em>
+                                    {conversation.messageCount}
+                                  </span>
+                                  <span>
+                                    <em>Topic</em>
+                                    {conversation.topic}
+                                  </span>
                                 </span>
-                                <span>
-                                  <em>Messages</em>
-                                  {conversation.messageCount}
-                                </span>
-                                <span>
-                                  <em>Topic</em>
-                                  {conversation.topic}
-                                </span>
-                              </span>
-                            </button>
+                              </button>
+                            </div>
                           ))}
 
                           {!filteredConversationReviewRows.length ? (
@@ -6095,7 +6542,53 @@ export function TeacherClassManager({
                                       }))
                                     }
                                   />
+                                  <div className="student-feedback-response-box">
+                                    <label htmlFor={`feedback-response-${feedback.id}`}>
+                                      Response to student
+                                      <span>
+                                        {feedback.studentVisibleResponseSentAt
+                                          ? `Sent ${formatConversationDate(feedback.studentVisibleResponseSentAt)}`
+                                          : "Not sent yet"}
+                                      </span>
+                                    </label>
+                                    <textarea
+                                      id={`feedback-response-${feedback.id}`}
+                                      maxLength={1000}
+                                      placeholder="Write a response the student will see..."
+                                      rows={3}
+                                      value={feedbackResponsesById[feedback.id] ?? feedback.studentVisibleResponse ?? ""}
+                                      onChange={(event) =>
+                                        setFeedbackResponsesById((currentResponses) => ({
+                                          ...currentResponses,
+                                          [feedback.id]: event.target.value
+                                        }))
+                                      }
+                                    />
+                                  </div>
                                   <div className="student-feedback-actions">
+                                    <button
+                                      disabled={savingFeedbackId === feedback.id}
+                                      type="button"
+                                      onClick={() => {
+                                        const response = buildStudentFeedbackResponse(feedback);
+                                        setFeedbackResponsesById((currentResponses) => ({
+                                          ...currentResponses,
+                                          [feedback.id]: response
+                                        }));
+                                      }}
+                                    >
+                                      Generate response
+                                    </button>
+                                    <button
+                                      disabled={
+                                        savingFeedbackId === feedback.id ||
+                                        !(feedbackResponsesById[feedback.id] ?? feedback.studentVisibleResponse ?? "").trim()
+                                      }
+                                      type="button"
+                                      onClick={() => void sendStudentFeedbackResponse(feedback)}
+                                    >
+                                      Send response
+                                    </button>
                                     <button
                                       disabled={savingFeedbackId === feedback.id || feedback.status === "reviewed"}
                                       type="button"
@@ -6143,7 +6636,19 @@ export function TeacherClassManager({
                                 type="button"
                                 onClick={() => {
                                   if (selectedConversationReviewRow) {
-                                    void saveConversationReview(selectedConversationReviewRow, action.status);
+                                    const followUpDueAt =
+                                      action.status === "needs_follow_up"
+                                        ? conversationFollowUpDueById[selectedConversationReviewRow.id] ??
+                                          normalizeDateTimeLocalValue(selectedConversationReviewRow.review.followUpDueAt) ??
+                                          defaultFollowUpDateTimeLocal("tomorrow")
+                                        : null;
+                                    if (followUpDueAt) {
+                                      setConversationFollowUpDueById((currentDueDates) => ({
+                                        ...currentDueDates,
+                                        [selectedConversationReviewRow.id]: followUpDueAt
+                                      }));
+                                    }
+                                    void saveConversationReview(selectedConversationReviewRow, action.status, followUpDueAt);
                                   }
                                 }}
                               >
@@ -6151,6 +6656,62 @@ export function TeacherClassManager({
                               </button>
                             ))}
                           </div>
+                          {selectedConversationReviewRow?.status === "needs_follow_up" ? (
+                            <div className="follow-up-scheduler" aria-label="Follow-up due date">
+                              <div>
+                                <strong>Follow-up due</strong>
+                                <span>
+                                  {selectedConversationReviewRow.review.followUpDueAt
+                                    ? formatFollowUpDueLabel(selectedConversationReviewRow.review.followUpDueAt)
+                                    : "Defaults to tomorrow"}
+                                </span>
+                              </div>
+                              <div className="follow-up-preset-row">
+                                {(["tomorrow", "thisWeek"] as const).map((preset) => (
+                                  <button
+                                    disabled={savingReviewConversationId === selectedConversationReviewRow.id}
+                                    key={preset}
+                                    type="button"
+                                    onClick={() => {
+                                      const dueAt = defaultFollowUpDateTimeLocal(preset);
+                                      setConversationFollowUpDueById((currentDueDates) => ({
+                                        ...currentDueDates,
+                                        [selectedConversationReviewRow.id]: dueAt
+                                      }));
+                                      void saveConversationReview(selectedConversationReviewRow, "needs_follow_up", dueAt);
+                                    }}
+                                  >
+                                    {preset === "tomorrow" ? "Tomorrow" : "This week"}
+                                  </button>
+                                ))}
+                              </div>
+                              <label>
+                                <span>Custom date/time</span>
+                                <input
+                                  disabled={savingReviewConversationId === selectedConversationReviewRow.id}
+                                  type="datetime-local"
+                                  value={
+                                    conversationFollowUpDueById[selectedConversationReviewRow.id] ??
+                                    normalizeDateTimeLocalValue(selectedConversationReviewRow.review.followUpDueAt) ??
+                                    defaultFollowUpDateTimeLocal("tomorrow")
+                                  }
+                                  onChange={(event) => {
+                                    setConversationFollowUpDueById((currentDueDates) => ({
+                                      ...currentDueDates,
+                                      [selectedConversationReviewRow.id]: event.target.value
+                                    }));
+                                  }}
+                                  onBlur={(event) => {
+                                    void saveConversationReview(
+                                      selectedConversationReviewRow,
+                                      "needs_follow_up",
+                                      event.target.value || defaultFollowUpDateTimeLocal("tomorrow")
+                                    );
+                                  }}
+                                />
+                              </label>
+                            </div>
+                          ) : null}
                           <label className="sr-only" htmlFor="conversation-private-note">
                             Add private note
                           </label>
@@ -6197,7 +6758,16 @@ export function TeacherClassManager({
                         <section className="review-side-panel" aria-labelledby="conversation-summary-title">
                           <div className="conversation-panel-heading">
                             <h3 id="conversation-summary-title">Conversation Summary</h3>
-                            <span>{selectedConversationReviewRow ? formatConversationStatus(selectedConversationReviewRow.status) : ""}</span>
+                            <span>
+                              {selectedConversationReviewRow
+                                ? selectedConversationReviewRow.status === "needs_follow_up" &&
+                                  selectedConversationReviewRow.review.followUpDueAt
+                                  ? `${formatConversationStatus(selectedConversationReviewRow.status)} / Due ${formatFollowUpDueLabel(
+                                      selectedConversationReviewRow.review.followUpDueAt
+                                    )}`
+                                  : formatConversationStatus(selectedConversationReviewRow.status)
+                                : ""}
+                            </span>
                           </div>
                           <div className="conversation-summary-card">
                             <span>Topic</span>
@@ -6861,7 +7431,7 @@ export function TeacherClassManager({
                 value={materialSourceUrl}
                 onChange={(event) => handleMaterialSourceUrlChange(event.target.value)}
               />
-              <p className="field-hint">Public PDF, HTML, TXT, MD, or CSV URLs only.</p>
+              <p className="field-hint">Public PDF URLs are downloaded directly. Public web pages, TXT, MD, and CSV URLs are converted to PDF.</p>
 
               <label className="field-label" htmlFor="material-text">
                 Paste text
@@ -6965,33 +7535,55 @@ function HelpLimitSelectors({
   labelClassName: string;
   selectedAnswerPolicy: AnswerPolicySettings;
 }) {
+  const [selectedHelpLimits, setSelectedHelpLimits] = useState(selectedAnswerPolicy.helpLimitsByUnderstandingLevel);
+
   return (
     <div className="help-limit-grid">
       {understandingLevelOptions.map((level) => {
         const fieldId = `${idPrefix}-${level}`;
+        const selectedLimit = selectedHelpLimits[level];
 
         return (
           <div className="help-limit-row" key={level}>
-            <label className={labelClassName} htmlFor={fieldId}>
-              {helpLimitLevelLabels[level]}
-            </label>
-            <select
-              id={fieldId}
-              name={`answerPolicy.helpLimitsByUnderstandingLevel.${level}`}
-              defaultValue={selectedAnswerPolicy.helpLimitsByUnderstandingLevel[level]}
-            >
-              {helpLimitOptionIds.map((optionId) => (
-                <option key={optionId} value={optionId}>
-                  {helpLimitLabels[optionId]}
-                </option>
-              ))}
-            </select>
+            <div className="help-limit-level-copy">
+              <span className="help-limit-level-badge">Level {level}</span>
+              <label className={labelClassName} htmlFor={fieldId}>
+                {helpLimitLevelLabels[level]}
+              </label>
+              <small>{helpLimitLevelDescriptions[level]}</small>
+            </div>
+            <div className="help-limit-control">
+              <select
+                id={fieldId}
+                name={`answerPolicy.helpLimitsByUnderstandingLevel.${level}`}
+                value={selectedLimit}
+                onChange={(event) =>
+                  setSelectedHelpLimits((currentLimits) => ({
+                    ...currentLimits,
+                    [level]: event.target.value as HelpLimitOptionId
+                  }))
+                }
+              >
+                {helpLimitOptionIds.map((optionId) => (
+                  <option key={optionId} value={optionId}>
+                    {helpLimitLabels[optionId]}
+                  </option>
+                ))}
+              </select>
+              <small>{helpLimitDescriptions[selectedLimit]}</small>
+            </div>
           </div>
         );
       })}
     </div>
   );
 }
+
+const studentMessageLimitPresets = [
+  { id: "light", label: "Light", perDay: 20, perWeek: 100 },
+  { id: "standard", label: "Standard", perDay: 50, perWeek: 250 },
+  { id: "open", label: "Open", perDay: 80, perWeek: 400 }
+] as const;
 
 function TokenLimitInputs({
   idPrefix,
@@ -7004,86 +7596,77 @@ function TokenLimitInputs({
   requestLimits: AiRequestLimitSettings;
   tokenLimits: AiTokenLimitSettings;
 }) {
+  const [studentDailyLimit, setStudentDailyLimit] = useState(requestLimits.perStudentDaily);
+  const [studentWeeklyLimit, setStudentWeeklyLimit] = useState(requestLimits.perStudentWeekly);
+  const selectedPreset = studentMessageLimitPresets.find(
+    (preset) => preset.perDay === studentDailyLimit && preset.perWeek === studentWeeklyLimit
+  )?.id ?? "custom";
+
   return (
     <>
+      <div className="usage-limit-preset-panel">
+        <span className={labelClassName}>Preset</span>
+        <div className="usage-limit-presets" aria-label="Student message limit presets">
+          {studentMessageLimitPresets.map((preset) => (
+            <button
+              aria-pressed={selectedPreset === preset.id}
+              key={preset.id}
+              type="button"
+              onClick={() => {
+                setStudentDailyLimit(preset.perDay);
+                setStudentWeeklyLimit(preset.perWeek);
+              }}
+            >
+              <strong>{preset.label}</strong>
+              <span>{preset.perDay}/day</span>
+              <span>{preset.perWeek}/week</span>
+            </button>
+          ))}
+        </div>
+      </div>
       <div>
-        <label className={labelClassName} htmlFor={`${idPrefix}-student-requests`}>
-          Requests per student per day
+        <label className={labelClassName} htmlFor={`${idPrefix}-student-daily-requests`}>
+          Student messages per day
         </label>
         <input
-          id={`${idPrefix}-student-requests`}
+          id={`${idPrefix}-student-daily-requests`}
           min={1}
           name="modelSettings.requestLimits.perStudentDaily"
           step={1}
           type="number"
-          defaultValue={requestLimits.perStudentDaily}
+          value={studentDailyLimit}
+          onChange={(event) => setStudentDailyLimit(Number(event.target.value))}
         />
       </div>
       <div>
-        <label className={labelClassName} htmlFor={`${idPrefix}-class-requests`}>
-          Requests per class per day
+        <label className={labelClassName} htmlFor={`${idPrefix}-student-weekly-requests`}>
+          Student messages per week
         </label>
         <input
-          id={`${idPrefix}-class-requests`}
+          id={`${idPrefix}-student-weekly-requests`}
           min={1}
-          name="modelSettings.requestLimits.perClassDaily"
+          name="modelSettings.requestLimits.perStudentWeekly"
           step={1}
           type="number"
-          defaultValue={requestLimits.perClassDaily}
+          value={studentWeeklyLimit}
+          onChange={(event) => setStudentWeeklyLimit(Number(event.target.value))}
         />
       </div>
-      <div>
-        <label className={labelClassName} htmlFor={`${idPrefix}-preview-requests`}>
-          Teacher preview requests per day
-        </label>
-        <input
-          id={`${idPrefix}-preview-requests`}
-          min={0}
-          name="modelSettings.requestLimits.teacherPreviewDaily"
-          step={1}
-          type="number"
-          defaultValue={requestLimits.teacherPreviewDaily ?? 0}
-        />
+      <div className="usage-limit-summary">
+        <strong>
+          {studentDailyLimit || 0} per day, {studentWeeklyLimit || 0} per week
+        </strong>
+        <span>Each student gets this many sent tutor messages. Uploads and longer AI responses may still use more tutoring time.</span>
       </div>
-      <div>
-        <label className={labelClassName} htmlFor={`${idPrefix}-hour`}>
-          Tokens per student per hour
-        </label>
-        <input
-          id={`${idPrefix}-hour`}
-          min={1000}
-          name="modelSettings.tokenLimits.perHour"
-          step={1000}
-          type="number"
-          defaultValue={tokenLimits.perHour}
-        />
+      <div className="usage-limit-student-preview">
+        <span className={labelClassName}>Student limit message</span>
+        <p>You have reached this class&apos;s tutor message limit. You can continue when your limit resets.</p>
       </div>
-      <div>
-        <label className={labelClassName} htmlFor={`${idPrefix}-day`}>
-          Tokens per student per day
-        </label>
-        <input
-          id={`${idPrefix}-day`}
-          min={1000}
-          name="modelSettings.tokenLimits.perDay"
-          step={1000}
-          type="number"
-          defaultValue={tokenLimits.perDay}
-        />
-      </div>
-      <div>
-        <label className={labelClassName} htmlFor={`${idPrefix}-week`}>
-          Tokens per student per week
-        </label>
-        <input
-          id={`${idPrefix}-week`}
-          min={1000}
-          name="modelSettings.tokenLimits.perWeek"
-          step={1000}
-          type="number"
-          defaultValue={tokenLimits.perWeek}
-        />
-      </div>
+      <input name="modelSettings.requestLimits.perClassDaily" type="hidden" value={requestLimits.perClassDaily} />
+      <input name="modelSettings.requestLimits.teacherPreviewDaily" type="hidden" value={requestLimits.teacherPreviewDaily ?? ""} />
+      <input name="modelSettings.tokenLimits.perHour" type="hidden" value={tokenLimits.perHour} />
+      <input name="modelSettings.tokenLimits.perDay" type="hidden" value={tokenLimits.perDay} />
+      <input name="modelSettings.tokenLimits.perWeek" type="hidden" value={tokenLimits.perWeek} />
     </>
   );
 }
@@ -7093,6 +7676,7 @@ function CoTeacherRow({
   disabled = false,
   displayName,
   email,
+  onPermissionsChange,
   onRemove,
   onRoleChange,
   role
@@ -7101,9 +7685,10 @@ function CoTeacherRow({
   disabled?: boolean;
   displayName?: string;
   email?: string;
+  onPermissionsChange?: (permissions: ClassAccessPermissions) => void;
   onRemove?: () => void;
   onRoleChange?: (role: Exclude<ClassAccessRole, "owner">) => void;
-  role: "Owner" | "Co-teacher" | "Viewer";
+  role: "Owner" | "Co-teacher" | "Viewer" | "TA";
 }) {
   return (
     <article className="class-invite-row">
@@ -7122,11 +7707,19 @@ function CoTeacherRow({
           >
             <option value="co-teacher">Co-teacher</option>
             <option value="viewer">Viewer</option>
+            <option value="ta">TA</option>
           </select>
         ) : (
           <code>{role}</code>
         )}
       </div>
+      {coTeacher?.role === "ta" ? (
+        <ClassAccessPermissionToggles
+          disabled={disabled}
+          permissions={coTeacher.permissions}
+          onChange={onPermissionsChange}
+        />
+      ) : null}
       {coTeacher ? (
         <div className="class-invite-actions">
           <button className="teacher-danger-button" disabled={disabled} type="button" onClick={onRemove}>
@@ -7137,6 +7730,49 @@ function CoTeacherRow({
       ) : null}
     </article>
   );
+}
+
+function ClassAccessPermissionToggles({
+  disabled = false,
+  onChange,
+  permissions
+}: {
+  disabled?: boolean;
+  onChange?: (permissions: ClassAccessPermissions) => void;
+  permissions: ClassAccessPermissions;
+}) {
+  return (
+    <div className="class-staff-permission-grid">
+      {(Object.entries(classAccessPermissionLabels) as Array<[ClassAccessPermission, string]>).map(([permission, label]) => (
+        <label className="settings-checkbox-row" key={permission}>
+          <input
+            checked={permissions[permission]}
+            disabled={disabled}
+            type="checkbox"
+            onChange={(event) =>
+              onChange?.({
+                ...permissions,
+                [permission]: event.target.checked
+              })
+            }
+          />
+          <span>{label}</span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function formatClassStaffRole(role: Exclude<ClassAccessRole, "owner">) {
+  if (role === "co-teacher") {
+    return "Co-teacher";
+  }
+
+  if (role === "ta") {
+    return "TA";
+  }
+
+  return "Viewer";
 }
 
 function formatMathNotationLabel(value: string) {
@@ -7151,9 +7787,33 @@ function formatMathNotationLabel(value: string) {
   return "Balanced";
 }
 
-function formatResponseLengthLabel(value: string) {
-  if (value === "long") {
+function formatVerboseLabel(value: string) {
+  if (value === "brief") {
+    return "Brief";
+  }
+
+  if (value === "detailed") {
     return "Detailed";
+  }
+
+  if (value === "veryDetailed") {
+    return "Very detailed";
+  }
+
+  return "Standard";
+}
+
+function formatExampleFrequencyLabel(value: string) {
+  if (value === "rarely") {
+    return "Rarely";
+  }
+
+  if (value === "often") {
+    return "Often";
+  }
+
+  if (value === "whenHelpful") {
+    return "When helpful";
   }
 
   return capitalizeLabel(value);
@@ -8586,6 +9246,7 @@ function buildConversationReviewRows(
     .map((conversation) => ({
       feedback: conversation.feedback ?? [],
       feedbackSummary: conversation.feedbackSummary ?? emptyStudentFeedbackSummary(),
+      followUpDueAt: conversation.review.followUpDueAt,
       id: conversation.id,
       lastMessageAt: conversation.lastMessageAt,
       lastMessageLabel: formatConversationDate(conversation.lastMessageAt) || "No messages",
@@ -8731,16 +9392,16 @@ function conversationMatchesFilter({
     return conversationIsReviewed(row);
   }
 
+  if (filter === "needsFollowUp") {
+    return row.status === "needs_follow_up";
+  }
+
   if (!conversationNeedsTeacherReview(row)) {
     return false;
   }
 
   if (filter === "unreviewed" || filter === "noTeacherReview") {
     return row.status === "new";
-  }
-
-  if (filter === "needsFollowUp") {
-    return row.status === "needs_follow_up";
   }
 
   if (filter === "activeToday") {
@@ -8764,10 +9425,6 @@ function conversationMatchesFilter({
   }
 
   return true;
-}
-
-function conversationNeedsTeacherReview(row: Pick<ConversationReviewRow, "feedbackSummary" | "status">) {
-  return conversationReviewRequiredStatuses.has(row.status) || row.feedbackSummary.openCount > 0;
 }
 
 function conversationIsReviewed(row: Pick<ConversationReviewRow, "feedbackSummary" | "status">) {
@@ -8795,6 +9452,59 @@ function summarizeStudentFeedback(feedback: StudentFeedback[]): StudentFeedbackS
     openCount: feedback.filter((item) => item.status !== "resolved").length,
     totalCount: feedback.length
   };
+}
+
+function normalizeDateTimeLocalValue(value: unknown): string | null {
+  const date = coerceDate(value);
+  if (!date) {
+    return null;
+  }
+
+  const offsetMs = date.getTimezoneOffset() * 60 * 1000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function defaultFollowUpDateTimeLocal(preset: "tomorrow" | "thisWeek") {
+  const dueAt = new Date();
+  if (preset === "tomorrow") {
+    dueAt.setDate(dueAt.getDate() + 1);
+  } else {
+    dueAt.setDate(dueAt.getDate() + 3);
+  }
+  dueAt.setHours(9, 0, 0, 0);
+  return normalizeDateTimeLocalValue(dueAt) ?? "";
+}
+
+function formatFollowUpDueLabel(value: unknown) {
+  const dueAt = coerceDate(value);
+  if (!dueAt) {
+    return "not scheduled";
+  }
+
+  return dueAt.toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short"
+  });
+}
+
+function buildStudentFeedbackResponse(feedback: StudentFeedback) {
+  if (feedback.kind === "usage_request") {
+    return "Thanks for asking for more tutoring time. I reviewed the request and will follow up with the next step for today's work.";
+  }
+
+  if (feedback.rating === "confusing") {
+    return "Thanks for letting me know this was confusing. I will review the exchange and clarify the next step for you.";
+  }
+
+  if (feedback.rating === "incorrect") {
+    return "Thanks for flagging this. I will check the response against our class materials and follow up with a correction if needed.";
+  }
+
+  if (feedback.rating === "helpful") {
+    return "Thanks for the feedback. I am glad this helped, and I will keep it in mind when reviewing class support.";
+  }
+
+  return "Thanks for sharing this feedback. I will review the conversation and follow up if there is anything you should revisit.";
 }
 
 function buildConversationMetrics(rows: ConversationReviewRow[], rosterRows: RosterRow[]) {
@@ -9190,6 +9900,7 @@ function buildRosterRows({
     const questionsPerDay = activity?.questionsPerDay ?? 0;
     const conversationsCount = activity?.conversationCount ?? 0;
     const status = activityStatusLabel(activity?.status ?? "no_activity");
+    const lastActiveDate = coerceDate(activity?.lastActiveAt);
     const recentConversations =
       activity?.recentConversations.map((conversation) => ({
         id: conversation.id,
@@ -9207,6 +9918,7 @@ function buildRosterRows({
       hasConversations: conversationsCount > 0,
       highQuestions: questionsPerDay >= 3,
       lastActive: formatLastActive(activity?.lastActiveAt),
+      lastActiveAtMs: lastActiveDate?.getTime() ?? null,
       lastChatTopic: activity?.lastChatTopic || "No saved topic",
       questionsLabel: `${formatStatNumber(questionsPerDay)}/day`,
       questionsPerDay,
@@ -9220,6 +9932,54 @@ function buildRosterRows({
       totalQuestions: activity?.totalQuestions ?? 0
     };
   });
+}
+
+function sortRosterRows(rows: RosterRow[], sort: RosterSort) {
+  if (!sort) {
+    return rows;
+  }
+
+  const directionMultiplier = sort.direction === "asc" ? 1 : -1;
+
+  return rows
+    .map((row, index) => ({ index, row }))
+    .sort((left, right) => {
+      const comparison = compareRosterRows(left.row, right.row, sort.column);
+
+      if (comparison !== 0) {
+        return comparison * directionMultiplier;
+      }
+
+      return left.index - right.index;
+    })
+    .map(({ row }) => row);
+}
+
+function compareRosterRows(left: RosterRow, right: RosterRow, column: RosterSortColumn) {
+  if (column === "student") {
+    return (
+      compareText(left.student.displayName, right.student.displayName) ||
+      compareText(left.student.email, right.student.email)
+    );
+  }
+
+  if (column === "activity") {
+    return rosterStatusSortPriority[left.status] - rosterStatusSortPriority[right.status];
+  }
+
+  if (column === "questions") {
+    return left.questionsPerDay - right.questionsPerDay;
+  }
+
+  if (column === "lastActive") {
+    return (left.lastActiveAtMs ?? Number.NEGATIVE_INFINITY) - (right.lastActiveAtMs ?? Number.NEGATIVE_INFINITY);
+  }
+
+  return left.conversationsCount - right.conversationsCount;
+}
+
+function compareText(left: string, right: string) {
+  return left.localeCompare(right, undefined, { sensitivity: "base", numeric: true });
 }
 
 function filterRosterRows(rows: RosterRow[], query: string, filter: RosterFilter) {

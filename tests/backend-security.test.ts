@@ -12,7 +12,7 @@ test("FastAPI chat authorizes Firebase scope instead of trusting client courseId
   assert.match(source, /scope = authorize_tutor_chat_request\(request, authorization\)/);
   assert.match(source, /course_id = scope\["classId"\]/);
   assert.match(source, /class_id = str\(profile\.get\("classId"\) or ""\)\.strip\(\)/);
-  assert.match(source, /authorize_class_teacher\(class_id, authorization, decoded_token=decoded_token\)/);
+  assert.match(source, /required_permission="teacherPreviewChat"/);
   assert.doesNotMatch(source, /retrieve_course_context\(request\.courseId/);
 });
 
@@ -27,7 +27,7 @@ test("material extraction routes require teacher authorization", () => {
   const nextSource = readFileSync(join(repoRoot, "frontend/app/api/materials/extract/route.ts"), "utf8");
   const fastApiSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
 
-  assert.match(nextSource, /await authorizeClassTeacher\(request, classId\)/);
+  assert.match(nextSource, /await authorizeClassAccess\(request, classId, "manageMaterials"\)/);
   assert.match(nextSource, /Choose a class before extracting material text/);
   assert.match(fastApiSource, /classId: str = Form\(\.\.\.\)/);
   assert.match(fastApiSource, /authorization: (?:str \| None|Optional\[str\]) = Header\(default=None\)/);
@@ -177,7 +177,9 @@ test("Firestore class settings rules accept the current teacher settings schema"
   assert.match(rules, /"coTeachers"/);
   assert.match(rules, /"quoteSourcePassages"/);
   assert.match(rules, /sourceUsage\.quoteSourcePassages is bool/);
-  assert.match(rules, /modelSettings\.responseLength in \["short", "medium", "long", "extended"\]/);
+  assert.match(rules, /modelSettings\.verbose in \["brief", "standard", "detailed", "veryDetailed"\]/);
+  assert.match(rules, /responseFormat\.simpleWording is bool/);
+  assert.match(rules, /responseFormat\.exampleFrequency in \["rarely", "whenHelpful", "often"\]/);
   assert.match(rules, /validAiTokenLimits\(modelSettings\.tokenLimits\)/);
   assert.match(rules, /tokenLimits\.perDay <= 5000000/);
   assert.match(rules, /"openingMessage"/);
@@ -189,6 +191,7 @@ test("Firestore class settings rules accept the current teacher settings schema"
   assert.match(rules, /"requestLimits"/);
   assert.match(rules, /validAiRequestLimits\(modelSettings\.requestLimits\)/);
   assert.match(rules, /requestLimits\.perStudentDaily <= 10000/);
+  assert.match(rules, /requestLimits\.perStudentWeekly <= 100000/);
 });
 
 test("teacher controls can pause class chat and one student without exposing content", () => {
@@ -207,12 +210,15 @@ test("teacher controls can pause class chat and one student without exposing con
 
   assert.match(classesSource, /studentChatEnabled: tutorAccess\.enabled/);
   assert.match(managerSource, /name="tutorAccess\.enabled"/);
-  assert.match(managerSource, /Student chat paused/);
+  assert.match(managerSource, /AI paused for student/);
   assert.match(managerSource, /modelSettings\.requestLimits\.perStudentDaily/);
+  assert.match(managerSource, /modelSettings\.requestLimits\.perStudentWeekly/);
   assert.match(managerSource, /modelSettings\.requestLimits\.perClassDaily/);
   assert.match(managerSource, /modelSettings\.requestLimits\.teacherPreviewDaily/);
   assert.match(managerSource, /chatBlocked: row\.chatBlocked/);
   assert.match(managerSource, /\/chat-access/);
+  assert.match(managerSource, /async function saveTeacherNotes[\s\S]*?\/support/);
+  assert.match(managerSource, /async function saveStudentChatBlocked[\s\S]*?\/chat-access/);
   assert.match(managerSource, /AI paused/);
   assert.match(profileSource, /chatBlocked: options\.chatBlocked \?\? stats\.chatBlocked/);
   assert.match(supportRoute, /chatBlocked/);
@@ -235,20 +241,43 @@ test("Firestore class list rules match the owned and co-teacher live queries", (
 test("class access and student data actions stay on server routes", () => {
   const coTeachersRoute = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/co-teachers/route.ts"), "utf8");
   const inviteCodeRoute = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/invite-code/route.ts"), "utf8");
+  const rosterSyncRoute = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/roster/sync/route.ts"), "utf8");
   const studentDataRoute = readFileSync(
     join(repoRoot, "frontend/app/api/classes/[classId]/students/[studentId]/data/route.ts"),
     "utf8"
   );
 
-  assert.match(coTeachersRoute, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(coTeachersRoute, /authorizeClassAccess\(request, classId, "manageClassAccess"\)/);
   assert.match(coTeachersRoute, /You cannot demote yourself/);
   assert.match(coTeachersRoute, /FieldValue\.arrayUnion/);
-  assert.match(inviteCodeRoute, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(inviteCodeRoute, /authorizeClassAccess\(request, classId, "manageClassAccess"\)/);
   assert.match(inviteCodeRoute, /createUniqueClassCode/);
-  assert.match(studentDataRoute, /authorizeClassTeacher\(request, classId\)/);
+  assert.match(rosterSyncRoute, /authorizeClassAccess\(request, classId, "manageRoster"\)/);
+  assert.doesNotMatch(rosterSyncRoute, /classSnapshot\.data\.teacherId !== decodedToken\.uid/);
+  assert.match(studentDataRoute, /authorizeClassAccess\(request, classId, "exportStudentData"\)/);
+  assert.match(studentDataRoute, /authorizeClassAccess\(request, classId, "deleteStudentData"\)/);
   assert.match(studentDataRoute, /Content-Disposition/);
   assert.match(studentDataRoute, /DELETE_STUDENT_CLASS_DATA/);
   assert.match(studentDataRoute, /listConversationMessages/);
+});
+
+test("class staff TA permissions are explicit and preview chat is permission-gated", () => {
+  const settingsSource = readFileSync(join(repoRoot, "frontend/lib/class-settings.ts"), "utf8");
+  const authSource = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
+  const chatAuthSource = readFileSync(join(repoRoot, "frontend/lib/tutor-chat-auth.ts"), "utf8");
+  const fastApiSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
+  const coTeachersRoute = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/co-teachers/route.ts"), "utf8");
+
+  assert.match(settingsSource, /"ta"/);
+  assert.match(settingsSource, /teacherPreviewChat/);
+  assert.match(authSource, /export async function authorizeClassAccess/);
+  assert.match(authSource, /access\.permissions\[permission\]/);
+  assert.match(coTeachersRoute, /normalizeClassAccessPermissions\(body\.permissions, role\)/);
+  assert.match(coTeachersRoute, /\[`coTeachers\.\$\{targetUid\}\.permissions`\]: permissions/);
+  assert.match(chatAuthSource, /role === "ta" && permissions\.teacherPreviewChat/);
+  assert.match(fastApiSource, /required_permission="teacherPreviewChat"/);
+  assert.match(fastApiSource, /role != "ta"/);
+  assert.match(fastApiSource, /permissions\.get\(permission\) is True/);
 });
 
 test("Firestore user theme preference updates only validate theme fields", () => {
@@ -287,7 +316,7 @@ test("Firestore student feedback is read-scoped and server-written", () => {
   const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
 
   assert.match(rules, /match \/studentFeedback\/\{feedbackId\}/);
-  assert.match(rules, /allow read: if isTargetClassTeacher\(classId\)/);
+  assert.match(rules, /allow read: if hasTargetClassAccess\(classId, "reviewConversations"\)/);
   assert.match(rules, /isStudentInClass\(classId\)\s*&& resource\.data\.studentId == request\.auth\.uid/);
   assert.match(rules, /match \/studentFeedback\/\{feedbackId\} \{[\s\S]*allow write: if false;/);
 });

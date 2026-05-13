@@ -19,13 +19,15 @@ import {
   addMessage as addPostgresMessage,
   getConversationById,
   listClassConversations as listPostgresClassConversations,
+  listConversationAttachments as listPostgresConversationAttachments,
   listConversationMessages as listPostgresConversationMessages,
   listStudentConversations as listPostgresStudentConversations,
   listTeacherStudentConversations as listPostgresTeacherStudentConversations,
   updateConversationMetadata,
   updateConversationTitle,
   updateMessageLearningStrategyTelemetry,
-  upsertConversation
+  upsertConversation,
+  type MessageAttachmentRecord
 } from "./data/conversations";
 import {
   listConversationReviews,
@@ -99,6 +101,8 @@ const vagueConversationTitles = new Set([
   "question",
   "still stuck"
 ]);
+
+type ConversationMessageRecord = Awaited<ReturnType<typeof listPostgresConversationMessages>>[number];
 
 type RosterActivityStudentRow = {
   chatBlocked?: boolean;
@@ -517,6 +521,7 @@ export async function updateTeacherConversationReview({
   classId,
   conversationId,
   flags,
+  followUpDueAt,
   privateNote,
   status,
   teacherId
@@ -525,6 +530,7 @@ export async function updateTeacherConversationReview({
   conversationId: string;
   teacherId: string;
   status: ConversationReviewStatus;
+  followUpDueAt?: string | null;
   privateNote: string;
   flags: string[];
 }): Promise<TeacherConversationReview> {
@@ -544,11 +550,14 @@ export async function updateTeacherConversationReview({
   if (postgresConversation.classId !== classId) {
     throw new ConversationPersistenceError("Conversation does not belong to this class.", 403);
   }
+  const normalizedFollowUpDueAt =
+    normalizeConversationFollowUpDueAt(followUpDueAt) ?? (status === "needs_follow_up" ? defaultConversationFollowUpDueAt() : null);
   await tryPostgresData("conversation.review.write", () =>
     upsertConversationReview({
       classId,
       conversationId,
       flags: sanitizeReviewFlags(flags),
+      followUpDueAt: status === "needs_follow_up" ? normalizedFollowUpDueAt : null,
       privateNote: privateNote.slice(0, maxTeacherReviewNoteLength),
       reviewedBy: teacherId,
       status
@@ -564,6 +573,7 @@ export async function updateTeacherConversationReview({
     classId,
     conversationId,
     flags: sanitizeReviewFlags(flags),
+    followUpDueAt: status === "needs_follow_up" ? normalizedFollowUpDueAt : null,
     privateNote: privateNote.slice(0, maxTeacherReviewNoteLength),
     reviewedAt: status === "new" ? null : FieldValue.serverTimestamp(),
     status,
@@ -830,6 +840,8 @@ export async function updateTeacherStudentSupport({
     .collection("students")
     .doc(supportDocumentId)
     .get();
+  const rosterStudentData = rosterStudentSnapshot.exists ? rosterStudentSnapshot.data() : null;
+  const rosterStudentUid = String(rosterStudentData?.uid ?? "").trim();
   const postgresRosterStudent = rosterStudentSnapshot.exists
     ? null
     : ((await listClassEnrollmentsPostgresFirst(classId)) as RosterActivityStudentRow[]).find((student) =>
@@ -843,11 +855,13 @@ export async function updateTeacherStudentSupport({
     upsertStudentSupport({
       classId,
       displayName: rosterStudentSnapshot.exists
-        ? String(rosterStudentSnapshot.data()?.displayName ?? "")
+        ? String(rosterStudentData?.displayName ?? "")
         : String(postgresRosterStudent?.displayName ?? ""),
       id: `${classId}:${supportDocumentId}`,
       studentEmail: normalizedEmail,
-      studentId: rosterStudentSnapshot.exists ? rosterStudentSnapshot.id : String(postgresRosterStudent?.uid ?? ""),
+      studentId: rosterStudentSnapshot.exists
+        ? rosterStudentUid || null
+        : String(postgresRosterStudent?.uid ?? "") || null,
       supportNotes: notes.slice(0, 1000),
       metadata: { updatedBy: teacherId },
       chatBlocked
@@ -894,6 +908,8 @@ export async function updateTeacherStudentChatAccess({
   const classReference = adminDb!.collection("classes").doc(classId);
   const rosterStudentReference = classReference.collection("students").doc(supportDocumentId);
   const rosterStudentSnapshot = await rosterStudentReference.get();
+  const rosterStudentData = rosterStudentSnapshot.exists ? rosterStudentSnapshot.data() : null;
+  const rosterStudentUid = String(rosterStudentData?.uid ?? "").trim();
   const postgresRosterStudent = rosterStudentSnapshot.exists
     ? null
     : ((await listClassEnrollmentsPostgresFirst(classId)) as RosterActivityStudentRow[]).find((student) =>
@@ -908,11 +924,13 @@ export async function updateTeacherStudentChatAccess({
       chatBlocked,
       classId,
       displayName: rosterStudentSnapshot.exists
-        ? String(rosterStudentSnapshot.data()?.displayName ?? "")
+        ? String(rosterStudentData?.displayName ?? "")
         : String(postgresRosterStudent?.displayName ?? ""),
       id: `${classId}:${supportDocumentId}`,
       studentEmail: normalizedEmail,
-      studentId: rosterStudentSnapshot.exists ? rosterStudentSnapshot.id : String(postgresRosterStudent?.uid ?? ""),
+      studentId: rosterStudentSnapshot.exists
+        ? rosterStudentUid || null
+        : String(postgresRosterStudent?.uid ?? "") || null,
       metadata: { updatedBy: teacherId }
     })
   );
@@ -960,7 +978,7 @@ export async function listTeacherConversationMessages({
     throw new ConversationPersistenceError("Conversation does not belong to this class.", 403);
   }
 
-  return (await listPostgresConversationMessages(conversationId)).map(messageRecordToStudentChatMessage);
+  return (await listConversationMessagesWithHydratedAttachments(conversationId)).map(messageRecordToStudentChatMessage);
 }
 
 async function getLastSignInAt(studentEmail: string) {
@@ -1053,7 +1071,46 @@ export async function listStudentConversationMessages({
     throw new ConversationPersistenceError("You can only open your own class conversations.", 403);
   }
 
-  return (await listPostgresConversationMessages(conversationId)).map(messageRecordToChatMessage);
+  return (await listConversationMessagesWithHydratedAttachments(conversationId)).map(messageRecordToChatMessage);
+}
+
+async function listConversationMessagesWithHydratedAttachments(conversationId: string): Promise<ConversationMessageRecord[]> {
+  const [messages, attachments] = await Promise.all([
+    listPostgresConversationMessages(conversationId),
+    listPostgresConversationAttachments(conversationId)
+  ]);
+
+  if (!attachments.length) {
+    return messages;
+  }
+
+  const attachmentsByMessageId = new Map<string, MessageAttachment[]>();
+
+  for (const attachment of attachments) {
+    const messageId = String(attachment.messageId ?? "").trim();
+
+    if (!messageId || attachment.uploadStatus !== "ready") {
+      continue;
+    }
+
+    const messageAttachment = attachmentRecordToHydratedMessageAttachment(attachment);
+    const existingAttachments = attachmentsByMessageId.get(messageId) ?? [];
+    existingAttachments.push(messageAttachment);
+    attachmentsByMessageId.set(messageId, existingAttachments);
+  }
+
+  return messages.map((message) => {
+    const messageAttachments = attachmentsByMessageId.get(message.id);
+
+    if (!messageAttachments?.length) {
+      return message;
+    }
+
+    return {
+      ...message,
+      attachments: mergeMessageAttachmentRecords(message.attachments, messageAttachments)
+    };
+  });
 }
 
 function conversationDocToSummary(id: string, data: Record<string, unknown>): StudentConversationSummary {
@@ -1183,6 +1240,7 @@ function reviewRecordToTeacherReview(review: Awaited<ReturnType<typeof listConve
     classId: review.classId,
     conversationId: review.conversationId,
     flags: Array.isArray(review.metadata.flags) ? review.metadata.flags.map(String) : [],
+    followUpDueAt: normalizeConversationFollowUpDueAt(review.metadata.followUpDueAt),
     privateNote: review.teacherNote,
     reviewedAt: review.reviewedAt?.toISOString() ?? null,
     status: normalizeConversationReviewStatus(review.status),
@@ -1202,7 +1260,7 @@ async function updateConversationProblemMetadataFromTutorResponse({
 }) {
   const problemMetadata = buildConversationProblemMetadataFromTutorResponse(response);
 
-  if (!problemMetadata.problemNumber || !problemMetadata.problemLabel) {
+  if (!problemMetadata.problemLabel) {
     return false;
   }
 
@@ -1292,12 +1350,14 @@ function buildConversationProblemMetadataFromTutorResponse(response: TutorApiRes
     firstProblemNumberFromSources(response.sources) ||
     firstProblemNumberFromSelectedPages(response.langGraphTrace?.selectedPages) ||
     firstProblemNumberFromMetadataRecords(response.langGraphTrace?.selectedMetadataRecords) ||
+    firstProblemNumberFromKnowledgeItems(response.langGraphTrace?.knowledgeItems) ||
     firstProblemNumberFromText(problemText);
   const problemSummary =
     normalizeProblemSummary(structuredMetadata?.problemSummary) ||
     summarizeProblemText(problemText) ||
-    summarizeMetadataProblemText(response.langGraphTrace?.selectedMetadataRecords);
-  const problemLabel = problemNumber ? `Problem ${problemNumber}` : "";
+    summarizeMetadataProblemText(response.langGraphTrace?.selectedMetadataRecords) ||
+    summarizeKnowledgeProblemText(response.langGraphTrace?.knowledgeItems);
+  const problemLabel = problemNumber ? `Problem ${problemNumber}` : problemSummary ? truncateConversationTitle(`Problem: ${problemSummary}`) : "";
 
   return {
     ...(problemLabel ? { problemLabel } : {}),
@@ -1372,6 +1432,22 @@ function firstProblemNumberFromMetadataRecords(records: Array<Record<string, unk
   return "";
 }
 
+function firstProblemNumberFromKnowledgeItems(items: TutorTrace["knowledgeItems"] | undefined) {
+  for (const item of items ?? []) {
+    if (item.kind !== "problem" || item.usedAs !== "active_problem") {
+      continue;
+    }
+
+    const problemNumber = firstProblemNumberFromText(item.content ?? "") || normalizeProblemNumber(item.problemId);
+
+    if (problemNumber && !problemNumber.startsWith("knowledge_") && !problemNumber.startsWith("problem_")) {
+      return problemNumber;
+    }
+  }
+
+  return "";
+}
+
 function firstProblemNumberFromUnknownList(value: unknown) {
   if (!Array.isArray(value)) {
     return "";
@@ -1407,6 +1483,22 @@ function normalizeProblemSummary(value: unknown) {
 function summarizeMetadataProblemText(records: Array<Record<string, unknown>> | undefined) {
   for (const record of records ?? []) {
     const summary = summarizeProblemText(String(record.problem_text ?? record.problemText ?? record.ocr_text ?? record.ocrText ?? record.chunk_text ?? ""));
+
+    if (summary) {
+      return summary;
+    }
+  }
+
+  return "";
+}
+
+function summarizeKnowledgeProblemText(items: TutorTrace["knowledgeItems"] | undefined) {
+  for (const item of items ?? []) {
+    if (item.kind !== "problem" || item.usedAs !== "active_problem") {
+      continue;
+    }
+
+    const summary = summarizeProblemText(item.content ?? "");
 
     if (summary) {
       return summary;
@@ -1716,6 +1808,7 @@ function defaultTeacherConversationReview({
     classId,
     conversationId,
     flags: [],
+    followUpDueAt: null,
     privateNote: "",
     reviewedAt: "",
     status: "new",
@@ -1731,6 +1824,7 @@ function reviewDocToTeacherReview(conversationId: string, data: Record<string, u
     classId: String(data.classId ?? ""),
     conversationId: String(data.conversationId ?? conversationId),
     flags: sanitizeReviewFlags(data.flags),
+    followUpDueAt: normalizeConversationFollowUpDueAt(data.followUpDueAt),
     privateNote: String(data.privateNote ?? "").slice(0, maxTeacherReviewNoteLength),
     reviewedAt: serializeFirestoreValue(data.reviewedAt),
     status,
@@ -1743,6 +1837,23 @@ function normalizeConversationReviewStatus(value: unknown): ConversationReviewSt
   const status = String(value ?? "new") as ConversationReviewStatus;
 
   return conversationReviewStatuses.has(status) ? status : "new";
+}
+
+function normalizeConversationFollowUpDueAt(value: unknown): string | null {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const dueAt = new Date(text);
+  return Number.isNaN(dueAt.getTime()) ? null : dueAt.toISOString();
+}
+
+function defaultConversationFollowUpDueAt() {
+  const dueAt = new Date();
+  dueAt.setDate(dueAt.getDate() + 1);
+  dueAt.setHours(9, 0, 0, 0);
+  return dueAt.toISOString();
 }
 
 function normalizeRetrievalConfidence(value: unknown): RetrievalConfidence | undefined {
@@ -1770,7 +1881,12 @@ function normalizeTutorSources(value: unknown): TutorSource[] {
       materialType: String(sourceRecord.materialType ?? "class-material"),
       title
     };
+    const id = stringOrUndefined(sourceRecord.id);
     const problemNumber = stringOrUndefined(sourceRecord.problemNumber);
+
+    if (id) {
+      normalizedSource.id = id;
+    }
 
     if (typeof sourceRecord.citationsRequired === "boolean") {
       normalizedSource.citationsRequired = sourceRecord.citationsRequired;
@@ -1780,8 +1896,66 @@ function normalizeTutorSources(value: unknown): TutorSource[] {
       normalizedSource.pageNumber = sourceRecord.pageNumber;
     }
 
+    if (typeof sourceRecord.pageStart === "number") {
+      normalizedSource.pageStart = sourceRecord.pageStart;
+    }
+
+    if (typeof sourceRecord.pageEnd === "number") {
+      normalizedSource.pageEnd = sourceRecord.pageEnd;
+    }
+
+    if (typeof sourceRecord.printedPageNumber === "number") {
+      normalizedSource.printedPageNumber = sourceRecord.printedPageNumber;
+    }
+
+    if (typeof sourceRecord.printedPageStart === "number") {
+      normalizedSource.printedPageStart = sourceRecord.printedPageStart;
+    }
+
+    if (typeof sourceRecord.printedPageEnd === "number") {
+      normalizedSource.printedPageEnd = sourceRecord.printedPageEnd;
+    }
+
+    const pdfId = stringOrUndefined(sourceRecord.pdfId);
+    const reason = stringOrUndefined(sourceRecord.reason);
+    const retrievalReason = stringOrUndefined(sourceRecord.retrievalReason);
+    const sourceId = stringOrUndefined(sourceRecord.sourceId);
+    const usedAs = stringOrUndefined(sourceRecord.usedAs);
+
+    if (pdfId) {
+      normalizedSource.pdfId = pdfId;
+    }
+
     if (problemNumber) {
       normalizedSource.problemNumber = problemNumber;
+    }
+
+    if (Array.isArray(sourceRecord.problemNumbers)) {
+      normalizedSource.problemNumbers = sourceRecord.problemNumbers.map(String).filter(Boolean);
+    }
+
+    if (reason) {
+      normalizedSource.reason = reason;
+    }
+
+    if (retrievalReason) {
+      normalizedSource.retrievalReason = retrievalReason;
+    }
+
+    if (sourceId) {
+      normalizedSource.sourceId = sourceId;
+    }
+
+    if (
+      usedAs === "active_problem" ||
+      usedAs === "problem_source" ||
+      usedAs === "supporting_context" ||
+      usedAs === "definition_reference" ||
+      usedAs === "theorem_reference" ||
+      usedAs === "example_reference" ||
+      usedAs === "student_attempt"
+    ) {
+      normalizedSource.usedAs = usedAs;
     }
 
     sources.push(normalizedSource);
@@ -1831,11 +2005,45 @@ function normalizeMessageAttachments(value: unknown): MessageAttachment[] | unde
   return attachments.length ? attachments : undefined;
 }
 
+function mergeMessageAttachmentRecords(existingValue: unknown, hydratedAttachments: MessageAttachment[]) {
+  const existingAttachments = normalizeMessageAttachments(existingValue) ?? [];
+  const attachmentsById = new Map<string, MessageAttachment>();
+
+  for (const attachment of [...existingAttachments, ...hydratedAttachments]) {
+    if (attachment.id) {
+      attachmentsById.set(attachment.id, attachment);
+    }
+  }
+
+  return Array.from(attachmentsById.values());
+}
+
+function attachmentRecordToHydratedMessageAttachment(record: MessageAttachmentRecord): MessageAttachment {
+  return {
+    classId: record.classId,
+    conversationId: record.conversationId,
+    createdAt: record.createdAt.toISOString(),
+    extractedText: record.extractedText,
+    fileName: record.fileName,
+    fileSize: record.fileSize,
+    fileType: record.fileType,
+    id: record.id,
+    messageId: record.messageId,
+    mimeType: record.mimeType,
+    pageCount: record.pageCount,
+    storageKey: record.storageKey,
+    studentId: record.studentId ?? "",
+    updatedAt: record.updatedAt.toISOString(),
+    uploadStatus: record.uploadStatus
+  };
+}
+
 function sourceKey(source: TutorSource) {
+  const pageNumber = source.printedPageStart ?? source.printedPageNumber ?? source.pageNumber;
   return [
     source.title,
     source.materialType,
-    source.pageNumber ? `p${source.pageNumber}` : "",
+    pageNumber ? `p${pageNumber}` : "",
     source.problemNumber ? `problem${source.problemNumber}` : ""
   ]
     .join("|")

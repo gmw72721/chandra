@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { ConversationPersistenceError, updateTeacherStudentChatAccess } from "@/lib/student-conversations-server";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -10,7 +10,7 @@ export async function PATCH(
 ) {
   try {
     const { classId, studentId } = await params;
-    const { uid } = await authorizeClassTeacher(request, classId);
+    const { uid } = await authorizeClassAccess(request, classId, "manageStudentSupport");
     const data = (await request.json()) as { chatBlocked?: unknown };
 
     if (typeof data.chatBlocked !== "boolean") {

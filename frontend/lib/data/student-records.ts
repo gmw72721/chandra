@@ -131,6 +131,8 @@ export async function upsertStudentFeedback(input: {
   promptReason?: string | null;
   rating?: string | null;
   status?: string;
+  studentVisibleResponse?: string;
+  studentVisibleResponseSentAt?: string;
   studentEmail: string;
   studentId: string;
   studentName: string;
@@ -164,7 +166,11 @@ export async function upsertStudentFeedback(input: {
       input.comment,
       input.status ?? "new",
       input.teacherNote ?? "",
-      JSON.stringify(input.metadata ?? {})
+      JSON.stringify({
+        ...(input.metadata ?? {}),
+        studentVisibleResponse: input.studentVisibleResponse ?? input.metadata?.studentVisibleResponse ?? "",
+        studentVisibleResponseSentAt: input.studentVisibleResponseSentAt ?? input.metadata?.studentVisibleResponseSentAt ?? ""
+      })
     ]
   );
 
@@ -201,6 +207,7 @@ export async function upsertConversationReview(input: {
   classId: string;
   conversationId: string;
   flags?: string[];
+  followUpDueAt?: string | null;
   privateNote?: string;
   reviewedBy?: string;
   status: string;
@@ -225,7 +232,7 @@ export async function upsertConversationReview(input: {
       input.status,
       input.privateNote ?? "",
       input.reviewedBy ?? null,
-      JSON.stringify({ flags: input.flags ?? [], teacherId: input.reviewedBy ?? "" })
+      JSON.stringify({ flags: input.flags ?? [], followUpDueAt: input.followUpDueAt ?? null, teacherId: input.reviewedBy ?? "" })
     ]
   );
 

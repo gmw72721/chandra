@@ -3,7 +3,7 @@ import {
   listTeacherClassFeedback,
   StudentFeedbackPersistenceError
 } from "@/lib/student-feedback-server";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -11,7 +11,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ clas
   try {
     const { classId } = await params;
     const url = new URL(request.url);
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "reviewConversations");
 
     const feedback = await listTeacherClassFeedback({
       classId,

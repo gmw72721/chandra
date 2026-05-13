@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { listActiveMaterialJobsByClass, listClassMaterials, type MaterialJobRecord, type MaterialRecord } from "@/lib/data/materials";
 import { PostgresDataError } from "@/lib/data/postgres";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -11,7 +11,7 @@ export async function GET(
 ) {
   try {
     const { classId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "viewMaterials");
     const [materials, activeJobs] = await Promise.all([
       listClassMaterials(classId),
       listActiveMaterialJobsByClass(classId)

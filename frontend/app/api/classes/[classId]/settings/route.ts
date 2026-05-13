@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
+import { normalizeClassModelSettings } from "@/lib/class-settings";
 import { updateClassSettings } from "@/lib/data/classes";
 import { tryPostgresData } from "@/lib/data/server";
 import { adminDb } from "@/lib/firebase-admin";
-import { authorizeClassTeacher, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
+import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -12,10 +13,12 @@ export async function PATCH(
 ) {
   try {
     const { classId } = await params;
-    await authorizeClassTeacher(request, classId);
+    await authorizeClassAccess(request, classId, "manageClassSettings");
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const modelSettings = objectOrUndefined(body.modelSettings);
     const firestoreUpdates = {
       ...body,
+      ...(modelSettings ? { modelSettings: normalizeClassModelSettings(modelSettings) } : {}),
       updatedAt: new Date()
     };
 
@@ -27,7 +30,7 @@ export async function PATCH(
         behaviorTitle: stringOrUndefined(body.behaviorTitle),
         classId,
         defaultAssignmentContext: stringOrUndefined(body.defaultAssignmentContext),
-        modelSettings: objectOrUndefined(body.modelSettings),
+        modelSettings: modelSettings ? normalizeClassModelSettings(modelSettings) : undefined,
         name: stringOrUndefined(body.name),
         notificationSettings: objectOrUndefined(body.notificationSettings),
         openingMessage: stringOrUndefined(body.openingMessage),

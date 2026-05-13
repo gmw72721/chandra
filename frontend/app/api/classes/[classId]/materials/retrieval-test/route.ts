@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { retrieveCourseContext } from "@/lib/retrieval";
-import { TutorKnowledgeHttpError, authorizeClassTeacher } from "@/lib/tutor-knowledge-server";
+import { TutorKnowledgeHttpError, authorizeClassAccess } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
 
@@ -18,7 +18,7 @@ export async function POST(
       return NextResponse.json({ error: "Add a student question before testing retrieval." }, { status: 400 });
     }
 
-    const { classSnapshot, uid } = await authorizeClassTeacher(request, classId);
+    const { classSnapshot, uid } = await authorizeClassAccess(request, classId, "viewMaterials");
     const professorName = String(classSnapshot.data()?.teacherName ?? classSnapshot.data()?.professorName ?? "").trim();
     const retrieval = await retrieveCourseContext(
       {
