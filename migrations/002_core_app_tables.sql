@@ -409,6 +409,16 @@ CREATE TABLE IF NOT EXISTS ai_usage_events (
 CREATE INDEX IF NOT EXISTS idx_ai_usage_events_user_created
   ON ai_usage_events (user_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS ai_usage_anchors (
+  class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  anchor_at TIMESTAMPTZ NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (class_id, student_id)
+);
+
 CREATE TABLE IF NOT EXISTS ai_usage_buckets (
   id TEXT PRIMARY KEY,
   class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
@@ -565,6 +575,7 @@ BEGIN
     'conversation_reviews',
     'student_support',
     'ai_usage_reservations',
+    'ai_usage_anchors',
     'ai_usage_buckets',
     'ai_usage_request_buckets',
     'ai_usage_allowances',

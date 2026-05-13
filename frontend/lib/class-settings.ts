@@ -16,7 +16,24 @@ export type AnswerPolicySettings = {
   askGuidingQuestionBeforeExplaining: boolean;
   allowWorkedExamples: boolean;
   refuseAnswerOnlyRequests: boolean;
+  helpLimitsByUnderstandingLevel: HelpLimitsByUnderstandingLevel;
 };
+
+export const understandingLevelOptions = [0, 1, 2, 3, 4] as const;
+export type UnderstandingLevel = (typeof understandingLevelOptions)[number];
+
+export const helpLimitOptionIds = [
+  "ask_for_attempt_only",
+  "conceptual_orientation",
+  "guiding_question",
+  "light_hint",
+  "targeted_hint_next_action",
+  "one_worked_step",
+  "check_work_explain_gaps",
+  "full_explanation_allowed"
+] as const;
+export type HelpLimitOptionId = (typeof helpLimitOptionIds)[number];
+export type HelpLimitsByUnderstandingLevel = Record<UnderstandingLevel, HelpLimitOptionId>;
 
 export const preferredSourceTypeOptions = [
   "Homework and textbook",
@@ -143,7 +160,14 @@ export const defaultAnswerPolicySettings: AnswerPolicySettings = {
   requireStudentAttemptFirst: true,
   askGuidingQuestionBeforeExplaining: true,
   allowWorkedExamples: false,
-  refuseAnswerOnlyRequests: true
+  refuseAnswerOnlyRequests: true,
+  helpLimitsByUnderstandingLevel: {
+    0: "ask_for_attempt_only",
+    1: "light_hint",
+    2: "targeted_hint_next_action",
+    3: "one_worked_step",
+    4: "check_work_explain_gaps"
+  }
 };
 
 export const defaultSourceUsageSettings: SourceUsageSettings = {
@@ -184,8 +208,8 @@ export const defaultNotificationSettings: NotificationSettings = {
 
 export const defaultAiTokenLimitSettings: AiTokenLimitSettings = {
   perHour: 50_000,
-  perDay: 300_000,
-  perWeek: 1_200_000
+  perDay: 400_000,
+  perWeek: 1_600_000
 };
 
 export const defaultAiRequestLimitSettings: AiRequestLimitSettings = {
@@ -294,8 +318,24 @@ export function normalizeAnswerPolicySettings(value: unknown): AnswerPolicySetti
     requireStudentAttemptFirst: booleanWithDefault(source.requireStudentAttemptFirst, true),
     askGuidingQuestionBeforeExplaining: booleanWithDefault(source.askGuidingQuestionBeforeExplaining, true),
     allowWorkedExamples: booleanWithDefault(source.allowWorkedExamples, false),
-    refuseAnswerOnlyRequests: booleanWithDefault(source.refuseAnswerOnlyRequests, true)
+    refuseAnswerOnlyRequests: booleanWithDefault(source.refuseAnswerOnlyRequests, true),
+    helpLimitsByUnderstandingLevel: normalizeHelpLimitsByUnderstandingLevel(source.helpLimitsByUnderstandingLevel)
   };
+}
+
+export function normalizeHelpLimitsByUnderstandingLevel(value: unknown): HelpLimitsByUnderstandingLevel {
+  const source = isRecord(value) ? value : {};
+
+  return Object.fromEntries(
+    understandingLevelOptions.map((level) => {
+      const configuredLimit = source[level] ?? source[String(level)];
+      const limit = helpLimitOptionIds.includes(configuredLimit as HelpLimitOptionId)
+        ? (configuredLimit as HelpLimitOptionId)
+        : defaultAnswerPolicySettings.helpLimitsByUnderstandingLevel[level];
+
+      return [level, limit];
+    })
+  ) as HelpLimitsByUnderstandingLevel;
 }
 
 export function normalizeSourceUsageSettings(value: unknown): SourceUsageSettings {

@@ -802,6 +802,15 @@ test("student chat keeps quick lookup messages when final answer arrives", () =>
   assert.doesNotMatch(studentSource, /current\.filter\(\(message\) => message\.id !== quickResponseMessageId\)/);
 });
 
+test("student chat appends final assistant response after quick response", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+
+  assert.match(studentSource, /quickResponseMessageId = quickResponseMessageId \|\| `quick-\$\{studentMessage\.id\}`/);
+  assert.match(studentSource, /upsertFinalAssistantMessage\(current, assistantMessage\)/);
+  assert.doesNotMatch(studentSource, /hasSameVisibleAssistantAnswer/);
+  assert.doesNotMatch(studentSource, /quickResponseIndex/);
+});
+
 test("student chat response normalization repairs split decimal example next step", () => {
   const response = normalizeTutorResponse({
     content:
@@ -1029,6 +1038,19 @@ test("provider messages keep assistant source context for follow-ups", () => {
   assert.match(providerContent, /material type reading/);
 });
 
+test("show my work mode marks student attempts for provider feedback", () => {
+  const promptSource = readFileSync(join(repoRoot, "frontend/lib/prompts.ts"), "utf8");
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+
+  assert.match(studentSource, /studentMessageMode/);
+  assert.match(studentSource, /Show my work/);
+  assert.match(routeSource, /studentMessageMode: z\.enum\(\["ask", "work"\]\)\.optional\(\)/);
+  assert.match(promptSource, /Student message mode: Show my work/);
+  assert.match(promptSource, /reasoning-focused feedback/);
+  assert.match(promptSource, /message\.studentMessageMode !== "work"/);
+});
+
 test("chat context memory saves only cited sources as sources used", () => {
   const context = buildChatContextMemory([
     {
@@ -1064,6 +1086,50 @@ test("chat context memory saves only cited sources as sources used", () => {
   assert.deepEqual(context.sourcesUsed, [
     {
       id: undefined,
+      sourceName: "ACME VOL 1",
+      pageNumber: 159,
+      problemNumber: undefined,
+      label: "ACME VOL 1 · p. 159"
+    }
+  ]);
+});
+
+test("chat context memory includes pdf knowledge items as sources used", () => {
+  const context = buildChatContextMemory([
+    {
+      createdAt: "2026-05-12T08:22:00.000Z",
+      id: "assistant-2",
+      role: "assistant",
+      content: "Here is a similar example.",
+      langGraphTrace: {
+        knowledgeItems: [
+          {
+            chatId: "conversation-1",
+            createdAt: "2026-05-12T08:22:00.000Z",
+            id: "knowledge-example-page",
+            kind: "pdf_page",
+            ocrText: "Example 4. Compare ranks after composing two maps.",
+            page: 159,
+            pdfId: "acme",
+            problemId: "Example 4",
+            reason: "Chandra used this page as an example reference.",
+            sourceId: "acme",
+            sourceName: "ACME VOL 1",
+            updatedAt: "2026-05-12T08:22:00.000Z",
+            usedAs: "example_reference"
+          }
+        ],
+        searchQueries: ["worked example rank composition"],
+        selectedPages: [],
+        stages: ["pdf_search"],
+        toolCallCount: 1
+      }
+    }
+  ]);
+
+  assert.deepEqual(context.sourcesUsed, [
+    {
+      id: "acme",
       sourceName: "ACME VOL 1",
       pageNumber: 159,
       problemNumber: undefined,
@@ -1132,10 +1198,10 @@ test("student AI limits are token-budget based and student-safe", () => {
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
   const typesSource = readFileSync(join(repoRoot, "frontend/lib/types.ts"), "utf8");
 
-  assert.match(settingsSource, /perDay: 300_000/);
-  assert.match(settingsSource, /perWeek: 1_200_000/);
-  assert.doesNotMatch(settingsSource, /perHour:/);
-  assert.doesNotMatch(usageSource, /limits\.perHour/);
+  assert.match(settingsSource, /perHour: 50_000/);
+  assert.match(settingsSource, /perDay: 400_000/);
+  assert.match(settingsSource, /perWeek: 1_600_000/);
+  assert.doesNotMatch(usageSource, /limit: limits\.perHour/);
   assert.match(settingsSource, /tokenLimits: defaultAiTokenLimitSettings/);
   assert.doesNotMatch(usageSource, /ipPerFiveMinutes/);
   assert.doesNotMatch(usageSource, /ipPerHour/);
@@ -1158,15 +1224,20 @@ test("student AI limits are token-budget based and student-safe", () => {
   assert.doesNotMatch(typesSource, /tokenUsage\?:/);
 });
 
-test("student chat header uses compact context and usage popovers", () => {
+test("student chat header uses compact context and tutoring time popovers", () => {
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
   const stylesSource = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
   const typesSource = readFileSync(join(repoRoot, "frontend/lib/types.ts"), "utf8");
   const usageSource = readFileSync(join(repoRoot, "frontend/lib/ai-usage-limits.ts"), "utf8");
 
-  assert.match(studentSource, /type HeaderDropdown = "context" \| "feedback" \| "usage" \| null/);
+  assert.match(studentSource, /type HeaderDropdown = "context" \| "feedback" \| "understanding" \| "usage" \| null/);
   assert.match(studentSource, /Context/);
-  assert.match(studentSource, /aria-label=\{`Usage · \$\{usageSummary\.todayPercentLeft\}% today`\}/);
+  assert.match(studentSource, /Tutoring time · \$\{usageSummary\.todayPercentLeft\}% left/);
+  assert.match(studentSource, /Tutoring time: \$\{usageSummary\.todayPercentLeft\}% left today/);
+  assert.match(studentSource, /Loading tutoring time/);
+  assert.match(studentSource, /Tutoring time unavailable/);
+  assert.match(studentSource, /errorMessage=\{aiUsageError\}/);
+  assert.match(studentSource, /kind="tutoringTime"/);
   assert.match(studentSource, /student-header-usage-percent/);
   assert.match(studentSource, /student-header-control-label/);
   assert.match(studentSource, /Feedback/);
@@ -1176,6 +1247,18 @@ test("student chat header uses compact context and usage popovers", () => {
   assert.doesNotMatch(studentSource, /student-ai-usage-meters/);
   assert.match(studentSource, /StudentContextPopover/);
   assert.match(studentSource, /StudentUsagePopover/);
+  assert.match(studentSource, /You have \$\{summary\.todayPercentLeft\}% of today's tutoring time left\./);
+  assert.match(studentSource, /Uploads use more tutoring time\./);
+  assert.match(studentSource, /Long explanations use more tutoring time\./);
+  assert.match(studentSource, /Asking many follow-up questions uses more tutoring time\./);
+  assert.match(studentSource, /formatTutoringResetLabel/);
+  assert.match(studentSource, /resetAt=\{status\.dailyResetAt\}/);
+  assert.match(studentSource, /resetAt=\{status\.weeklyResetAt\}/);
+  assert.match(studentSource, /Loading weekly tutoring time/);
+  assert.doesNotMatch(studentSource, /Weekly tutoring time resets Monday\./);
+  assert.match(studentSource, /Ask professor for more time/);
+  assert.doesNotMatch(studentSource, /credits used/);
+  assert.doesNotMatch(studentSource, /100% left/);
   assert.match(studentSource, /StudentFeedbackPopover/);
   assert.doesNotMatch(studentSource, /StudentFeedbackModal/);
   assert.doesNotMatch(studentSource, /student-feedback-modal-backdrop/);
@@ -1191,6 +1274,8 @@ test("student chat header uses compact context and usage popovers", () => {
   assert.match(stylesSource, /\.student-header-popover \{/);
   assert.match(stylesSource, /\.student-header-control-label/);
   assert.match(stylesSource, /max-width: 0/);
+  assert.match(stylesSource, /\.student-usage-header-control \.student-header-control-label \{/);
+  assert.match(stylesSource, /\.student-usage-header-control \.student-header-control-label[\s\S]*max-width: none/);
   assert.match(stylesSource, /\.student-header-control:hover \.student-header-control-label/);
   assert.match(stylesSource, /\.student-workspace-shell\[data-appearance="dark"\] \.student-header-control/);
   assert.match(stylesSource, /\.student-workspace-shell\[data-appearance="dark"\] \.student-header-popover/);
@@ -1243,12 +1328,60 @@ test("teacher preview is allowed when class chat is paused but still uses previe
   assert.match(studentSource, /Your teacher has paused chat for this class\./);
 });
 
+test("paused student accounts can read saved conversations but cannot compose", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const classesRouteSource = readFileSync(join(repoRoot, "frontend/app/api/student/classes/route.ts"), "utf8");
+  const conversationsRouteSource = readFileSync(join(repoRoot, "frontend/app/api/student/conversations/route.ts"), "utf8");
+  const aiUsageRouteSource = readFileSync(join(repoRoot, "frontend/app/api/student/ai-usage/route.ts"), "utf8");
+  const messagesRouteSource = readFileSync(
+    join(repoRoot, "frontend/app/api/student/conversations/[conversationId]/messages/route.ts"),
+    "utf8"
+  );
+  const attachmentsRouteSource = readFileSync(
+    join(repoRoot, "frontend/app/api/student/conversations/[conversationId]/attachments/route.ts"),
+    "utf8"
+  );
+
+  assert.match(classesRouteSource, /chatBlocked: boolean/);
+  assert.match(classesRouteSource, /getStudentChatBlocked/);
+  assert.match(aiUsageRouteSource, /enforceStudentChatAccess: false/);
+  assert.match(conversationsRouteSource, /enforceStudentChatAccess: false/);
+  assert.match(messagesRouteSource, /enforceStudentChatAccess: false/);
+  assert.match(attachmentsRouteSource, /enforceStudentChatAccess: false/);
+  assert.match(studentSource, /activeClass\?\.chatBlocked[\s\S]*Chat is paused for this account/);
+  assert.match(studentSource, /disabled=\{studentChatPaused\}/);
+  assert.match(studentSource, /disabled=\{isSending \|\| studentChatPaused\}/);
+});
+
 test("AI request quota day buckets reset by UTC day", () => {
   const usageSource = readFileSync(join(repoRoot, "frontend/lib/ai-usage-limits.ts"), "utf8");
 
   assert.match(usageSource, /function dayBucketKey\(date: Date\)/);
   assert.match(usageSource, /date\.toISOString\(\)\.slice\(0, 10\)\.replace\(\s*\/-\/g,\s*""\s*\)/);
   assert.match(usageSource, /export function buildAiUsageDayBucketKey/);
+});
+
+test("student tutoring-time buckets are anchored to first class AI use", () => {
+  const usageSource = readFileSync(join(repoRoot, "frontend/lib/ai-usage-limits.ts"), "utf8");
+  const dataSource = readFileSync(join(repoRoot, "frontend/lib/data/usage.ts"), "utf8");
+  const migrationSource = readFileSync(join(repoRoot, "migrations/002_core_app_tables.sql"), "utf8");
+  const typesSource = readFileSync(join(repoRoot, "frontend/lib/types.ts"), "utf8");
+
+  assert.match(migrationSource, /CREATE TABLE IF NOT EXISTS ai_usage_anchors/);
+  assert.match(migrationSource, /PRIMARY KEY \(class_id, student_id\)/);
+  assert.match(dataSource, /INSERT INTO ai_usage_anchors/);
+  assert.match(dataSource, /ON CONFLICT \(class_id, student_id\) DO NOTHING/);
+  assert.match(usageSource, /ensureStudentAiUsageAnchor\(\{ classId, now, studentId: quotaUserId \}\)/);
+  assert.match(usageSource, /getStudentAiUsageAnchor\(\{ classId, studentId \}\)/);
+  assert.match(usageSource, /dayBucketDurationMs = 24 \* 60 \* 60 \* 1000/);
+  assert.match(usageSource, /weekBucketDurationMs = 7 \* dayBucketDurationMs/);
+  assert.match(usageSource, /bucketKey: `anchored_\$\{anchorMillis\}_\$\{elapsedPeriods\}`/);
+  assert.match(usageSource, /buildAnchoredAiUsageBucketKey/);
+  assert.match(usageSource, /buildAnchoredAiUsageResetAt/);
+  assert.match(usageSource, /dailyResetAt = anchoredBucketResetAt\(bucket\.bucketKey, "day"\)/);
+  assert.match(usageSource, /weeklyResetAt = anchoredBucketResetAt\(bucket\.bucketKey, "week"\)/);
+  assert.match(typesSource, /dailyResetAt\?: string/);
+  assert.match(typesSource, /weeklyResetAt\?: string/);
 });
 
 test("student chat response length settings leave room for math-heavy examples", () => {
@@ -1474,11 +1607,41 @@ test("student understanding helper is empty before active problem and initialize
     null
   );
 
+  assert.equal(
+    buildUnderstandingState([
+      {
+        id: "assistant-lookup",
+        role: "assistant",
+        content: "I'm checking the class materials for problem 2/20.",
+        createdAt: "2026-05-12T00:00:00.000Z",
+        langGraphTrace: {
+          problemUnderstandingState: {
+            activeProblemId: "problem-lookup-only",
+            reasons: ["Requested problem 2/20 after earlier asking for problem 2.24."],
+            understandingLevel: 0,
+            updatedAt: "2026-05-12T00:00:00.000Z"
+          },
+          retrievalReason: "student_requested_problem",
+          searchQueries: [],
+          selectedPages: [],
+          stages: [],
+          toolCallCount: 0,
+          tutorPlan: {
+            needsRetrieval: true,
+            retrievalReason: "student_requested_problem",
+            studentIntent: "specific_question"
+          }
+        }
+      }
+    ]),
+    null
+  );
+
   const state = buildUnderstandingState([
     {
       id: "assistant-1",
       role: "assistant",
-      content: "Problem 3.9...",
+      content: "Problem:\nProblem 3.9. Prove that a rotation in R^2 is orthonormal.",
       createdAt: "2026-05-12T00:00:00.000Z",
       langGraphTrace: {
         problemUnderstandingState: {
@@ -1523,7 +1686,7 @@ test("student understanding reasons stay process-focused and safe", () => {
     {
       id: "assistant-close",
       role: "assistant",
-      content: "Check your notation.",
+      content: "Problem:\nProblem close. Check the notation in your final line.",
       createdAt: "2026-05-12T00:00:00.000Z",
       langGraphTrace: {
         problemUnderstandingState: {
@@ -1549,9 +1712,13 @@ test("student understanding UI sits beside knowledge and keeps safe copy", () =>
   const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
   assert.ok(studentSource.indexOf("<KnowledgeIconButton") < studentSource.indexOf("<UnderstandingLevelButton"));
-  assert.match(studentSource, /disabled=\{!hasState\}/);
+  assert.match(studentSource, /aria-describedby=\{hasState \? undefined : emptyTooltipId\}/);
+  assert.match(studentSource, /aria-disabled=\{!hasState\}/);
   assert.match(studentSource, /data-understanding-level=\{state\?\.level\}/);
-  assert.match(studentSource, /title="Understanding"/);
+  assert.match(studentSource, /Understanding starts once a problem is loaded\./);
+  assert.match(studentSource, /role="tooltip"/);
+  assert.match(studentSource, /student-header-popover student-understanding-popover student-understanding-empty-tooltip/);
+  assert.match(studentSource, /student-popover-empty/);
   assert.match(studentSource, /Chandra estimates how much support you need for this problem\./);
   assert.match(studentSource, /This is not a grade\./);
   const popoverSource = studentSource.slice(
@@ -1560,6 +1727,9 @@ test("student understanding UI sits beside knowledge and keeps safe copy", () =>
   );
   assert.doesNotMatch(popoverSource, /\b(?:correct|incorrect|answer)\b/i);
   assert.match(styles, /\.student-understanding-control/);
+  assert.match(styles, /\.student-understanding-control\[aria-disabled="true"\]/);
+  assert.match(styles, /\.student-understanding-empty-tooltip/);
+  assert.match(styles, /:hover \+ \.student-understanding-empty-tooltip/);
   assert.match(styles, /\.student-understanding-popover/);
   assert.match(styles, /data-understanding-level="0"/);
   assert.match(styles, /data-understanding-level="4"/);

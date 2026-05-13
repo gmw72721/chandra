@@ -120,6 +120,33 @@ TUTOR_STUDENT_INTENTS = {
 }
 ANSWER_SEEKING_RISKS = {"low", "medium", "high"}
 CURRENT_STEP_STATUSES = {"not_started", "in_progress", "completed", "unclear"}
+HELP_LIMIT_DEFAULTS = {
+    0: "ask_for_attempt_only",
+    1: "light_hint",
+    2: "targeted_hint_next_action",
+    3: "one_worked_step",
+    4: "check_work_explain_gaps",
+}
+HELP_LIMIT_MAX_DEPTH = {
+    "ask_for_attempt_only": 1,
+    "conceptual_orientation": 1,
+    "guiding_question": 1,
+    "light_hint": 1,
+    "targeted_hint_next_action": 2,
+    "one_worked_step": 3,
+    "check_work_explain_gaps": 3,
+    "full_explanation_allowed": 4,
+}
+HELP_LIMIT_DESCRIPTIONS = {
+    "ask_for_attempt_only": "ask for the student's attempt or exact stuck point only",
+    "conceptual_orientation": "conceptual orientation only",
+    "guiding_question": "one guiding question",
+    "light_hint": "one light hint",
+    "targeted_hint_next_action": "one targeted hint plus one next action",
+    "one_worked_step": "one worked step only",
+    "check_work_explain_gaps": "check shown work and explain gaps without taking over the rest",
+    "full_explanation_allowed": "full explanation allowed when other teacher policy permits",
+}
 TUTOR_DECISION_DEFAULT_MAX_TOKENS = 700
 TUTOR_DECISION_MAX_TOKENS = 900
 TUTOR_DECISION_LENGTH_RETRY_MAX_TOKENS = TUTOR_DECISION_MAX_TOKENS * 2
@@ -215,6 +242,7 @@ def build_pdf_rag_graph(
         decision = enforce_initial_source_lookup_search(decision, state)
         decision = enforce_referenced_problem_dependency_search(decision, state)
         decision = suppress_repeated_failed_search_decision(decision, state)
+        decision = clamp_decision_to_help_limits(decision, state)
         answer = str(decision.get("student_response") or "").strip() if not decision.get("needs_search") else ""
         return {
             "answer": answer,
@@ -525,7 +553,7 @@ def build_tutor_decision_messages(state: PdfRagState, heuristic: dict[str, Any])
     understanding_state = current_problem_understanding_state(state, memory=memory, active_record=active_metadata)
     payload = {
         "active_metadata": active_metadata,
-        "answer_policy": state.get("answer_policy") or {},
+        "answer_policy": normalize_answer_policy_state(state.get("answer_policy")),
         "chat_history": compact_history,
         "failed_searches": memory.get("failed_searches", [])[:8],
         "heuristic": heuristic,
@@ -555,6 +583,9 @@ def build_tutor_decision_messages(state: PdfRagState, heuristic: dict[str, Any])
         "Also produce a tutorPlan. The tutorPlan is internal planning for progressive disclosure and the final answer must obey it. "
         "Decide studentIntent from: vague_help, specific_question, showed_work, unclear_attempt, asks_for_next_step, asks_for_solution, asks_for_explanation, verification. "
         "Decide nextHelpDepth from 1, 2, 3, 4 using problem_understanding_state, current message, previous hints, attempts, repeated stuck signals, teacher policy, shown work, active context, and answer-shopping risk. "
+        "Teacher help limits by understanding level are ceilings, not targets. You may choose lighter support, but your nextHelpDepth must not exceed the max depth allowed by answer_policy.helpLimitsByUnderstandingLevel for the current/effective understanding level. "
+        "Help-limit max depths: ask_for_attempt_only/conceptual_orientation/guiding_question/light_hint -> 1; targeted_hint_next_action -> 2; one_worked_step/check_work_explain_gaps -> 3; full_explanation_allowed -> 4. "
+        "If a level is capped at ask_for_attempt_only, ask for the student's attempt or exact stuck point and keep help conceptual. "
         "Decide stateUpdates.understandingLevel from evidence in the student's latest work, not from turn count and not by incrementing one level at a time. "
         "The level may jump by more than 1 in a single update when the student's message shows stronger understanding. "
         "Understanding rubric: 0 = problem loaded, no student understanding observed yet; 1 = needs first nudge or little/no useful work shown; 2 = understands setup but is missing the core idea; 3 = understands the core idea but needs execution help; 4 = solution-ready, mostly needs verification or minor cleanup. "
@@ -599,6 +630,8 @@ def build_tutor_decision_messages(state: PdfRagState, heuristic: dict[str, Any])
         "or task statement from the student, active metadata, or retrieved source. Never put `You said...`, lookup/checking status, "
         "clarifying questions, requests for a page/title/textbook, source notes, offers, hints, or next steps in problem; put those "
         "in answer or sourceNote, or leave structuredOutput empty if a plain response is enough. "
+        "If structuredOutput.sections.problem is present, also set structuredOutput.metadata.problemNumber when visible and "
+        "structuredOutput.metadata.problemSummary to a short noun phrase of at most 12 words describing the task without solving it. "
         "When needs_search is true, do not ask the student to send, upload, type, paste, or share a page image, screenshot, "
         "photo, textbook name, homework title, worksheet title, exact source, or problem text in student_response or structuredOutput; the search is already checking "
         "available class OCR metadata. For requested problem/source lookups, if you include an interim student_response, use "
@@ -1022,16 +1055,81 @@ def normalize_backend_structured_output(value: Any) -> dict[str, Any] | None:
     order = [str(item) for item in raw_order] if isinstance(raw_order, list) else []
     section_order = normalized_structured_section_order(order, sections, include_answer_first=False)
     metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    problem = str(sections.get("problem") or "")
+    problem_metadata = structured_problem_metadata(metadata, problem)
+
     return {
         "sections": sections,
         **({"sectionOrder": section_order} if section_order else {}),
         "metadata": {
             "hintLevel": metadata.get("hintLevel") if metadata.get("hintLevel") in {"none", "small_hint", "guided_step", "worked_example", "refusal"} else "guided_step",
+            **problem_metadata,
             "sourceConfidence": metadata.get("sourceConfidence") if metadata.get("sourceConfidence") in {"high", "medium", "low"} else "low",
             "studentActionNeeded": metadata.get("studentActionNeeded") if metadata.get("studentActionNeeded") in {"none", "show_attempt", "try_next_step", "answer_question", "review_source", "paste_problem", "ask_teacher"} else "try_next_step",
             "mode": metadata.get("mode") if metadata.get("mode") in {"guided_problem_solving", "socratic", "check_work", "reading_helper", "exam_review", "source_lookup", "direct_answer_refusal", "clarification", "off_topic_redirect"} else "guided_problem_solving",
         },
     }
+
+
+def structured_problem_metadata(metadata: dict[str, Any], problem: str, sources: list[dict[str, Any]] | None = None) -> dict[str, str]:
+    problem_number = str(metadata.get("problemNumber") or "").strip()
+    problem_summary = str(metadata.get("problemSummary") or "").strip()
+
+    if not problem_number:
+        problem_number = problem_number_from_sources(sources or []) or first_problem_number(problem)
+
+    if not problem_summary:
+        problem_summary = summarize_problem_statement(problem)
+
+    return {
+        **({"problemNumber": problem_number[:40]} if problem_number else {}),
+        **({"problemSummary": problem_summary[:180]} if problem_summary else {}),
+    }
+
+
+def problem_number_from_sources(sources: list[dict[str, Any]]) -> str:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+
+        number = str(source.get("problemNumber") or "").strip()
+        if number:
+            return number
+
+        numbers = source.get("problemNumbers") or source.get("problem_numbers")
+        if isinstance(numbers, list):
+            for item in numbers:
+                number = str(item or "").strip()
+                if number:
+                    return number
+
+    return ""
+
+
+def first_problem_number(text: str) -> str:
+    numbers = sorted(problem_numbers_from_text(text), key=problem_number_sort_key)
+    return numbers[0] if numbers else ""
+
+
+def summarize_problem_statement(problem: str) -> str:
+    normalized = re.sub(r"\s+", " ", problem).strip()
+    if not normalized:
+        return ""
+
+    normalized = re.sub(
+        r"^(?:problem|exercise|question|ex\.?)\s*\d{1,3}(?:\.\d{1,3})?[a-z]?\s*[:.)-]?\s*",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"^\d{1,3}(?:\.\d{1,3})?[a-z]?\s*[:.)-]\s*", "", normalized)
+    normalized = normalized.strip()
+
+    words = normalized.split()
+    if len(words) <= 12:
+        return normalized.rstrip(".")
+
+    return " ".join(words[:12]).rstrip(".,;:") + "..."
 
 
 def repair_misplaced_problem_section(sections: dict[str, str]) -> None:
@@ -1852,6 +1950,17 @@ def sync_problem_understanding_state_to_active_context(
     )
 
 
+def should_suppress_problem_understanding_for_response(
+    state: PdfRagState,
+    problem_context: dict[str, Any] | None,
+) -> bool:
+    plan = state.get("tutor_plan") if isinstance(state.get("tutor_plan"), dict) else {}
+    if not tutor_plan_is_source_lookup_only(plan):
+        return False
+
+    return not str((problem_context or {}).get("problem") or "").strip()
+
+
 def tutor_plan_is_source_lookup_only(plan: dict[str, Any]) -> bool:
     return (
         bool(plan.get("needsRetrieval"))
@@ -2586,6 +2695,7 @@ def build_multimodal_final_messages(state: PdfRagState) -> list[dict[str, Any]]:
         f"TutorPlan for internal use only: {compact_json_dumps(state.get('tutor_plan') or decision.get('tutorPlan') or {})}",
         f"Current problem understanding state for internal use only: {compact_json_dumps(state.get('problem_understanding_state') or current_problem_understanding_state(state))}",
         "Tutor planning contract: obey TutorPlan.nextHelpDepth in the student-facing response. The first LLM already decided understandingLevel, lastHelpDepth, summaries, and help depth; do not revise those fields.",
+        *help_limit_instruction_lines(answer_policy),
         "Current-step contract: obey TutorPlan.currentStep/currentSubstep and the current problem understanding state. Do not advance to a later mathematical step until currentStepStatus is completed or the student has shown understanding. If the student asks for the next step but the current step is incomplete, make the currentSubstep smaller inside the same currentStep.",
         "Repeated-stuck contract: if repeatedStuckSignals is positive, the student gives a tiny unclear answer like `2?`, or TutorPlan.studentIntent is unclear_attempt/asks_for_next_step while the current step is incomplete, do not repeat the previous hint wording. Explain only the expected answer form or type if needed, without revealing the value the student should get, then ask one smaller sub-question inside the active currentStep.",
         "Validation contract: when the student asks whether their work is right, internally evaluate it but do not give a direct correctness verdict unless teacher policy explicitly allows answer checking. Avoid `correct`, `incorrect`, `right`, `wrong`, `yes`, `no`, `that's the answer`, `your first part is right`, and `the mistake is` as student-facing verdicts. Use neutral process language such as `You're using a relevant idea`, `This is a useful direction`, `One place to tighten is`, `Check this part carefully`, `Can you justify this step?`, or `What would make this implication valid?`.",
@@ -3043,12 +3153,85 @@ def infer_selected_page_used_as(asset: dict[str, Any]) -> str:
     return infer_pdf_page_used_as(asset)
 
 
-def normalize_answer_policy_state(value: Any) -> dict[str, bool]:
+def normalize_answer_policy_state(value: Any) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     return {
         "refuseAnswerOnlyRequests": source.get("refuseAnswerOnlyRequests")
         if isinstance(source.get("refuseAnswerOnlyRequests"), bool)
         else True,
+        "helpLimitsByUnderstandingLevel": normalize_help_limits_by_understanding_level(
+            source.get("helpLimitsByUnderstandingLevel")
+        ),
+    }
+
+
+def normalize_help_limits_by_understanding_level(value: Any) -> dict[int, str]:
+    source = value if isinstance(value, dict) else {}
+    limits: dict[int, str] = {}
+    for level, default_limit in HELP_LIMIT_DEFAULTS.items():
+        raw_limit = source.get(level, source.get(str(level)))
+        limits[level] = raw_limit if raw_limit in HELP_LIMIT_MAX_DEPTH else default_limit
+    return limits
+
+
+def help_limit_for_understanding_level(answer_policy: dict[str, Any], level: int) -> str:
+    limits = normalize_help_limits_by_understanding_level(answer_policy.get("helpLimitsByUnderstandingLevel"))
+    return limits.get(level, HELP_LIMIT_DEFAULTS.get(level, HELP_LIMIT_DEFAULTS[0]))
+
+
+def help_limit_max_depth_for_understanding_level(answer_policy: dict[str, Any], level: int) -> int:
+    return HELP_LIMIT_MAX_DEPTH[help_limit_for_understanding_level(answer_policy, level)]
+
+
+def help_limit_instruction_lines(answer_policy: dict[str, Any]) -> list[str]:
+    limits = normalize_help_limits_by_understanding_level(answer_policy.get("helpLimitsByUnderstandingLevel"))
+    return [
+        "Help limits by understanding level are ceilings, not targets. Chandra may choose lighter support when appropriate, but must not exceed the configured maximum for the current/effective level.",
+        *[
+            f"- Understanding level {level} max help: {HELP_LIMIT_DESCRIPTIONS[limit]} (max depth {HELP_LIMIT_MAX_DEPTH[limit]})."
+            for level, limit in limits.items()
+        ],
+    ]
+
+
+def effective_understanding_level_for_plan(plan: dict[str, Any]) -> int:
+    updates = plan.get("stateUpdates") if isinstance(plan.get("stateUpdates"), dict) else {}
+    raw_level = updates.get("understandingLevel", plan.get("currentUnderstandingLevel"))
+    return clamp_int(raw_level, minimum=0, maximum=4, default=0)
+
+
+def clamp_tutor_plan_to_help_limits(tutor_plan: Any, answer_policy_value: Any) -> dict[str, Any]:
+    plan = dict(tutor_plan) if isinstance(tutor_plan, dict) else {}
+    answer_policy = normalize_answer_policy_state(answer_policy_value)
+    effective_level = effective_understanding_level_for_plan(plan)
+    max_depth = help_limit_max_depth_for_understanding_level(answer_policy, effective_level)
+    current_depth = clamp_int(plan.get("nextHelpDepth"), minimum=1, maximum=4, default=1)
+
+    if current_depth <= max_depth:
+        return plan
+
+    next_plan = {**plan, "nextHelpDepth": max_depth}
+    state_updates = dict(next_plan.get("stateUpdates")) if isinstance(next_plan.get("stateUpdates"), dict) else {}
+    if clamp_int(state_updates.get("lastHelpDepth"), minimum=1, maximum=4, default=max_depth) > max_depth:
+        state_updates["lastHelpDepth"] = max_depth
+    next_plan["stateUpdates"] = state_updates
+    next_plan["shouldGiveWorkedStep"] = bool(next_plan.get("shouldGiveWorkedStep")) and max_depth >= 3
+    next_plan["shouldAvoidFullSolution"] = True if max_depth < 4 else bool(next_plan.get("shouldAvoidFullSolution", False))
+    next_plan["shouldAskQuestion"] = bool(next_plan.get("shouldAskQuestion", max_depth <= 2)) or max_depth <= 2
+    limit = help_limit_for_understanding_level(answer_policy, effective_level)
+    strategy = str(next_plan.get("responseStrategy") or "").strip()
+    cap_note = (
+        f"Respect the teacher help limit for understanding level {effective_level}: "
+        f"{HELP_LIMIT_DESCRIPTIONS[limit]}."
+    )
+    next_plan["responseStrategy"] = f"{strategy} {cap_note}".strip()
+    return next_plan
+
+
+def clamp_decision_to_help_limits(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
+    return {
+        **decision,
+        "tutorPlan": clamp_tutor_plan_to_help_limits(decision.get("tutorPlan"), state.get("answer_policy")),
     }
 
 
@@ -3130,6 +3313,7 @@ def sources_from_pages(pages: list[dict[str, Any]], *, limit: int = MAX_RETRIEVE
                 "title": page.get("title") or "Untitled PDF",
                 "materialType": page.get("material_type") or "pdf",
                 "pageNumber": page.get("page_start"),
+                **({"problemNumbers": page.get("problem_numbers") or page.get("problemNumbers")} if page.get("problem_numbers") or page.get("problemNumbers") else {}),
             }
         )
         if len(sources) >= limit:
@@ -3156,6 +3340,7 @@ def sources_from_page_assets(assets: list[dict[str, Any]], *, limit: int = MAX_R
                 "title": asset.get("title") or "Untitled PDF",
                 "materialType": asset.get("material_type") or "pdf",
                 "pageNumber": page_number or None,
+                **({"problemNumbers": asset.get("problem_numbers")} if asset.get("problem_numbers") else {}),
             }
         )
 
@@ -3369,6 +3554,30 @@ def strongest_page_location_fallback(state: PdfRagState) -> str:
     return (
         "I found the strongest matching PDF page for this question: "
         f"{'; '.join(source_labels)}. Start there; it was the top-ranked match."
+    )
+
+
+def final_response_without_page_assets(state: PdfRagState, decision: dict[str, Any]) -> str:
+    page_fallback = strongest_page_location_fallback(state)
+    if page_fallback:
+        return page_fallback
+
+    retrieval_reason = str(decision.get("retrieval_reason") or state.get("retrieval_reason") or "")
+    if retrieval_reason == "needed_example_page":
+        return (
+            "I could not find a relevant class example in the materials I searched. "
+            "Send the topic, section, or source page you want to use, and I can help from there."
+        )
+
+    if retrieval_reason == "needed_supporting_page":
+        return (
+            "I could not find the supporting class page in the materials I searched. "
+            "Send the page, section, or pasted text, and I can help from there."
+        )
+
+    return (
+        "I could not find that exact problem in the class materials I searched. "
+        "Send the worksheet/page or paste the problem text, and I can help from there."
     )
 
 
@@ -3874,6 +4083,7 @@ async def run_pdf_rag_agent_stream(
         decision = enforce_initial_source_lookup_search(decision, state)
         decision = enforce_referenced_problem_dependency_search(decision, state)
         decision = suppress_repeated_failed_search_decision(decision, state)
+        decision = clamp_decision_to_help_limits(decision, state)
         state["retrieval_decision"] = decision
         state["tutor_plan"] = decision.get("tutorPlan") or {}
         state["problem_understanding_state"] = state_after_tutor_plan(state, state.get("tutor_plan"))
@@ -3995,9 +4205,21 @@ async def run_pdf_rag_agent_stream(
                 reasoning_effort=final_reasoning_effort,
             )
         else:
-            state["answer"] = str(decision.get("student_response") or state.get("answer") or "").strip()
+            state["answer"] = (
+                final_response_without_page_assets(state, decision)
+                if state.get("tool_call_count")
+                else str(decision.get("student_response") or state.get("answer") or "").strip()
+            )
             if not state["answer"]:
                 state["answer"] = "Tell me what part you tried or where you got stuck, and I’ll give you a small nudge."
+
+        preliminary_sources = sources_for_answer(state, state.get("answer") or "")
+        problem_context = parse_problem_context_from_answer(state.get("answer") or "", state, preliminary_sources)
+        if should_suppress_problem_understanding_for_response(state, problem_context):
+            state["problem_understanding_state"] = {}
+            state["problem_understanding_state_suppressed"] = True
+        else:
+            state.pop("problem_understanding_state_suppressed", None)
 
         state["used_page_assets"] = page_assets_for_memory_from_answer(state, state.get("answer") or "")
         state["chat_retrieval_memory"] = build_next_chat_retrieval_memory(state)
@@ -4020,7 +4242,12 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
     preliminary_sources = sources_for_answer(state, raw_answer)
     problem_context = parse_problem_context_from_answer(raw_answer, state, preliminary_sources)
     active_problem_context = update_active_problem_context(problem_context, state)
-    sync_problem_understanding_state_to_active_context(state, active_problem_context)
+    if should_suppress_problem_understanding_for_response(state, problem_context):
+        state["problem_understanding_state"] = {}
+        state["problem_understanding_state_suppressed"] = True
+    else:
+        state.pop("problem_understanding_state_suppressed", None)
+        sync_problem_understanding_state_to_active_context(state, active_problem_context)
     state["used_page_assets"] = page_assets_for_memory_from_answer(state, raw_answer)
     answer_without_context = remove_problem_context_from_student_text(raw_answer).strip()
     answer = suppress_repeated_problem_section_for_followup(answer_without_context, state)
@@ -4853,7 +5080,9 @@ def build_next_chat_retrieval_memory(state: PdfRagState) -> dict[str, Any]:
         previous_items=previous.get("knowledge_items", []),
     )
     understanding_state = state.get("problem_understanding_state")
-    if not isinstance(understanding_state, dict) or not understanding_state.get("activeProblemId"):
+    if state.get("problem_understanding_state_suppressed"):
+        understanding_state = {}
+    elif not isinstance(understanding_state, dict) or not understanding_state.get("activeProblemId"):
         understanding_state = state_after_tutor_plan(state, state.get("tutor_plan"))
     active_problem_id = str(understanding_state.get("activeProblemId") or active_problem_id_for_state(state, active_record=active))
     problem_understanding_states = (
@@ -4861,7 +5090,11 @@ def build_next_chat_retrieval_memory(state: PdfRagState) -> dict[str, Any]:
         if isinstance(previous.get("problem_understanding_states"), dict)
         else {}
     )
-    if active_problem_id and active_problem_id.lower() not in {"unknown", "none", "null", "n/a"}:
+    if (
+        not state.get("problem_understanding_state_suppressed")
+        and active_problem_id
+        and active_problem_id.lower() not in {"unknown", "none", "null", "n/a"}
+    ):
         problem_understanding_states = {
             **problem_understanding_states,
             active_problem_id: understanding_state,
@@ -6294,12 +6527,18 @@ def structured_tutor_output_from_answer(
         sections,
         include_answer_first=bool(section_answer),
     )
+    metadata_sources = [
+        *sources,
+        *(state.get("selected_metadata_records") if isinstance(state.get("selected_metadata_records"), list) else []),
+    ]
+    problem_metadata = structured_problem_metadata({}, problem, metadata_sources)
 
     return {
         "sections": sections,
         **({"sectionOrder": section_order} if section_order else {}),
         "metadata": {
             "hintLevel": hint_level,
+            **problem_metadata,
             "sourceConfidence": source_confidence,
             "studentActionNeeded": student_action_needed,
             "mode": mode,

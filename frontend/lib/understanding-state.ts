@@ -4,8 +4,19 @@ const unsafeUnderstandingReasonPattern =
   /\b(?:correct|incorrect|answer|final\s+solution|solution\s+is|solved|proves?\s+the\s+theorem)\b/i;
 
 export function buildUnderstandingState(messages: ChatMessage[]): UnderstandingState | null {
-  const state = latestProblemUnderstandingState(messages);
+  const latest = latestProblemUnderstandingState(messages);
+  if (!latest) {
+    return null;
+  }
+
+  const state = latest?.state;
   if (!isRealActiveProblemId(state?.activeProblemId)) {
+    return null;
+  }
+  if (!hasDetectedProblemForUnderstanding(messages, latest.index)) {
+    return null;
+  }
+  if (isSourceLookupOnlyState(latest.message) && !messageHasDetectedProblem(latest.message)) {
     return null;
   }
 
@@ -55,15 +66,63 @@ export function normalizeUnderstandingLevel(value: unknown): UnderstandingLevel 
   return 0;
 }
 
-function latestProblemUnderstandingState(messages: ChatMessage[]): TutorProblemUnderstandingState | null {
+function latestProblemUnderstandingState(
+  messages: ChatMessage[]
+): { index: number; message: ChatMessage; state: TutorProblemUnderstandingState } | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const state = messages[index]?.langGraphTrace?.problemUnderstandingState;
+    const message = messages[index];
+    const state = message?.langGraphTrace?.problemUnderstandingState;
     if (state?.activeProblemId) {
-      return state;
+      return { index, message, state };
     }
   }
 
   return null;
+}
+
+function hasDetectedProblemForUnderstanding(messages: ChatMessage[], throughIndex: number) {
+  return messages.slice(0, throughIndex + 1).some(messageHasDetectedProblem);
+}
+
+function messageHasDetectedProblem(message: ChatMessage) {
+  const structuredProblem = sanitizeProblemText(message.structuredOutput?.sections?.problem);
+  if (structuredProblem) {
+    return true;
+  }
+
+  const contentProblem = sanitizeProblemText(extractProblemSection(message.content));
+  return Boolean(contentProblem);
+}
+
+function extractProblemSection(content: string) {
+  const match = String(content ?? "").match(/(?:^|\n)\s*Problem\s*:\s*([\s\S]+?)(?:\n\s*[A-Z][A-Za-z ]{1,30}\s*:|$)/i);
+  return match?.[1] ?? "";
+}
+
+function sanitizeProblemText(value: unknown) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text || /checking|loading|looking|searching|requested/i.test(text)) {
+    return "";
+  }
+  return text.length >= 12 ? text : "";
+}
+
+function isSourceLookupOnlyState(message: ChatMessage) {
+  const trace = message.langGraphTrace;
+  const plan = isRecord(trace?.tutorPlan) ? trace.tutorPlan : {};
+  const retrievalReason = String(trace?.retrievalReason || plan.retrievalReason || plan.retrieval_reason || "").trim();
+  if (!["student_requested_problem", "student_changed_problem"].includes(retrievalReason)) {
+    return false;
+  }
+
+  const studentIntent = String(plan.studentIntent || plan.student_intent || "").trim();
+  return !["vague_help", "showed_work", "asks_for_next_step", "asks_for_solution", "asks_for_explanation", "verification"].includes(
+    studentIntent
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function isRealActiveProblemId(value: unknown): value is string {

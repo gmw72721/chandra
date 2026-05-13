@@ -569,6 +569,37 @@ def test_repeated_stuck_plan_can_escalate_to_depth_two() -> None:
     assert understanding["understandingLevel"] == 2
 
 
+def test_help_limit_clamps_tutor_plan_depth_for_effective_understanding_level() -> None:
+    plan = {
+        "currentUnderstandingLevel": 1,
+        "nextHelpDepth": 4,
+        "shouldAskQuestion": False,
+        "shouldGiveWorkedStep": True,
+        "shouldAvoidFullSolution": False,
+        "responseStrategy": "Give a full explanation.",
+        "stateUpdates": {
+            "understandingLevel": 1,
+            "lastHelpDepth": 4,
+        },
+    }
+
+    clamped = graph_module.clamp_tutor_plan_to_help_limits(
+        plan,
+        {
+            "helpLimitsByUnderstandingLevel": {
+                "1": "light_hint",
+            }
+        },
+    )
+
+    assert clamped["nextHelpDepth"] == 1
+    assert clamped["stateUpdates"]["lastHelpDepth"] == 1
+    assert clamped["shouldAskQuestion"] is True
+    assert clamped["shouldGiveWorkedStep"] is False
+    assert clamped["shouldAvoidFullSolution"] is True
+    assert "light hint" in clamped["responseStrategy"]
+
+
 def test_decision_prompt_uses_evidence_based_understanding_levels() -> None:
     state = {
         "chat_retrieval_memory": {
@@ -1470,6 +1501,66 @@ async def test_final_prompt_obeys_first_llm_help_depth_without_state_revision() 
 
 
 @pytest.mark.asyncio
+async def test_final_response_uses_clamped_help_limit_depth() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": False,
+                        "memory_used": False,
+                        "needs_search": True,
+                        "retrieval_reason": "needed_supporting_page",
+                        "search_query": "rank theorem",
+                        "student_response": "",
+                        "tutorPlan": {
+                            "activeProblemId": "rank-problem",
+                            "studentIntent": "asks_for_explanation",
+                            "needsRetrieval": True,
+                            "retrievalReason": "needed_supporting_page",
+                            "currentUnderstandingLevel": 1,
+                            "nextHelpDepth": 4,
+                            "answerSeekingRisk": "low",
+                            "responseStrategy": "Give the full route.",
+                            "shouldAskQuestion": False,
+                            "shouldGiveWorkedStep": True,
+                            "shouldAvoidFullSolution": False,
+                            "stateUpdates": {
+                                "understandingLevel": 1,
+                                "lastHelpDepth": 4,
+                            },
+                        },
+                    }
+                )
+            },
+            {"content": "Try one light hint first."},
+        ]
+    )
+
+    response = await run_pdf_rag_agent(
+        answer_policy={
+            "helpLimitsByUnderstandingLevel": {
+                "1": "light_hint",
+            }
+        },
+        class_id="class-linear",
+        conversation_id="conv-help-limit",
+        messages=[{"role": "user", "content": "can you explain all of this?"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        page_asset_builder=lambda pages, *, max_total_pages: _return_async([pages[0]]),
+        professor_id="teacher-1",
+        retriever=FakeRetriever([ocr_page()]),
+    )
+
+    final_prompt = json.dumps(client.calls[1]["messages"][-1]["content"])
+    assert '\\"nextHelpDepth\\": 1' in final_prompt or '\\"nextHelpDepth\\":1' in final_prompt
+    assert "Understanding level 1 max help" in final_prompt
+    assert response["langGraphTrace"]["tutorPlan"]["nextHelpDepth"] == 1
+    assert response["langGraphTrace"]["problemUnderstandingState"]["lastHelpDepth"] == 1
+
+
+@pytest.mark.asyncio
 async def test_specific_problem_lookup_uses_two_llm_calls_and_only_exact_problem() -> None:
     client = FakeOpenRouterClient(
         [
@@ -1628,6 +1719,49 @@ async def test_selected_problem_page_prevents_page_image_request_fallback() -> N
 
     assert "Please share" not in response["content"]
     assert response["content"] == "Problem:\nProblem 2.16. Use the selected page."
+
+
+@pytest.mark.asyncio
+async def test_problem_lookup_without_detected_problem_suppresses_understanding_state() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": False,
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "search_query": "Problem 2.20",
+                        "student_response": "I'm checking the class materials for that problem.",
+                        "tutorPlan": {
+                            "activeProblemId": "requested-problem-2-20",
+                            "needsRetrieval": True,
+                            "retrievalReason": "student_requested_problem",
+                            "studentIntent": "specific_question",
+                            "stateUpdates": {
+                                "understandingLevel": 0,
+                                "lastHintSummary": "Requested problem 2/20 after earlier asking for problem 2.24.",
+                            },
+                        },
+                    }
+                )
+            },
+            {"content": "I'm checking the class materials for that problem."},
+        ]
+    )
+
+    response = await run_pdf_rag_agent(
+        class_id="class-linear",
+        conversation_id="conv-undetected-problem-lookup",
+        messages=[{"role": "user", "content": "problem 2/20"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        professor_id="teacher-1",
+        retriever=FakeRetriever([]),
+    )
+
+    assert response["content"] == "I'm checking the class materials for that problem."
+    assert response["langGraphTrace"]["problemUnderstandingState"] == {}
 
 
 @pytest.mark.asyncio
@@ -1836,6 +1970,46 @@ async def test_streaming_forced_problem_search_does_not_emit_page_image_request(
     assert quick_messages == ["I'm checking the class materials for that problem."]
     assert "Please share" not in json.dumps(events)
     assert events[-1]["payload"]["content"].startswith("Problem:")
+
+
+@pytest.mark.asyncio
+async def test_streaming_failed_problem_search_does_not_finalize_quick_status() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": False,
+                        "memory_used": False,
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "search_query": "Problem 2.20",
+                        "student_response": "I'm checking the class materials for that problem.",
+                    }
+                )
+            },
+        ]
+    )
+    events = [
+        event
+        async for event in run_pdf_rag_agent_stream(
+            class_id="class-linear",
+            conversation_id="conv-stream-missing-problem",
+            messages=[{"role": "user", "content": "problem 2/20"}],
+            model="openai/gpt-4.1-mini",
+            openrouter_client=client,
+            professor_id="teacher-1",
+            retriever=FakeRetriever([]),
+        )
+    ]
+
+    quick_messages = [event.get("message", "") for event in events if event.get("type") == "quick_response"]
+    final_content = events[-1]["payload"]["content"]
+
+    assert len(client.calls) == 1
+    assert quick_messages == ["I'm checking the class materials for that problem."]
+    assert final_content != quick_messages[0]
+    assert final_content.startswith("I could not find that exact problem")
 
 
 @pytest.mark.asyncio

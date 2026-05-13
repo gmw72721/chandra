@@ -29,6 +29,7 @@ import {
   normalizeTutorAccessSettings,
   normalizeTutorBehavior,
   conversationRetentionOptions,
+  helpLimitOptionIds,
   materialSourceTypeKeys,
   materialSourceTypePreferenceOptions,
   preferredSourceTypeOptions,
@@ -36,6 +37,7 @@ import {
   reasoningEffortOptions,
   responseLengthOptions,
   tutorBehaviorOptions,
+  understandingLevelOptions,
   type AnswerPolicySettings,
   type ClassAccessRole,
   type ClassCoTeacher,
@@ -46,7 +48,8 @@ import {
   type ResponseFormatSettings,
   type SourceDefaultsSettings,
   type SourceUsageSettings,
-  type TutorAccessSettings
+  type TutorAccessSettings,
+  type HelpLimitOptionId
 } from "@/lib/class-settings";
 import {
   assistantMessageBlocks,
@@ -87,7 +90,8 @@ import type {
   TeacherClassOverview,
   TeacherConversationReviewSummary,
   TeacherConversationSourceAuditSummary,
-  TeacherOverviewStatusTone
+  TeacherOverviewStatusTone,
+  TeacherProblemSummaryRow
 } from "@/lib/types";
 import { useAuth } from "./AuthProvider";
 import { TeacherAnalyticsDashboardContent } from "./TeacherAnalyticsDashboard";
@@ -162,7 +166,7 @@ const materialUploadExactSteps: Array<{
   }
 ];
 
-type TeacherTab = "overview" | "roster" | "settings" | "knowledge" | "conversations";
+type TeacherTab = "overview" | "roster" | "problems" | "settings" | "knowledge" | "conversations";
 type SettingsPane =
   | "general"
   | "classAccess"
@@ -421,7 +425,7 @@ const conversationReviewActions: Array<{ label: string; status: ConversationRevi
 const markdownRemarkPlugins = [remarkMath];
 const markdownRehypePlugins = [rehypeKatex];
 
-const answerPolicySettings = [
+const academicIntegritySettings = [
   {
     id: "doNotGiveFinalAnswers",
     title: "Do not give final answers",
@@ -433,11 +437,6 @@ const answerPolicySettings = [
     description: "Ask for an attempt before task-specific help."
   },
   {
-    id: "askGuidingQuestionBeforeExplaining",
-    title: "Ask guiding question before explaining",
-    description: "Prompt with a question to promote deeper thinking."
-  },
-  {
     id: "allowWorkedExamples",
     title: "Allow worked examples",
     description: "Provide full worked examples when appropriate."
@@ -446,6 +445,27 @@ const answerPolicySettings = [
     id: "refuseAnswerOnlyRequests",
     title: "Refuse answer-only requests",
     description: "Decline requests that seek only answers."
+  }
+] as const;
+
+const responseStructureSettings = [
+  {
+    id: "oneStepAtATime",
+    name: "responseFormat.oneStepAtATime",
+    title: "One step at a time",
+    description: "After an attempt, give one hint or step before continuing."
+  },
+  {
+    id: "askGuidingQuestionBeforeExplaining",
+    name: "answerPolicy.askGuidingQuestionBeforeExplaining",
+    title: "Ask guiding question before explaining",
+    description: "Prompt with a question to promote deeper thinking."
+  },
+  {
+    id: "endWithCheckQuestion",
+    name: "responseFormat.endWithCheckQuestion",
+    title: "End with a check question",
+    description: "Close replies with a quick question that checks understanding."
   }
 ] as const;
 
@@ -472,18 +492,24 @@ const sourceUsageSettings = [
   }
 ] as const;
 
-const responseFormatSettings = [
-  {
-    id: "oneStepAtATime",
-    title: "One step at a time",
-    description: "After an attempt, give one hint or step before continuing."
-  },
-  {
-    id: "endWithCheckQuestion",
-    title: "End with a check question",
-    description: "Close replies with a quick question that checks understanding."
-  }
-] as const;
+const helpLimitLabels: Record<HelpLimitOptionId, string> = {
+  ask_for_attempt_only: "Ask for attempt only",
+  conceptual_orientation: "Conceptual orientation",
+  guiding_question: "Guiding question",
+  light_hint: "Light hint",
+  targeted_hint_next_action: "Targeted hint + next action",
+  one_worked_step: "One worked step",
+  check_work_explain_gaps: "Check work + explain gaps",
+  full_explanation_allowed: "Full explanation allowed"
+};
+
+const helpLimitLevelLabels: Record<(typeof understandingLevelOptions)[number], string> = {
+  0: "Level 0: no evidence yet",
+  1: "Level 1: first nudge",
+  2: "Level 2: setup forming",
+  3: "Level 3: execution help",
+  4: "Level 4: verification"
+};
 
 const selectableModelOptions = defaultModelOptions.filter((modelOption) => modelOption.provider === "openrouter");
 const classAppearanceOptions = ["light", "dark"] as const;
@@ -570,6 +596,7 @@ export function TeacherClassManager({
   const [rosterActivity, setRosterActivity] = useState<StudentRosterActivitySummary[]>([]);
   const [studentConversations, setStudentConversations] = useState<StudentConversationSummary[]>([]);
   const [classConversations, setClassConversations] = useState<TeacherConversationReviewSummary[]>([]);
+  const [classProblems, setClassProblems] = useState<TeacherProblemSummaryRow[]>([]);
   const [classConversationMetrics, setClassConversationMetrics] = useState<{
     followUp: number;
     lowConfidence: number;
@@ -631,6 +658,8 @@ export function TeacherClassManager({
   const [rosterFilter, setRosterFilter] = useState<RosterFilter>("all");
   const [conversationFilter, setConversationFilter] = useState<ConversationFilter>("all");
   const [conversationSearchQuery, setConversationSearchQuery] = useState("");
+  const [problemSearchQuery, setProblemSearchQuery] = useState("");
+  const [selectedProblemId, setSelectedProblemId] = useState("");
   const [conversationStudentFilter, setConversationStudentFilter] = useState("all");
   const [conversationTopicFilter, setConversationTopicFilter] = useState("all");
   const [checkedStudentIds, setCheckedStudentIds] = useState<string[]>([]);
@@ -661,6 +690,7 @@ export function TeacherClassManager({
   const [fileInputKey, setFileInputKey] = useState(0);
   const [error, setError] = useState("");
   const [conversationError, setConversationError] = useState("");
+  const [problemError, setProblemError] = useState("");
   const [teacherInvites, setTeacherInvites] = useState<TeacherInviteSummary[]>([]);
   const [teacherInviteFilter, setTeacherInviteFilter] = useState<TeacherInviteFilter>("all");
   const [teacherInviteCopyResult, setTeacherInviteCopyResult] = useState<{
@@ -752,7 +782,14 @@ export function TeacherClassManager({
         setSelectedClassId(classId);
       }
 
-      if (tab === "overview" || tab === "roster" || tab === "settings" || tab === "knowledge" || tab === "conversations") {
+      if (
+        tab === "overview" ||
+        tab === "roster" ||
+        tab === "problems" ||
+        tab === "settings" ||
+        tab === "knowledge" ||
+        tab === "conversations"
+      ) {
         setActiveTab(tab);
         setIsSecondarySidebarOpen(tab === "settings" || tab === "knowledge" || tab === "conversations");
       }
@@ -837,6 +874,17 @@ export function TeacherClassManager({
   const conversationReviewRows = useMemo(
     () => buildConversationReviewRows(classConversations, activeClassId),
     [activeClassId, classConversations]
+  );
+  const filteredProblemRows = useMemo(
+    () => filterProblemRows(classProblems, problemSearchQuery),
+    [classProblems, problemSearchQuery]
+  );
+  const selectedProblemRow = useMemo(
+    () =>
+      filteredProblemRows.find((problem) => problem.id === selectedProblemId) ??
+      filteredProblemRows[0] ??
+      null,
+    [filteredProblemRows, selectedProblemId]
   );
   const conversationReviewRowById = useMemo(
     () => new Map(conversationReviewRows.map((conversation) => [conversation.id, conversation])),
@@ -1457,6 +1505,58 @@ export function TeacherClassManager({
   }, [activeClassId, user]);
 
   useEffect(() => {
+    if (!activeClassId || !user) {
+      const clearTimer = window.setTimeout(() => {
+        setClassProblems([]);
+        setProblemError("");
+      }, 0);
+      return () => window.clearTimeout(clearTimer);
+    }
+
+    let isCancelled = false;
+    const controller = new AbortController();
+
+    user
+      .getIdToken()
+      .then(async (token) => {
+        const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeClassId)}/problems`), {
+          headers: {
+            Authorization: `Bearer ${token}`
+          },
+          signal: controller.signal
+        });
+        const data = (await response.json()) as {
+          error?: string;
+          problems?: TeacherProblemSummaryRow[];
+        };
+
+        if (!response.ok) {
+          throw new Error(data.error ?? "Class problems load failed.");
+        }
+
+        if (!isCancelled) {
+          setClassProblems(data.problems ?? []);
+          setProblemError("");
+        }
+      })
+      .catch((caughtError) => {
+        if (isAbortError(caughtError)) {
+          return;
+        }
+
+        if (!isCancelled) {
+          setClassProblems([]);
+          setProblemError(formatConversationError(caughtError, "Class problems load failed."));
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+      controller.abort();
+    };
+  }, [activeClassId, user]);
+
+  useEffect(() => {
     if (!activeClassId || !selectedStudent || !user) {
       return;
     }
@@ -1632,7 +1732,15 @@ export function TeacherClassManager({
         requireStudentAttemptFirst: formData.has("answerPolicy.requireStudentAttemptFirst"),
         askGuidingQuestionBeforeExplaining: formData.has("answerPolicy.askGuidingQuestionBeforeExplaining"),
         allowWorkedExamples: formData.has("answerPolicy.allowWorkedExamples"),
-        refuseAnswerOnlyRequests: formData.has("answerPolicy.refuseAnswerOnlyRequests")
+        refuseAnswerOnlyRequests: formData.has("answerPolicy.refuseAnswerOnlyRequests"),
+        helpLimitsByUnderstandingLevel: normalizeAnswerPolicySettings({
+          helpLimitsByUnderstandingLevel: Object.fromEntries(
+            understandingLevelOptions.map((level) => [
+              level,
+              String(formData.get(`answerPolicy.helpLimitsByUnderstandingLevel.${level}`) ?? "")
+            ])
+          )
+        }).helpLimitsByUnderstandingLevel
       };
       const sourceUsage: SourceUsageSettings = {
         useClassMaterialsFirst: formData.has("sourceUsage.useClassMaterialsFirst"),
@@ -3223,6 +3331,28 @@ export function TeacherClassManager({
     setActiveTab("conversations");
   }
 
+  function openProblemConversation(conversationId?: string, studentId?: string) {
+    const conversation =
+      conversationReviewRows.find((row) => conversationId && row.id === conversationId) ??
+      conversationReviewRows.find((row) => studentId && row.studentId === studentId) ??
+      null;
+
+    if (conversation) {
+      setSelectedStudentId(conversation.studentId);
+      setSelectedStudentClassId(activeClassId);
+      setSelectedConversationId(conversation.id);
+      setSelectedConversationClassId(activeClassId);
+      setIsRosterDetailOpen(true);
+      setRosterDetailFocus("activity");
+    } else if (conversationId) {
+      setSelectedConversationId(conversationId);
+      setSelectedConversationClassId(activeClassId);
+    }
+
+    setIsProfessorReviewOpen(false);
+    setActiveTab("conversations");
+  }
+
   function handleOverviewNextAction(action: NonNullable<TeacherClassOverview["nextActions"]>[number]) {
     if (action.action === "addStudent") {
       setIsStudentDialogOpen(true);
@@ -3273,10 +3403,12 @@ export function TeacherClassManager({
     setRosterActivity([]);
     setStudentConversations([]);
     setClassConversations([]);
+    setClassProblems([]);
     setClassConversationMetrics(null);
     setClassOverview(null);
     setConversationMessages([]);
     setConversationError("");
+    setProblemError("");
     setSelectedMaterialId("");
     setKnowledgeFilter("All");
     setCheckedStudentIds([]);
@@ -3287,6 +3419,8 @@ export function TeacherClassManager({
     setRosterFilter("all");
     setConversationFilter("all");
     setConversationSearchQuery("");
+    setProblemSearchQuery("");
+    setSelectedProblemId("");
     setConversationStudentFilter("all");
     setConversationTopicFilter("all");
     setIsSidebarDrawerOpen(false);
@@ -3297,8 +3431,9 @@ export function TeacherClassManager({
   const teacherPrimaryNavItems: TeacherPrimaryNavItem[] = [
     { icon: <HomeIcon />, id: "overview", label: "Overview" },
     { icon: <UserGroupIcon />, id: "roster", label: "Students" },
-    { icon: <BookOpenIcon />, id: "knowledge", label: "AI Tutor" },
+    { icon: <LightbulbIcon />, id: "problems", label: "Problems" },
     { icon: <ChatIcon />, id: "conversations", label: "Conversations" },
+    { icon: <BookOpenIcon />, id: "knowledge", label: "AI Tutor" },
     {
       href: selectedClass ? `/teacher/student-view?classId=${selectedClass.id}` : "/teacher",
       icon: <GraduationCapIcon />,
@@ -4228,24 +4363,14 @@ export function TeacherClassManager({
                             />
                           </section>
 
-                          <section className="settings-group" aria-labelledby="settings-refusal-style">
-                            <h3 id="settings-refusal-style">Direct-answer Redirect</h3>
-                            <p>Tell Chandra how to respond when students ask for answers only.</p>
-                            <textarea
-                              id="refusal-style"
-                              name="refusalStyle"
-                              rows={5}
-                              defaultValue={selectedClass.refusalStyle ?? defaultRefusalStyle}
-                            />
-                          </section>
                         </div>
 
                         <div className="settings-pane" hidden={activeSettingsPane !== "answerPolicy"}>
-                          <section className="settings-group" aria-labelledby="settings-answer-policy">
-                            <h3 id="settings-answer-policy">Answer Policy</h3>
-                            <p>Control how Chandra responds to student questions.</p>
+                          <section className="settings-group" aria-labelledby="settings-academic-integrity">
+                            <h3 id="settings-academic-integrity">Academic Integrity</h3>
+                            <p>Set what kinds of answer help Chandra may provide.</p>
                             <div className="settings-toggle-list">
-                              {answerPolicySettings.map((setting) => (
+                              {academicIntegritySettings.map((setting) => (
                                 <SettingsToggle
                                   defaultChecked={selectedAnswerPolicy[setting.id]}
                                   key={setting.title}
@@ -4254,6 +4379,27 @@ export function TeacherClassManager({
                                 />
                               ))}
                             </div>
+                          </section>
+
+                          <section className="settings-group" aria-labelledby="settings-help-limits">
+                            <h3 id="settings-help-limits">Help Limits by Understanding Level</h3>
+                            <p>Set the most help Chandra may provide. Chandra can choose lighter support when appropriate.</p>
+                            <HelpLimitSelectors
+                              idPrefix="settings-help-limit"
+                              labelClassName="settings-control-label"
+                              selectedAnswerPolicy={selectedAnswerPolicy}
+                            />
+                          </section>
+
+                          <section className="settings-group" aria-labelledby="settings-refusal-style">
+                            <h3 id="settings-refusal-style">Direct-answer Redirect</h3>
+                            <p>Tell Chandra how to respond when students ask for answers only.</p>
+                            <textarea
+                              id="refusal-style"
+                              name="refusalStyle"
+                              rows={5}
+                              defaultValue={selectedRefusalStyle}
+                            />
                           </section>
                         </div>
 
@@ -4308,21 +4454,6 @@ export function TeacherClassManager({
                               }
                             />
 
-                            <label className="settings-control-label" htmlFor="max-response-length">
-                              Max response length
-                            </label>
-                            <select
-                              id="max-response-length"
-                              name="modelSettings.responseLength"
-                              defaultValue={selectedModelSettings.responseLength}
-                            >
-                              {responseLengthOptions.map((responseLength) => (
-                                <option key={responseLength} value={responseLength}>
-                                  {capitalizeLabel(responseLength)}
-                                </option>
-                              ))}
-                            </select>
-
                             <div className="ai-tutor-control-grid">
                               <TokenLimitInputs
                                 idPrefix="settings-token-limit"
@@ -4335,20 +4466,28 @@ export function TeacherClassManager({
                         </div>
 
                         <div className="settings-pane" hidden={activeSettingsPane !== "response"}>
-                          <section className="settings-group" aria-labelledby="settings-response-format">
-                            <h3 id="settings-response-format">Response Format</h3>
-                            <p>Control the structure and reading style of normal tutoring replies.</p>
+                          <section className="settings-group" aria-labelledby="settings-reply-structure">
+                            <h3 id="settings-reply-structure">Reply Structure</h3>
+                            <p>Control how allowed help is delivered in normal tutoring replies.</p>
                             <div className="settings-toggle-list">
-                              {responseFormatSettings.map((setting) => (
+                              {responseStructureSettings.map((setting) => (
                                 <SettingsToggle
-                                  defaultChecked={selectedResponseFormat[setting.id]}
+                                  defaultChecked={
+                                    setting.id === "askGuidingQuestionBeforeExplaining"
+                                      ? selectedAnswerPolicy.askGuidingQuestionBeforeExplaining
+                                      : selectedResponseFormat[setting.id]
+                                  }
                                   key={setting.title}
-                                  name={`responseFormat.${setting.id}`}
-                                  {...setting}
+                                  name={setting.name}
+                                  title={setting.title}
+                                  description={setting.description}
                                 />
                               ))}
                             </div>
+                          </section>
 
+                          <section className="settings-group" aria-labelledby="settings-reading-notation">
+                            <h3 id="settings-reading-notation">Reading & Notation</h3>
                             <label className="settings-control-label" htmlFor="reading-level">
                               Reading level
                             </label>
@@ -4375,6 +4514,24 @@ export function TeacherClassManager({
                               {mathNotationOptions.map((notation) => (
                                 <option key={notation} value={notation}>
                                   {formatMathNotationLabel(notation)}
+                                </option>
+                              ))}
+                            </select>
+                          </section>
+
+                          <section className="settings-group" aria-labelledby="settings-response-length">
+                            <h3 id="settings-response-length">Length</h3>
+                            <label className="settings-control-label" htmlFor="max-response-length">
+                              Max response length
+                            </label>
+                            <select
+                              id="max-response-length"
+                              name="modelSettings.responseLength"
+                              defaultValue={selectedModelSettings.responseLength}
+                            >
+                              {responseLengthOptions.map((responseLength) => (
+                                <option key={responseLength} value={responseLength}>
+                                  {capitalizeLabel(responseLength)}
                                 </option>
                               ))}
                             </select>
@@ -5300,16 +5457,6 @@ export function TeacherClassManager({
                               defaultValue={selectedBehaviorInstructions}
                             />
 
-                            <label className="ai-tutor-control-label" htmlFor="ai-refusal-style">
-                              Direct-answer redirect
-                            </label>
-                            <p>Tell Chandra how to respond when students ask for answers only.</p>
-                            <textarea
-                              id="ai-refusal-style"
-                              name="refusalStyle"
-                              rows={4}
-                              defaultValue={selectedRefusalStyle}
-                            />
                           </section>
                         </section>
 
@@ -5325,9 +5472,9 @@ export function TeacherClassManager({
                             </div>
                           </div>
                           <section className="ai-tutor-card" aria-labelledby="ai-tutor-answer-policy-card-title">
-                            <h3 id="ai-tutor-answer-policy-card-title">Guardrails</h3>
+                            <h3 id="ai-tutor-answer-policy-card-title">Academic Integrity</h3>
                             <div className="settings-toggle-list">
-                              {answerPolicySettings.map((setting) => (
+                              {academicIntegritySettings.map((setting) => (
                                 <SettingsToggle
                                   defaultChecked={selectedAnswerPolicy[setting.id]}
                                   key={setting.title}
@@ -5336,6 +5483,25 @@ export function TeacherClassManager({
                                 />
                               ))}
                             </div>
+                          </section>
+                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-help-limits-card-title">
+                            <h3 id="ai-tutor-help-limits-card-title">Help Limits by Understanding Level</h3>
+                            <p>Set the most help Chandra may provide. Chandra can choose lighter support when appropriate.</p>
+                            <HelpLimitSelectors
+                              idPrefix="ai-help-limit"
+                              labelClassName="ai-tutor-control-label"
+                              selectedAnswerPolicy={selectedAnswerPolicy}
+                            />
+                          </section>
+                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-refusal-card-title">
+                            <h3 id="ai-tutor-refusal-card-title">Direct-answer Redirect</h3>
+                            <p>Tell Chandra how to respond when students ask for answers only.</p>
+                            <textarea
+                              id="ai-refusal-style"
+                              name="refusalStyle"
+                              rows={4}
+                              defaultValue={selectedRefusalStyle}
+                            />
                           </section>
                         </section>
 
@@ -5351,18 +5517,26 @@ export function TeacherClassManager({
                             </div>
                           </div>
                           <section className="ai-tutor-card" aria-labelledby="ai-tutor-response-card-title">
-                            <h3 id="ai-tutor-response-card-title">Response Format</h3>
+                            <h3 id="ai-tutor-response-card-title">Reply Structure</h3>
                             <div className="settings-toggle-list">
-                              {responseFormatSettings.map((setting) => (
+                              {responseStructureSettings.map((setting) => (
                                 <SettingsToggle
-                                  defaultChecked={selectedResponseFormat[setting.id]}
+                                  defaultChecked={
+                                    setting.id === "askGuidingQuestionBeforeExplaining"
+                                      ? selectedAnswerPolicy.askGuidingQuestionBeforeExplaining
+                                      : selectedResponseFormat[setting.id]
+                                  }
                                   key={setting.title}
-                                  name={`responseFormat.${setting.id}`}
-                                  {...setting}
+                                  name={setting.name}
+                                  title={setting.title}
+                                  description={setting.description}
                                 />
                               ))}
                             </div>
+                          </section>
 
+                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-reading-notation-title">
+                            <h3 id="ai-tutor-reading-notation-title">Reading & Notation</h3>
                             <div className="ai-tutor-control-grid">
                               <div>
                                 <label className="ai-tutor-control-label" htmlFor="ai-reading-level">
@@ -5396,6 +5570,11 @@ export function TeacherClassManager({
                                   ))}
                                 </select>
                               </div>
+                            </div>
+                          </section>
+                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-response-length-title">
+                            <h3 id="ai-tutor-response-length-title">Length</h3>
+                            <div className="ai-tutor-control-grid single">
                               <div>
                                 <label className="ai-tutor-control-label" htmlFor="ai-response-length">
                                   Max response length
@@ -5464,27 +5643,6 @@ export function TeacherClassManager({
                                   ))}
                                 </select>
                               </div>
-                              <div>
-                                <label className="ai-tutor-control-label" htmlFor="ai-model-response-length">
-                                  Max response length
-                                </label>
-                                <select
-                                  id="ai-model-response-length"
-                                  value={displayedResponseLength}
-                                  onChange={(event) =>
-                                    setAiTutorResponseLengthPreview({
-                                      classId: activeClassId,
-                                      value: event.target.value
-                                    })
-                                  }
-                                >
-                                  {responseLengthOptions.map((responseLength) => (
-                                    <option key={responseLength} value={responseLength}>
-                                      {formatResponseLengthLabel(responseLength)}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
                             </div>
 
                             <div className="settings-slider-heading">
@@ -5522,6 +5680,200 @@ export function TeacherClassManager({
                       </div>
                     </div>
                   </form>
+                ) : null}
+
+                {activeTab === "problems" ? (
+                  <div className="problems-page teacher-content-block">
+                    <div className="teacher-section-heading problems-heading">
+                      <div>
+                        <h2>Problems</h2>
+                        <span>
+                          See which class problems students are working on, where understanding is uneven, and who needs a check-in.
+                        </span>
+                      </div>
+                    </div>
+
+                    {problemError ? <p className="form-error">{problemError}</p> : null}
+
+                    <div className="problems-grid">
+                      <section className="problems-table-card" aria-label="Class problems">
+                        <div className="problems-toolbar">
+                          <label className="roster-search" htmlFor="problem-search-input">
+                            <SearchIcon />
+                            <input
+                              id="problem-search-input"
+                              placeholder="Search problems or confusions"
+                              type="search"
+                              value={problemSearchQuery}
+                              onChange={(event) => setProblemSearchQuery(event.target.value)}
+                            />
+                          </label>
+                        </div>
+
+                        <div className="problems-table" role="table" aria-label="Problem understanding">
+                          <div className="problems-table-header" role="row">
+                            <span>Problem</span>
+                            <span>Students</span>
+                            <span>Avg level</span>
+                            <span>Distribution</span>
+                            <span>Chats/student</span>
+                            <span>Questions</span>
+                            <span>Confusions</span>
+                            <span>Action</span>
+                          </div>
+
+                          {filteredProblemRows.map((problem) => (
+                            <div
+                              aria-selected={problem.id === selectedProblemRow?.id}
+                              className="problems-table-row"
+                              key={problem.id}
+                              role="row"
+                              tabIndex={0}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter" || event.key === " ") {
+                                  event.preventDefault();
+                                  setSelectedProblemId(problem.id);
+                                }
+                              }}
+                              onClick={() => setSelectedProblemId(problem.id)}
+                            >
+                              <span className="problem-cell problem-label-cell" role="cell">
+                                <strong>{problem.label}</strong>
+                                <em>{problem.id}</em>
+                              </span>
+                              <span className="problem-cell" role="cell">
+                                {problem.studentCount} {problem.studentCount === 1 ? "student" : "students"}
+                              </span>
+                              <span className="problem-cell" role="cell">
+                                <span className={`problem-level-pill ${problem.averageUnderstandingLevel < 2 ? "low" : problem.averageUnderstandingLevel < 3 ? "mid" : "high"}`}>
+                                  {problem.averageUnderstandingLevel.toFixed(1)}
+                                </span>
+                              </span>
+                              <span className="problem-cell" role="cell">
+                                <ProblemLevelDistribution distribution={problem.levelDistribution} />
+                              </span>
+                              <span className="problem-cell" role="cell">
+                                {problem.averageConversationsPerStudent.toFixed(1)}
+                              </span>
+                              <span className="problem-cell" role="cell">
+                                {problem.totalStudentMessages}
+                              </span>
+                              <span className="problem-cell problem-confusion-cell" role="cell">
+                                {problem.commonConfusions.length ? problem.commonConfusions.slice(0, 2).join(", ") : "None recorded"}
+                              </span>
+                              <span className="problem-cell problem-actions-cell" role="cell">
+                                <button
+                                  className="teacher-action-button compact"
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    openProblemConversation(problem.openConversationId);
+                                  }}
+                                >
+                                  Open chats
+                                </button>
+                              </span>
+                            </div>
+                          ))}
+
+                          {!filteredProblemRows.length ? (
+                            <div className="empty-state problems-empty-state">
+                              <strong>No problem understanding data yet</strong>
+                              <span>
+                                Problem rows appear after students work on class problems and Chandra saves understanding state for those chats.
+                              </span>
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="roster-table-footer">
+                          {filteredProblemRows.length
+                            ? `Showing 1-${filteredProblemRows.length} of ${classProblems.length} problems`
+                            : `Showing 0 of ${classProblems.length} problems`}
+                        </div>
+                      </section>
+
+                      <aside className="problem-detail-panel" aria-label="Problem detail">
+                        <div className="conversation-panel-heading">
+                          <h3>{selectedProblemRow?.label ?? "No problem selected"}</h3>
+                          <span>
+                            {selectedProblemRow
+                              ? `${selectedProblemRow.studentCount} students / ${selectedProblemRow.conversationCount} related chats`
+                              : "Select a problem to see students who may need follow-up."}
+                          </span>
+                        </div>
+
+                        {selectedProblemRow ? (
+                          <>
+                            <div className="problem-detail-summary">
+                              <div>
+                                <span>Average level</span>
+                                <strong>{selectedProblemRow.averageUnderstandingLevel.toFixed(1)}</strong>
+                              </div>
+                              <div>
+                                <span>Questions</span>
+                                <strong>{selectedProblemRow.totalStudentMessages}</strong>
+                              </div>
+                              <div>
+                                <span>Chats/student</span>
+                                <strong>{selectedProblemRow.averageConversationsPerStudent.toFixed(1)}</strong>
+                              </div>
+                            </div>
+
+                            <div className="problem-confusion-list">
+                              <span>Common confusions</span>
+                              {selectedProblemRow.commonConfusions.length ? (
+                                selectedProblemRow.commonConfusions.map((confusion) => (
+                                  <strong key={confusion}>{confusion}</strong>
+                                ))
+                              ) : (
+                                <strong>None recorded yet</strong>
+                              )}
+                            </div>
+
+                            <div className="problem-student-table" role="table" aria-label="Students for selected problem">
+                              <div className="problem-student-header" role="row">
+                                <span>Student</span>
+                                <span>Level</span>
+                                <span>Chats</span>
+                                <span>Last active</span>
+                                <span>Action</span>
+                              </div>
+                              {selectedProblemRow.students.map((student) => (
+                                <div className="problem-student-row" key={`${selectedProblemRow.id}-${student.studentId || student.studentEmail}`} role="row">
+                                  <span className="problem-student-cell" role="cell">
+                                    <strong>{student.studentName}</strong>
+                                    <em>{student.studentEmail}</em>
+                                  </span>
+                                  <span className="problem-student-cell" role="cell">
+                                    <span className={`problem-level-pill ${student.latestUnderstandingLevel < 2 ? "low" : student.latestUnderstandingLevel < 3 ? "mid" : "high"}`}>
+                                      {student.latestUnderstandingLevel}
+                                    </span>
+                                  </span>
+                                  <span className="problem-student-cell" role="cell">{student.conversationCount}</span>
+                                  <span className="problem-student-cell" role="cell">{formatConversationDate(student.lastActive) || "No date"}</span>
+                                  <span className="problem-student-cell problem-actions-cell" role="cell">
+                                    <button
+                                      className="teacher-action-button compact"
+                                      type="button"
+                                      onClick={() => openProblemConversation(student.openConversationId, student.studentId)}
+                                    >
+                                      Open chat
+                                    </button>
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        ) : (
+                          <div className="empty-state problems-empty-state">
+                            <strong>No problem selected</strong>
+                            <span>Choose a problem row to see student-level follow-up details.</span>
+                          </div>
+                        )}
+                      </aside>
+                    </div>
+                  </div>
                 ) : null}
 
                 {activeTab === "conversations" ? (
@@ -6601,6 +6953,43 @@ function SettingsToggle({
       <input defaultChecked={defaultChecked} name={name} type="checkbox" />
       <span className="settings-toggle-switch" aria-hidden="true" />
     </label>
+  );
+}
+
+function HelpLimitSelectors({
+  idPrefix,
+  labelClassName,
+  selectedAnswerPolicy
+}: {
+  idPrefix: string;
+  labelClassName: string;
+  selectedAnswerPolicy: AnswerPolicySettings;
+}) {
+  return (
+    <div className="help-limit-grid">
+      {understandingLevelOptions.map((level) => {
+        const fieldId = `${idPrefix}-${level}`;
+
+        return (
+          <div className="help-limit-row" key={level}>
+            <label className={labelClassName} htmlFor={fieldId}>
+              {helpLimitLevelLabels[level]}
+            </label>
+            <select
+              id={fieldId}
+              name={`answerPolicy.helpLimitsByUnderstandingLevel.${level}`}
+              defaultValue={selectedAnswerPolicy.helpLimitsByUnderstandingLevel[level]}
+            >
+              {helpLimitOptionIds.map((optionId) => (
+                <option key={optionId} value={optionId}>
+                  {helpLimitLabels[optionId]}
+                </option>
+              ))}
+            </select>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -8216,6 +8605,53 @@ function buildConversationReviewRows(
       (first, second) =>
         (coerceDate(second.lastMessageAt)?.getTime() ?? 0) - (coerceDate(first.lastMessageAt)?.getTime() ?? 0)
     );
+}
+
+function filterProblemRows(rows: TeacherProblemSummaryRow[], query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return rows;
+  }
+
+  return rows.filter((row) =>
+    [
+      row.id,
+      row.label,
+      ...row.commonConfusions,
+      ...row.students.map((student) => `${student.studentName} ${student.studentEmail}`)
+    ].some((value) => value.toLowerCase().includes(normalizedQuery))
+  );
+}
+
+function ProblemLevelDistribution({
+  distribution
+}: {
+  distribution: TeacherProblemSummaryRow["levelDistribution"];
+}) {
+  const levels = [0, 1, 2, 3, 4] as const;
+  const total = levels.reduce<number>((sum, level) => sum + distribution[level], 0);
+
+  return (
+    <span
+      className="problem-level-distribution"
+      aria-label={`Levels 0 through 4: ${levels.map((level) => `${level}: ${distribution[level]}`).join(", ")}`}
+    >
+      {levels.map((level) => {
+        const count = distribution[level];
+        const width = total ? Math.max((count / total) * 100, count ? 8 : 0) : 0;
+
+        return (
+          <i
+            aria-hidden="true"
+            data-level={level}
+            key={level}
+            style={{ width: `${width}%` }}
+            title={`Level ${level}: ${count}`}
+          />
+        );
+      })}
+    </span>
+  );
 }
 
 function filterConversationReviewRows({

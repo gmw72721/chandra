@@ -1,4 +1,5 @@
 export type Role = "student" | "teacher" | "assistant" | "system";
+export type StudentMessageMode = "ask" | "work";
 
 export type ModelOption = {
   id: string;
@@ -180,6 +181,7 @@ export type ChatMessage = {
   learningStrategyTelemetry?: LearningStrategyTelemetry;
   retrievalConfidence?: RetrievalConfidence;
   sources?: TutorSource[];
+  studentMessageMode?: StudentMessageMode;
   structuredOutput?: TutorStructuredOutput;
 };
 
@@ -229,6 +231,9 @@ export type StudentConversationSummary = {
   assignment?: string;
   contextMemory?: ChatContextMemory;
   contextUpdatedAt?: unknown;
+  problemLabel?: string;
+  problemNumber?: string;
+  problemSummary?: string;
   tags?: string[];
 };
 
@@ -287,6 +292,8 @@ export type TutorStructuredSectionKey =
 
 export type TutorStructuredMetadata = {
   hintLevel: "none" | "small_hint" | "guided_step" | "worked_example" | "refusal";
+  problemNumber?: string;
+  problemSummary?: string;
   sourceConfidence: "high" | "medium" | "low";
   studentActionNeeded:
     | "none"
@@ -321,6 +328,7 @@ export type TutorSource = {
   citationsRequired?: boolean;
   pageNumber?: number;
   problemNumber?: string;
+  problemNumbers?: string[];
 };
 
 export type KnowledgeItemKind = "problem" | "pdf_page" | "student_upload";
@@ -494,6 +502,7 @@ export type TutorTrace = {
     pageStart?: number;
     printedPageEnd?: number;
     printedPageStart?: number;
+    problemNumbers?: string[];
     title?: string;
   }>;
   stages: string[];
@@ -598,8 +607,10 @@ export type StudentAiUsageStatus = {
   dailyUsed?: number;
   nearLimit: boolean;
   resetHint: string;
+  dailyResetAt?: string;
   todayPercentRemaining: number;
   weekPercentRemaining: number;
+  weeklyResetAt?: string;
   weeklyLimit?: number;
   weeklyUsed?: number;
 };
@@ -893,4 +904,41 @@ export type TeacherClassOverview = {
   reviewQueueRows: TeacherClassOverviewReviewQueueRow[];
   summary: TeacherClassOverviewSummary;
   timezone: string;
+};
+
+export type TeacherProblemLevelDistribution = {
+  0: number;
+  1: number;
+  2: number;
+  3: number;
+  4: number;
+};
+
+export type TeacherProblemStudentRow = {
+  conversationCount: number;
+  conversationIds: string[];
+  latestUnderstandingLevel: UnderstandingLevel;
+  lastActive: unknown;
+  lastActiveLabel?: string;
+  openConversationId?: string;
+  studentEmail: string;
+  studentId: string;
+  studentName: string;
+  studentMessageCount: number;
+};
+
+export type TeacherProblemSummaryRow = {
+  averageConversationsPerStudent: number;
+  averageUnderstandingLevel: number;
+  commonConfusions: string[];
+  conversationCount: number;
+  conversationIds: string[];
+  id: string;
+  label: string;
+  lastActive: unknown;
+  levelDistribution: TeacherProblemLevelDistribution;
+  openConversationId?: string;
+  studentCount: number;
+  students: TeacherProblemStudentRow[];
+  totalStudentMessages: number;
 };

@@ -11,7 +11,9 @@ export const runtime = "nodejs";
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
-    const scope = await authorizeTutorChatRequest(request, url.searchParams.get("courseId") ?? undefined);
+    const scope = await authorizeTutorChatRequest(request, url.searchParams.get("courseId") ?? undefined, {
+      enforceStudentChatAccess: false
+    });
 
     if (scope.role !== "student") {
       return NextResponse.json({ error: "Use a student account to open saved conversations." }, { status: 403 });

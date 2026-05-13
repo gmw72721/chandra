@@ -274,6 +274,10 @@ function buildTutorBehaviorInstructions(policyTitle: string) {
 
 function buildAnswerPolicyInstructions(answerPolicy: AnswerPolicySettings) {
   return [
+    "- Help limits by understanding level are ceilings, not targets. Chandra may choose lighter support when appropriate, but must not exceed the configured maximum for the student's current/effective understanding level.",
+    ...Object.entries(answerPolicy.helpLimitsByUnderstandingLevel).map(
+      ([level, limit]) => `- Understanding level ${level} max help: ${formatHelpLimitInstruction(limit)}`
+    ),
     ...(answerPolicy.requireStudentAttemptFirst
       ? [
           "- Require a shown attempt before substantial help on graded-looking work, except for source-text lookup.",
@@ -298,6 +302,38 @@ function buildAnswerPolicyInstructions(answerPolicy: AnswerPolicySettings) {
       ? ["- You may provide worked examples when they are teacher-created, clearly similar but not the student's exact graded task, or explicitly allowed."]
       : ["- Avoid full worked examples unless teacher instructions explicitly allow them."])
   ];
+}
+
+function formatHelpLimitInstruction(limit: string) {
+  if (limit === "ask_for_attempt_only") {
+    return "ask for the student's attempt or exact stuck point only";
+  }
+
+  if (limit === "conceptual_orientation") {
+    return "conceptual orientation only";
+  }
+
+  if (limit === "guiding_question") {
+    return "one guiding question";
+  }
+
+  if (limit === "light_hint") {
+    return "one light hint";
+  }
+
+  if (limit === "targeted_hint_next_action") {
+    return "one targeted hint plus one next action";
+  }
+
+  if (limit === "one_worked_step") {
+    return "one worked step only";
+  }
+
+  if (limit === "check_work_explain_gaps") {
+    return "check shown work and explain gaps without taking over the rest";
+  }
+
+  return "full explanation allowed when other teacher policy permits";
 }
 
 function buildAcademicIntegrityInstructions(answerPolicy: AnswerPolicySettings) {
@@ -486,7 +522,20 @@ export function toProviderMessages(systemPrompt: string, messages: ChatMessage[]
       .filter((message) => message.role === "student" || message.role === "assistant")
       .map((message) => ({
         role: message.role === "student" ? ("user" as const) : ("assistant" as const),
-        content: message.role === "assistant" ? assistantContentWithSources(message) : message.content
+        content: message.role === "assistant" ? assistantContentWithSources(message) : studentContentForProvider(message)
       }))
   ];
+}
+
+function studentContentForProvider(message: ChatMessage) {
+  if (message.studentMessageMode !== "work") {
+    return message.content;
+  }
+
+  return [
+    "Student message mode: Show my work.",
+    "Treat the student's message as an attempt or partial work to review. Give reasoning-focused feedback: identify the useful idea or first place to tighten, ask for a justification or small revision, and avoid simply giving a final correctness verdict or finishing the rest of the task.",
+    "",
+    message.content
+  ].join("\n");
 }

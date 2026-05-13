@@ -36,6 +36,7 @@ import type {
   KnowledgeItem,
   KnowledgeUiColorToken,
   MessageAttachment,
+  StudentMessageMode,
   StudentAiUsageStatus,
   StudentConversationSummary,
   StudentFeedbackKind,
@@ -91,6 +92,7 @@ type ChatStreamEvent =
 
 type StudentVisibleClass = {
   appearance?: TeacherClassAppearance;
+  chatBlocked?: boolean;
   id: string;
   joinCode?: string;
   name: string;
@@ -115,10 +117,8 @@ const maxComposerAttachments = 3;
 const allowedComposerAttachmentExtensions = [".pdf"];
 const allowedComposerAttachmentAccept = ".pdf,application/pdf";
 const maxComposerPdfBytes = 25 * 1024 * 1024;
-const aiUsageLimitMessage =
-  "Sorry, you have reached your Chandra usage limit.";
 const aiUsageIncreaseRequestComment =
-  "Usage increase request: I reached my Chandra usage limit and would like my professor to allow more usage.";
+  "Tutoring time request: I am out of tutoring time and would like my professor to allow more time.";
 const teacherPreviewDebugStorageKey = "chandra.teacherPreviewDebugMode";
 
 const welcomeMessageId = "welcome";
@@ -167,6 +167,7 @@ export function StudentWorkspace() {
   const { firebaseReady, profile, user } = useAuth();
   const [messages, setMessages] = useState<ChatMessage[]>(() => buildInitialStudentMessages(null));
   const [draft, setDraft] = useState("");
+  const [studentMessageMode, setStudentMessageMode] = useState<StudentMessageMode>("ask");
   const draftTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
@@ -314,10 +315,24 @@ export function StudentWorkspace() {
     () => studentClasses.find((studentClass) => studentClass.id === activeCourseId) ?? null,
     [activeCourseId, studentClasses]
   );
-  const activeClass: StudentVisibleClass | null = useMemo(
-    () => (savedClass?.id === activeCourseId ? savedClass : activeStudentClass),
-    [activeCourseId, activeStudentClass, savedClass]
-  );
+  const activeClass: StudentVisibleClass | null = useMemo(() => {
+    if (savedClass?.id !== activeCourseId) {
+      return activeStudentClass;
+    }
+
+    if (!activeStudentClass) {
+      return savedClass;
+    }
+
+    return {
+      ...savedClass,
+      chatBlocked: activeStudentClass.chatBlocked,
+      studentChatEnabled:
+        savedClass.studentChatEnabled === false || activeStudentClass.studentChatEnabled === false
+          ? false
+          : savedClass.studentChatEnabled ?? activeStudentClass.studentChatEnabled
+    };
+  }, [activeCourseId, activeStudentClass, savedClass]);
   const activeAppearance = useMemo(
     () =>
       normalizeTeacherClassAppearance(
@@ -335,7 +350,13 @@ export function StudentWorkspace() {
   const className = activeClass?.name ?? (activeCourseId ? "Saved class" : "Class needed");
   const classSection = activeClass?.section ?? (activeCourseId ? "Student chat" : "Enter your class code");
   const classSectionLabel = formatClassSectionLabel(classSection, Boolean(activeCourseId));
-  const studentChatPaused = Boolean(activeCourseId && !isTeacherPreview && activeClass?.studentChatEnabled === false);
+  const studentChatPauseMessage =
+    activeCourseId && !isTeacherPreview && activeClass?.chatBlocked
+      ? "Chat is paused for this account."
+      : activeCourseId && !isTeacherPreview && activeClass?.studentChatEnabled === false
+        ? "Your teacher has paused chat for this class."
+        : "";
+  const studentChatPaused = Boolean(studentChatPauseMessage);
   const compactClassLabel = formatCompactClassLabel(className);
   const visibleClassCode = activeClass?.joinCode || activeClass?.id || activeCourseId;
   const visibleConversationSummaries = useMemo(
@@ -356,6 +377,16 @@ export function StudentWorkspace() {
   const accountUsernameValue = profile?.username ?? accountEmail;
   const accountLastSignInAt = user?.metadata.lastSignInTime ?? "";
   const usageSummary = useMemo(() => usageSummaryFromStatus(aiUsageStatus), [aiUsageStatus]);
+  const tutoringTimeHeaderText = aiUsageStatus
+    ? `Tutoring time · ${usageSummary.todayPercentLeft}% left`
+    : aiUsageError
+      ? "Tutoring time unavailable"
+      : "Loading tutoring time";
+  const tutoringTimeHeaderLabel = aiUsageStatus
+    ? `Tutoring time: ${usageSummary.todayPercentLeft}% left today`
+    : aiUsageError
+      ? `Tutoring time unavailable: ${aiUsageError}`
+      : "Loading tutoring time";
   const chatContextMemory = useMemo(() => buildChatContextMemory(messages), [messages]);
   const knowledgeLines = useMemo(() => buildKnowledgeLines(messages), [messages]);
   const understandingState = useMemo(() => buildUnderstandingState(messages), [messages]);
@@ -627,6 +658,10 @@ export function StudentWorkspace() {
 
     if (!activeCourseId) {
       setAttachmentError("Join a class before uploading homework files.");
+      return;
+    }
+
+    if (studentChatPaused) {
       return;
     }
 
@@ -907,7 +942,8 @@ export function StudentWorkspace() {
       role: "student",
       attachments: readyComposerAttachments,
       content: content || "Can you help me with this attached homework material?",
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      studentMessageMode
     };
 
     const sentAttachmentIds = readyComposerAttachments.map((attachment) => attachment.id);
@@ -1044,12 +1080,7 @@ export function StudentWorkspace() {
         structuredOutput: data.structuredOutput
       };
 
-      setMessages((current) =>
-        upsertChatMessage(
-          current,
-          assistantMessage
-        )
-      );
+      setMessages((current) => upsertFinalAssistantMessage(current, assistantMessage));
       pendingFeedbackPrompt = buildFeedbackPromptCandidate({
         assistantMessage,
         classId: activeCourseId,
@@ -1335,7 +1366,13 @@ export function StudentWorkspace() {
               <section className="student-conversation-history" aria-label="Saved conversations">
                 <div className="sidebar-section-heading">
                   <strong>Conversations</strong>
-                  <button className="student-new-mini-button" type="button" onClick={startNewConversation}>
+                  <button
+                    className="student-new-mini-button"
+                    disabled={studentChatPaused}
+                    title={studentChatPaused ? "Chat is paused right now." : "Start a new conversation"}
+                    type="button"
+                    onClick={startNewConversation}
+                  >
                     <span className="student-new-label">New</span>
                     <svg className="student-new-icon" aria-hidden="true" viewBox="0 0 24 24">
                       <path d="M12 5v14M5 12h14" />
@@ -1351,6 +1388,7 @@ export function StudentWorkspace() {
                           aria-pressed={conversation.id === activeSelectedConversationId}
                           className="student-conversation-row"
                           key={conversation.id}
+                          title={formatConversationHoverTitle(conversation)}
                           type="button"
                           onClick={() => {
                             setStudentMainView("chat");
@@ -1360,11 +1398,11 @@ export function StudentWorkspace() {
                           }}
                         >
                           <span className="student-conversation-copy">
-                            <strong>{conversation.title}</strong>
+                            <strong>{formatConversationDisplayTitle(conversation)}</strong>
                             <span>{formatConversationMeta(conversation)}</span>
                           </span>
                           <span className="student-conversation-compact-label" aria-hidden="true">
-                            {formatConversationCompactLabel(conversation.title)}
+                            {formatConversationCompactLabel(formatConversationDisplayTitle(conversation))}
                           </span>
                           <span className="student-row-menu" aria-hidden="true">
                             <span />
@@ -1494,23 +1532,30 @@ export function StudentWorkspace() {
                 {!isTeacherPreview ? (
                   <div className="student-header-control-wrap">
                     <button
-                      aria-label={`Usage · ${usageSummary.todayPercentLeft}% today`}
+                      aria-label={tutoringTimeHeaderLabel}
                       aria-controls="student-usage-popover"
                       aria-expanded={openHeaderDropdown === "usage"}
                       className="student-header-control student-usage-header-control"
-                      title={`Usage · ${usageSummary.todayPercentLeft}% today`}
+                      title={tutoringTimeHeaderLabel}
                       type="button"
                       onClick={() =>
                         setOpenHeaderDropdown((currentDropdown) => (currentDropdown === "usage" ? null : "usage"))
                       }
                     >
-                      <HeaderControlIcon kind="usage" />
-                      <span className="student-header-control-label">Usage · </span>
-                      <span className="student-header-usage-percent">{usageSummary.todayPercentLeft}%</span>
-                      <span className="student-header-control-label">today</span>
+                      <HeaderControlIcon kind="tutoringTime" />
+                      {aiUsageStatus ? (
+                        <>
+                          <span className="student-header-control-label">Tutoring time · </span>
+                          <span className="student-header-usage-percent">{usageSummary.todayPercentLeft}%</span>
+                          <span className="student-header-control-label">left</span>
+                        </>
+                      ) : (
+                        <span className="student-header-control-label">{tutoringTimeHeaderText}</span>
+                      )}
                     </button>
                     {openHeaderDropdown === "usage" ? (
                       <StudentUsagePopover
+                        errorMessage={aiUsageError}
                         id="student-usage-popover"
                         isRequestingMoreUsage={isRequestingUsageIncrease}
                         requestMessage={usageIncreaseRequestMessage}
@@ -1602,12 +1647,9 @@ export function StudentWorkspace() {
                 </div>
               </div>
             </header>
-            {studentChatPaused ? (
-              <p className="form-error chat-error">Your teacher has paused chat for this class.</p>
+            {conversationMessagesError && !isPausedChatAccessMessage(conversationMessagesError) ? (
+              <p className="form-error chat-error">{conversationMessagesError}</p>
             ) : null}
-            {aiUsageError ? <p className="form-error chat-error">{aiUsageError}</p> : null}
-
-            {conversationMessagesError ? <p className="form-error chat-error">{conversationMessagesError}</p> : null}
             <div className="message-list student-message-list">
               {messages.map((message) => (
                 <StudentChatMessage
@@ -1621,12 +1663,15 @@ export function StudentWorkspace() {
             </div>
 
             <form
-              className={`composer student-composer${isDraggingAttachment ? " is-dragging" : ""}`}
+              className={`composer student-composer${isDraggingAttachment ? " is-dragging" : ""}${
+                studentChatPaused ? " is-paused" : ""
+              }`}
               onDragLeave={() => setIsDraggingAttachment(false)}
               onDragOver={handleAttachmentDragOver}
               onDrop={(event) => void handleAttachmentDrop(event)}
               onSubmit={sendMessage}
             >
+              {studentChatPaused ? <p className="student-paused-notice">{studentChatPauseMessage}</p> : null}
               {composerAttachments.length || attachmentError ? (
                 <div className="student-composer-attachments" aria-live="polite">
                   {composerAttachments.map((attachment) => (
@@ -1647,11 +1692,39 @@ export function StudentWorkspace() {
                 type="file"
                 onChange={(event) => void handleAttachmentSelection(event)}
               />
+              <div className="student-message-mode-control" role="radiogroup" aria-label="Message type">
+                <button
+                  aria-checked={studentMessageMode === "ask"}
+                  className={studentMessageMode === "ask" ? "is-active" : ""}
+                  disabled={isSending || studentChatPaused}
+                  role="radio"
+                  type="button"
+                  onClick={() => setStudentMessageMode("ask")}
+                >
+                  Ask
+                </button>
+                <button
+                  aria-checked={studentMessageMode === "work"}
+                  className={studentMessageMode === "work" ? "is-active" : ""}
+                  disabled={isSending || studentChatPaused}
+                  role="radio"
+                  type="button"
+                  onClick={() => setStudentMessageMode("work")}
+                >
+                  Show my work
+                </button>
+              </div>
               <button
                 className="student-composer-add"
                 type="button"
                 aria-label="Attach homework file"
-                disabled={isSending || isUploadingAttachment || composerAttachments.length >= maxComposerAttachments || !activeCourseId}
+                disabled={
+                  isSending ||
+                  studentChatPaused ||
+                  isUploadingAttachment ||
+                  composerAttachments.length >= maxComposerAttachments ||
+                  !activeCourseId
+                }
                 onClick={() => attachmentInputRef.current?.click()}
               >
                 <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -1663,13 +1736,14 @@ export function StudentWorkspace() {
                 aria-label="Message Chandra"
                 ref={draftTextareaRef}
                 value={draft}
+                disabled={studentChatPaused}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={handleComposerKeyDown}
                 placeholder={
                   studentChatPaused
-                    ? "Your teacher has paused chat for this class."
+                    ? studentChatPauseMessage
                     : !isTeacherPreview && aiUsageStatus?.blocked
-                    ? "Ask your professor for more Chandra usage."
+                    ? "Ask your professor for more tutoring time."
                     : activeCourseId
                       ? "Ask about a problem, step, or equation..."
                       : "Join a class to start chatting."
@@ -1794,6 +1868,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
         <div className="student-message-stack">
           <div className="message-meta-row">
             <div className="message-meta">You</div>
+            <StudentMessageModeBadge mode={message.studentMessageMode} />
             {debugEnabled ? <MessageDebugDetails message={message} /> : null}
           </div>
           <div className="student-message-bubble">
@@ -1865,6 +1940,18 @@ const StudentChatMessage = memo(function StudentChatMessage({
     </article>
   );
 });
+
+function StudentMessageModeBadge({ mode }: { mode?: StudentMessageMode }) {
+  if (!mode) {
+    return null;
+  }
+
+  return (
+    <span className="student-message-mode-badge" data-mode={mode}>
+      {mode === "work" ? "Work" : "Question"}
+    </span>
+  );
+}
 
 function MessageDebugDetails({ message }: { message: ChatMessage }) {
   const debug = buildMessageDebugDisplay(message);
@@ -2188,7 +2275,6 @@ function StudentSettingsPanel({
               <dd>{formatAccountActivityTime(accountLastSignInAt)}</dd>
             </div>
           </dl>
-          {accountSettingsError ? <p className="form-error">{accountSettingsError}</p> : null}
         </section>
 
         <section className="student-settings-card student-credentials-card" aria-labelledby="student-email-password-settings">
@@ -2259,6 +2345,17 @@ function StudentSettingsPanel({
                   onChange={(event) => onConfirmAccountPasswordChange(event.target.value)}
                 />
               </div>
+            </div>
+            {accountSettingsError ? <p className="form-error student-credentials-error">{accountSettingsError}</p> : null}
+            <div className="student-credentials-actions">
+              <button
+                className="student-settings-save-button student-credentials-save-button"
+                disabled={isSavingAccountSettings || isSavingThemePreference}
+                type="button"
+                onClick={() => void onSaveAccountSettings()}
+              >
+                {isSavingAccountSettings ? "Saving" : "Change password"}
+              </button>
             </div>
           </div>
         </section>
@@ -2665,24 +2762,46 @@ function UnderstandingLevelButton({
   state: UnderstandingState | null;
 }) {
   const hasState = Boolean(state);
+  const emptyTooltipId = "student-understanding-empty-tooltip";
+  const emptyTooltip = "Understanding starts once a problem is loaded.";
 
   return (
-    <button
-      aria-label="Understanding"
-      aria-controls="student-understanding-popover"
-      aria-expanded={hasState ? isExpanded : false}
-      className={`student-header-control student-understanding-control${hasState ? " is-active" : ""}`}
-      data-understanding-level={state?.level}
-      disabled={!hasState}
-      title="Understanding"
-      type="button"
-      onClick={onClick}
-    >
-      <span aria-hidden="true" className="student-understanding-level">
-        {state?.level ?? ""}
-      </span>
-      <span className="student-header-control-label">Understanding</span>
-    </button>
+    <>
+      <button
+        aria-label="Understanding"
+        aria-controls="student-understanding-popover"
+        aria-describedby={hasState ? undefined : emptyTooltipId}
+        aria-disabled={!hasState}
+        aria-expanded={hasState ? isExpanded : false}
+        className={`student-header-control student-understanding-control${hasState ? " is-active" : ""}`}
+        data-understanding-level={state?.level}
+        title={hasState ? "Understanding" : undefined}
+        type="button"
+        onClick={() => {
+          if (hasState) {
+            onClick();
+          }
+        }}
+      >
+        <span aria-hidden="true" className="student-understanding-level">
+          {state?.level ?? ""}
+        </span>
+        <span className="student-header-control-label">Understanding</span>
+      </button>
+      {!hasState ? (
+        <section
+          aria-label="Understanding"
+          className="student-header-popover student-understanding-popover student-understanding-empty-tooltip"
+          id={emptyTooltipId}
+          role="tooltip"
+        >
+          <div className="student-context-popover-heading">
+            <h2>Understanding</h2>
+          </div>
+          <p className="student-popover-empty">{emptyTooltip}</p>
+        </section>
+      ) : null}
+    </>
   );
 }
 
@@ -2776,13 +2895,15 @@ function KnowledgeItemTypeIcon({
   );
 }
 
-function HeaderControlIcon({ kind }: { kind: "feedback" | "usage" }) {
+function HeaderControlIcon({ kind }: { kind: "feedback" | "tutoringTime" }) {
   return (
     <svg className="student-header-control-icon" aria-hidden="true" viewBox="0 0 24 24">
-      {kind === "usage" ? (
+      {kind === "tutoringTime" ? (
         <>
-          <path d="M4 17 9 12l4 4 7-9" />
-          <path d="M16 7h4v4" />
+          <circle cx="12" cy="13" r="7" />
+          <path d="M12 9v4l2.8 1.7" />
+          <path d="M9 3h6" />
+          <path d="M12 3v3" />
         </>
       ) : (
         <>
@@ -2913,6 +3034,7 @@ function ContextDetail({ label, value }: { label: string; value?: string | numbe
 }
 
 const StudentUsagePopover = memo(function StudentUsagePopover({
+  errorMessage,
   id,
   isRequestingMoreUsage,
   onRequestMoreUsage,
@@ -2920,6 +3042,7 @@ const StudentUsagePopover = memo(function StudentUsagePopover({
   status,
   summary
 }: {
+  errorMessage?: string;
   id: string;
   isRequestingMoreUsage: boolean;
   onRequestMoreUsage?: () => void;
@@ -2927,40 +3050,59 @@ const StudentUsagePopover = memo(function StudentUsagePopover({
   status: StudentAiUsageStatus | null;
   summary: UsageSummary;
 }) {
+  const isLoading = !status;
+  const mainMessage = isLoading
+    ? errorMessage || "Loading tutoring time"
+    : status.blocked
+      ? "You're out of tutoring time for today. Ask your professor for more."
+      : status.nearLimit
+        ? "You're almost out of today's tutoring time."
+        : `You have ${summary.todayPercentLeft}% of today's tutoring time left.`;
+
   return (
-    <section className="student-header-popover student-usage-popover" id={id} role="region" aria-label="Usage">
-      <h2>Usage</h2>
-      <UsagePopoverMeter
-        label="Today"
-        limit={summary.dailyLimit}
-        percentLeft={summary.todayPercentLeft}
-        used={summary.dailyUsed}
-      />
-      <UsagePopoverMeter
-        label="This week"
-        limit={summary.weeklyLimit}
-        percentLeft={summary.weekPercentLeft}
-        used={summary.weeklyUsed}
-      />
+    <section className="student-header-popover student-usage-popover" id={id} role="region" aria-label="Tutoring time">
+      <h2>Tutoring time</h2>
+      <p className="student-usage-message">{mainMessage}</p>
+      {!isLoading ? (
+        <TutoringTimeMeter
+          label="Today"
+          percentLeft={summary.todayPercentLeft}
+          resetAt={status.dailyResetAt}
+        />
+      ) : null}
       <div className="student-popover-section">
-        <h3>Credit costs</h3>
+        <h3>What uses tutoring time</h3>
         <ul className="student-usage-costs">
-          <li>Short hint: 1 credit</li>
-          <li>Long step-by-step answer: 2 credits</li>
-          <li>File/image upload: 3-5 credits</li>
+          <li>Uploads use more tutoring time.</li>
+          <li>Long explanations use more tutoring time.</li>
+          <li>Asking many follow-up questions uses more tutoring time.</li>
         </ul>
       </div>
       <div className="student-popover-section">
-        <h3>Reset info</h3>
-        <p>Daily usage resets tonight</p>
-        <p>Weekly usage resets Monday</p>
+        <h3>Weekly</h3>
+        {!isLoading ? (
+          <TutoringTimeMeter
+            isSecondary
+            label="This week"
+            percentLeft={summary.weekPercentLeft}
+            resetAt={status.weeklyResetAt}
+          />
+        ) : errorMessage ? (
+          <p>Tutoring time is unavailable right now.</p>
+        ) : (
+          <p>Loading weekly tutoring time</p>
+        )}
       </div>
       {status?.blocked || status?.nearLimit ? (
         <div className="student-usage-request">
-          <p>{status.blocked ? formatAiUsageLimitMessage(status) : "AI usage is almost used up."}</p>
+          <p>
+            {status.blocked
+              ? "You're out of tutoring time for today. Ask your professor for more."
+              : "You're almost out of today's tutoring time."}
+          </p>
           {status.blocked && onRequestMoreUsage ? (
             <button type="button" disabled={isRequestingMoreUsage} onClick={onRequestMoreUsage}>
-              {isRequestingMoreUsage ? "Sending request" : "Ask professor for more usage"}
+              {isRequestingMoreUsage ? "Sending request" : "Ask professor for more time"}
             </button>
           ) : null}
           {requestMessage ? <span>{requestMessage}</span> : null}
@@ -2970,40 +3112,76 @@ const StudentUsagePopover = memo(function StudentUsagePopover({
   );
 });
 
-function UsagePopoverMeter({
+function TutoringTimeMeter({
+  isSecondary = false,
   label,
-  limit,
   percentLeft,
-  used
+  resetAt
 }: {
+  isSecondary?: boolean;
   label: string;
-  limit: number;
   percentLeft: number;
-  used: number;
+  resetAt?: string;
 }) {
   const cleanPercentLeft = clampPercent(percentLeft);
-  const percentUsed = 100 - cleanPercentLeft;
+  const resetLabel = formatTutoringResetLabel(resetAt);
 
   return (
-    <div className="student-usage-popover-meter">
+    <div className={isSecondary ? "student-usage-popover-meter is-secondary" : "student-usage-popover-meter"}>
       <span>
-        <strong>{label}</strong>
-        <em>{cleanPercentLeft}% left</em>
+        <strong>{label} · {cleanPercentLeft}% left</strong>
       </span>
-      <p>
-        {formatUsageNumber(used)} / {formatUsageNumber(limit)} credits used
-      </p>
-      <div aria-hidden="true">
-        <span style={{ width: `${percentUsed}%` }} />
+      {resetLabel ? <em>{resetLabel}</em> : null}
+      <div
+        aria-label={`${label} tutoring time remaining`}
+        aria-valuemax={100}
+        aria-valuemin={0}
+        aria-valuenow={cleanPercentLeft}
+        role="meter"
+      >
+        <span style={{ width: `${cleanPercentLeft}%` }} />
       </div>
     </div>
   );
 }
 
-function formatAiUsageLimitMessage(status: StudentAiUsageStatus) {
-  const resetHint = status.resetHint?.trim();
+function formatTutoringResetLabel(resetAt?: string) {
+  if (!resetAt) {
+    return "";
+  }
 
-  return resetHint ? `${aiUsageLimitMessage} It resets ${resetHint}.` : aiUsageLimitMessage;
+  const resetDate = new Date(resetAt);
+
+  if (!Number.isFinite(resetDate.getTime())) {
+    return "";
+  }
+
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const resetDayStart = new Date(resetDate.getFullYear(), resetDate.getMonth(), resetDate.getDate()).getTime();
+  const daysUntilReset = Math.round((resetDayStart - todayStart) / (24 * 60 * 60 * 1000));
+  const timeLabel = new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(resetDate);
+  let dayLabel: string;
+
+  if (daysUntilReset === 0) {
+    dayLabel = "today";
+  } else if (daysUntilReset === 1) {
+    dayLabel = "tomorrow";
+  } else if (daysUntilReset >= 2 && daysUntilReset <= 6) {
+    dayLabel = new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(resetDate);
+  } else if (daysUntilReset >= 7 && daysUntilReset <= 13) {
+    dayLabel = `next ${new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(resetDate)}`;
+  } else {
+    dayLabel = new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: "short"
+    }).format(resetDate);
+  }
+
+  return `Resets ${dayLabel} at ${timeLabel}`;
 }
 
 function usageSummaryFromStatus(status: StudentAiUsageStatus | null): UsageSummary {
@@ -3012,8 +3190,8 @@ function usageSummaryFromStatus(status: StudentAiUsageStatus | null): UsageSumma
     dailyLimit: positiveNumber(status?.dailyLimit, 100),
     weeklyUsed: nonnegativeNumber(status?.weeklyUsed, 0),
     weeklyLimit: positiveNumber(status?.weeklyLimit, 400),
-    todayPercentLeft: clampPercent(status?.todayPercentRemaining ?? 100),
-    weekPercentLeft: clampPercent(status?.weekPercentRemaining ?? 100)
+    todayPercentLeft: status ? clampPercent(status.todayPercentRemaining) : 0,
+    weekPercentLeft: status ? clampPercent(status.weekPercentRemaining) : 0
   };
 }
 
@@ -3100,6 +3278,7 @@ function buildChatContextMemory(messages: ChatMessage[]): ChatContextMemory {
   const latestStructuredMessage = assistantMessages.find(
     (message) =>
       message.sources?.length ||
+      message.langGraphTrace?.knowledgeItems?.length ||
       message.langGraphTrace?.selectedPages?.length ||
       message.langGraphTrace?.selectedMetadataRecords?.length
   );
@@ -3130,17 +3309,10 @@ function buildChatContextMemory(messages: ChatMessage[]): ChatContextMemory {
       .filter((problem): problem is NonNullable<ChatContextMemory["currentProblem"]> => Boolean(problem))
   );
   const sourcesUsed = dedupeContextSources(
-    (latestStructuredMessage.sources ?? []).map((source) => ({
-      id: source.id,
-      sourceName: source.title,
-      pageNumber: source.pageNumber,
-      problemNumber: source.problemNumber,
-      label: formatContextSource({
-        sourceName: source.title,
-        pageNumber: source.pageNumber,
-        problemNumber: source.problemNumber
-      })
-    }))
+    [
+      ...contextSourcesFromTutorSources(latestStructuredMessage),
+      ...contextSourcesFromKnowledgeItems(latestStructuredMessage)
+    ]
   );
   const failedSearches = [
     ...(trace?.failedSearchesSkipped ?? []).map((query) => ({
@@ -3185,6 +3357,36 @@ function hasChatContextMemory(contextMemory: ChatContextMemory) {
       contextMemory.failedSearches?.length ||
       contextMemory.retrievalReason
   );
+}
+
+function contextSourcesFromTutorSources(message: ChatMessage): NonNullable<ChatContextMemory["sourcesUsed"]> {
+  return (message.sources ?? []).map((source) => ({
+    id: source.id,
+    sourceName: source.title,
+    pageNumber: source.pageNumber,
+    problemNumber: source.problemNumber,
+    label: formatContextSource({
+      sourceName: source.title,
+      pageNumber: source.pageNumber,
+      problemNumber: source.problemNumber
+    })
+  }));
+}
+
+function contextSourcesFromKnowledgeItems(message: ChatMessage): NonNullable<ChatContextMemory["sourcesUsed"]> {
+  return (message.langGraphTrace?.knowledgeItems ?? [])
+    .filter((item) => item.kind === "pdf_page")
+    .map((item) => ({
+      id: item.sourceId || item.pdfId || item.id,
+      sourceName: item.sourceName,
+      pageNumber: item.page,
+      problemNumber: item.usedAs === "problem_source" ? item.problemId : undefined,
+      label: formatContextSource({
+        sourceName: item.sourceName,
+        pageNumber: item.page,
+        problemNumber: item.usedAs === "problem_source" ? item.problemId : undefined
+      })
+    }));
 }
 
 function contextProblemFromMessage(message: ChatMessage) {
@@ -3323,17 +3525,41 @@ function normalizeComparableProblemText(text?: string) {
 }
 
 function dedupeContextSources(sources: NonNullable<ChatContextMemory["sourcesUsed"]>) {
-  const seen = new Set<string>();
   const deduped: NonNullable<ChatContextMemory["sourcesUsed"]> = [];
 
   for (const source of sources) {
-    const key = [source.sourceName?.toLowerCase() ?? source.id ?? "", source.pageNumber ?? "", source.problemNumber ?? ""].join("|");
+    const sourceIdentity = source.sourceName?.toLowerCase() || source.id || "";
+    const pageOrProblem = source.pageNumber ?? (source.problemNumber ? `problem:${source.problemNumber.toLowerCase()}` : "");
+    const key = [sourceIdentity, pageOrProblem].join("|");
+    const existingIndex = deduped.findIndex((dedupedSource) => {
+      const dedupedIdentity = dedupedSource.sourceName?.toLowerCase() || dedupedSource.id || "";
+      const dedupedPageOrProblem =
+        dedupedSource.pageNumber ??
+        (dedupedSource.problemNumber ? `problem:${dedupedSource.problemNumber.toLowerCase()}` : "");
 
-    if (seen.has(key) || (!source.sourceName && !source.pageNumber && !source.problemNumber)) {
+      return [dedupedIdentity, dedupedPageOrProblem].join("|") === key;
+    });
+
+    if (!source.sourceName && !source.pageNumber && !source.problemNumber) {
       continue;
     }
 
-    seen.add(key);
+    if (existingIndex >= 0) {
+      const existing = deduped[existingIndex];
+      deduped[existingIndex] = {
+        id: existing.id || source.id,
+        sourceName: existing.sourceName || source.sourceName,
+        pageNumber: existing.pageNumber ?? source.pageNumber,
+        problemNumber: existing.problemNumber || source.problemNumber,
+        label: formatContextSource({
+          sourceName: existing.sourceName || source.sourceName,
+          pageNumber: existing.pageNumber ?? source.pageNumber,
+          problemNumber: existing.problemNumber || source.problemNumber
+        })
+      };
+      continue;
+    }
+
     deduped.push(source);
   }
 
@@ -3382,10 +3608,6 @@ function formatOcrConfidence(confidence?: number) {
   }
 
   return confidence <= 1 ? `${Math.round(confidence * 100)}%` : `${Math.round(confidence)}%`;
-}
-
-function formatUsageNumber(value: number) {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(Math.max(0, Math.round(value)));
 }
 
 function clampPercent(value: number) {
@@ -3475,6 +3697,16 @@ function upsertChatMessage(messages: ChatMessage[], message: ChatMessage) {
   }
 
   return messages.map((currentMessage, index) => (index === existingIndex ? message : currentMessage));
+}
+
+function upsertFinalAssistantMessage(messages: ChatMessage[], message: ChatMessage) {
+  const existingIndex = messages.findIndex((currentMessage) => currentMessage.id === message.id);
+
+  if (existingIndex !== -1) {
+    return messages.map((currentMessage, index) => (index === existingIndex ? message : currentMessage));
+  }
+
+  return [...messages, message];
 }
 
 async function fetchStudentAiUsageStatus({
@@ -3807,6 +4039,7 @@ function mergeStudentClasses(classes: StudentClassSummary[], activeClass: Studen
 
   if (activeClass) {
     classMap.set(activeClass.id, {
+      chatBlocked: activeClass.chatBlocked,
       id: activeClass.id,
       joinCode: activeClass.joinCode,
       name: activeClass.name,
@@ -3830,6 +4063,11 @@ function describeStudentConversationLoadError(caughtError: unknown) {
 
 function describeStudentConversationMessageError(caughtError: unknown) {
   return caughtError instanceof Error ? caughtError.message : "Conversation messages failed to load.";
+}
+
+function isPausedChatAccessMessage(message: string) {
+  const normalized = message.toLowerCase();
+  return normalized.includes("chat is paused") || normalized.includes("teacher has paused chat");
 }
 
 function validateComposerAttachmentFile(file: File) {
@@ -3964,6 +4202,14 @@ function formatConversationMeta(conversation: StudentConversationSummary) {
     `${conversation.messageCount} messages`,
     formatConversationDate(conversation.lastMessageAt)
   ].filter(Boolean).join(" / ");
+}
+
+function formatConversationDisplayTitle(conversation: StudentConversationSummary) {
+  return conversation.problemLabel || conversation.title;
+}
+
+function formatConversationHoverTitle(conversation: StudentConversationSummary) {
+  return [formatConversationDisplayTitle(conversation), conversation.problemSummary].filter(Boolean).join(": ");
 }
 
 function formatConversationCompactLabel(title: string) {

@@ -250,11 +250,19 @@ export async function saveAssistantMessage({
   });
   await saveConversationCurrentContext({ conversationId });
 
-  await updateVagueConversationTitleFromTutorResponse({
+  const updatedProblemMetadata = await updateConversationProblemMetadataFromTutorResponse({
     classId: scope.classId,
     conversationId,
     response
   });
+
+  if (!updatedProblemMetadata) {
+    await updateVagueConversationTitleFromTutorResponse({
+      classId: scope.classId,
+      conversationId,
+      response
+    });
+  }
 }
 
 export function buildConversationTitle(prompt: string) {
@@ -1049,6 +1057,8 @@ export async function listStudentConversationMessages({
 }
 
 function conversationDocToSummary(id: string, data: Record<string, unknown>): StudentConversationSummary {
+  const problemMetadata = conversationProblemMetadata(data);
+
   return {
     assignment: stringOrUndefined(data.assignment),
     classId: String(data.classId ?? ""),
@@ -1059,6 +1069,7 @@ function conversationDocToSummary(id: string, data: Record<string, unknown>): St
     lastMessageAt: serializeFirestoreValue(data.lastMessageAt),
     messageCount: Number(data.messageCount ?? 0),
     modelId: String(data.modelId ?? ""),
+    ...problemMetadata,
     studentEmail: String(data.studentEmail ?? ""),
     studentId: String(data.studentId ?? ""),
     studentName: String(data.studentName ?? "Student"),
@@ -1071,6 +1082,8 @@ function conversationDocToSummary(id: string, data: Record<string, unknown>): St
 }
 
 function conversationRecordToSummary(conversation: Awaited<ReturnType<typeof getConversationById>> extends infer T ? NonNullable<T> : never): StudentConversationSummary {
+  const problemMetadata = conversationProblemMetadata(conversation.metadata);
+
   return {
     assignment: conversation.assignment || undefined,
     classId: conversation.classId,
@@ -1081,6 +1094,7 @@ function conversationRecordToSummary(conversation: Awaited<ReturnType<typeof get
     lastMessageAt: conversation.lastMessageAt?.toISOString() ?? conversation.updatedAt.toISOString(),
     messageCount: conversation.messageCount,
     modelId: conversation.modelId,
+    ...problemMetadata,
     studentEmail: conversation.studentEmail,
     studentId: conversation.studentId ?? "",
     studentName: conversation.studentName,
@@ -1093,6 +1107,8 @@ function conversationRecordToSummary(conversation: Awaited<ReturnType<typeof get
 }
 
 function conversationRecordToFirestoreData(conversation: Parameters<typeof conversationRecordToSummary>[0]): Record<string, unknown> {
+  const problemMetadata = conversationProblemMetadata(conversation.metadata);
+
   return {
     assignment: conversation.assignment,
     classId: conversation.classId,
@@ -1103,6 +1119,7 @@ function conversationRecordToFirestoreData(conversation: Parameters<typeof conve
     lastMessageAt: conversation.lastMessageAt?.toISOString() ?? conversation.updatedAt.toISOString(),
     messageCount: conversation.messageCount,
     modelId: conversation.modelId,
+    ...problemMetadata,
     studentEmail: conversation.studentEmail,
     studentId: conversation.studentId ?? "",
     studentName: conversation.studentName,
@@ -1142,8 +1159,13 @@ function messageRecordToChatMessage(message: Awaited<ReturnType<typeof listPostg
     retrievalConfidence: normalizeRetrievalConfidence(message.retrievalConfidence),
     role: message.role,
     sources: Array.isArray(message.sources) ? message.sources as ChatMessage["sources"] : undefined,
+    studentMessageMode: normalizeStudentMessageMode(message.metadata.studentMessageMode),
     structuredOutput: normalizeStructuredTutorOutput(message.structuredOutput, message.content)
   };
+}
+
+function normalizeStudentMessageMode(value: unknown): ChatMessage["studentMessageMode"] {
+  return value === "ask" || value === "work" ? value : undefined;
 }
 
 function messageRecordToStudentChatMessage(message: Awaited<ReturnType<typeof listPostgresConversationMessages>>[number]): ChatMessage {
@@ -1167,6 +1189,39 @@ function reviewRecordToTeacherReview(review: Awaited<ReturnType<typeof listConve
     teacherId: String(review.metadata.teacherId ?? review.reviewedBy ?? ""),
     updatedAt: review.updatedAt.toISOString()
   };
+}
+
+async function updateConversationProblemMetadataFromTutorResponse({
+  classId,
+  conversationId,
+  response
+}: {
+  classId: string;
+  conversationId: string;
+  response: TutorApiResponse;
+}) {
+  const problemMetadata = buildConversationProblemMetadataFromTutorResponse(response);
+
+  if (!problemMetadata.problemNumber || !problemMetadata.problemLabel) {
+    return false;
+  }
+
+  const conversation = await getConversationById(conversationId);
+
+  if (!conversation || conversation.classId !== classId) {
+    return false;
+  }
+
+  await updateConversationMetadata({
+    id: conversationId,
+    metadata: problemMetadata
+  });
+
+  if (conversation.title !== problemMetadata.problemLabel) {
+    await updateConversationTitle({ id: conversationId, title: problemMetadata.problemLabel });
+  }
+
+  return true;
 }
 
 async function updateVagueConversationTitleFromTutorResponse({
@@ -1227,6 +1282,155 @@ function buildConversationTitleFromTutorResponse(response: TutorApiResponse) {
   }
 
   return inferTopicConversationTitle(response.message);
+}
+
+function buildConversationProblemMetadataFromTutorResponse(response: TutorApiResponse) {
+  const structuredMetadata = response.structuredOutput?.metadata;
+  const problemText = response.structuredOutput?.sections.problem ?? "";
+  const problemNumber =
+    normalizeProblemNumber(structuredMetadata?.problemNumber) ||
+    firstProblemNumberFromSources(response.sources) ||
+    firstProblemNumberFromSelectedPages(response.langGraphTrace?.selectedPages) ||
+    firstProblemNumberFromMetadataRecords(response.langGraphTrace?.selectedMetadataRecords) ||
+    firstProblemNumberFromText(problemText);
+  const problemSummary =
+    normalizeProblemSummary(structuredMetadata?.problemSummary) ||
+    summarizeProblemText(problemText) ||
+    summarizeMetadataProblemText(response.langGraphTrace?.selectedMetadataRecords);
+  const problemLabel = problemNumber ? `Problem ${problemNumber}` : "";
+
+  return {
+    ...(problemLabel ? { problemLabel } : {}),
+    ...(problemNumber ? { problemNumber } : {}),
+    ...(problemSummary ? { problemSummary } : {})
+  };
+}
+
+function conversationProblemMetadata(data: Record<string, unknown>) {
+  const currentContext = isRecord(data.currentContext) ? data.currentContext : {};
+  const currentProblem = isRecord(currentContext.currentProblem) ? currentContext.currentProblem : {};
+  const problemNumber =
+    normalizeProblemNumber(data.problemNumber) ||
+    normalizeProblemNumber(currentProblem.problemNumber) ||
+    firstProblemNumberFromText(String(currentProblem.problemText ?? ""));
+  const problemLabel = stringOrUndefined(data.problemLabel) || (problemNumber ? `Problem ${problemNumber}` : undefined);
+  const problemSummary =
+    normalizeProblemSummary(data.problemSummary) ||
+    normalizeProblemSummary(currentProblem.title) ||
+    summarizeProblemText(String(currentProblem.problemText ?? ""));
+
+  return {
+    ...(problemLabel ? { problemLabel } : {}),
+    ...(problemNumber ? { problemNumber } : {}),
+    ...(problemSummary ? { problemSummary } : {})
+  };
+}
+
+function firstProblemNumberFromSources(sources: TutorSource[] | undefined) {
+  for (const source of sources ?? []) {
+    const problemNumber = normalizeProblemNumber(source.problemNumber);
+
+    if (problemNumber) {
+      return problemNumber;
+    }
+
+    for (const item of source.problemNumbers ?? []) {
+      const sourceProblemNumber = normalizeProblemNumber(item);
+
+      if (sourceProblemNumber) {
+        return sourceProblemNumber;
+      }
+    }
+  }
+
+  return "";
+}
+
+function firstProblemNumberFromSelectedPages(pages: TutorTrace["selectedPages"] | undefined) {
+  for (const page of pages ?? []) {
+    for (const problemNumber of page.problemNumbers ?? []) {
+      const normalized = normalizeProblemNumber(problemNumber);
+
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+
+  return "";
+}
+
+function firstProblemNumberFromMetadataRecords(records: Array<Record<string, unknown>> | undefined) {
+  for (const record of records ?? []) {
+    const problemNumber = firstProblemNumberFromUnknownList(record.problem_numbers) || firstProblemNumberFromUnknownList(record.problemNumbers);
+
+    if (problemNumber) {
+      return problemNumber;
+    }
+  }
+
+  return "";
+}
+
+function firstProblemNumberFromUnknownList(value: unknown) {
+  if (!Array.isArray(value)) {
+    return "";
+  }
+
+  for (const item of value) {
+    const problemNumber = normalizeProblemNumber(item);
+
+    if (problemNumber) {
+      return problemNumber;
+    }
+  }
+
+  return "";
+}
+
+function firstProblemNumberFromText(text: string) {
+  const match =
+    text.match(/\b(?:problem|exercise|question|ex\.?)\s*#?\s*(\d{1,3}(?:\.\d{1,3})?[a-z]?)\b/i) ||
+    text.match(/(?<![\d.])(\d{1,3}\.\d{1,3}[a-z]?)(?![\d.])/i);
+
+  return normalizeProblemNumber(match?.[1]);
+}
+
+function normalizeProblemNumber(value: unknown) {
+  return String(value ?? "").trim().replace(/^#/, "").slice(0, 40);
+}
+
+function normalizeProblemSummary(value: unknown) {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, 180);
+}
+
+function summarizeMetadataProblemText(records: Array<Record<string, unknown>> | undefined) {
+  for (const record of records ?? []) {
+    const summary = summarizeProblemText(String(record.problem_text ?? record.problemText ?? record.ocr_text ?? record.ocrText ?? record.chunk_text ?? ""));
+
+    if (summary) {
+      return summary;
+    }
+  }
+
+  return "";
+}
+
+function summarizeProblemText(problemText: string) {
+  const normalized = problemText
+    .replace(/\s+/g, " ")
+    .replace(/^(?:problem|exercise|question|ex\.?)\s*#?\s*\d{1,3}(?:\.\d{1,3})?[a-z]?\s*[:.)-]?\s*/i, "")
+    .replace(/^\d{1,3}(?:\.\d{1,3})?[a-z]?\s*[:.)-]\s*/i, "")
+    .trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  const words = normalized.split(/\s+/).slice(0, 12);
+  const summary = words.join(" ").replace(/[.,;:]+$/g, "");
+
+  return normalized.split(/\s+/).length > words.length ? `${summary}...` : summary;
 }
 
 function inferTopicConversationTitle(text: string) {
@@ -1423,7 +1627,8 @@ async function saveConversationMessage({
     retrievalConfidence: message.role === "assistant" ? message.retrievalConfidence : undefined,
     role: message.role,
     sources: message.sources,
-    structuredOutput: message.role === "assistant" ? message.structuredOutput : undefined
+    structuredOutput: message.role === "assistant" ? message.structuredOutput : undefined,
+    metadata: message.studentMessageMode ? { studentMessageMode: message.studentMessageMode } : undefined
   });
 }
 

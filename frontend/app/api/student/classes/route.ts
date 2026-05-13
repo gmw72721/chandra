@@ -10,6 +10,7 @@ export const runtime = "nodejs";
 
 type StudentClassSummary = {
   appearance: string;
+  chatBlocked: boolean;
   id: string;
   joinCode?: string;
   name: string;
@@ -70,7 +71,13 @@ export async function GET(request: Request) {
       classIds.add(classId);
     }
 
-    const classResults = await Promise.all(Array.from(classIds).map((classId) => getStudentClassSummary(classId)));
+    const studentIdentity = {
+      email,
+      uid: decodedToken.uid
+    };
+    const classResults = await Promise.all(
+      Array.from(classIds).map((classId) => getStudentClassSummary(classId, studentIdentity))
+    );
     const classes = classResults
       .filter((teacherClass): teacherClass is StudentClassSummary => teacherClass !== null)
       .sort((firstClass, secondClass) =>
@@ -137,7 +144,10 @@ async function getRosterClassIdsByUid(uid: string) {
   }
 }
 
-async function getStudentClassSummary(classId: string): Promise<StudentClassSummary | null> {
+async function getStudentClassSummary(
+  classId: string,
+  studentIdentity: { email: string; uid: string }
+): Promise<StudentClassSummary | null> {
   const classSnapshot = await getClassSnapshotPostgresFirst(classId);
 
   if (!classSnapshot.exists) {
@@ -145,9 +155,11 @@ async function getStudentClassSummary(classId: string): Promise<StudentClassSumm
   }
 
   const classData = classSnapshot.data;
+  const chatBlocked = await getStudentChatBlocked(classId, studentIdentity);
 
   return {
     appearance: normalizeTeacherClassAppearance(classData.appearance),
+    chatBlocked,
     id: classSnapshot.id,
     ...(String(classData.joinCode ?? "").trim() ? { joinCode: String(classData.joinCode ?? "").trim() } : {}),
     name: String(classData.name ?? "Saved class").trim() || "Saved class",
@@ -158,6 +170,42 @@ async function getStudentClassSummary(classId: string): Promise<StudentClassSumm
     studentChatEnabled: readTutorAccessEnabled(classData.tutorAccess) !== false && classData.studentChatEnabled !== false,
     themeColor: normalizeTeacherClassThemeColor(classData.themeColor)
   };
+}
+
+async function getStudentChatBlocked(classId: string, { email, uid }: { email: string; uid: string }) {
+  const supportDocumentId = email ? encodeURIComponent(email) : "";
+  const [supportSnapshot, rosterSnapshot, uidRosterSnapshot] = await Promise.all([
+    supportDocumentId
+      ? adminDb!
+          .collection("classes")
+          .doc(classId)
+          .collection("studentSupport")
+          .doc(supportDocumentId)
+          .get()
+      : null,
+    supportDocumentId
+      ? adminDb!
+          .collection("classes")
+          .doc(classId)
+          .collection("students")
+          .doc(supportDocumentId)
+          .get()
+      : null,
+    adminDb!
+      .collection("classes")
+      .doc(classId)
+      .collection("students")
+      .where("uid", "==", uid)
+      .limit(1)
+      .get()
+  ]);
+  const uidRosterDoc = uidRosterSnapshot.docs[0] ?? null;
+
+  return (
+    supportSnapshot?.data()?.chatBlocked === true ||
+    rosterSnapshot?.data()?.chatBlocked === true ||
+    uidRosterDoc?.data()?.chatBlocked === true
+  );
 }
 
 function readTutorAccessEnabled(value: unknown) {

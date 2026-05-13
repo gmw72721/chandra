@@ -176,6 +176,7 @@ const chatRequestSchema = z.object({
               pageStart: z.number().optional(),
               printedPageEnd: z.number().optional(),
               printedPageStart: z.number().optional(),
+              problemNumbers: z.array(z.string()).optional(),
               title: z.string().optional()
             })
           ),
@@ -191,10 +192,12 @@ const chatRequestSchema = z.object({
             materialType: z.string(),
             pageNumber: z.number().optional(),
             problemNumber: z.string().optional(),
+            problemNumbers: z.array(z.string()).optional(),
             title: z.string()
           })
         )
         .optional(),
+      studentMessageMode: z.enum(["ask", "work"]).optional(),
       structuredOutput: z
         .union([
           z.object({
@@ -226,6 +229,8 @@ const chatRequestSchema = z.object({
               .optional(),
             metadata: z.object({
               hintLevel: z.enum(tutorHintLevels),
+              problemNumber: z.string().optional(),
+              problemSummary: z.string().optional(),
               sourceConfidence: z.enum(["high", "medium", "low"]),
               studentActionNeeded: z.enum(tutorStudentActions),
               mode: z.enum(tutorModes)
@@ -1420,7 +1425,7 @@ function studentMessageForChatError(code: StudentChatErrorCode) {
     case "CHAT_REQUEST_INVALID":
       return "I could not send that message. Refresh the page and try again.";
     case "CHAT_AI_USAGE_EXHAUSTED":
-      return "Sorry, you have reached your Chandra usage limit. Ask your professor to allow more usage.";
+      return "You're out of tutoring time for today. Ask your professor for more.";
     case "TUTOR_BACKEND_REQUEST_TOO_LARGE":
       return "This chat is too large to send. Start a new chat and try again.";
     case "TUTOR_BACKEND_UNREACHABLE":
@@ -1934,6 +1939,7 @@ function buildPdfToolChoosingTutorSystemPrompt(
     "- Allowed labels are only `Problem:`, `Hint:`, `Why this works:`, `Formula:`, `Example:`, and `Check your work:`.",
     "- Before using `Problem:`, classify the candidate text: it must be the exact academic exercise/question/task statement the student is working on, either supplied by the student or found in selected class material. Do not use `Problem:` for an issue/error, `You said...` recap, lookup/checking status, clarification, request for a page/title/textbook, source note, offer, hint, next step, or commentary; put those in the main answer or leave them out.",
     "- If you use `Problem:`, put only the problem statement there. Never put prompts like `send me your work`, `what have you tried`, offers, hints, next steps, source context, or commentary inside `Problem:`.",
+    "- If you use `Problem:`, also set structured metadata `problemNumber` when visible and `problemSummary` to a short noun phrase of at most 12 words describing the task, without solving it.",
     "- If the student is following up after a problem statement was already shown and asks for help, says they are lost/confused/stuck, asks for a hint, or asks what to try, do not restate the problem statement or include a `Problem:` section again.",
     "- For that bare stuck follow-up, use at most one nudge plus one question. Do not use both `Hint:` and `nextStep` unless `nextStep` only asks the student to show work; otherwise prefer one concise reply or one short `Hint:` and leave `nextStep` empty.",
     "- Use `Hint:` when the student is stuck or asks how to start: give one small nudge or leading question. Keep it short, direct, and usually one sentence. Do not put citations, definitions, commentary, offers, or multiple bullet-like ideas in `Hint:`.",

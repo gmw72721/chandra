@@ -53,6 +53,12 @@ export type AiUsageReservationRecord = {
   userId: string;
 };
 
+export type AiUsageAnchorRecord = {
+  anchorAt: string;
+  classId: string;
+  studentId: string;
+};
+
 type TokenBucketRow = {
   id: string;
   class_id: string | null;
@@ -102,6 +108,12 @@ type ReservationRow = {
 
 type AllowanceRow = {
   extra_tokens: number;
+};
+
+type AnchorRow = {
+  anchor_at: Date | string;
+  class_id: string;
+  student_id: string;
 };
 
 export class PostgresAiUsageLimitDataError extends Error {
@@ -203,6 +215,53 @@ export async function reserveAiUsagePostgres(input: {
 
     return { requestBuckets, tokenBuckets };
   });
+}
+
+export async function ensureAiUsageAnchorPostgres(input: {
+  anchorAt: string;
+  classId: string;
+  studentId: string;
+}, client?: PostgresQueryClient) {
+  await runPostgresQuery(
+    client,
+    `INSERT INTO ai_usage_anchors (
+      class_id, student_id, anchor_at
+    ) VALUES (
+      $1, $2, $3
+    )
+    ON CONFLICT (class_id, student_id) DO NOTHING`,
+    [input.classId, input.studentId, input.anchorAt]
+  );
+
+  const anchor = await getAiUsageAnchorPostgres({
+    classId: input.classId,
+    studentId: input.studentId
+  }, client);
+
+  if (!anchor) {
+    return {
+      anchorAt: input.anchorAt,
+      classId: input.classId,
+      studentId: input.studentId
+    };
+  }
+
+  return anchor;
+}
+
+export async function getAiUsageAnchorPostgres(input: {
+  classId: string;
+  studentId: string;
+}, client?: PostgresQueryClient) {
+  const result = await runPostgresQuery<AnchorRow>(
+    client,
+    `SELECT class_id, student_id, anchor_at
+    FROM ai_usage_anchors
+    WHERE class_id = $1 AND student_id = $2`,
+    [input.classId, input.studentId]
+  );
+
+  return result.rows[0] ? rowToAnchor(result.rows[0]) : null;
 }
 
 export async function getAiUsageReservationPostgres(id: string, client?: PostgresQueryClient) {
@@ -530,5 +589,15 @@ function rowToReservation(row: ReservationRow): AiUsageReservationRecord {
     status: row.status,
     studentId: row.student_id ?? "",
     userId: row.user_id ?? ""
+  };
+}
+
+function rowToAnchor(row: AnchorRow): AiUsageAnchorRecord {
+  const anchorAt = row.anchor_at instanceof Date ? row.anchor_at.toISOString() : String(row.anchor_at);
+
+  return {
+    anchorAt,
+    classId: row.class_id,
+    studentId: row.student_id
   };
 }

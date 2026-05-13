@@ -6,7 +6,9 @@ import { authorizeTutorChatRequest, TutorChatHttpError } from "@/lib/tutor-chat-
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const scope = await authorizeTutorChatRequest(request, searchParams.get("courseId") ?? undefined);
+    const scope = await authorizeTutorChatRequest(request, searchParams.get("courseId") ?? undefined, {
+      enforceStudentChatAccess: false
+    });
 
     if (scope.role !== "student") {
       return NextResponse.json({ error: "Use a student account to view AI usage." }, { status: 403 });

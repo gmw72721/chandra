@@ -15,7 +15,9 @@ export async function GET(
   try {
     const url = new URL(request.url);
     const { attachmentId, conversationId } = await params;
-    const scope = await authorizeTutorChatRequest(request, url.searchParams.get("courseId") ?? undefined);
+    const scope = await authorizeTutorChatRequest(request, url.searchParams.get("courseId") ?? undefined, {
+      enforceStudentChatAccess: false
+    });
     const attachment = await getStudentConversationAttachment({ attachmentId, conversationId, scope });
 
     return NextResponse.json({ attachment });

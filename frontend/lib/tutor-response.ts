@@ -103,6 +103,7 @@ export function normalizeStructuredTutorOutput(
     ...(sectionOrder.length ? { sectionOrder } : {}),
     metadata: {
       hintLevel: includesString(tutorHintLevels, metadataRecord.hintLevel) ? metadataRecord.hintLevel : "guided_step",
+      ...optionalProblemMetadata(metadataRecord),
       sourceConfidence: normalizeRetrievalConfidence(metadataRecord.sourceConfidence),
       studentActionNeeded: includesString(tutorStudentActions, metadataRecord.studentActionNeeded)
         ? metadataRecord.studentActionNeeded
@@ -179,6 +180,16 @@ function normalizeSectionOrder(value: unknown) {
 
 function normalizeRetrievalConfidence(value: unknown): RetrievalConfidence {
   return value === "high" || value === "medium" ? value : "low";
+}
+
+function optionalProblemMetadata(metadataRecord: Record<string, unknown>) {
+  const problemNumber = stringValue(metadataRecord.problemNumber).slice(0, 40);
+  const problemSummary = stringValue(metadataRecord.problemSummary).slice(0, 180);
+
+  return {
+    ...(problemNumber ? { problemNumber } : {}),
+    ...(problemSummary ? { problemSummary } : {})
+  };
 }
 
 function includesString<const T extends readonly string[]>(values: T, value: unknown): value is T[number] {

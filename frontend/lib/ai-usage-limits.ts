@@ -11,7 +11,9 @@ import { adminDb, assertFirebaseAdminAuthReady } from "./firebase-admin";
 import { isPostgresConfigured, shouldFallbackToFirestoreWhenPostgresFails } from "./data/postgres.ts";
 import {
   adjustAiUsageReservationPostgres,
+  ensureAiUsageAnchorPostgres,
   finalizeAiUsagePostgres,
+  getAiUsageAnchorPostgres,
   getAiUsageReservationPostgres,
   getAiUsageAllowancePercentPostgres,
   listAiUsageTokenBucketsPostgres,
@@ -32,6 +34,8 @@ const openRouterToolSchemaReserveTokens = 600;
 const ragModelPassReserveTokens = 1_000;
 const pdfPageAssetReserveTokens = 4_000;
 const attachmentReserveTokens = 1_500;
+const dayBucketDurationMs = 24 * 60 * 60 * 1000;
+const weekBucketDurationMs = 7 * dayBucketDurationMs;
 
 export type AiTokenUsage = {
   inputTokens: number;
@@ -46,8 +50,10 @@ export type StudentAiUsageStatus = {
   dailyUsed?: number;
   nearLimit: boolean;
   resetHint: string;
+  dailyResetAt?: string;
   todayPercentRemaining: number;
   weekPercentRemaining: number;
+  weeklyResetAt?: string;
   weeklyLimit?: number;
   weeklyUsed?: number;
 };
@@ -112,6 +118,12 @@ type TokenBucketSnapshot = TokenBucketSpec & {
   actualOutputTokens: number;
   actualTotalTokens: number;
   reservedTokens: number;
+};
+
+type StudentAiUsageAnchor = {
+  anchorAt: Date;
+  classId: string;
+  studentId: string;
 };
 
 export class AiUsageLimitError extends Error {
@@ -183,14 +195,19 @@ export async function reserveAiTokenUsage({
   const cleanEstimate = Math.max(1, Math.ceil(estimatedTokens));
   const cleanEstimatedInputTokens = Math.max(0, Math.ceil(estimatedInputTokens ?? cleanEstimate));
   const cleanEstimatedOutputTokens = Math.max(0, Math.ceil(estimatedOutputTokens ?? 0));
+  const usageAnchor = role === "student" && quotaUserId
+    ? await ensureStudentAiUsageAnchor({ classId, now, studentId: quotaUserId })
+    : null;
+  const usageWindows = usageAnchor ? aiUsageWindows(now, usageAnchor.anchorAt) : null;
   const limits = await tokenLimitsWithActiveAllowance({
     classId,
+    dayBucket: usageWindows?.day.bucketKey,
     now,
     studentId: quotaUserId,
     tokenLimits
   });
   const specs = role === "student" && quotaUserId
-    ? tokenBucketSpecs({ classId, ipAddress, now, studentId: quotaUserId, tokenLimits: limits })
+    ? tokenBucketSpecs({ anchor: usageAnchor?.anchorAt, classId, ipAddress, now, studentId: quotaUserId, tokenLimits: limits })
     : [];
   const requestQuotaSpecs = requestQuotaBucketSpecs({
     classId,
@@ -612,7 +629,7 @@ function blockedUsageStatus(): StudentAiUsageStatus {
 }
 
 function blockedRealUsageStatus(
-  buckets: Pick<TokenBucketSnapshot, "actualTotalTokens" | "limit" | "period" | "reservedTokens" | "scope">[]
+  buckets: Pick<TokenBucketSnapshot, "actualTotalTokens" | "bucketKey" | "limit" | "period" | "reservedTokens" | "scope">[]
 ): StudentAiUsageStatus {
   return buckets.length ? studentStatusFromBuckets(buckets, true) : blockedUsageStatus();
 }
@@ -625,13 +642,22 @@ export async function getStudentAiUsageStatus(
   assertFirebaseAdminAuthReady();
 
   const now = new Date();
+  const usageAnchor = await getStudentAiUsageAnchor({ classId, studentId });
+
+  if (!usageAnchor) {
+    return studentStatusFromBuckets([]);
+  }
+
+  const usageWindows = aiUsageWindows(now, usageAnchor.anchorAt);
   const limits = await tokenLimitsWithActiveAllowance({
     classId,
+    dayBucket: usageWindows.day.bucketKey,
     now,
     studentId,
     tokenLimits
   });
   const specs = tokenBucketSpecs({
+    anchor: usageAnchor.anchorAt,
     classId,
     ipAddress: "",
     now,
@@ -680,7 +706,8 @@ export async function grantStudentAiUsageAllowance({
 
   const now = new Date();
   const cleanPercent = normalizeAllowancePercent(percent);
-  const dayBucket = dayBucketKey(now);
+  const usageAnchor = await getStudentAiUsageAnchor({ classId, studentId });
+  const dayBucket = usageAnchor ? aiUsageWindows(now, usageAnchor.anchorAt).day.bucketKey : dayBucketKey(now);
   const allowanceReference = aiUsageAllowanceReference(classId, studentId, dayBucket);
 
   if (isPostgresConfigured()) {
@@ -797,15 +824,17 @@ function blockedStudentStatusAfterReservation(buckets: TokenBucketSnapshot[], es
 }
 
 function studentStatusFromBuckets(
-  buckets: Pick<TokenBucketSnapshot, "actualTotalTokens" | "limit" | "period" | "reservedTokens" | "scope">[],
+  buckets: Pick<TokenBucketSnapshot, "actualTotalTokens" | "bucketKey" | "limit" | "period" | "reservedTokens" | "scope">[],
   forceBlocked = false
 ): StudentAiUsageStatus {
   let dayRemaining = 100;
   let dailyLimit = 100;
   let dailyUsed = 0;
+  let dailyResetAt: string | undefined;
   let weekRemaining = 100;
   let weeklyLimit = 400;
   let weeklyUsed = 0;
+  let weeklyResetAt: string | undefined;
 
   for (const bucket of buckets) {
     if (bucket.scope !== "student" || (bucket.period !== "day" && bucket.period !== "week")) {
@@ -819,12 +848,14 @@ function studentStatusFromBuckets(
       dayRemaining = remainingPercent;
       dailyLimit = bucket.limit;
       dailyUsed = usedTokens;
+      dailyResetAt = anchoredBucketResetAt(bucket.bucketKey, "day");
     }
 
     if (bucket.period === "week") {
       weekRemaining = remainingPercent;
       weeklyLimit = bucket.limit;
       weeklyUsed = usedTokens;
+      weeklyResetAt = anchoredBucketResetAt(bucket.bucketKey, "week");
     }
   }
 
@@ -836,8 +867,10 @@ function studentStatusFromBuckets(
     dailyUsed,
     nearLimit: lowestRemaining > 0 && lowestRemaining <= nearLimitThresholdPercent,
     resetHint: dayRemaining <= weekRemaining ? "today" : "this week",
+    dailyResetAt,
     todayPercentRemaining: dayRemaining,
     weekPercentRemaining: weekRemaining,
+    weeklyResetAt,
     weeklyLimit,
     weeklyUsed
   };
@@ -853,11 +886,13 @@ function percentRemaining(limit: number, usedTokens: number) {
 
 async function tokenLimitsWithActiveAllowance({
   classId,
+  dayBucket,
   now,
   studentId,
   tokenLimits
 }: {
   classId?: string;
+  dayBucket?: string;
   now: Date;
   studentId: string;
   tokenLimits?: Partial<AiTokenLimitSettings> | null;
@@ -868,7 +903,7 @@ async function tokenLimitsWithActiveAllowance({
     return limits;
   }
 
-  const allowancePercent = await activeAiUsageAllowancePercent(classId, studentId, now);
+  const allowancePercent = await activeAiUsageAllowancePercent(classId, studentId, dayBucket ?? dayBucketKey(now));
 
   if (allowancePercent <= 0) {
     return limits;
@@ -881,12 +916,12 @@ async function tokenLimitsWithActiveAllowance({
   };
 }
 
-async function activeAiUsageAllowancePercent(classId: string, studentId: string, now: Date) {
+async function activeAiUsageAllowancePercent(classId: string, studentId: string, dayBucket: string) {
   if (isPostgresConfigured()) {
     try {
       return await getAiUsageAllowancePercentPostgres({
         classId,
-        dayBucket: dayBucketKey(now),
+        dayBucket,
         studentId
       });
     } catch (caughtError) {
@@ -898,7 +933,7 @@ async function activeAiUsageAllowancePercent(classId: string, studentId: string,
     }
   }
 
-  const snapshot = await aiUsageAllowanceReference(classId, studentId, dayBucketKey(now)).get();
+  const snapshot = await aiUsageAllowanceReference(classId, studentId, dayBucket).get();
 
   return normalizeAllowancePercent(snapshot.data()?.percent ?? 0);
 }
@@ -908,12 +943,14 @@ function applyAllowancePercent(limit: number, percent: number) {
 }
 
 function tokenBucketSpecs({
+  anchor,
   classId,
   ipAddress,
   now,
   studentId,
   tokenLimits
 }: {
+  anchor?: Date | null;
   classId?: string;
   ipAddress: string;
   now: Date;
@@ -922,9 +959,10 @@ function tokenBucketSpecs({
 }): TokenBucketSpec[] {
   const limits = normalizeAiTokenLimitSettings(tokenLimits);
   const studentHash = stableHash(classId ? `${classId}:${studentId}` : studentId);
+  const usageWindows = anchor ? aiUsageWindows(now, anchor) : null;
   return [
-    bucketSpec({ bucketKey: dayBucketKey(now), classId, limit: limits.perDay, period: "day", scope: "student", scopeHash: studentHash }),
-    bucketSpec({ bucketKey: weekBucketKey(now), classId, limit: limits.perWeek, period: "week", scope: "student", scopeHash: studentHash })
+    bucketSpec({ bucketKey: usageWindows?.day.bucketKey ?? dayBucketKey(now), classId, limit: limits.perDay, period: "day", scope: "student", scopeHash: studentHash }),
+    bucketSpec({ bucketKey: usageWindows?.week.bucketKey ?? weekBucketKey(now), classId, limit: limits.perWeek, period: "week", scope: "student", scopeHash: studentHash })
   ];
 }
 
@@ -1108,6 +1146,180 @@ function tokenBucketValues(data: Record<string, unknown>) {
     actualTotalTokens: nonnegativeInteger(data.actualTotalTokens),
     reservedTokens: nonnegativeInteger(data.reservedTokens)
   };
+}
+
+async function ensureStudentAiUsageAnchor({
+  classId,
+  now,
+  studentId
+}: {
+  classId: string;
+  now: Date;
+  studentId: string;
+}): Promise<StudentAiUsageAnchor> {
+  if (isPostgresConfigured()) {
+    try {
+      return normalizeStudentAiUsageAnchor(await ensureAiUsageAnchorPostgres({
+        anchorAt: now.toISOString(),
+        classId,
+        studentId
+      }));
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("AI usage anchor Postgres path failed; using Firestore fallback.", caughtError);
+    }
+  }
+
+  return ensureStudentAiUsageAnchorFirestore({ classId, now, studentId });
+}
+
+async function getStudentAiUsageAnchor({
+  classId,
+  studentId
+}: {
+  classId?: string;
+  studentId: string;
+}): Promise<StudentAiUsageAnchor | null> {
+  if (!classId || !studentId) {
+    return null;
+  }
+
+  if (isPostgresConfigured()) {
+    try {
+      const anchor = await getAiUsageAnchorPostgres({ classId, studentId });
+      return anchor ? normalizeStudentAiUsageAnchor(anchor) : null;
+    } catch (caughtError) {
+      if (!shouldFallbackToFirestoreWhenPostgresFails()) {
+        throw caughtError;
+      }
+
+      console.warn("AI usage anchor Postgres path failed; using Firestore fallback.", caughtError);
+    }
+  }
+
+  const snapshot = await aiUsageAnchorReference(classId, studentId).get();
+  return snapshot.exists ? anchorFromFirestoreData(classId, studentId, snapshot.data() ?? {}) : null;
+}
+
+function ensureStudentAiUsageAnchorFirestore({
+  classId,
+  now,
+  studentId
+}: {
+  classId: string;
+  now: Date;
+  studentId: string;
+}) {
+  const reference = aiUsageAnchorReference(classId, studentId);
+  const anchorAt = now.toISOString();
+
+  return adminDb!.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(reference);
+
+    if (snapshot.exists) {
+      return anchorFromFirestoreData(classId, studentId, snapshot.data() ?? {});
+    }
+
+    transaction.set(reference, {
+      anchorAt,
+      classId,
+      createdAt: FieldValue.serverTimestamp(),
+      studentId,
+      updatedAt: FieldValue.serverTimestamp()
+    });
+
+    return {
+      anchorAt: now,
+      classId,
+      studentId
+    };
+  });
+}
+
+function aiUsageAnchorReference(classId: string, studentId: string) {
+  return adminDb!.collection("aiUsageAnchors").doc(stableHash(`${classId}:${studentId}`));
+}
+
+function normalizeStudentAiUsageAnchor(anchor: { anchorAt: Date | string; classId: string; studentId: string }): StudentAiUsageAnchor {
+  return {
+    anchorAt: dateFromUnknown(anchor.anchorAt),
+    classId: anchor.classId,
+    studentId: anchor.studentId
+  };
+}
+
+function anchorFromFirestoreData(classId: string, studentId: string, data: Record<string, unknown>): StudentAiUsageAnchor {
+  return {
+    anchorAt: dateFromUnknown(data.anchorAt),
+    classId,
+    studentId
+  };
+}
+
+function dateFromUnknown(value: unknown) {
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return value;
+  }
+
+  if (typeof value === "object" && value && "toDate" in value) {
+    const maybeTimestamp = value as { toDate?: () => unknown };
+    const firestoreDate = typeof maybeTimestamp.toDate === "function" ? maybeTimestamp.toDate() : null;
+
+    if (firestoreDate instanceof Date && Number.isFinite(firestoreDate.getTime())) {
+      return firestoreDate;
+    }
+  }
+
+  const parsedDate = new Date(String(value ?? ""));
+  return Number.isFinite(parsedDate.getTime()) ? parsedDate : new Date(0);
+}
+
+export function buildAnchoredAiUsageBucketKey(now: Date, anchorAt: Date, period: "day" | "week") {
+  return anchoredBucketWindow(now, anchorAt, period).bucketKey;
+}
+
+export function buildAnchoredAiUsageResetAt(now: Date, anchorAt: Date, period: "day" | "week") {
+  return anchoredBucketWindow(now, anchorAt, period).resetAt;
+}
+
+function aiUsageWindows(now: Date, anchorAt: Date) {
+  return {
+    day: anchoredBucketWindow(now, anchorAt, "day"),
+    week: anchoredBucketWindow(now, anchorAt, "week")
+  };
+}
+
+function anchoredBucketWindow(now: Date, anchorAt: Date, period: "day" | "week") {
+  const periodMs = period === "day" ? dayBucketDurationMs : weekBucketDurationMs;
+  const anchorMillis = anchorAt.getTime();
+  const elapsedPeriods = Math.max(0, Math.floor((now.getTime() - anchorMillis) / periodMs));
+  const resetAt = new Date(anchorMillis + (elapsedPeriods + 1) * periodMs).toISOString();
+
+  return {
+    bucketKey: `anchored_${anchorMillis}_${elapsedPeriods}`,
+    resetAt
+  };
+}
+
+function anchoredBucketResetAt(bucketKey: string, period: "day" | "week") {
+  const match = /^anchored_(\d+)_(\d+)$/.exec(bucketKey);
+
+  if (!match) {
+    return undefined;
+  }
+
+  const anchorMillis = Number(match[1]);
+  const elapsedPeriods = Number(match[2]);
+
+  if (!Number.isFinite(anchorMillis) || !Number.isFinite(elapsedPeriods)) {
+    return undefined;
+  }
+
+  const periodMs = period === "day" ? dayBucketDurationMs : weekBucketDurationMs;
+  return new Date(anchorMillis + (elapsedPeriods + 1) * periodMs).toISOString();
 }
 
 function fiveMinuteBucketKey(date: Date) {

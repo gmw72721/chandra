@@ -1168,7 +1168,36 @@ def build_core_tutor_instructions(
     ]
 
 
-def normalize_answer_policy(value: Optional[dict[str, Any]]) -> dict[str, bool]:
+HELP_LIMIT_DEFAULTS = {
+    0: "ask_for_attempt_only",
+    1: "light_hint",
+    2: "targeted_hint_next_action",
+    3: "one_worked_step",
+    4: "check_work_explain_gaps",
+}
+HELP_LIMIT_MAX_DEPTH = {
+    "ask_for_attempt_only": 1,
+    "conceptual_orientation": 1,
+    "guiding_question": 1,
+    "light_hint": 1,
+    "targeted_hint_next_action": 2,
+    "one_worked_step": 3,
+    "check_work_explain_gaps": 3,
+    "full_explanation_allowed": 4,
+}
+HELP_LIMIT_DESCRIPTIONS = {
+    "ask_for_attempt_only": "ask for the student's attempt or exact stuck point only",
+    "conceptual_orientation": "conceptual orientation only",
+    "guiding_question": "one guiding question",
+    "light_hint": "one light hint",
+    "targeted_hint_next_action": "one targeted hint plus one next action",
+    "one_worked_step": "one worked step only",
+    "check_work_explain_gaps": "check shown work and explain gaps without taking over the rest",
+    "full_explanation_allowed": "full explanation allowed when other teacher policy permits",
+}
+
+
+def normalize_answer_policy(value: Optional[dict[str, Any]]) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     return {
         "doNotGiveFinalAnswers": bool_with_default(source.get("doNotGiveFinalAnswers"), True),
@@ -1176,7 +1205,17 @@ def normalize_answer_policy(value: Optional[dict[str, Any]]) -> dict[str, bool]:
         "askGuidingQuestionBeforeExplaining": bool_with_default(source.get("askGuidingQuestionBeforeExplaining"), True),
         "allowWorkedExamples": bool_with_default(source.get("allowWorkedExamples"), False),
         "refuseAnswerOnlyRequests": bool_with_default(source.get("refuseAnswerOnlyRequests"), True),
+        "helpLimitsByUnderstandingLevel": normalize_help_limits_by_understanding_level(source.get("helpLimitsByUnderstandingLevel")),
     }
+
+
+def normalize_help_limits_by_understanding_level(value: Any) -> dict[int, str]:
+    source = value if isinstance(value, dict) else {}
+    limits: dict[int, str] = {}
+    for level, default_limit in HELP_LIMIT_DEFAULTS.items():
+        raw_limit = source.get(level, source.get(str(level)))
+        limits[level] = raw_limit if raw_limit in HELP_LIMIT_MAX_DEPTH else default_limit
+    return limits
 
 
 def normalize_source_usage(value: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -1283,8 +1322,13 @@ def tutor_behavior_lines(policy_title: str) -> list[str]:
     ]
 
 
-def answer_policy_lines(answer_policy: dict[str, bool]) -> list[str]:
+def answer_policy_lines(answer_policy: dict[str, Any]) -> list[str]:
     return [
+        "Help limits by understanding level are ceilings, not targets. Chandra may choose lighter support when appropriate, but must not exceed the configured maximum for the current/effective level.",
+        *[
+            f"- Understanding level {level} max help: {HELP_LIMIT_DESCRIPTIONS[limit]} (max depth {HELP_LIMIT_MAX_DEPTH[limit]})."
+            for level, limit in answer_policy["helpLimitsByUnderstandingLevel"].items()
+        ],
         *(
             [
                 "- Require a student attempt before substantial help on graded-looking work.",
@@ -1314,7 +1358,7 @@ def answer_policy_lines(answer_policy: dict[str, bool]) -> list[str]:
     ]
 
 
-def academic_integrity_lines(answer_policy: dict[str, bool]) -> list[str]:
+def academic_integrity_lines(answer_policy: dict[str, Any]) -> list[str]:
     return [
         *(
             ["- Do not provide final answers, answer keys, full solved worksheets, full essays, or complete code for graded work unless the teacher instructions explicitly allow it."]

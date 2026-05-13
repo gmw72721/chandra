@@ -5,6 +5,7 @@ export function buildChatContextMemory(messages: ChatMessage[]): ChatContextMemo
   const latestStructuredMessage = assistantMessages.find(
     (message) =>
       message.sources?.length ||
+      message.langGraphTrace?.knowledgeItems?.length ||
       message.langGraphTrace?.selectedPages?.length ||
       message.langGraphTrace?.selectedMetadataRecords?.length
   );
@@ -36,17 +37,10 @@ export function buildChatContextMemory(messages: ChatMessage[]): ChatContextMemo
       .filter((problem): problem is NonNullable<ChatContextMemory["currentProblem"]> => Boolean(problem))
   );
   const sourcesUsed = dedupeContextSources(
-    (latestStructuredMessage.sources ?? []).map((source) => ({
-      id: source.id,
-      sourceName: source.title,
-      pageNumber: source.pageNumber,
-      problemNumber: source.problemNumber,
-      label: formatContextSource({
-        sourceName: source.title,
-        pageNumber: source.pageNumber,
-        problemNumber: source.problemNumber
-      })
-    }))
+    [
+      ...contextSourcesFromTutorSources(latestStructuredMessage),
+      ...contextSourcesFromKnowledgeItems(latestStructuredMessage)
+    ]
   );
   const failedSearches = [
     ...(trace?.failedSearchesSkipped ?? []).map((query) => ({
@@ -174,6 +168,36 @@ function contextProblemFromMessage(message: ChatMessage) {
     activeProblemNumber,
     problem
   };
+}
+
+function contextSourcesFromTutorSources(message: ChatMessage): NonNullable<ChatContextMemory["sourcesUsed"]> {
+  return (message.sources ?? []).map((source) => ({
+    id: source.id,
+    sourceName: source.title,
+    pageNumber: source.pageNumber,
+    problemNumber: source.problemNumber,
+    label: formatContextSource({
+      sourceName: source.title,
+      pageNumber: source.pageNumber,
+      problemNumber: source.problemNumber
+    })
+  }));
+}
+
+function contextSourcesFromKnowledgeItems(message: ChatMessage): NonNullable<ChatContextMemory["sourcesUsed"]> {
+  return (message.langGraphTrace?.knowledgeItems ?? [])
+    .filter((item) => item.kind === "pdf_page")
+    .map((item) => ({
+      id: item.sourceId || item.pdfId || item.id,
+      sourceName: item.sourceName,
+      pageNumber: item.page,
+      problemNumber: item.usedAs === "problem_source" ? item.problemId : undefined,
+      label: formatContextSource({
+        sourceName: item.sourceName,
+        pageNumber: item.page,
+        problemNumber: item.usedAs === "problem_source" ? item.problemId : undefined
+      })
+    }));
 }
 
 function compactContextMemory(contextMemory: ChatContextMemory): ChatContextMemory {
@@ -344,17 +368,41 @@ function normalizeComparableProblemText(text?: string) {
 }
 
 function dedupeContextSources(sources: NonNullable<ChatContextMemory["sourcesUsed"]>) {
-  const seen = new Set<string>();
   const deduped: NonNullable<ChatContextMemory["sourcesUsed"]> = [];
 
   for (const source of sources) {
-    const key = [source.sourceName?.toLowerCase() ?? source.id ?? "", source.pageNumber ?? "", source.problemNumber ?? ""].join("|");
+    const sourceIdentity = source.sourceName?.toLowerCase() || source.id || "";
+    const pageOrProblem = source.pageNumber ?? (source.problemNumber ? `problem:${source.problemNumber.toLowerCase()}` : "");
+    const key = [sourceIdentity, pageOrProblem].join("|");
+    const existingIndex = deduped.findIndex((dedupedSource) => {
+      const dedupedIdentity = dedupedSource.sourceName?.toLowerCase() || dedupedSource.id || "";
+      const dedupedPageOrProblem =
+        dedupedSource.pageNumber ??
+        (dedupedSource.problemNumber ? `problem:${dedupedSource.problemNumber.toLowerCase()}` : "");
 
-    if (seen.has(key) || (!source.sourceName && !source.pageNumber && !source.problemNumber)) {
+      return [dedupedIdentity, dedupedPageOrProblem].join("|") === key;
+    });
+
+    if (!source.sourceName && !source.pageNumber && !source.problemNumber) {
       continue;
     }
 
-    seen.add(key);
+    if (existingIndex >= 0) {
+      const existing = deduped[existingIndex];
+      deduped[existingIndex] = {
+        id: existing.id || source.id,
+        sourceName: existing.sourceName || source.sourceName,
+        pageNumber: existing.pageNumber ?? source.pageNumber,
+        problemNumber: existing.problemNumber || source.problemNumber,
+        label: formatContextSource({
+          sourceName: existing.sourceName || source.sourceName,
+          pageNumber: existing.pageNumber ?? source.pageNumber,
+          problemNumber: existing.problemNumber || source.problemNumber
+        })
+      };
+      continue;
+    }
+
     deduped.push(source);
   }
 

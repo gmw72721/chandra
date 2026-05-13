@@ -10,6 +10,10 @@ export type AuthorizedTutorChatScope = {
   uid: string;
 };
 
+type TutorChatAuthorizationOptions = {
+  enforceStudentChatAccess?: boolean;
+};
+
 export class TutorChatHttpError extends Error {
   classId?: string;
   decision?: "class_chat_disabled" | "student_chat_blocked";
@@ -31,7 +35,8 @@ export class TutorChatHttpError extends Error {
 
 export async function authorizeTutorChatRequest(
   request: Request,
-  requestedCourseId?: string
+  requestedCourseId?: string,
+  options: TutorChatAuthorizationOptions = {}
 ): Promise<AuthorizedTutorChatScope> {
   const token = getBearerToken(request);
 
@@ -62,12 +67,14 @@ export async function authorizeTutorChatRequest(
       savedClassId: String(profile.classId ?? "")
     });
     const classScope = await getClassProfessorScope(classId);
-    await assertStudentChatAccess({
-      classData: classScope.classData,
-      classId,
-      profile,
-      uid: decodedToken.uid
-    });
+    if (options.enforceStudentChatAccess !== false) {
+      await assertStudentChatAccess({
+        classData: classScope.classData,
+        classId,
+        profile,
+        uid: decodedToken.uid
+      });
+    }
     return { classId, ...classScope, role, uid: decodedToken.uid };
   }
 

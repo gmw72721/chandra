@@ -313,10 +313,12 @@ export async function addMessage(input: {
 export async function updateConversationMetadata({
   contextUpdatedAt,
   currentContext,
+  metadata,
   id
 }: {
   contextUpdatedAt?: string;
   currentContext?: unknown;
+  metadata?: Record<string, unknown>;
   id: string;
 }, client?: PostgresQueryClient) {
   const result = await runPostgresQuery<ConversationRow>(
@@ -330,7 +332,8 @@ export async function updateConversationMetadata({
       id,
       JSON.stringify({
         ...(currentContext === undefined ? {} : { currentContext }),
-        ...(contextUpdatedAt ? { contextUpdatedAt } : {})
+        ...(contextUpdatedAt ? { contextUpdatedAt } : {}),
+        ...(metadata ?? {})
       })
     ]
   );
@@ -407,6 +410,20 @@ export async function listConversationMessages(conversationId: string, client?: 
     WHERE conversation_id = $1
     ORDER BY created_at ASC`,
     [conversationId]
+  );
+
+  return result.rows.map(rowToMessage);
+}
+
+export async function listClassConversationMessages(classId: string, client?: PostgresQueryClient) {
+  const result = await runPostgresQuery<MessageRow>(
+    client,
+    `SELECT messages.*
+    FROM messages
+    INNER JOIN conversations ON conversations.id = messages.conversation_id
+    WHERE messages.class_id = $1 AND conversations.deleted_at IS NULL
+    ORDER BY messages.conversation_id ASC, messages.created_at ASC`,
+    [classId]
   );
 
   return result.rows.map(rowToMessage);
