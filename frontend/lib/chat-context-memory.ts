@@ -493,7 +493,7 @@ function dedupeContextSources(sources: NonNullable<ChatContextMemory["sourcesUse
 
 function formatContextSource(source: NonNullable<ChatContextMemory["sourcesUsed"]>[number]) {
   if (source.sourceType === "student_upload") {
-    return ["Student upload", source.sourceName].filter(Boolean).join(" · ");
+    return source.sourceName || "Student upload";
   }
 
   if (source.sourceType === "pasted_problem") {

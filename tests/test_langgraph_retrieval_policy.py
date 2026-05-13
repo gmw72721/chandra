@@ -139,6 +139,137 @@ def test_decision_prompt_searches_source_lookup_before_asking_for_more_detail() 
     assert "rather than only the assigned problem number" in system_prompt
     assert "uploaded homework attachments" in system_prompt
     assert "uploaded files, active Knowledge, and available class OCR/PDF search should all be considered" in system_prompt
+    assert "ask which problem on the page the student wants to focus on" in system_prompt
+    assert "do not ask why they provided the page" in system_prompt
+    assert "buttons must be in JSON" in system_prompt
+    assert "label should be just the number" in system_prompt
+    assert "must not list the problem numbers" in system_prompt
+    assert "exact full visible task statement word-for-word" in system_prompt
+    assert "Do not summarize, shorten, paraphrase" in system_prompt
+    assert "Do not put the numbers only in prose" in system_prompt
+
+
+def test_ambiguous_student_upload_clarification_overrides_search_decision() -> None:
+    decision = graph_module.enforce_ambiguous_student_upload_clarification(
+        {
+            "can_answer_now": False,
+            "needs_search": True,
+            "query": "find exact problem page OCR metadata here is the problem",
+            "retrieval_reason": "student_requested_problem",
+            "searches": [
+                {
+                    "query": "find exact problem page OCR metadata here is the problem",
+                    "retrieval_reason": "student_requested_problem",
+                    "top_k": 1,
+                }
+            ],
+            "student_response": "I'm checking the class materials for that problem.",
+        },
+        {
+            "chat_retrieval_memory": {},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "here is the problem\n\n"
+                        "Student uploaded homework attachments available for this turn:\n"
+                        "1. worksheet.pdf | PDF\n"
+                        "Extracted text:\n"
+                        "2.14. Prove rank(KL) <= rank(L).\n"
+                        "2.15. Find a basis for the image."
+                    ),
+                }
+            ],
+            "student_attachment_files": [
+                {
+                    "fileName": "worksheet.pdf",
+                    "fileType": "pdf",
+                    "extractedText": "2.14. Prove rank(KL) <= rank(L).\n2.15. Find a basis for the image.",
+                    "mimeType": "application/pdf",
+                }
+            ],
+        },
+    )
+
+    assert decision["needs_search"] is False
+    assert decision["decision_source"] == "student_upload"
+    assert decision["searches"] == []
+    assert decision["query"] == ""
+    assert decision["student_response"] == "Pick the problem you want help with."
+
+
+def test_ambiguous_student_upload_clarification_keeps_search_when_problem_is_named() -> None:
+    original_decision = {
+        "can_answer_now": False,
+        "needs_search": True,
+        "query": "find exact problem page OCR metadata problem 2.14",
+        "retrieval_reason": "student_requested_problem",
+        "searches": [
+            {
+                "query": "find exact problem page OCR metadata problem 2.14",
+                "retrieval_reason": "student_requested_problem",
+                "top_k": 1,
+            }
+        ],
+        "student_response": "I'm checking the class materials for that problem.",
+    }
+
+    decision = graph_module.enforce_ambiguous_student_upload_clarification(
+        original_decision,
+        {
+            "chat_retrieval_memory": {},
+            "messages": [{"role": "user", "content": "help me with problem 2.14"}],
+            "student_attachment_files": [
+                {
+                    "fileName": "worksheet.pdf",
+                    "fileType": "pdf",
+                    "extractedText": "2.14. Prove rank(KL) <= rank(L).\n2.15. Find a basis for the image.",
+                    "mimeType": "application/pdf",
+                }
+            ],
+        },
+    )
+
+    assert decision is original_decision
+
+
+def test_terminal_upload_problem_selection_strips_late_search_decision() -> None:
+    decision = {
+        "can_answer_now": False,
+        "needs_search": True,
+        "query": "find exact problem page OCR metadata",
+        "retrieval_reason": "student_requested_problem",
+        "searches": [
+            {
+                "query": "find exact problem page OCR metadata",
+                "retrieval_reason": "student_requested_problem",
+                "top_k": 1,
+            }
+        ],
+        "student_response": "I can see more than one problem here. Pick the one you want help with.",
+        "structuredOutput": {
+            "sections": {"answer": "I can see more than one problem here. Pick the one you want help with."},
+            "confusionPrompt": "I can see more than one problem here. Pick the one you want help with.",
+            "confusionChoices": [
+                {"id": "problem-2-14", "label": "2.14", "message": "Help me with problem 2.14 from this upload."},
+                {"id": "problem-2-15", "label": "2.15", "message": "Help me with problem 2.15 from this upload."},
+            ],
+            "metadata": {
+                "choiceDisplay": "problem_selection",
+                "hintLevel": "none",
+                "mode": "clarification",
+                "sourceConfidence": "medium",
+                "studentActionNeeded": "answer_question",
+            },
+        },
+    }
+
+    fixed = graph_module.enforce_terminal_upload_problem_selection(decision, {"student_attachment_files": []})
+
+    assert fixed["needs_search"] is False
+    assert fixed["searches"] == []
+    assert fixed["query"] == ""
+    assert fixed["structuredOutput"]["metadata"]["choiceDisplay"] == "problem_selection"
 
 
 def test_langfuse_prompt_helper_falls_back_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -412,6 +543,306 @@ def test_primary_tutor_turn_preserves_two_to_six_valid_confusion_choices() -> No
     ]
 
 
+def test_primary_tutor_problem_selection_json_cancels_search() -> None:
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "can_answer_now": False,
+                    "needs_search": True,
+                    "retrieval_reason": "student_requested_problem",
+                    "searches": [
+                        {
+                            "query": "find exact problem page OCR metadata",
+                            "retrieval_reason": "student_requested_problem",
+                            "top_k": 1,
+                        }
+                    ],
+                    "student_response": "Pick the problem you want help with.",
+                    "structuredOutput": {
+                        "sections": {"answer": "Pick the problem you want help with."},
+                        "confusionPrompt": "Pick the problem you want help with.",
+                        "confusionChoices": [
+                            {
+                                "id": "problem-2-14",
+                                "label": "2.14",
+                                "message": "Help me with problem 2.14 from this upload.",
+                            },
+                            {
+                                "id": "problem-2-15",
+                                "label": "2.15",
+                                "message": "Help me with problem 2.15 from this upload.",
+                            },
+                        ],
+                        "metadata": {
+                            "choiceDisplay": "problem_selection",
+                            "hintLevel": "none",
+                            "mode": "clarification",
+                            "sourceConfidence": "medium",
+                            "studentActionNeeded": "answer_question",
+                        },
+                    },
+                }
+            )
+        },
+        {
+            "decision_source": "search_required",
+            "needs_search": True,
+            "query": "find exact problem page OCR metadata",
+            "retrieval_reason": "student_requested_problem",
+            "search_query": "find exact problem page OCR metadata",
+            "searches": [
+                {
+                    "query": "find exact problem page OCR metadata",
+                    "retrieval_reason": "student_requested_problem",
+                    "top_k": 1,
+                }
+            ],
+            "top_k": 1,
+        },
+    )
+
+    assert decision["needs_search"] is False
+    assert decision["searches"] == []
+    assert graph_module.retrieval_decision_tool_calls(decision) == []
+    assert decision["structuredOutput"]["metadata"]["choiceDisplay"] == "problem_selection"
+    assert [choice["label"] for choice in decision["structuredOutput"]["confusionChoices"]] == ["2.14", "2.15"]
+
+
+def test_generic_upload_problem_pick_prompt_cancels_search() -> None:
+    decision = {
+        "can_answer_now": False,
+        "decision_source": "search_required",
+        "needs_search": True,
+        "query": "find exact problem page OCR metadata",
+        "retrieval_reason": "student_requested_problem",
+        "search_query": "find exact problem page OCR metadata",
+        "searches": [
+            {
+                "query": "find exact problem page OCR metadata",
+                "retrieval_reason": "student_requested_problem",
+                "top_k": 1,
+            }
+        ],
+        "student_response": "Pick the problem you want help with.",
+        "top_k": 1,
+    }
+    state = {
+        "messages": [{"role": "user", "content": "Can you help me with this attached homework material?"}],
+        "student_attachment_files": [
+            {
+                "fileName": "worksheet.pdf",
+                "fileType": "pdf",
+                "extractedText": "2.14. Prove rank(KL) <= rank(L).\n2.15. Find a basis for the image.",
+                "mimeType": "application/pdf",
+            }
+        ],
+    }
+
+    fixed = graph_module.enforce_ambiguous_student_upload_clarification(decision, state)
+
+    assert fixed["needs_search"] is False
+    assert fixed["searches"] == []
+    assert graph_module.retrieval_decision_tool_calls(fixed) == []
+    assert fixed["student_response"] == "Pick the problem you want help with."
+    assert "confusionChoices" not in fixed["structuredOutput"]
+
+
+def test_existing_problem_selection_json_choices_are_preserved() -> None:
+    structured_output = {
+        "sections": {"answer": "This page has several exercises. Which one should we start with?"},
+        "confusionPrompt": "This page has several exercises. Which one should we start with?",
+        "confusionChoices": [
+            {"id": "problem-2-14", "label": "2.14", "message": "Help me with problem 2.14 from this upload."},
+            {"id": "problem-2-15", "label": "2.15", "message": "Help me with problem 2.15 from this upload."},
+            {"id": "problem-2-16", "label": "2.16", "message": "Help me with problem 2.16 from this upload."},
+        ],
+        "metadata": {
+            "choiceDisplay": "problem_selection",
+            "hintLevel": "none",
+            "mode": "clarification",
+            "sourceConfidence": "medium",
+            "studentActionNeeded": "answer_question",
+        },
+    }
+    decision = {
+        "can_answer_now": False,
+        "decision_source": "search_required",
+        "needs_search": True,
+        "query": "find exact problem page OCR metadata",
+        "retrieval_reason": "student_requested_problem",
+        "search_query": "find exact problem page OCR metadata",
+        "searches": [
+            {
+                "query": "find exact problem page OCR metadata",
+                "retrieval_reason": "student_requested_problem",
+                "top_k": 1,
+            }
+        ],
+        "student_response": "This page has several exercises. Which one should we start with?",
+        "structuredOutput": graph_module.normalize_backend_structured_output(structured_output),
+        "top_k": 1,
+    }
+    state = {
+        "messages": [{"role": "user", "content": "Can you help me with this attached homework material?"}],
+        "student_attachment_files": [
+            {
+                "fileName": "worksheet.pdf",
+                "fileType": "pdf",
+                "mimeType": "application/pdf",
+            }
+        ],
+    }
+
+    fixed = graph_module.enforce_ambiguous_student_upload_clarification(decision, state)
+
+    assert fixed["needs_search"] is False
+    assert graph_module.retrieval_decision_tool_calls(fixed) == []
+    assert fixed["structuredOutput"]["confusionPrompt"] == "This page has several exercises. Which one should we start with?"
+    assert [choice["label"] for choice in fixed["structuredOutput"]["confusionChoices"]] == ["2.14", "2.15", "2.16"]
+
+
+def test_selected_upload_problem_number_cancels_search_and_sets_problem_section() -> None:
+    decision = {
+        "can_answer_now": False,
+        "decision_source": "search_required",
+        "needs_search": True,
+        "query": "find exact task in assignment problem 2.14",
+        "retrieval_reason": "student_requested_problem",
+        "search_query": "find exact task in assignment problem 2.14",
+        "searches": [
+            {
+                "query": "find exact task in assignment problem 2.14",
+                "retrieval_reason": "student_requested_problem",
+                "top_k": 1,
+            }
+        ],
+        "student_response": "I'm checking the class materials for that problem.",
+        "top_k": 1,
+    }
+    state = {
+        "messages": [{"role": "user", "content": "Help me with problem 2.14 from this upload."}],
+        "student_attachment_files": [
+            {
+                "fileName": "worksheet.pdf",
+                "fileType": "pdf",
+                "extractedText": "2.14. Prove rank(KL) <= rank(L).\n2.15. Find a basis for the image.",
+                "mimeType": "application/pdf",
+            }
+        ],
+    }
+
+    fixed = graph_module.enforce_selected_upload_problem_response(decision, state)
+
+    assert fixed["needs_search"] is False
+    assert fixed["searches"] == []
+    assert graph_module.retrieval_decision_tool_calls(fixed) == []
+    assert fixed["decision_source"] == "student_upload"
+    assert fixed["structuredOutput"]["sections"]["problem"] == "2.14. Prove rank(KL) <= rank(L)."
+    assert fixed["structuredOutput"]["metadata"]["problemNumber"] == "2.14"
+
+
+def test_selected_upload_problem_without_problem_evidence_keeps_search_decision() -> None:
+    decision = {
+        "can_answer_now": False,
+        "decision_source": "search_required",
+        "needs_search": True,
+        "query": "find exact task in assignment problem 2.14",
+        "retrieval_reason": "student_requested_problem",
+        "search_query": "find exact task in assignment problem 2.14",
+        "searches": [
+            {
+                "query": "find exact task in assignment problem 2.14",
+                "retrieval_reason": "student_requested_problem",
+                "top_k": 1,
+            }
+        ],
+        "student_response": "For 2.14, compare images and use rank-nullity.",
+        "top_k": 1,
+    }
+    state = {
+        "messages": [{"role": "user", "content": "Help me with problem 2.14 from this upload."}],
+        "student_attachment_files": [
+            {
+                "fileName": "worksheet.pdf",
+                "fileType": "pdf",
+                "extractedText": "2.15. Find a basis for the image.",
+                "mimeType": "application/pdf",
+            }
+        ],
+    }
+
+    fixed = graph_module.enforce_selected_upload_problem_response(decision, state)
+
+    assert fixed is decision
+    assert fixed["needs_search"] is True
+
+
+def test_bare_problem_number_after_upload_problem_selection_uses_upload_context() -> None:
+    state = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "Pick the problem you want help with.",
+                "structuredOutput": {
+                    "sections": {"answer": "Pick the problem you want help with."},
+                    "confusionPrompt": "Pick the problem you want help with.",
+                    "confusionChoices": [
+                        {
+                            "id": "problem-2-14",
+                            "label": "2.14",
+                            "message": "Help me with problem 2.14 from this upload.",
+                        },
+                        {
+                            "id": "problem-2-15",
+                            "label": "2.15",
+                            "message": "Help me with problem 2.15 from this upload.",
+                        },
+                    ],
+                    "metadata": {
+                        "choiceDisplay": "problem_selection",
+                        "hintLevel": "none",
+                        "mode": "clarification",
+                        "sourceConfidence": "medium",
+                        "studentActionNeeded": "answer_question",
+                    },
+                },
+            },
+            {"role": "user", "content": "2.14"},
+        ],
+        "student_attachment_files": [
+            {
+                "fileName": "worksheet.pdf",
+                "fileType": "pdf",
+                "extractedText": "2.14. Prove rank(KL) <= rank(L).\n2.15. Find a basis for the image.",
+                "mimeType": "application/pdf",
+            }
+        ],
+    }
+
+    assert graph_module.selected_upload_problem_numbers(state) == ["2.14"]
+
+
+def test_forced_initial_search_skips_selected_upload_problem_number() -> None:
+    decision = {"needs_search": False, "student_response": "Use the uploaded problem text."}
+    state = {
+        "messages": [{"role": "user", "content": "Help me with problem 2.14 from this upload."}],
+        "student_attachment_files": [
+            {
+                "fileName": "worksheet.pdf",
+                "fileType": "pdf",
+                "extractedText": "2.14. Prove rank(KL) <= rank(L).\n2.15. Find a basis for the image.",
+                "mimeType": "application/pdf",
+            }
+        ],
+    }
+
+    fixed = graph_module.enforce_initial_source_lookup_search(decision, state)
+
+    assert fixed is decision
+    assert graph_module.forced_initial_search_tool_call(state) is not None
+
+
 def test_primary_tutor_turn_drops_choice_counts_outside_two_to_five() -> None:
     structured_output = graph_module.normalize_backend_structured_output(
         {
@@ -571,6 +1002,156 @@ def test_debug_force_no_retrieval_overrides_search_decision() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_student_upload_does_not_search_class_materials() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": False,
+                        "memory_used": False,
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "searches": [
+                            {
+                                "query": "find exact problem page OCR metadata here is the problem",
+                                "retrieval_reason": "student_requested_problem",
+                                "top_k": 1,
+                            }
+                        ],
+                        "student_response": "I'm checking the class materials for that problem.",
+                    }
+                )
+            }
+        ]
+    )
+    retriever = FakeRetriever([ocr_page()])
+
+    response = await run_pdf_rag_agent(
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "here is the problem\n\n"
+                    "Student uploaded homework attachments available for this turn:\n"
+                    "1. worksheet.pdf | PDF\n"
+                    "Extracted text:\n"
+                    "2.14. Prove rank(KL) <= rank(L).\n"
+                    "2.15. Find a basis for the image."
+                ),
+            }
+        ],
+        model="openai/gpt-5.4-mini",
+        openrouter_client=client,
+        retriever=retriever,
+        student_attachment_files=[
+            {
+                "fileName": "worksheet.pdf",
+                "fileType": "pdf",
+                "extractedText": "2.14. Prove rank(KL) <= rank(L).\n2.15. Find a basis for the image.",
+                "mimeType": "application/pdf",
+            }
+        ],
+    )
+
+    assert retriever.calls == []
+    assert response["langGraphTrace"]["toolCallCount"] == 0
+    assert response["langGraphTrace"]["searchQueries"] == []
+    assert response["langGraphTrace"]["decisionSource"] == "student_upload"
+    assert response["content"] == "Pick the problem you want help with."
+    assert "confusionChoices" not in response["structuredOutput"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_upload_problem_selection_ends_after_first_model_call() -> None:
+    selection_text = (
+        "I can help, but this page has several exercises. Which one do you want to work on: "
+        "2.14, 2.15, 2.16*, 2.17, 2.18, 2.19, 2.20, 2.21, 2.22, or 2.23?"
+    )
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": False,
+                        "memory_used": False,
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "searches": [
+                            {
+                                "query": "find exact problem page OCR metadata attached homework",
+                                "retrieval_reason": "student_requested_problem",
+                                "top_k": 1,
+                            }
+                        ],
+                        "student_response": selection_text,
+                        "structuredOutput": {
+                            "sections": {"answer": "This page has several exercises. Which one do you want to work on?"},
+                            "confusionPrompt": "This page has several exercises. Which one do you want to work on?",
+                            "confusionChoices": [
+                                {
+                                    "id": f"problem-2-{number}",
+                                    "label": f"2.{number}",
+                                    "message": f"Help me with problem 2.{number} from this upload.",
+                                }
+                                for number in range(14, 24)
+                            ],
+                            "metadata": {
+                                "choiceDisplay": "problem_selection",
+                                "hintLevel": "none",
+                                "mode": "clarification",
+                                "sourceConfidence": "medium",
+                                "studentActionNeeded": "answer_question",
+                            },
+                        },
+                    }
+                )
+            },
+            {"content": "This second model call should not happen."},
+        ]
+    )
+    retriever = FakeRetriever([ocr_page()])
+
+    events = []
+    async for event in run_pdf_rag_agent_stream(
+        messages=[{"role": "user", "content": "Can you help me with this attached homework material?"}],
+        model="openai/gpt-5.4-mini",
+        openrouter_client=client,
+        retriever=retriever,
+        student_attachment_files=[
+            {
+                "fileName": "worksheet.pdf",
+                "mimeType": "application/pdf",
+            }
+        ],
+    ):
+        events.append(event)
+
+    assert len(client.calls) == 1
+    assert retriever.calls == []
+    assert not any(event.get("type") == "search_batch" for event in events)
+    assert not any(event.get("stage") == "preparing_context_grounded_answer" for event in events)
+    final_payload = [event["payload"] for event in events if event.get("type") == "final"][0]
+    assert final_payload["langGraphTrace"]["searchQueries"] == []
+    assert final_payload["structuredOutput"]["metadata"]["choiceDisplay"] == "problem_selection"
+    assert final_payload["structuredOutput"]["sections"]["answer"] == (
+        "This page has several exercises. Which one do you want to work on?"
+    )
+    assert [choice["label"] for choice in final_payload["structuredOutput"]["confusionChoices"]] == [
+        "2.14",
+        "2.15",
+        "2.16",
+        "2.17",
+        "2.18",
+        "2.19",
+        "2.20",
+        "2.21",
+        "2.22",
+        "2.23",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_debug_forced_confusion_choices_become_the_response() -> None:
     client = FakeOpenRouterClient(
         [
@@ -681,6 +1262,157 @@ def test_retrieval_needed_decision_does_not_preserve_confusion_choices() -> None
     assert decision["needs_search"] is True
     assert decision["structuredOutput"] is None
     assert decision["student_response"] == "Pick a direction."
+
+
+def test_uploaded_multi_problem_clarification_does_not_synthesize_focus_choices() -> None:
+    answer = "I can see several exercises on the page, so I'm not sure which one you want help with."
+    state = {
+        "messages": [{"role": "user", "content": "this one"}],
+        "retrieval_confidence": "medium",
+        "selected_metadata_records": [
+            ocr_page(
+                chunk_text="2.1. Find the eigenvalues.\n2.2. Solve the system.\n2.3. Compute the determinant.",
+                problem_numbers=["2.1", "2.2", "2.3"],
+            )
+        ],
+        "student_attachment_files": [
+            {
+                "fileName": "worksheet.pdf",
+                "mimeType": "application/pdf",
+                "extractedText": "2.1. Find the eigenvalues.\n2.2. Solve the system.\n2.3. Compute the determinant.",
+            }
+        ],
+    }
+
+    response = graph_module.pdf_rag_response_from_state(state, answer)
+
+    assert response["content"] == answer
+    assert "confusionPrompt" not in response["structuredOutput"]
+    assert response["structuredOutput"]["metadata"]["mode"] == "guided_problem_solving"
+    assert response["structuredOutput"]["metadata"]["studentActionNeeded"] == "try_next_step"
+    assert "choiceDisplay" not in response["structuredOutput"]["metadata"]
+    assert "confusionChoices" not in response["structuredOutput"]
+    assert "why" not in response["structuredOutput"]["sections"]["answer"].lower()
+
+
+def test_uploaded_multi_problem_clarification_does_not_synthesize_detected_problems() -> None:
+    answer = "This page has several exercises. Which one do you want help with?"
+    problem_numbers = [f"2.{number}" for number in range(14, 24)]
+    extracted_text = "\n".join(f"{number}. Problem statement." for number in problem_numbers)
+    state = {
+        "messages": [{"role": "user", "content": "help me start"}],
+        "retrieval_confidence": "medium",
+        "student_attachment_files": [
+            {
+                "fileName": "worksheet.pdf",
+                "mimeType": "application/pdf",
+                "extractedText": extracted_text,
+            }
+        ],
+    }
+
+    response = graph_module.pdf_rag_response_from_state(state, answer)
+
+    assert "choiceDisplay" not in response["structuredOutput"]["metadata"]
+    assert "confusionChoices" not in response["structuredOutput"]
+
+
+def test_model_listed_problem_numbers_do_not_become_problem_buttons_without_json() -> None:
+    state = {
+        "messages": [{"role": "user", "content": "Can you help me with this attached homework material?"}],
+        "retrieval_confidence": "medium",
+        "student_attachment_files": [
+            {
+                "fileName": "worksheet.pdf",
+                "mimeType": "application/pdf",
+            }
+        ],
+        "retrieval_decision": {},
+    }
+    answer = (
+        "I can help, but this page has several exercises. Which one do you want to work on: "
+        "2.14, 2.15, 2.16*, 2.17, 2.18, 2.19, 2.20, 2.21, 2.22, or 2.23?"
+    )
+
+    response = graph_module.pdf_rag_response_from_state(state, answer)
+
+    assert "choiceDisplay" not in response["structuredOutput"]["metadata"]
+    assert "confusionChoices" not in response["structuredOutput"]
+
+
+def test_numbered_exercise_claim_does_not_fall_back_to_position_buttons() -> None:
+    state = {
+        "messages": [{"role": "user", "content": "Can you help me with this attached homework material?"}],
+        "retrieval_confidence": "medium",
+        "student_attachment_files": [
+            {
+                "fileName": "worksheet.pdf",
+                "mimeType": "application/pdf",
+            }
+        ],
+        "retrieval_decision": {},
+    }
+    answer = "I can see several numbered exercises on the page, so I'm not sure which one you want help with yet."
+
+    response = graph_module.pdf_rag_response_from_state(state, answer)
+
+    assert "confusionChoices" not in response["structuredOutput"]
+
+
+def test_uncited_selected_page_is_not_returned_as_visible_source() -> None:
+    response = graph_module.pdf_rag_response_from_state(
+        {
+            "messages": [{"role": "user", "content": "this one"}],
+            "page_assets": [ocr_page(title="ACME Vol 1", page_start=12, page_end=12, printed_page_start=None)],
+            "retrieval_decision": {},
+        },
+        "I can see several exercises on the page, so I'm not sure which one you want help with.",
+    )
+
+    assert response["sources"] == []
+
+
+def test_multiple_model_referenced_pages_are_returned_as_visible_sources() -> None:
+    response = graph_module.pdf_rag_response_from_state(
+        {
+            "messages": [{"role": "user", "content": "help with these examples"}],
+            "page_assets": [
+                ocr_page(doc_id="material-acme-12", title="ACME Vol 1", page_start=12, page_end=12),
+                ocr_page(doc_id="material-acme-13", title="ACME Vol 1", page_start=13, page_end=13, printed_page_start=81),
+            ],
+            "retrieval_decision": {},
+        },
+        (
+            "Compare the setup on the two selected pages before choosing the exercise.\n\n"
+            "Referenced sources:\n"
+            "doc_id: material-acme-12; page: 80; reason: first selected page\n"
+            "doc_id: material-acme-13; page: 81; reason: second selected page"
+        ),
+    )
+
+    assert [source["sourceId"] for source in response["sources"]] == ["material-acme-12", "material-acme-13"]
+    assert [source["pageNumber"] for source in response["sources"]] == [80, 81]
+    assert "Referenced sources:" not in response["content"]
+
+
+def test_uploaded_problem_image_without_numbers_does_not_get_fallback_position_choices() -> None:
+    answer = "I can see multiple problems in the image, so I'm not sure which one you want help with."
+    state = {
+        "messages": [{"role": "user", "content": "help with this"}],
+        "student_attachment_files": [
+            {
+                "dataUrl": "data:image/png;base64,abc",
+                "fileName": "problems.png",
+                "mimeType": "image/png",
+                "summary": "An uploaded worksheet image with multiple visible problems.",
+            }
+        ],
+    }
+
+    response = graph_module.pdf_rag_response_from_state(state, answer)
+
+    assert "confusionChoices" not in response["structuredOutput"]
+    assert "why" not in response["structuredOutput"]["sections"]["answer"].lower()
 
 
 def test_example_request_cannot_be_downgraded_to_no_search_refusal() -> None:

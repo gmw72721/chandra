@@ -2197,6 +2197,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
   const sourceChips = message.sources?.length ? sourceChipDetails(message) : [];
   const confusionChoices = message.structuredOutput?.confusionChoices;
   const confusionPrompt = message.structuredOutput?.confusionPrompt?.trim();
+  const isProblemSelectionPrompt = message.structuredOutput?.metadata.choiceDisplay === "problem_selection";
   const visibleConfusionPrompt =
     confusionPrompt && !messageBlocks.some((block) => sameDisplayedText(block.content, confusionPrompt))
       ? confusionPrompt
@@ -2240,6 +2241,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
           <TutorConfusionChoices
             choices={confusionChoices}
             disabled={isSending}
+            isProblemSelection={isProblemSelectionPrompt}
             prompt={visibleConfusionPrompt}
             onChoiceSelect={onChoiceSelect}
           />
@@ -2277,16 +2279,20 @@ function compactDisplayedText(value: string) {
 function TutorConfusionChoices({
   choices,
   disabled,
+  isProblemSelection,
   prompt,
   onChoiceSelect
 }: {
   choices: TutorConfusionChoice[];
   disabled: boolean;
+  isProblemSelection?: boolean;
   prompt?: string;
   onChoiceSelect: (message: string) => void;
 }) {
   return (
-    <div className="assistant-confusion-choice-panel">
+    <div
+      className={`assistant-confusion-choice-panel${isProblemSelection ? " problem-selection" : ""}`}
+    >
       {prompt ? <p>{prompt}</p> : null}
       <div className="assistant-confusion-choice-grid" aria-label="Choose what Chandra should focus on">
         {choices.map((choice) => (
@@ -2298,7 +2304,7 @@ function TutorConfusionChoices({
             onClick={() => onChoiceSelect(choice.message)}
           >
             <span className="assistant-confusion-choice-label">{choice.label}</span>
-            {!sameDisplayedText(choice.label, choice.message) ? (
+            {!isProblemSelection && !sameDisplayedText(choice.label, choice.message) ? (
               <span className="assistant-confusion-choice-description">{choice.message}</span>
             ) : null}
           </button>
@@ -4242,6 +4248,10 @@ function formatProblemMeta(problem: NonNullable<ChatContextMemory["currentProble
 }
 
 function formatKnowledgeSourceListLabel(source: NonNullable<ChatContextMemory["sourcesUsed"]>[number]) {
+  if (source.sourceType === "student_upload") {
+    return stripStudentUploadLabelPrefix(source.label || source.sourceName || "Student upload");
+  }
+
   if (source.sourceType !== "class_material") {
     return source.label || source.sourceName || "Class material";
   }
@@ -4257,6 +4267,10 @@ function formatKnowledgeSourceListLabel(source: NonNullable<ChatContextMemory["s
     source.sourceName ||
     "Class material"
   );
+}
+
+function stripStudentUploadLabelPrefix(label: string) {
+  return label.replace(/^Student upload\s*[\u00b7\u2022-]\s*/i, "") || label;
 }
 
 function formatRetrievalReason(reason: string) {

@@ -136,6 +136,7 @@ const tutorConfusionChoiceSchema = z.object({
   label: z.string().min(1).max(80),
   message: z.string().min(1).max(240)
 });
+const tutorConfusionChoicesSchema = z.array(tutorConfusionChoiceSchema).min(2).max(80);
 const chatDebugOptionsSchema = z.object({
   forceAiUsageBlocked: z.boolean().optional(),
   forceAiUsageNearLimit: z.boolean().optional(),
@@ -345,15 +346,28 @@ const chatRequestSchema = z.object({
               )
               .optional(),
             confusionPrompt: z.string().max(240).optional(),
-            confusionChoices: z.array(tutorConfusionChoiceSchema).min(2).max(6).optional(),
+            confusionChoices: tutorConfusionChoicesSchema.optional(),
             metadata: z.object({
               hintLevel: z.enum(tutorHintLevels),
+              choiceDisplay: z.enum(["problem_selection"]).optional(),
               problemNumber: z.string().optional(),
               problemSummary: z.string().optional(),
               sourceConfidence: z.enum(["high", "medium", "low"]),
               studentActionNeeded: z.enum(tutorStudentActions),
               mode: z.enum(tutorModes)
             })
+          }).superRefine((value, context) => {
+            if (
+              value.confusionChoices &&
+              value.confusionChoices.length > 6 &&
+              value.metadata.choiceDisplay !== "problem_selection"
+            ) {
+              context.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: "Generic confusion choices must include 2 to 6 choices.",
+                path: ["confusionChoices"]
+              });
+            }
           }),
           z.object({
             answer: z.string(),

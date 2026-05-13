@@ -292,6 +292,7 @@ export type TutorStructuredSectionKey =
 
 export type TutorStructuredMetadata = {
   hintLevel: "none" | "small_hint" | "guided_step" | "worked_example" | "refusal";
+  choiceDisplay?: "problem_selection";
   problemNumber?: string;
   problemSummary?: string;
   sourceConfidence: "high" | "medium" | "low";

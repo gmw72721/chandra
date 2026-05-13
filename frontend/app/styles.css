@@ -12561,6 +12561,32 @@ button.student-row[aria-pressed="true"] {
   opacity: 0.6;
 }
 
+.assistant-confusion-choice-panel.problem-selection {
+  width: min(620px, 100%);
+}
+
+.assistant-confusion-choice-panel.problem-selection .assistant-confusion-choice-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.assistant-confusion-choice-panel.problem-selection .assistant-confusion-choice-grid button {
+  display: inline-flex;
+  width: auto;
+  min-width: 42px;
+  min-height: 30px;
+  justify-content: center;
+  padding: 6px 10px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.assistant-confusion-choice-panel.problem-selection .assistant-confusion-choice-label {
+  font-size: 0.8rem;
+}
+
 .student-workspace-shell[data-appearance="dark"] .assistant-structured-section {
   --section-accent: rgba(154, 164, 191, 0.84);
   --section-bg: rgba(14, 20, 39, 0.84);

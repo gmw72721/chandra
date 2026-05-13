@@ -80,6 +80,7 @@ export function normalizeStructuredTutorOutput(
   const answer = repaired.answer || splitProblem.followup || misplacedProblemAnswer;
   const { hint, nextStep } = repairHintLabeledNextStep(rawHint, repaired.nextStep);
   const mode = includesString(tutorModes, metadataRecord.mode) ? metadataRecord.mode : "guided_problem_solving";
+  const choiceDisplay = metadataRecord.choiceDisplay === "problem_selection" ? "problem_selection" : undefined;
   const dedupedSections = suppressDuplicatedTutorSections(
     {
       answer,
@@ -97,8 +98,13 @@ export function normalizeStructuredTutorOutput(
   const sectionOrder = normalizeSectionOrder(record.sectionOrder ?? sectionsRecord.sectionOrder).filter(
     (key) => key in dedupedSections
   );
-  const confusionPrompt = stringValue(record.confusionPrompt ?? record.confusion_prompt).slice(0, 240);
-  const confusionChoices = normalizeConfusionChoices(record.confusionChoices ?? record.confusion_choices);
+  let confusionPrompt = stringValue(record.confusionPrompt ?? record.confusion_prompt).slice(0, 240);
+  const confusionChoices = normalizeConfusionChoices(record.confusionChoices ?? record.confusion_choices, {
+    maxCount: choiceDisplay === "problem_selection" ? 80 : 6
+  });
+  if (choiceDisplay === "problem_selection" && confusionChoices && !confusionPrompt) {
+    confusionPrompt = "Pick the problem you want help with.";
+  }
   const finalSections =
     confusionPrompt && confusionChoices
       ? { answer: preferredConfusionChoicePrompt(dedupedSections.answer, confusionPrompt) }
@@ -112,6 +118,7 @@ export function normalizeStructuredTutorOutput(
     ...(confusionChoices ? { confusionChoices } : {}),
     metadata: {
       hintLevel: includesString(tutorHintLevels, metadataRecord.hintLevel) ? metadataRecord.hintLevel : "guided_step",
+      ...(choiceDisplay ? { choiceDisplay } : {}),
       ...optionalProblemMetadata(metadataRecord),
       sourceConfidence: normalizeRetrievalConfidence(metadataRecord.sourceConfidence),
       studentActionNeeded: includesString(tutorStudentActions, metadataRecord.studentActionNeeded)
@@ -129,7 +136,10 @@ function preferredConfusionChoicePrompt(answer: string | undefined, confusionPro
   return confusionPrompt;
 }
 
-function normalizeConfusionChoices(value: unknown): TutorConfusionChoice[] | undefined {
+function normalizeConfusionChoices(
+  value: unknown,
+  options: { maxCount?: number } = {}
+): TutorConfusionChoice[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
   }
@@ -150,7 +160,8 @@ function normalizeConfusionChoices(value: unknown): TutorConfusionChoice[] | und
     choices.push({ id, label, message });
   }
 
-  return choices.length >= 2 && choices.length <= 6 ? choices : undefined;
+  const maxCount = options.maxCount ?? 6;
+  return choices.length >= 2 && choices.length <= maxCount ? choices : undefined;
 }
 
 function splitProblemSectionFollowup(problem: string) {

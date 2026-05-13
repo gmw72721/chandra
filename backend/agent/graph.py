@@ -167,9 +167,11 @@ PRIMARY_TUTOR_MAX_TOKENS = 900
 PRIMARY_TUTOR_LENGTH_RETRY_MAX_TOKENS = PRIMARY_TUTOR_MAX_TOKENS * 2
 CONFUSION_CHOICE_MIN_COUNT = 2
 CONFUSION_CHOICE_MAX_COUNT = 6
+PROBLEM_SELECTION_CHOICE_MAX_COUNT = 80
 CONFUSION_CHOICE_LABEL_MAX_LENGTH = 80
 CONFUSION_CHOICE_MESSAGE_MAX_LENGTH = 240
 NORMALIZE_SEARCH_QUERY_RE = re.compile(r"[^a-z0-9]+")
+ATTACHMENT_TUTOR_CONTEXT_MARKER = "Student uploaded homework attachments available for this turn:"
 PAGE_LOCATOR_RE = re.compile(r"\b(?:page|pg\.?|p\.)\s*\d")
 REQUESTED_CONTEXT_MARKER_PATTERNS = (
     re.compile(r"\b(?:section|sec\.?|sect\.?)\s+\d+(?:\.\d+)*[a-z]?\b"),
@@ -258,12 +260,15 @@ def build_pdf_rag_graph(
         heuristic = build_retrieval_decision(state)
         response = await call_primary_tutor_model(client, state, heuristic)
         decision = parse_primary_tutor_response(response, heuristic)
+        decision = enforce_ambiguous_student_upload_clarification(decision, state)
+        decision = enforce_selected_upload_problem_response(decision, state)
         decision = enforce_initial_source_lookup_search(decision, state)
         decision = enforce_referenced_problem_dependency_search(decision, state)
         decision = suppress_repeated_failed_search_decision(decision, state)
         decision = enforce_debug_retrieval_options(decision, state)
         decision = enforce_student_upload_direct_inspection(decision, state)
         decision = clamp_decision_to_help_limits(decision, state)
+        decision = enforce_terminal_upload_problem_selection(decision, state)
         answer = str(decision.get("student_response") or "").strip() if not decision.get("needs_search") else ""
         return {
             "answer": answer,
@@ -561,10 +566,13 @@ def route_after_retrieval_decision(state: PdfRagState) -> str:
 
 def route_after_metadata_context(state: PdfRagState) -> str:
     decision = state.get("retrieval_decision") or {}
+    structured_output = decision.get("structuredOutput")
     if (
-        str(state.get("answer") or "").strip()
+        (str(state.get("answer") or "").strip() or structured_output_is_problem_selection(structured_output))
         and not decision.get("needs_search")
         and (
+            structured_output_is_problem_selection(structured_output)
+            or
             forced_confusion_choice_response(state)
             or not (decision.get("memory_used") and state.get("page_assets"))
         )
@@ -581,6 +589,14 @@ def forced_confusion_choice_response(state: PdfRagState) -> bool:
     return isinstance(structured_output, dict) and bool(structured_output.get("confusionChoices"))
 
 
+def structured_output_is_problem_selection(structured_output: Any) -> bool:
+    if not isinstance(structured_output, dict):
+        return False
+
+    metadata = structured_output.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("choiceDisplay") == "problem_selection"
+
+
 def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) -> list[dict[str, Any]]:
     memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
     active_metadata = active_metadata_record_from_memory(memory)
@@ -595,6 +611,7 @@ def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) 
         "failed_searches": memory.get("failed_searches", [])[:8],
         "heuristic": heuristic,
         "latest_student_message": latest_message,
+        "selected_upload_problem_numbers": selected_upload_problem_numbers(state),
         "problem_understanding_state": understanding_state,
         "source_usage": state.get("source_usage") or {},
     }
@@ -708,6 +725,12 @@ def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) 
         "plain sentence in the answer or sourceNote section, while the search runs. Do not put retrieval status, page lookup, "
         "or source lookup progress in problem or nextStep. "
         "If the latest student turn includes uploaded homework attachments and the request is class-relevant, inspect the attached image/PDF parts in this primary call and use them as Knowledge context; also request class-material retrieval when the student asks for a specific source item, a numbered problem/page, or class PDFs could help locate, compare, or support the answer. Do not say you cannot see the upload. "
+        "Special case: when the latest student turn selects a problem from the upload, for example `Help me with problem 2.14 from this upload.`, inspect the uploaded image/PDF/OCR in this primary call. If that problem is visible or present in the upload, set needs_search false, leave searches empty, and put the exact full visible task statement word-for-word in structuredOutput.sections.problem with structuredOutput.metadata.problemNumber before giving any hint. Do not summarize, shorten, paraphrase, infer, or replace the problem with a phrase like `prove the rank inequalities`; copy the complete exercise text, including subparts, equations, references to earlier exercises, and constraints that are visible in the upload. Search class OCR/PDF metadata only if the selected problem is not found in the uploaded image/PDF/OCR. "
+        "If the upload or selected page visibly contains multiple problems/exercises/questions and there is no active problem or clear referenced item, ask which problem on the page the student wants to focus on; do not ask why they provided the page. "
+        "When visible choices are problem/exercise/question numbers, including ranges like `2.14 through 2.23`, the buttons must be in JSON: return structuredOutput.confusionPrompt plus structuredOutput.confusionChoices for each visible problem number and set structuredOutput.metadata.choiceDisplay to `problem_selection`; do not put the choice request only in nextStep or only in prose. "
+        "For problem_selection, inspect the attached upload closely and enumerate all visible problem/exercise/question numbers in structuredOutput.confusionChoices. This is required: each visible number gets one JSON choice object. Do not return generic location choices like `Problem near the top`, `Problem in the middle`, or `Problem near the bottom` when the upload shows numbered problems; use those only when the visible problems truly have no readable numbers. "
+        "The student-facing structuredOutput.confusionPrompt and answer may be a natural short sentence or two, such as saying the page has several exercises and asking which one to start with, but they must not list the problem numbers. Put the actual visible exercise numbers only inside JSON choices: structuredOutput.confusionChoices must contain one object per visible number, label should be just the number such as `2.14`, and message should be student-sendable such as `Help me with problem 2.14 from this upload.` Do not put the numbers only in prose, and do not use generic choices such as top/middle/bottom when visible problem numbers are available. "
+        "Use ordinary Chandra uncertainty choices only for non-problem-selection ambiguity when retrieval is not required first. "
         "If the attachment or request is not class-relevant, do not inspect or describe the upload; redirect to the class instead. "
         "Set needs_search according to the whole context: uploaded files, active Knowledge, and available class OCR/PDF search should all be considered before deciding. A context-grounded answer call should only be needed after retrieval, active selected source context, or if this primary call cannot produce a student_response. "
         "When needs_search is false, structuredOutput is the complete student-facing reply. "
@@ -855,6 +878,12 @@ def parse_primary_tutor_response(response: dict[str, Any], fallback: dict[str, A
     )
 
     structured_output = normalize_backend_structured_output(parsed.get("structuredOutput") or parsed.get("structured_output"))
+    if structured_output_is_problem_selection(structured_output):
+        needs_search = False
+        first_search = {}
+        query = ""
+        retrieval_reason = ""
+        decision_source = "student_message"
     if needs_search:
         had_confusion_choices = bool((structured_output or {}).get("confusionChoices"))
         structured_output = suppress_retrieval_status_next_step(structured_output)
@@ -1171,8 +1200,19 @@ def normalize_backend_structured_output(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
 
+    metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    choice_display = (
+        metadata.get("choiceDisplay")
+        if metadata.get("choiceDisplay") in {"problem_selection"}
+        else None
+    )
     confusion_prompt = coerce_structured_section_text(value.get("confusionPrompt") or value.get("confusion_prompt"))[:240]
-    confusion_choices = normalize_confusion_choices(value.get("confusionChoices") or value.get("confusion_choices"))
+    confusion_choices = normalize_confusion_choices(
+        value.get("confusionChoices") or value.get("confusion_choices"),
+        max_count=PROBLEM_SELECTION_CHOICE_MAX_COUNT if choice_display == "problem_selection" else CONFUSION_CHOICE_MAX_COUNT,
+    )
+    if choice_display == "problem_selection" and confusion_choices and not confusion_prompt:
+        confusion_prompt = problem_selection_display_prompt()
     sections_value = value.get("sections")
     if not isinstance(sections_value, dict):
         sections_value = value
@@ -1199,7 +1239,6 @@ def normalize_backend_structured_output(value: Any) -> dict[str, Any] | None:
     raw_order = value.get("sectionOrder") or value.get("section_order") or sections_value.get("sectionOrder")
     order = [str(item) for item in raw_order] if isinstance(raw_order, list) else []
     section_order = normalized_structured_section_order(order, sections, include_answer_first=False)
-    metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
     problem = str(sections.get("problem") or "")
     problem_metadata = structured_problem_metadata(metadata, problem)
 
@@ -1214,6 +1253,7 @@ def normalize_backend_structured_output(value: Any) -> dict[str, Any] | None:
             "sourceConfidence": metadata.get("sourceConfidence") if metadata.get("sourceConfidence") in {"high", "medium", "low"} else "low",
             "studentActionNeeded": metadata.get("studentActionNeeded") if metadata.get("studentActionNeeded") in {"none", "show_attempt", "try_next_step", "answer_question", "review_source", "paste_problem", "ask_teacher"} else "try_next_step",
             "mode": metadata.get("mode") if metadata.get("mode") in {"guided_problem_solving", "socratic", "check_work", "reading_helper", "exam_review", "source_lookup", "direct_answer_refusal", "clarification", "off_topic_redirect"} else "guided_problem_solving",
+            **({"choiceDisplay": choice_display} if choice_display else {}),
         },
     }
 
@@ -1232,7 +1272,11 @@ def preferred_confusion_choice_prompt(answer: Any, confusion_prompt: str) -> str
     return confusion_prompt
 
 
-def normalize_confusion_choices(value: Any) -> list[dict[str, str]] | None:
+def problem_selection_display_prompt() -> str:
+    return "Pick the problem you want help with."
+
+
+def normalize_confusion_choices(value: Any, max_count: int = CONFUSION_CHOICE_MAX_COUNT) -> list[dict[str, str]] | None:
     if not isinstance(value, list):
         return None
 
@@ -1251,7 +1295,7 @@ def normalize_confusion_choices(value: Any) -> list[dict[str, str]] | None:
         choice_id = coerce_structured_section_text(item.get("id"))[:CONFUSION_CHOICE_LABEL_MAX_LENGTH] or f"choice-{len(choices) + 1}"
         choices.append({"id": choice_id, "label": label, "message": message})
 
-    return choices if CONFUSION_CHOICE_MIN_COUNT <= len(choices) <= CONFUSION_CHOICE_MAX_COUNT else None
+    return choices if CONFUSION_CHOICE_MIN_COUNT <= len(choices) <= max_count else None
 
 
 def strip_confusion_choice_output(structured_output: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1702,8 +1746,346 @@ def referenced_problem_dependency_search_query(active_record: dict[str, Any] | N
     return f"find exact referenced exercise problem {number_text}{material_hint}".strip()
 
 
+def enforce_ambiguous_student_upload_clarification(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
+    if structured_output_is_problem_selection(decision.get("structuredOutput")):
+        return terminal_problem_selection_decision(decision)
+
+    decision_selection_text = upload_problem_selection_text_from_decision(decision)
+    if not asks_student_to_select_visible_problem(decision_selection_text):
+        decision_selection_text = ""
+    if not ambiguous_student_upload_problem_page(state) and not decision_asks_upload_problem_selection(decision, state):
+        return decision
+
+    if normalize_debug_options(state.get("debug_options")).get("forceRetrieval"):
+        return decision
+
+    prompt = problem_selection_display_prompt()
+    structured_output = normalize_backend_structured_output(
+        {
+            "sections": {"answer": prompt},
+            "confusionPrompt": prompt,
+            "metadata": {
+                "hintLevel": "none",
+                "mode": "clarification",
+                "sourceConfidence": "medium",
+                "studentActionNeeded": "answer_question",
+            },
+        }
+    )
+    tutor_plan = {
+        **(decision.get("tutorPlan") if isinstance(decision.get("tutorPlan"), dict) else {}),
+        "activeProblemId": "unknown",
+        "studentIntent": "vague_help",
+        "needsRetrieval": False,
+        "retrievalReason": "",
+        "currentUnderstandingLevel": 0,
+        "nextHelpDepth": 1,
+        "answerSeekingRisk": "low",
+        "currentStep": "Identify which uploaded exercise the student wants help with.",
+        "currentSubstep": "Ask for the problem number or visible position on the uploaded page.",
+        "currentStepStatus": "unclear",
+        "currentStepCompleted": False,
+        "responseStrategy": "Ask a focused clarification before searching class materials.",
+        "shouldAskQuestion": True,
+        "shouldGiveWorkedStep": False,
+        "shouldAvoidFullSolution": True,
+        "stateUpdates": {},
+    }
+
+    return {
+        **decision,
+        "can_answer_now": True,
+        "decision_source": "student_upload",
+        "memory_used": bool(decision.get("memory_used")),
+        "needs_search": False,
+        "query": "",
+        "retrieval_reason": "",
+        "search_query": "",
+        "searches": [],
+        "student_response": prompt,
+        "structuredOutput": structured_output,
+        "tool_calls": [],
+        "top_k": 1,
+        "tutorPlan": tutor_plan,
+    }
+
+
+def enforce_terminal_upload_problem_selection(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
+    if structured_output_is_problem_selection(decision.get("structuredOutput")):
+        return terminal_problem_selection_decision(decision)
+
+    return enforce_ambiguous_student_upload_clarification(decision, state)
+
+
+def terminal_problem_selection_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    tutor_plan = decision.get("tutorPlan") if isinstance(decision.get("tutorPlan"), dict) else {}
+    return {
+        **decision,
+        "can_answer_now": True,
+        "needs_search": False,
+        "query": "",
+        "retrieval_reason": "",
+        "search_query": "",
+        "searches": [],
+        "tool_calls": [],
+        "tutorPlan": {
+            **tutor_plan,
+            "needsRetrieval": False,
+            "retrievalReason": "",
+        },
+    }
+
+
+def enforce_selected_upload_problem_response(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
+    selected_numbers = selected_upload_problem_numbers(state)
+    if not selected_numbers:
+        return decision
+
+    if normalize_debug_options(state.get("debug_options")).get("forceRetrieval"):
+        return decision
+
+    problem_text = selected_problem_statement_text(state, set(selected_numbers), include_uploads=True)
+    structured_output = normalize_backend_structured_output(
+        decision.get("structuredOutput") or decision.get("structured_output")
+    )
+    if problem_text and not structured_output_problem_text(structured_output):
+        structured_output = structured_output_with_problem_section(
+            structured_output,
+            problem_text=problem_text,
+            problem_number=selected_numbers[0],
+        )
+
+    student_response = str(decision.get("student_response") or "").strip()
+    has_problem = bool(structured_output_problem_text(structured_output))
+
+    if not (problem_text or has_problem):
+        return decision
+
+    if not student_response or looks_like_retrieval_status_text(student_response):
+        student_response = structured_output_to_text(structured_output or {}) or (
+            f"I found problem {selected_numbers[0]} in the upload."
+        )
+
+    return {
+        **decision,
+        "can_answer_now": True,
+        "decision_source": "student_upload",
+        "needs_search": False,
+        "query": "",
+        "retrieval_reason": "",
+        "search_query": "",
+        "searches": [],
+        "student_response": student_response,
+        "structuredOutput": structured_output,
+        "tool_calls": [],
+    }
+
+
+def structured_output_problem_text(structured_output: dict[str, Any] | None) -> str:
+    if not isinstance(structured_output, dict):
+        return ""
+
+    sections = structured_output.get("sections")
+    if not isinstance(sections, dict):
+        return ""
+
+    return str(sections.get("problem") or "").strip()
+
+
+def structured_output_with_problem_section(
+    structured_output: dict[str, Any] | None,
+    *,
+    problem_text: str,
+    problem_number: str,
+) -> dict[str, Any]:
+    base = structured_output if isinstance(structured_output, dict) else {}
+    sections = base.get("sections") if isinstance(base.get("sections"), dict) else {}
+    metadata = base.get("metadata") if isinstance(base.get("metadata"), dict) else {}
+    existing_order = base.get("sectionOrder") if isinstance(base.get("sectionOrder"), list) else []
+    section_order = ["problem", *[str(item) for item in existing_order if str(item) != "problem"]]
+    if not existing_order:
+        section_order.extend(key for key in sections.keys() if key != "problem")
+
+    return normalize_backend_structured_output(
+        {
+            **base,
+            "sections": {
+                **sections,
+                "problem": problem_text,
+            },
+            "sectionOrder": section_order,
+            "metadata": {
+                **metadata,
+                "hintLevel": metadata.get("hintLevel") or "small_hint",
+                "mode": metadata.get("mode") or "guided_problem_solving",
+                "problemNumber": metadata.get("problemNumber") or problem_number,
+                "sourceConfidence": metadata.get("sourceConfidence") or "medium",
+                "studentActionNeeded": metadata.get("studentActionNeeded") or "try_next_step",
+            },
+        }
+    ) or {
+        "sections": {"problem": problem_text},
+        "sectionOrder": ["problem"],
+        "metadata": {
+            "hintLevel": "small_hint",
+            "mode": "guided_problem_solving",
+            "problemNumber": problem_number,
+            "sourceConfidence": "medium",
+            "studentActionNeeded": "try_next_step",
+        },
+    }
+
+
+def selected_upload_problem_numbers(state: PdfRagState) -> list[str]:
+    if not has_student_upload_for_latest_turn(state):
+        return []
+
+    latest_message = latest_student_request_text_without_attachment_context(state.get("messages", []))
+    numbers = sorted(problem_numbers_for_selection_from_text(latest_message), key=problem_number_sort_key)
+    if not numbers:
+        return []
+
+    if latest_message_mentions_upload(latest_message) or previous_assistant_was_upload_problem_selection(state):
+        return numbers
+
+    return []
+
+
+def previous_assistant_was_upload_problem_selection(state: PdfRagState) -> bool:
+    messages = state.get("messages", [])
+    if not isinstance(messages, list):
+        return False
+
+    seen_latest_student = False
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+
+        role = message.get("role")
+        if role in {"user", "student"} and not seen_latest_student:
+            seen_latest_student = True
+            continue
+
+        if not seen_latest_student:
+            continue
+
+        if role not in {"assistant", "ai", "model"}:
+            continue
+
+        structured_output = message.get("structuredOutput") or message.get("structured_output")
+        if structured_output_is_problem_selection(structured_output):
+            return True
+
+        content = str(message.get("content") or "")
+        if asks_student_to_pick_problem(content):
+            return True
+
+        return False
+
+    return False
+
+
+def latest_message_mentions_upload(message: str) -> bool:
+    normalized = normalize_search_query(message)
+    return bool(
+        re.search(
+            r"\b(?:from this upload|this upload|the upload|uploaded|attachment|attached|pdf|image|file|homework material)\b",
+            normalized,
+        )
+    )
+
+
+def decision_asks_upload_problem_selection(decision: dict[str, Any], state: PdfRagState) -> bool:
+    if not has_student_upload_for_latest_turn(state):
+        return False
+
+    if has_active_problem_context_for_upload_clarification(state):
+        return False
+
+    selection_text = upload_problem_selection_text_from_decision(decision)
+    return asks_student_to_select_visible_problem(selection_text) or asks_student_to_pick_problem(selection_text)
+
+
+def upload_problem_selection_text_from_decision(decision: dict[str, Any]) -> str:
+    text_parts = [
+        str(decision.get("student_response") or ""),
+        structured_output_to_text(decision.get("structuredOutput") or {}),
+    ]
+    return " ".join(part for part in text_parts if part).strip()
+
+
+def ambiguous_student_upload_problem_page(state: PdfRagState) -> bool:
+    if not has_student_upload_for_latest_turn(state):
+        return False
+
+    if has_active_problem_context_for_upload_clarification(state):
+        return False
+
+    request_text = latest_student_request_text_without_attachment_context(state.get("messages", []))
+    if latest_request_identifies_upload_problem(request_text):
+        return False
+
+    return student_upload_has_multiple_problem_candidates(state.get("student_attachment_files", []))
+
+
+def asks_student_to_pick_problem(answer: str) -> bool:
+    normalized = normalize_search_query(answer)
+    return bool(
+        re.search(r"\b(?:pick|choose|select)\b", normalized)
+        and re.search(r"\b(?:problem|exercise|question)\b", normalized)
+        and re.search(r"\b(?:want help with|focus on|work on)\b", normalized)
+    )
+
+
+def has_active_problem_context_for_upload_clarification(state: PdfRagState) -> bool:
+    context = state.get("active_problem_context")
+    if isinstance(context, dict) and str(context.get("problem_text") or context.get("problem_id") or "").strip():
+        return True
+
+    memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
+    return bool(active_metadata_record_from_memory(memory) or memory.get("active_problem"))
+
+
+def latest_student_request_text_without_attachment_context(messages: list[dict[str, Any]]) -> str:
+    content = latest_student_message_content(messages)
+    if not content:
+        return ""
+
+    return content.split(ATTACHMENT_TUTOR_CONTEXT_MARKER, 1)[0].strip()
+
+
+def latest_request_identifies_upload_problem(request_text: str) -> bool:
+    if problem_numbers_from_text(request_text) or explicit_page_numbers_from_text(request_text):
+        return True
+
+    normalized = normalize_search_query(request_text)
+    return bool(
+        re.search(
+            r"\b(?:first|second|third|fourth|fifth|last|top|middle|bottom|left|right|circled|highlighted)\b",
+            normalized,
+        )
+    )
+
+
+def student_upload_has_multiple_problem_candidates(files: list[dict[str, Any]]) -> bool:
+    for file_payload in files or []:
+        if not isinstance(file_payload, dict):
+            continue
+
+        if len(record_problem_numbers(file_payload)) >= 2:
+            return True
+
+    return False
+
+
 def enforce_initial_source_lookup_search(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
     if decision.get("needs_search"):
+        return decision
+
+    if selected_upload_problem_numbers(state):
+        return decision
+
+    if ambiguous_student_upload_problem_page(state):
         return decision
 
     if state.get("tool_call_count", 0) != 0 or state.get("retrieved_pages") or state.get("page_assets"):
@@ -3093,7 +3475,8 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
             else "If you answer directly, keep it concise and course-focused."
         ),
         "Student-uploaded files may be attached as image_url or file parts and represented as Knowledge items with extracted OCR text or summaries. Inspect uploaded image_url parts directly only when the student asks about a class-relevant image such as homework, notes, a worksheet, a problem, a diagram, a reading, or another academic task for this class; do not say you only have upload metadata when a class-relevant uploaded image part is present. If the primary tutor turn trace says or implies that Chandra cannot see a class-relevant image, treat that as stale planning context and override it by inspecting the attached image_url part. Treat uploads as the student's attempt only when their usedAs label is student_attempt.",
-        "When the latest student turn includes an uploaded image or PDF and the request is class-relevant, inspect the uploaded file directly or use its extracted text as Knowledge context, then consider selected class OCR/PDF context as well. If a problem is visible in the upload, put only that academic task statement in `Problem:` and save it through the internal Problem context block. If no academic problem is visible in the upload, use selected class material when available; otherwise say briefly what is missing. For unrelated uploaded photos or personal images such as pets, people, rooms, food, memes, or scenery, do not describe or react to the image; briefly redirect back to the course.",
+        "When the latest student turn includes an uploaded image or PDF and the request is class-relevant, inspect the uploaded file directly or use its extracted text as Knowledge context, then consider selected class OCR/PDF context as well. If a problem is visible in the upload, put only the exact full academic task statement word-for-word in `Problem:` and save it through the internal Problem context block; do not summarize or paraphrase the exercise. If no academic problem is visible in the upload, use selected class material when available; otherwise say briefly what is missing. For unrelated uploaded photos or personal images such as pets, people, rooms, food, memes, or scenery, do not describe or react to the image; briefly redirect back to the course.",
+        "If the uploaded image/PDF or selected page contains multiple problems/exercises/questions and no single active problem can be identified, ask which problem on the page the student wants to focus on. Do not ask why they provided the page.",
         f"Primary tutor turn trace for internal use only: {compact_json_dumps(decision)}",
         f"TutorPlan for internal use only: {compact_json_dumps(state.get('tutor_plan') or decision.get('tutorPlan') or {})}",
         f"Current problem understanding state for internal use only: {compact_json_dumps(state.get('problem_understanding_state') or current_problem_understanding_state(state))}",
@@ -3905,24 +4288,15 @@ def sources_for_answer(state: PdfRagState, answer: str) -> list[dict[str, Any]]:
     assets = state.get("page_assets") or []
 
     if assets:
-        model_referenced_assets = page_assets_referenced_by_model(answer, assets)
-        if model_referenced_assets:
-            return sources_from_page_assets(model_referenced_assets, answer=answer)
-
-        normalized_answer = answer.lower()
-        referenced_assets = [
-            asset for asset in assets if answer_references_asset_normalized(normalized_answer, asset)
-        ]
-
+        referenced_assets = page_assets_referenced_in_answer(answer, assets)
         if referenced_assets:
             return sources_from_page_assets(referenced_assets, answer=answer)
 
-        if answer_appears_source_backed(answer) and len(assets) > 1:
-            return sources_from_page_assets(assets, limit=min(3, MAX_RETRIEVED_WINDOWS))
+        return []
 
-        return sources_from_page_assets(assets, answer=answer, limit=1)
-
-    return sources_from_pages(state.get("retrieved_pages", []), limit=1)
+    retrieved_pages = state.get("retrieved_pages", [])
+    referenced_pages = page_assets_referenced_in_answer(answer, retrieved_pages)
+    return sources_from_pages(referenced_pages) if referenced_pages else []
 
 
 def page_assets_for_memory_from_answer(state: PdfRagState, answer: str) -> list[dict[str, Any]]:
@@ -3930,21 +4304,16 @@ def page_assets_for_memory_from_answer(state: PdfRagState, answer: str) -> list[
     if not assets:
         return []
 
+    return page_assets_referenced_in_answer(answer, assets)
+
+
+def page_assets_referenced_in_answer(answer: str, assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     model_referenced_assets = page_assets_referenced_by_model(answer, assets)
     if model_referenced_assets:
         return model_referenced_assets
 
     normalized_answer = answer.lower()
-    referenced_assets = [
-        asset for asset in assets if answer_references_asset_normalized(normalized_answer, asset)
-    ]
-    if referenced_assets:
-        return referenced_assets
-
-    if answer_appears_source_backed(answer) and len(assets) > 1:
-        return sorted(assets, key=lambda asset: float(asset.get("score") or 0.0), reverse=True)[: min(3, MAX_RETRIEVED_WINDOWS)]
-
-    return sorted(assets, key=lambda asset: float(asset.get("score") or 0.0), reverse=True)[:1]
+    return [asset for asset in assets if answer_references_asset_normalized(normalized_answer, asset)]
 
 
 def page_assets_referenced_by_model(answer: str, assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4235,9 +4604,28 @@ def requested_problem_numbers_for_lookup(message: str) -> set[str]:
     return numbers
 
 
-def selected_problem_statement_text(state: PdfRagState, requested_numbers: set[str]) -> str:
-    for record in [*state.get("page_assets", []), *state.get("retrieved_pages", [])]:
-        text = str(record.get("ocr_text") or record.get("chunk_text") or record.get("content") or "").strip()
+def selected_problem_statement_text(
+    state: PdfRagState,
+    requested_numbers: set[str],
+    *,
+    include_uploads: bool = False,
+) -> str:
+    records = [
+        *state.get("page_assets", []),
+        *state.get("retrieved_pages", []),
+    ]
+    if include_uploads:
+        records = [
+            *state.get("student_attachment_files", []),
+            *state.get("selected_metadata_records", []),
+            *records,
+        ]
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+
+        text = record_problem_search_text(record)
         if not text:
             continue
 
@@ -4246,6 +4634,20 @@ def selected_problem_statement_text(state: PdfRagState, requested_numbers: set[s
             return extracted
 
     return ""
+
+
+def record_problem_search_text(record: dict[str, Any]) -> str:
+    return str(
+        record.get("ocr_text")
+        or record.get("ocrText")
+        or record.get("extracted_text")
+        or record.get("extractedText")
+        or record.get("chunk_text")
+        or record.get("chunkText")
+        or record.get("content")
+        or record.get("summary")
+        or ""
+    ).strip()
 
 
 def extract_problem_statement_from_text(text: str, requested_numbers: set[str]) -> str:
@@ -4703,16 +5105,20 @@ async def run_pdf_rag_agent_stream(
         heuristic = build_retrieval_decision(state)
         response = await call_primary_tutor_model(client, state, heuristic)
         decision = parse_primary_tutor_response(response, heuristic)
+        decision = enforce_ambiguous_student_upload_clarification(decision, state)
+        decision = enforce_selected_upload_problem_response(decision, state)
         decision = enforce_initial_source_lookup_search(decision, state)
         decision = enforce_referenced_problem_dependency_search(decision, state)
         decision = suppress_repeated_failed_search_decision(decision, state)
         decision = clamp_decision_to_help_limits(decision, state)
         decision = enforce_student_upload_direct_inspection(decision, state)
+        decision = enforce_terminal_upload_problem_selection(decision, state)
         state["retrieval_decision"] = decision
         state["tutor_plan"] = decision.get("tutorPlan") or {}
         state["problem_understanding_state"] = state_after_tutor_plan(state, state.get("tutor_plan"))
         state["retrieval_reason"] = decision.get("retrieval_reason") or ""
         state["failed_searches_skipped"] = decision.get("failed_searches_skipped") or []
+        state["answer"] = str(decision.get("student_response") or "").strip() if not decision.get("needs_search") else ""
         if decision.get("structuredOutput") and not decision.get("needs_search"):
             state["structured_output_override"] = decision.get("structuredOutput")
         state["finish_reason"] = response.get("finish_reason") or ""
@@ -4799,9 +5205,11 @@ async def run_pdf_rag_agent_stream(
         state["stage_history"] = append_stage(state, "prepare_metadata_context")
 
         if (
-            state.get("answer")
+            (state.get("answer") or structured_output_is_problem_selection(decision.get("structuredOutput")))
             and not decision.get("needs_search")
             and (
+                structured_output_is_problem_selection(decision.get("structuredOutput"))
+                or
                 forced_confusion_choice_response(state)
                 or not (decision.get("memory_used") and state.get("page_assets"))
             )
@@ -4989,6 +5397,9 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
     if should_neutralize_validation_feedback(state):
         answer = neutralize_validation_verdicts(answer)
         structured_output = neutralize_structured_validation_verdicts(structured_output)
+
+    if structured_output_is_problem_selection(structured_output):
+        answer = coerce_structured_section_text((structured_output.get("sections") or {}).get("answer")) or answer
 
     active_problem_text = str(((structured_output.get("sections") or {}).get("problem") if isinstance(structured_output, dict) else "") or "")
     state["knowledge_items"] = knowledge_items_from_state(
@@ -6926,6 +7337,89 @@ def structured_tutor_output_from_answer(
             "mode": mode,
         },
     }
+
+
+def asks_student_to_select_visible_problem(answer: str) -> bool:
+    normalized = normalize_search_query(answer)
+    has_numbered_range_signal = bool(
+        re.search(
+            r"\b\d{1,3}\s*\.\s*\d{1,3}[a-z]?\s*(?:through|to|-|–|—)\s*\d{1,3}\s*\.\s*\d{1,3}[a-z]?\b",
+            answer,
+            re.I,
+        )
+    )
+    has_multiple_problem_signal = bool(
+        (
+            re.search(r"\b(?:several|multiple|more than one|a few|few|different)\b", normalized)
+            or has_numbered_range_signal
+        )
+        and re.search(r"\b(?:problem|problems|exercise|exercises|question|questions)\b", normalized)
+    )
+    has_selection_signal = bool(
+        re.search(
+            r"\b(?:not sure|unsure|unclear|which one|which problem|which exercise|which question|pick|choose|want help with)\b",
+            normalized,
+        )
+    )
+    return has_multiple_problem_signal and has_selection_signal
+
+
+def problem_numbers_for_selection_from_text(text: str) -> list[str]:
+    numbers = {str(number).strip() for number in problem_numbers_from_text(text) if str(number).strip()}
+    numbers.update(bare_dotted_problem_numbers_from_selection_text(text))
+    numbers.update(expanded_dotted_problem_ranges(text))
+    return sorted(numbers, key=problem_number_sort_key)
+
+
+def bare_dotted_problem_numbers_from_selection_text(text: str) -> list[str]:
+    return [
+        f"{match.group('section')}.{match.group('number')}"
+        for match in re.finditer(
+            r"\b(?P<section>\d{1,3})\s*\.\s*(?P<number>\d{1,3})[a-z]?\*?\b",
+            text,
+            re.I,
+        )
+    ]
+
+
+def expanded_dotted_problem_ranges(text: str) -> list[str]:
+    numbers: list[str] = []
+    for match in re.finditer(
+        r"\b(?P<section>\d{1,3})\s*\.\s*(?P<start>\d{1,3})[a-z]?\s*(?:through|to|-|–|—)\s*(?P=section)\s*\.\s*(?P<end>\d{1,3})[a-z]?\b",
+        text,
+        re.I,
+    ):
+        section = match.group("section")
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        if end < start or end - start > PROBLEM_SELECTION_CHOICE_MAX_COUNT:
+            continue
+        numbers.extend(f"{section}.{number}" for number in range(start, end + 1))
+
+    return numbers
+
+
+def problem_selection_records(state: PdfRagState) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    uploads = state.get("student_attachment_files")
+    if isinstance(uploads, list):
+        records.extend(item for item in uploads if isinstance(item, dict))
+
+    for key in ("selected_metadata_records", "page_assets", "retrieved_pages"):
+        value = state.get(key)
+        if not isinstance(value, list):
+            continue
+        records.extend(item for item in value if isinstance(item, dict))
+    return records
+
+
+def record_problem_numbers(record: dict[str, Any]) -> list[str]:
+    raw_numbers = record.get("problem_numbers") or record.get("problemNumbers")
+    if isinstance(raw_numbers, list):
+        return [str(number).strip() for number in raw_numbers if str(number).strip()]
+
+    text = record_problem_search_text(record)
+    return sorted(problem_numbers_from_text(text), key=problem_number_sort_key)
 
 
 def normalize_retrieval_confidence(value: Any) -> str:

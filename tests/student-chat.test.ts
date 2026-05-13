@@ -488,6 +488,42 @@ test("student chat response normalization preserves valid confusion choices", ()
   ]);
 });
 
+test("student chat response normalization preserves full problem selection choices", () => {
+  const choices = Array.from({ length: 10 }, (_, index) => {
+    const number = `2.${index + 14}`;
+    return {
+      id: `problem-2-${index + 14}`,
+      label: number,
+      message: `Help me with problem ${number} from this upload.`
+    };
+  });
+  const response = normalizeTutorResponse({
+    content: "This page has several exercises. Which one do you want help with?",
+    retrievalConfidence: "low",
+    sources: [],
+    structuredOutput: {
+      sections: {
+        answer: "This page has several exercises. Which one do you want help with?"
+      },
+      confusionPrompt: "This page has several exercises. Which one do you want help with?",
+      confusionChoices: choices,
+      metadata: {
+        choiceDisplay: "problem_selection",
+        hintLevel: "none",
+        mode: "clarification",
+        sourceConfidence: "low",
+        studentActionNeeded: "answer_question"
+      }
+    }
+  });
+
+  assert.equal(response.structuredOutput?.metadata.choiceDisplay, "problem_selection");
+  assert.deepEqual(response.structuredOutput?.sections, {
+    answer: "This page has several exercises. Which one do you want help with?"
+  });
+  assert.deepEqual(response.structuredOutput?.confusionChoices, choices);
+});
+
 test("student chat response normalization makes confusion choice prompt authoritative", () => {
   const response = normalizeTutorResponse({
     content: "I can help with Problem 2.14, but I need to know which part you want to start with.",
@@ -1404,9 +1440,10 @@ test("chat context memory includes student upload sources", () => {
       id: "attachment-1",
       sourceName: "problem-photo.png",
       sourceType: "student_upload",
+      fileType: "image",
       pageNumber: undefined,
       problemNumber: undefined,
-      label: "Student upload · problem-photo.png"
+      label: "problem-photo.png"
     }
   ]);
 });
@@ -1488,7 +1525,9 @@ test("student chat route schema accepts structured output with confusion choices
 
   assert.match(source, /const tutorConfusionChoiceSchema = z\.object/);
   assert.match(source, /confusionPrompt: z\.string\(\)\.max\(240\)\.optional\(\)/);
-  assert.match(source, /confusionChoices: z\.array\(tutorConfusionChoiceSchema\)\.min\(2\)\.max\(6\)\.optional\(\)/);
+  assert.match(source, /const tutorConfusionChoicesSchema = z\.array\(tutorConfusionChoiceSchema\)\.min\(2\)\.max\(80\)/);
+  assert.match(source, /choiceDisplay: z\.enum\(\["problem_selection"\]\)\.optional\(\)/);
+  assert.match(source, /Generic confusion choices must include 2 to 6 choices\./);
 });
 
 test("student chat tolerates partial structured output in message history", () => {
@@ -1508,11 +1547,14 @@ test("student UI renders confusion choice buttons and sends the selected message
   assert.match(source, /visibleConfusionPrompt/);
   assert.match(source, /sameDisplayedText\(block\.content, confusionPrompt\)/);
   assert.match(source, /assistant-confusion-choice-description/);
+  assert.match(source, /isProblemSelection/);
   assert.match(source, /onChoiceSelect\(choice\.message\)/);
   assert.match(source, /void sendStudentMessage\(choiceMessage\)/);
   assert.match(source, /aria-label=\{`Send: \$\{choice\.message\}`\}/);
   assert.match(styles, /\.assistant-confusion-choice-grid\s*\{\s*display: grid;/);
   assert.match(styles, /grid-template-columns: minmax\(0, 1fr\);/);
+  assert.match(styles, /\.assistant-confusion-choice-panel\.problem-selection \.assistant-confusion-choice-grid\s*\{\s*display: flex;/);
+  assert.match(styles, /flex-wrap: wrap;/);
 });
 
 test("teacher debug mode exposes tutor behavior controls in the composer", () => {
