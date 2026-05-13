@@ -106,7 +106,6 @@ export async function signUpWithRole({
   password,
   role,
   classId,
-  teacherInviteToken,
   username
 }: {
   displayName: string;
@@ -114,7 +113,6 @@ export async function signUpWithRole({
   password: string;
   role: AccountRole;
   classId?: string;
-  teacherInviteToken?: string;
   username?: string;
 }) {
   assertFirebaseReady();
@@ -130,7 +128,6 @@ export async function signUpWithRole({
   if (role === "teacher") {
     return createTeacherProfile({
       displayName,
-      teacherInviteToken,
       username: cleanUsername,
       user: credential.user
     });
@@ -173,14 +170,12 @@ export async function createRoleProfile({
   role,
   user,
   classId,
-  teacherInviteToken,
   username
 }: {
   displayName: string;
   role: AccountRole;
   user: User;
   classId?: string;
-  teacherInviteToken?: string;
   username?: string;
 }) {
   assertFirebaseReady();
@@ -194,7 +189,6 @@ export async function createRoleProfile({
   if (role === "teacher") {
     return createTeacherProfile({
       displayName: cleanDisplayName,
-      teacherInviteToken,
       username: cleanUsername,
       user
     });
@@ -682,12 +676,10 @@ async function joinStudentClass({
 
 async function createTeacherProfile({
   displayName,
-  teacherInviteToken,
   username,
   user
 }: {
   displayName: string;
-  teacherInviteToken?: string;
   username: string;
   user: User;
 }) {
@@ -700,7 +692,6 @@ async function createTeacherProfile({
     },
     body: JSON.stringify({
       displayName,
-      inviteToken: teacherInviteToken ?? "",
       username
     })
   });

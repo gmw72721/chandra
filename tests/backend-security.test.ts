@@ -93,7 +93,6 @@ test("production backend internal URLs and OpenRouter referer do not silently fa
   const openRouterSource = readFileSync(join(repoRoot, "backend/agent/openrouter_client.py"), "utf8");
   const fastApiSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
   const appHosting = readFileSync(join(repoRoot, "apphosting.yaml"), "utf8");
-  const inviteRoute = readFileSync(join(repoRoot, "frontend/app/api/teacher-invites/route.ts"), "utf8");
 
   assert.match(internalNextSource, /raise RuntimeError\(f"NEXT_INTERNAL_BASE_URL or FRONTEND_ORIGIN is required/);
   assert.match(toolsSource, /internal_next_base_url\("PDF retrieval"\)/);
@@ -109,8 +108,6 @@ test("production backend internal URLs and OpenRouter referer do not silently fa
   assert.doesNotMatch(assetRoute, /storagePath: z\.string/);
   assert.match(openRouterSource, /OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production/);
   assert.match(fastApiSource, /OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production/);
-  assert.match(inviteRoute, /publicFrontendOrigin/);
-  assert.match(inviteRoute, /FRONTEND_ORIGIN is required in production to create teacher invite links/);
   assert.match(appHosting, /FRONTEND_ORIGIN/);
   assert.match(appHosting, /https:\/\/chandra-frontend--chandra-f6e13\.us-central1\.hosted\.app/);
 });

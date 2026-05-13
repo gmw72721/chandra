@@ -16,7 +16,6 @@ test("core app PostgreSQL migration exists and defines phase 1 tables", () => {
     "classes",
     "class_enrollments",
     "co_teachers",
-    "teacher_invites",
     "materials",
     "material_jobs",
     "material_upload_sessions",

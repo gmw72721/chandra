@@ -104,26 +104,6 @@ CREATE TABLE IF NOT EXISTS co_teachers (
 CREATE INDEX IF NOT EXISTS idx_co_teachers_teacher_id
   ON co_teachers (teacher_id);
 
-CREATE TABLE IF NOT EXISTS teacher_invites (
-  id TEXT PRIMARY KEY,
-  token_hash TEXT NOT NULL UNIQUE,
-  email TEXT,
-  email_normalized TEXT GENERATED ALWAYS AS (lower(coalesce(email, ''))) STORED,
-  created_by TEXT REFERENCES accounts(id) ON DELETE SET NULL,
-  used_by TEXT REFERENCES accounts(id) ON DELETE SET NULL,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'used', 'revoked', 'expired')),
-  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at TIMESTAMPTZ,
-  used_at TIMESTAMPTZ,
-  revoked_at TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_teacher_invites_email
-  ON teacher_invites (email_normalized)
-  WHERE email IS NOT NULL;
-
 CREATE TABLE IF NOT EXISTS materials (
   id TEXT PRIMARY KEY,
   class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
@@ -563,7 +543,6 @@ BEGIN
     'classes',
     'class_enrollments',
     'co_teachers',
-    'teacher_invites',
     'materials',
     'material_jobs',
     'material_upload_sessions',

@@ -18,7 +18,6 @@ const allowedSections = new Set([
   "reviews",
   "support",
   "profiles",
-  "invites",
   "logs"
 ]);
 
@@ -104,10 +103,6 @@ async function backfill() {
 
     if (hasSection("profiles")) {
       await backfillLearningProfiles(client);
-    }
-
-    if (hasSection("invites")) {
-      await backfillTeacherInvites(client);
     }
 
     if (hasSection("logs")) {
@@ -587,44 +582,6 @@ async function backfillLearningProfiles(client) {
       }
     }
   });
-}
-
-async function backfillTeacherInvites(client) {
-  const snapshot = await db.collection("teacherInvites").get();
-  for (const doc of snapshot.docs) {
-    const data = doc.data();
-    let createdBy = stringOrNull(data.createdBy) || stringOrNull(data.createdByUid);
-    let usedBy = stringOrNull(data.usedBy) || stringOrNull(data.usedByUid);
-    if (createdBy) {
-      createdBy = await ensureAccount(client, createdBy, {
-        role: "teacher",
-        email: lowerString(data.createdByEmail) || legacyEmail(createdBy),
-        displayName: stringValue(data.createdByName) || "Legacy teacher"
-      }) || createdBy;
-    }
-    if (usedBy) {
-      usedBy = await ensureAccount(client, usedBy, {
-        role: "teacher",
-        email: lowerString(data.usedByEmail) || legacyEmail(usedBy),
-        displayName: stringValue(data.usedByName) || "Legacy teacher"
-      }) || usedBy;
-    }
-    await upsertTeacherInvite(client, {
-      id: doc.id,
-      tokenHash: stringValue(data.tokenHash) || doc.id,
-      email: lowerString(data.email),
-      createdBy,
-      usedBy,
-      status: normalizeInviteStatus(data.status, data),
-      metadata: firestoreJson(data),
-      createdAt: timestampValue(data.createdAt),
-      updatedAt: timestampValue(data.updatedAt),
-      expiresAt: timestampValue(data.expiresAt),
-      usedAt: timestampValue(data.usedAt),
-      revokedAt: timestampValue(data.revokedAt)
-    });
-    count("teacher_invites");
-  }
 }
 
 async function backfillOperationalLogs(client) {
@@ -1497,45 +1454,6 @@ async function insertLearningProfileRevision(client, input) {
   );
 }
 
-async function upsertTeacherInvite(client, input) {
-  if (dryRun) {
-    return;
-  }
-  await client.query(
-    `insert into teacher_invites (
-      id, token_hash, email, created_by, used_by, status, metadata,
-      created_at, updated_at, expires_at, used_at, revoked_at
-    ) values (
-      $1, $2, $3, $4, $5, $6, $7::jsonb,
-      coalesce($8, now()), coalesce($9, now()), $10, $11, $12
-    )
-    on conflict (id) do update set
-      token_hash = excluded.token_hash,
-      email = excluded.email,
-      created_by = excluded.created_by,
-      used_by = excluded.used_by,
-      status = excluded.status,
-      metadata = teacher_invites.metadata || excluded.metadata,
-      expires_at = excluded.expires_at,
-      used_at = excluded.used_at,
-      revoked_at = excluded.revoked_at`,
-    [
-      input.id,
-      input.tokenHash,
-      input.email,
-      input.createdBy,
-      input.usedBy,
-      input.status,
-      JSON.stringify(input.metadata),
-      input.createdAt,
-      input.updatedAt,
-      input.expiresAt,
-      input.usedAt,
-      input.revokedAt
-    ]
-  );
-}
-
 async function insertAuditLog(client, input) {
   if (dryRun) {
     return;
@@ -1937,19 +1855,6 @@ function normalizeRevisionType(value) {
   return value === "draft_saved" || value === "approved" || value === "disabled" || value === "cleared"
     ? value
     : "draft_generated";
-}
-
-function normalizeInviteStatus(value, data) {
-  if (value === "used" || value === "revoked" || value === "expired") {
-    return value;
-  }
-  if (data.usedAt) {
-    return "used";
-  }
-  if (data.revokedAt) {
-    return "revoked";
-  }
-  return "active";
 }
 
 function normalizeSeverity(value) {

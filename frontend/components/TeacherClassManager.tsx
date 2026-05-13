@@ -2,7 +2,17 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, memo, type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  FormEvent,
+  memo,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState
+} from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
@@ -116,6 +126,7 @@ type MaterialUploadProgress = {
 type MaterialUploadDisplayStep = "upload" | "read" | "prepare" | "ready";
 
 const materialUploadDisplaySteps: MaterialUploadDisplayStep[] = ["upload", "read", "prepare", "ready"];
+const teacherPrimarySidebarStorageKey = "chandra.teacher.primarySidebarPulledOpen";
 const classAccessPermissionLabels: Record<ClassAccessPermission, string> = {
   viewOverview: "View overview",
   viewRoster: "View roster",
@@ -194,7 +205,6 @@ type SettingsPane =
   | "privacy"
   | "notifications"
   | "usage"
-  | "invites"
   | "account"
   | "appearance";
 type AiTutorSection = "sources" | "sourceSettings" | "access" | "behavior" | "answerPolicy" | "model";
@@ -293,21 +303,6 @@ type RetrievalTestResult = {
   title: string;
 };
 
-type TeacherInviteStatus = "active" | "expired" | "revoked" | "used";
-type TeacherInviteFilter = "all" | TeacherInviteStatus;
-
-type TeacherInviteSummary = {
-  createdAt: string;
-  expiresAt: string;
-  inviteId: string;
-  inviteUrl: string;
-  revokedAt: string;
-  status: TeacherInviteStatus;
-  usedAt: string;
-  usedByEmail: string;
-  usedByUid: string;
-};
-
 type MaterialDetailChunk = {
   id: string;
   excerpt: string;
@@ -366,12 +361,6 @@ const settingsPanes: Array<{
     icon: <BellIcon />,
     id: "notifications",
     label: "Notifications"
-  },
-  {
-    description: "Teacher invite links",
-    icon: <LinkIcon />,
-    id: "invites",
-    label: "Teacher Invites"
   },
   {
     description: "Name and login",
@@ -609,20 +598,6 @@ const conversationStatusLabels: Record<ConversationReviewStatus, string> = {
   new: "New",
   reviewed: "Reviewed"
 };
-const teacherInviteFilterOptions: Array<{ id: TeacherInviteFilter; label: string }> = [
-  { id: "all", label: "All" },
-  { id: "active", label: "Active" },
-  { id: "used", label: "Used" },
-  { id: "expired", label: "Expired" },
-  { id: "revoked", label: "Revoked" }
-];
-const teacherInviteEmptyMessages: Record<TeacherInviteFilter, string> = {
-  active: "No active invite links.",
-  all: "No teacher invites yet.",
-  expired: "No expired invites.",
-  revoked: "No revoked invites.",
-  used: "No used invites yet."
-};
 const rosterPageSize = 10;
 const rosterSortLabels: Record<RosterSortColumn, string> = {
   activity: "Activity",
@@ -708,6 +683,8 @@ export function TeacherClassManager({
   const [savingPrivacyDataAction, setSavingPrivacyDataAction] = useState("");
   const [activeAiTutorSection, setActiveAiTutorSection] = useState<AiTutorSection>("sources");
   const [isSidebarDrawerOpen, setIsSidebarDrawerOpen] = useState(false);
+  const [isPrimarySidebarPulledOpen, setIsPrimarySidebarPulledOpen] = useState(false);
+  const [hasLoadedPrimarySidebarPreference, setHasLoadedPrimarySidebarPreference] = useState(false);
   const [isClassSwitcherOpen, setIsClassSwitcherOpen] = useState(false);
   const [isSecondarySidebarOpen, setIsSecondarySidebarOpen] = useState(false);
   const [aiTutorVerbosePreview, setAiTutorVerbosePreview] = useState<{
@@ -758,14 +735,6 @@ export function TeacherClassManager({
   const [error, setError] = useState("");
   const [conversationError, setConversationError] = useState("");
   const [problemError, setProblemError] = useState("");
-  const [teacherInvites, setTeacherInvites] = useState<TeacherInviteSummary[]>([]);
-  const [teacherInviteFilter, setTeacherInviteFilter] = useState<TeacherInviteFilter>("all");
-  const [teacherInviteCopyResult, setTeacherInviteCopyResult] = useState<{
-    inviteId: string;
-    status: "copied" | "failed";
-  } | null>(null);
-  const [teacherInvitesMessage, setTeacherInvitesMessage] = useState("");
-  const [revokingTeacherInviteId, setRevokingTeacherInviteId] = useState("");
   const [classInviteCopyResult, setClassInviteCopyResult] = useState<{
     classId: string;
     kind: "code" | "link";
@@ -785,8 +754,6 @@ export function TeacherClassManager({
   const [isSavingAccountSettings, setIsSavingAccountSettings] = useState(false);
   const [isResettingAccountPassword, setIsResettingAccountPassword] = useState(false);
   const [isSigningOutAllSessions, setIsSigningOutAllSessions] = useState(false);
-  const [isCreatingTeacherInvite, setIsCreatingTeacherInvite] = useState(false);
-  const [isLoadingTeacherInvites, setIsLoadingTeacherInvites] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [isClassDialogOpen, setIsClassDialogOpen] = useState(false);
   const [isStudentDialogOpen, setIsStudentDialogOpen] = useState(false);
@@ -797,14 +764,6 @@ export function TeacherClassManager({
   const [materialDetailError, setMaterialDetailError] = useState("");
   const [deletingMaterialId, setDeletingMaterialId] = useState("");
   const isLoadingClasses = Boolean(user && loadedTeacherId !== user.uid);
-  const filteredTeacherInvites = useMemo(
-    () =>
-      teacherInviteFilter === "all"
-        ? teacherInvites
-        : teacherInvites.filter((invite) => invite.status === teacherInviteFilter),
-    [teacherInviteFilter, teacherInvites]
-  );
-  const teacherInviteEmptyMessage = teacherInviteEmptyMessages[teacherInviteFilter];
 
   useEffect(() => {
     if (!user) {
@@ -1326,6 +1285,44 @@ export function TeacherClassManager({
 
     return () => window.clearTimeout(resetPrivacyStudentSearchTimer);
   }, [activeClassId]);
+
+  useEffect(() => {
+    const loadSidebarPreferenceTimer = window.setTimeout(() => {
+      try {
+        setIsPrimarySidebarPulledOpen(window.localStorage.getItem(teacherPrimarySidebarStorageKey) === "true");
+      } catch {
+        setIsPrimarySidebarPulledOpen(false);
+      } finally {
+        setHasLoadedPrimarySidebarPreference(true);
+      }
+    }, 0);
+
+    return () => window.clearTimeout(loadSidebarPreferenceTimer);
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedPrimarySidebarPreference) {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(teacherPrimarySidebarStorageKey, isPrimarySidebarPulledOpen ? "true" : "false");
+    } catch {
+      // Storage can be unavailable in restricted browser contexts.
+    }
+  }, [hasLoadedPrimarySidebarPreference, isPrimarySidebarPulledOpen]);
+
+  useEffect(() => {
+    if (!isPrimarySidebarPulledOpen) {
+      return () => {};
+    }
+
+    const closeSidebarDrawerTimer = window.setTimeout(() => {
+      setIsSidebarDrawerOpen(false);
+    }, 0);
+
+    return () => window.clearTimeout(closeSidebarDrawerTimer);
+  }, [isPrimarySidebarPulledOpen]);
 
   useEffect(() => {
     if (!isSidebarDrawerOpen && !isSecondarySidebarOpen) {
@@ -1937,155 +1934,6 @@ export function TeacherClassManager({
       setError(formatClassError(caughtError, "Class settings failed."));
     } finally {
       setIsSavingSettings(false);
-    }
-  }
-
-  const loadTeacherInvites = useCallback(async () => {
-    if (!user) {
-      return;
-    }
-
-    setTeacherInvitesMessage("");
-    setIsLoadingTeacherInvites(true);
-
-    try {
-      const token = await user.getIdToken();
-      const response = await fetch(apiUrl("/api/teacher-invites"), {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      });
-      const data = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        invites?: TeacherInviteSummary[];
-      };
-
-      if (!response.ok || !Array.isArray(data.invites)) {
-        throw new Error(data.error ?? "Teacher invite list failed.");
-      }
-
-      setTeacherInvites(data.invites);
-    } catch (caughtError) {
-      setTeacherInvitesMessage(formatClassError(caughtError, "Teacher invite list failed."));
-    } finally {
-      setIsLoadingTeacherInvites(false);
-    }
-  }, [user]);
-
-  async function createTeacherInviteLink() {
-    if (!user) {
-      return;
-    }
-
-    setError("");
-    setTeacherInviteCopyResult(null);
-    setIsCreatingTeacherInvite(true);
-
-    try {
-      const token = await user.getIdToken();
-      const response = await fetch(apiUrl("/api/teacher-invites"), {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      });
-      const data = (await response.json()) as {
-        error?: string;
-        expiresAt?: string;
-        inviteId?: string;
-        inviteUrl?: string;
-      };
-
-      if (!response.ok || !data.inviteId || !data.inviteUrl) {
-        throw new Error(data.error ?? "Teacher invite creation failed.");
-      }
-
-      setTeacherInviteFilter("active");
-      await loadTeacherInvites();
-
-      try {
-        await copyTextToClipboard(data.inviteUrl);
-        setTeacherInviteCopyResult({ inviteId: data.inviteId, status: "copied" });
-      } catch {
-        setTeacherInviteCopyResult({ inviteId: data.inviteId, status: "failed" });
-      }
-    } catch (caughtError) {
-      setError(formatClassError(caughtError, "Teacher invite creation failed."));
-    } finally {
-      setIsCreatingTeacherInvite(false);
-    }
-  }
-
-  async function revokeTeacherInvite(inviteId: string) {
-    if (!user) {
-      return;
-    }
-
-    setTeacherInvitesMessage("");
-    setRevokingTeacherInviteId(inviteId);
-
-    try {
-      const token = await user.getIdToken();
-      const response = await fetch(apiUrl("/api/teacher-invites"), {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ inviteId })
-      });
-      const data = (await response.json().catch(() => ({}))) as { error?: string; revoked?: boolean };
-
-      if (!response.ok || !data.revoked) {
-        throw new Error(data.error ?? "Teacher invite revoke failed.");
-      }
-
-      setTeacherInvites((currentInvites) =>
-        currentInvites.map((invite) =>
-          invite.inviteId === inviteId
-            ? { ...invite, inviteUrl: "", revokedAt: new Date().toISOString(), status: "revoked" }
-            : invite
-        )
-      );
-      setTeacherInvitesMessage("Teacher invite revoked.");
-    } catch (caughtError) {
-      setTeacherInvitesMessage(formatClassError(caughtError, "Teacher invite revoke failed."));
-    } finally {
-      setRevokingTeacherInviteId("");
-    }
-  }
-
-  useEffect(() => {
-    if (!user || activeSettingsPane !== "invites") {
-      return;
-    }
-
-    void Promise.resolve().then(loadTeacherInvites);
-  }, [activeSettingsPane, loadTeacherInvites, user]);
-
-  useEffect(() => {
-    if (!teacherInviteCopyResult) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      setTeacherInviteCopyResult(null);
-    }, 1800);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [teacherInviteCopyResult]);
-
-  async function copyTeacherInviteLink(invite: TeacherInviteSummary) {
-    const inviteUrl = invite.inviteUrl || buildTeacherInviteUrl(invite.inviteId);
-
-    setTeacherInvitesMessage("");
-    setTeacherInviteCopyResult(null);
-
-    try {
-      await copyTextToClipboard(inviteUrl);
-      setTeacherInviteCopyResult({ inviteId: invite.inviteId, status: "copied" });
-    } catch {
-      setTeacherInviteCopyResult({ inviteId: invite.inviteId, status: "failed" });
     }
   }
 
@@ -3902,32 +3750,136 @@ export function TeacherClassManager({
     setIsSidebarDrawerOpen(false);
     setIsClassSwitcherOpen(false);
   };
+  const handleSidebarPullStart = (event: ReactPointerEvent<HTMLElement>, minimumPullDistance = 72) => {
+    if (isPrimarySidebarPulledOpen || (event.pointerType === "mouse" && event.button !== 0)) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const startX = event.clientX;
+    const pointerId = event.pointerId;
+    const commitPullDistance = Math.max(112, minimumPullDistance);
+    let isFinished = false;
+
+    const finishPull = (shouldOpen: boolean) => {
+      if (isFinished) {
+        return;
+      }
+
+      isFinished = true;
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerCancel);
+
+      if (shouldOpen) {
+        setIsPrimarySidebarPulledOpen(true);
+        setIsSidebarDrawerOpen(false);
+        setIsClassSwitcherOpen(false);
+      }
+    };
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) {
+        return;
+      }
+
+      if (moveEvent.clientX - startX >= commitPullDistance) {
+        finishPull(true);
+      }
+    };
+
+    const handlePointerUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) {
+        return;
+      }
+
+      finishPull(upEvent.clientX - startX >= minimumPullDistance);
+    };
+
+    const handlePointerCancel = (cancelEvent: PointerEvent) => {
+      if (cancelEvent.pointerId === pointerId) {
+        finishPull(false);
+      }
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerCancel);
+  };
 
   return (
     <>
       <section
-        className={`teacher-dashboard ${hasSecondarySidebar ? "has-secondary-sidebar" : ""}`}
+        className={`teacher-dashboard ${hasSecondarySidebar ? "has-secondary-sidebar" : ""} ${
+          isPrimarySidebarPulledOpen ? "has-persistent-primary-sidebar" : ""
+        }`}
         data-active-tab={activeTab}
         data-appearance={selectedAppearance}
         data-theme-color={selectedThemeColor}
         aria-label="Teacher dashboard"
       >
-        <div
-          aria-hidden="true"
-          className="sidebar-edge-trigger"
-          onMouseEnter={() => setIsSidebarDrawerOpen(true)}
-        />
-        <PrimaryIconRail
-          accountEmail={accountEmail}
-          accountName={accountName}
-          activeTab={activeTab}
-          isSavingThemePreference={isSavingThemePreference}
-          navItems={teacherPrimaryNavItems}
-          nextAppearance={nextAppearance}
-          onNavigate={handlePrimaryNavigate}
-          onOpenDrawer={() => setIsSidebarDrawerOpen(true)}
-          onToggleTheme={() => void updatePersonalThemePreference({ appearance: nextAppearance })}
-        />
+        {!isPrimarySidebarPulledOpen ? (
+          <>
+            <div
+              aria-hidden="true"
+              className="sidebar-edge-trigger"
+              onMouseEnter={() => setIsSidebarDrawerOpen(true)}
+              onPointerDown={(event) => handleSidebarPullStart(event)}
+            />
+            <PrimaryIconRail
+              accountEmail={accountEmail}
+              accountName={accountName}
+              activeTab={activeTab}
+              isSavingThemePreference={isSavingThemePreference}
+              navItems={teacherPrimaryNavItems}
+              nextAppearance={nextAppearance}
+              onNavigate={handlePrimaryNavigate}
+              onOpenDrawer={() => setIsSidebarDrawerOpen(true)}
+              onToggleTheme={() => void updatePersonalThemePreference({ appearance: nextAppearance })}
+            />
+            <button
+              aria-label="Pull open navigation"
+              className="sidebar-pull-affordance"
+              title="Pull open navigation"
+              type="button"
+              onClick={() => {
+                setIsPrimarySidebarPulledOpen(true);
+                setIsSidebarDrawerOpen(false);
+              }}
+              onPointerDown={(event) => handleSidebarPullStart(event, 0)}
+            >
+              <ChevronRightIcon />
+            </button>
+          </>
+        ) : (
+          <PersistentPrimarySidebar
+            accountEmail={accountEmail}
+            accountName={accountName}
+            activeClassId={activeClassId}
+            activeTab={activeTab}
+            classes={classes}
+            isClassSwitcherOpen={isClassSwitcherOpen}
+            isLoadingClasses={isLoadingClasses}
+            isSavingThemePreference={isSavingThemePreference}
+            navItems={teacherPrimaryNavItems}
+            nextAppearance={nextAppearance}
+            selectedClass={selectedClass}
+            onCollapse={() => {
+              setIsPrimarySidebarPulledOpen(false);
+              setIsClassSwitcherOpen(false);
+            }}
+            onCreateClass={() => {
+              setIsClassDialogOpen(true);
+              setIsClassSwitcherOpen(false);
+            }}
+            onNavigate={handlePrimaryNavigate}
+            onSelectClass={selectTeacherClass}
+            onToggleClassSwitcher={() => setIsClassSwitcherOpen((isOpen) => !isOpen)}
+            onToggleTheme={() => void updatePersonalThemePreference({ appearance: nextAppearance })}
+            onSignOut={handleSignOut}
+          />
+        )}
 
         <SidebarDrawer
           accountEmail={accountEmail}
@@ -3997,7 +3949,7 @@ export function TeacherClassManager({
                         {selectedClass && activeTab === "knowledge"
                           ? "Control how Chandra teaches, answers, and uses your class materials."
                           : selectedClass && activeTab === "settings"
-                            ? "Manage class details, invites, account, and display preferences."
+                            ? "Manage class details, student access, account, and display preferences."
                           : "Add your first class from the sidebar."}
                       </p>
                       {selectedClass && (activeTab === "knowledge" || activeTab === "settings") ? (
@@ -4719,97 +4671,6 @@ export function TeacherClassManager({
                                 tokenLimits={selectedModelSettings.tokenLimits}
                               />
                             </div>
-                          </section>
-                        </div>
-
-                        <div className="settings-pane" hidden={activeSettingsPane !== "invites"}>
-                          <section className="settings-group" aria-labelledby="settings-teacher-invites">
-                            <h3 id="settings-teacher-invites">Teacher Invites</h3>
-                            <p>Create a one-use link for another teacher to join Chandra.</p>
-                            <div className="teacher-invite-actions">
-                              <button
-                                className="teacher-action-button"
-                                disabled={isCreatingTeacherInvite}
-                                title="Create a one-use teacher invite link"
-                                type="button"
-                                onClick={createTeacherInviteLink}
-                              >
-                                <LinkIcon />
-                                {isCreatingTeacherInvite ? "Creating" : "Create teacher invite"}
-                              </button>
-                            </div>
-                            <div className="teacher-invite-filter" aria-label="Filter teacher invites by status">
-                              {teacherInviteFilterOptions.map((filterOption) => (
-                                <button
-                                  aria-pressed={teacherInviteFilter === filterOption.id}
-                                  key={filterOption.id}
-                                  title={`Show ${filterOption.label.toLowerCase()} teacher invites`}
-                                  type="button"
-                                  onClick={() => setTeacherInviteFilter(filterOption.id)}
-                                >
-                                  {filterOption.label}
-                                </button>
-                              ))}
-                            </div>
-                            <div className="teacher-invite-list" aria-live="polite">
-                              {isLoadingTeacherInvites ? (
-                                <p className="settings-empty-message">Loading teacher invites.</p>
-                              ) : filteredTeacherInvites.length ? (
-                                filteredTeacherInvites.map((invite) => {
-                                  const copyStatus =
-                                    teacherInviteCopyResult?.inviteId === invite.inviteId
-                                      ? teacherInviteCopyResult.status
-                                      : "";
-                                  const detailText = teacherInviteDetailText(invite);
-                                  const isActiveInvite = invite.status === "active";
-
-                                  return (
-                                    <article
-                                      className="teacher-invite-row"
-                                      data-status={invite.status}
-                                      key={invite.inviteId}
-                                    >
-                                      <div className="teacher-invite-row-main">
-                                        <span className="teacher-invite-status-badge">{teacherInviteStatusLabel(invite)}</span>
-                                        <span>Created {formatInviteDate(invite.createdAt)}</span>
-                                        {detailText ? <strong>{detailText}</strong> : null}
-                                        <span>{teacherInviteDateText(invite)}</span>
-                                      </div>
-                                      {isActiveInvite ? (
-                                        <div className="teacher-invite-row-actions">
-                                          <button
-                                            className="teacher-action-button"
-                                            title="Copy this teacher invite link"
-                                            type="button"
-                                            onClick={() => void copyTeacherInviteLink(invite)}
-                                          >
-                                            <CopyIcon />
-                                            {copyStatus === "copied"
-                                              ? "Copied"
-                                              : copyStatus === "failed"
-                                                ? "Copy failed"
-                                                : "Copy link"}
-                                          </button>
-                                          <button
-                                            className="teacher-danger-button"
-                                            disabled={revokingTeacherInviteId === invite.inviteId}
-                                            title="Revoke this teacher invite link"
-                                            type="button"
-                                            onClick={() => void revokeTeacherInvite(invite.inviteId)}
-                                          >
-                                            <TrashIcon />
-                                            {revokingTeacherInviteId === invite.inviteId ? "Revoking" : "Revoke"}
-                                          </button>
-                                        </div>
-                                      ) : null}
-                                    </article>
-                                  );
-                                })
-                              ) : (
-                                <p className="settings-empty-message">{teacherInviteEmptyMessage}</p>
-                              )}
-                            </div>
-                            {teacherInvitesMessage ? <p className="settings-status-message">{teacherInvitesMessage}</p> : null}
                           </section>
                         </div>
 
@@ -8346,6 +8207,122 @@ function SidebarDrawer({
   );
 }
 
+function PersistentPrimarySidebar({
+  accountEmail,
+  accountName,
+  activeClassId,
+  activeTab,
+  classes,
+  isClassSwitcherOpen,
+  isLoadingClasses,
+  isSavingThemePreference,
+  navItems,
+  nextAppearance,
+  selectedClass,
+  onCollapse,
+  onCreateClass,
+  onNavigate,
+  onSelectClass,
+  onSignOut,
+  onToggleClassSwitcher,
+  onToggleTheme
+}: {
+  accountEmail: string;
+  accountName: string;
+  activeClassId: string;
+  activeTab: TeacherTab;
+  classes: TeacherClass[];
+  isClassSwitcherOpen: boolean;
+  isLoadingClasses: boolean;
+  isSavingThemePreference: boolean;
+  navItems: TeacherPrimaryNavItem[];
+  nextAppearance: string;
+  selectedClass: TeacherClass | null;
+  onCollapse: () => void;
+  onCreateClass: () => void;
+  onNavigate: (tab: TeacherTab) => void;
+  onSelectClass: (classId: string) => void;
+  onSignOut: () => void;
+  onToggleClassSwitcher: () => void;
+  onToggleTheme: () => void;
+}) {
+  return (
+    <aside className="sidebar-drawer persistent-primary-sidebar" aria-label="Persistent primary navigation">
+      <div className="sidebar-drawer-header">
+        <Link className="drawer-wordmark" href="/">
+          Chandra
+        </Link>
+        <button
+          aria-label="Collapse navigation"
+          className="drawer-close-button"
+          title="Collapse navigation"
+          type="button"
+          onClick={onCollapse}
+        >
+          <CloseIcon />
+        </button>
+      </div>
+
+      <div className="drawer-primary-stack">
+        <nav className="drawer-nav" aria-label="Dashboard sections">
+          {navItems.map((item) => (
+            <SidebarNavItem
+              active={activeTab === item.id}
+              href={item.href}
+              icon={item.icon}
+              key={item.id}
+              label={item.label}
+              onClick={() => {
+                if (item.href) {
+                  return;
+                }
+                onNavigate(item.id as TeacherTab);
+              }}
+            />
+          ))}
+        </nav>
+      </div>
+
+      <section className="drawer-account" aria-label="Account">
+        <div className="drawer-footer-class-switcher">
+          <ClassSwitcher
+            activeClassId={activeClassId}
+            classes={classes}
+            isLoadingClasses={isLoadingClasses}
+            isOpen={isClassSwitcherOpen}
+            selectedClass={selectedClass}
+            onCreateClass={onCreateClass}
+            onSelectClass={onSelectClass}
+            onToggle={onToggleClassSwitcher}
+          />
+        </div>
+        <div className="drawer-account-row">
+          <span className="teacher-avatar" aria-hidden="true">
+            {getInitials(accountName, accountEmail)}
+          </span>
+          <span className="teacher-account-copy">
+            <strong>{accountName}</strong>
+            {accountEmail ? <span>{accountEmail}</span> : null}
+          </span>
+          <button
+            aria-label={`Switch to ${nextAppearance} theme`}
+            className="sidebar-theme-icon-button"
+            disabled={isSavingThemePreference}
+            title={`Switch to ${nextAppearance} theme`}
+            type="button"
+            onClick={onToggleTheme}
+          >
+            <MoonIcon />
+          </button>
+        </div>
+        <button className="sidebar-signout-button drawer-signout-button" type="button" onClick={onSignOut}>
+          Sign out
+        </button>
+      </section>
+    </aside>
+  );
+}
+
 function ClassSwitcher({
   activeClassId,
   classes,
@@ -10075,56 +10052,6 @@ function formatAccountActivityTime(value: string) {
   return date.toLocaleString();
 }
 
-function formatInviteDate(value: string) {
-  if (!value) {
-    return "Not available";
-  }
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return "Not available";
-  }
-
-  return date.toLocaleDateString("en-US", {
-    day: "numeric",
-    month: "short",
-    year: "numeric"
-  });
-}
-
-function teacherInviteStatusLabel(invite: TeacherInviteSummary) {
-  return invite.status === "used" ? "Used" : capitalizeLabel(invite.status);
-}
-
-function teacherInviteDetailText(invite: TeacherInviteSummary) {
-  if (invite.status === "used") {
-    return `Used by ${invite.usedByEmail || "teacher"}`;
-  }
-
-  if (invite.status === "active") {
-    return "Unused";
-  }
-
-  return "";
-}
-
-function teacherInviteDateText(invite: TeacherInviteSummary) {
-  if (invite.status === "used") {
-    return invite.usedAt ? `Accepted ${formatInviteDate(invite.usedAt)}` : `Expires ${formatInviteDate(invite.expiresAt)}`;
-  }
-
-  if (invite.status === "revoked") {
-    return `Revoked ${formatInviteDate(invite.revokedAt)}`;
-  }
-
-  if (invite.status === "expired") {
-    return `Expired ${formatInviteDate(invite.expiresAt)}`;
-  }
-
-  return `Expires ${formatInviteDate(invite.expiresAt)}`;
-}
-
 function formatClassError(caughtError: unknown, fallback: string) {
   const message = caughtError instanceof Error ? caughtError.message : fallback;
   const normalizedMessage = message.toLowerCase();
@@ -10189,14 +10116,6 @@ function buildClassInviteUrl(classCode: string) {
   const inviteUrl = new URL("/auth", window.location.origin);
   inviteUrl.searchParams.set("role", "student");
   inviteUrl.searchParams.set("classId", classCode);
-
-  return inviteUrl.toString();
-}
-
-function buildTeacherInviteUrl(inviteId: string) {
-  const inviteUrl = new URL("/auth", window.location.origin);
-  inviteUrl.searchParams.set("role", "teacher");
-  inviteUrl.searchParams.set("teacherInvite", inviteId);
 
   return inviteUrl.toString();
 }

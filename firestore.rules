@@ -653,10 +653,6 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    match /teacherInvites/{inviteId} {
-      allow read, write: if false;
-    }
-
     match /auditLogs/{auditLogId} {
       allow read, write: if false;
     }

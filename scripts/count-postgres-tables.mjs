@@ -8,7 +8,6 @@ const tables = [
   "classes",
   "class_enrollments",
   "co_teachers",
-  "teacher_invites",
   "materials",
   "material_jobs",
   "conversations",

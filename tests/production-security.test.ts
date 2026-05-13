@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -45,9 +45,10 @@ test("password reset flow uses Firebase reset email without account enumeration"
   assert.doesNotMatch(authFormSource, /No account matches/);
 });
 
-test("class join and teacher invite signup use server-side lockouts with generic failures", () => {
+test("class join uses server-side lockouts and teacher signup is open to signed-in users", () => {
   const resolveSource = readFileSync(join(repoRoot, "frontend/app/api/classes/resolve/route.ts"), "utf8");
   const joinSource = readFileSync(join(repoRoot, "frontend/app/api/classes/join/route.ts"), "utf8");
+  const authFormSource = readFileSync(join(repoRoot, "frontend/components/AuthForm.tsx"), "utf8");
   const teacherSignupSource = readFileSync(join(repoRoot, "frontend/app/api/teacher-signup/route.ts"), "utf8");
 
   assert.match(resolveSource, /checkAbuseLockout/);
@@ -58,37 +59,24 @@ test("class join and teacher invite signup use server-side lockouts with generic
   assert.match(joinSource, /recordAbuseFailure/);
   assert.match(joinSource, /namespace: "classes\.join"/);
   assert.doesNotMatch(joinSource, /Class code was not found/);
-  assert.match(teacherSignupSource, /teacher_invite\.signup/);
-  assert.match(teacherSignupSource, /checkAbuseLockout/);
-  assert.match(teacherSignupSource, /recordAbuseFailure/);
-  assert.match(teacherSignupSource, /genericTeacherInviteError/);
-  assert.doesNotMatch(teacherSignupSource, /Use a valid teacher invite link to create a teacher account/);
+  assert.match(authFormSource, /<option value="teacher">Teacher<\/option>/);
+  assert.doesNotMatch(authFormSource, /canCreateTeacher/);
+  assert.doesNotMatch(teacherSignupSource, /inviteToken/);
+  assert.doesNotMatch(teacherSignupSource, /teacher_invite\.signup/);
+  assert.match(teacherSignupSource, /Sign in before creating a teacher profile/);
 });
 
-test("teacher invites are hash-only, single-use, listable, revocable, and audited", () => {
-  const inviteRoute = readFileSync(join(repoRoot, "frontend/app/api/teacher-invites/route.ts"), "utf8");
-  const signupRoute = readFileSync(join(repoRoot, "frontend/app/api/teacher-signup/route.ts"), "utf8");
+test("teacher invites are removed from the API and teacher UI", () => {
+  const operationalSource = readFileSync(join(repoRoot, "frontend/lib/data/operational.ts"), "utf8");
   const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 
-  assert.match(inviteRoute, /randomBytes\(32\)\.toString\("base64url"\)/);
-  assert.match(inviteRoute, /hashInviteToken\(inviteToken\)/);
-  assert.match(inviteRoute, /collection\("teacherInvites"\)\.doc\(tokenHash\)\.set/);
-  assert.match(inviteRoute, /export async function GET/);
-  assert.match(inviteRoute, /export async function DELETE/);
-  assert.match(inviteRoute, /inviteUrl: status === "active"/);
-  assert.match(signupRoute, /resolveInviteDocumentId/);
-  assert.match(inviteRoute, /revokedAt: FieldValue\.serverTimestamp/);
-  assert.match(inviteRoute, /teacher_invite\.created/);
-  assert.match(inviteRoute, /teacher_invite\.revoked/);
-  assert.match(signupRoute, /invite\?\.usedAt/);
-  assert.match(signupRoute, /invite\?\.revokedAt/);
-  assert.match(signupRoute, /teacher_invite\.used/);
-  assert.doesNotMatch(inviteRoute, /inviteToken,\s*$/m);
-  assert.match(teacherSource, /loadTeacherInvites/);
-  assert.match(teacherSource, /revokeTeacherInvite/);
-  assert.match(teacherSource, /teacherInviteFilterOptions/);
-  assert.match(teacherSource, /copyTeacherInviteLink\(invite/);
-  assert.match(teacherSource, /Used by/);
+  assert.equal(existsSync(join(repoRoot, "frontend/app/api/teacher-invites/route.ts")), false);
+  assert.doesNotMatch(operationalSource, /teacher_invites/);
+  assert.doesNotMatch(teacherSource, /loadTeacherInvites/);
+  assert.doesNotMatch(teacherSource, /revokeTeacherInvite/);
+  assert.doesNotMatch(teacherSource, /teacherInviteFilterOptions/);
+  assert.doesNotMatch(teacherSource, /copyTeacherInviteLink/);
+  assert.doesNotMatch(teacherSource, /Teacher Invites/);
 });
 
 test("account deletion requires fresh auth and protects owned teacher classes", () => {
@@ -139,7 +127,6 @@ test("session revocation exists and account changes can revoke refresh tokens", 
 test("audit and security logs are server-owned and unreadable from Firestore clients", () => {
   const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
   const auditSource = readFileSync(join(repoRoot, "frontend/lib/audit-log.ts"), "utf8");
-  const inviteRoute = readFileSync(join(repoRoot, "frontend/app/api/teacher-invites/route.ts"), "utf8");
   const coTeacherRoute = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/co-teachers/route.ts"), "utf8");
   const materialRoute = readFileSync(join(repoRoot, "frontend/app/api/materials/route.ts"), "utf8");
   const materialDetailRoute = readFileSync(join(repoRoot, "frontend/app/api/materials/[materialId]/route.ts"), "utf8");
@@ -155,7 +142,6 @@ test("audit and security logs are server-owned and unreadable from Firestore cli
   assert.match(rules, /match \/securityEvents\/\{securityEventId\}[\s\S]*allow read, write: if false/);
   assert.match(rules, /match \/chatErrorReferences\/\{errorId\}[\s\S]*allow read, write: if false/);
   assert.match(rules, /match \/rateLimits\/\{rateLimitId\}[\s\S]*allow read, write: if false/);
-  assert.match(inviteRoute, /teacher_invite\.created/);
   assert.match(coTeacherRoute, /class\.co_teacher\.(added|updated|removed)/);
   assert.match(materialRoute, /material\.uploaded/);
   assert.match(materialDetailRoute, /material\.deleted/);

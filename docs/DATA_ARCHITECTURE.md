@@ -13,10 +13,10 @@ Chandra is now organized around a Postgres-first data model. Firebase still prov
 
 Implemented phases:
 
-- `migrations/002_core_app_tables.sql`, covering accounts, classes, roster/enrollment data, teacher invites, materials, upload/job metadata, conversations, messages, attachments, feedback, learning profiles, reviews, support notes, AI usage, audit/security records, rate limits, and lockouts.
+- `migrations/002_core_app_tables.sql`, covering accounts, classes, roster/enrollment data, materials, upload/job metadata, conversations, messages, attachments, feedback, learning profiles, reviews, support notes, AI usage, audit/security records, rate limits, and lockouts.
 - `frontend/lib/data/postgres.ts`, the shared `pg` pool/config/transaction helper for app data and health checks.
-- Postgres-first modules under `frontend/lib/data/` for accounts, classes, materials, conversations, student records, usage accounting, operational logs, rate limits, lockouts, and teacher invites.
-- Account/profile, class, roster, co-teacher, material metadata, conversation, message, attachment metadata, feedback, learning profile, support, review, usage, invite, audit/security, and chat-error workflows now try Postgres first.
+- Postgres-first modules under `frontend/lib/data/` for accounts, classes, materials, conversations, student records, usage accounting, operational logs, rate limits, and lockouts.
+- Account/profile, class, roster, co-teacher, material metadata, conversation, message, attachment metadata, feedback, learning profile, support, review, usage, audit/security, and chat-error workflows now try Postgres first.
 - Firestore fallback code remains in place for legacy data and production rollback safety.
 - API response shapes and UI contracts are intentionally unchanged.
 
@@ -42,7 +42,7 @@ Use the Cloud SQL Auth Proxy or private network access when applying migrations 
 Backfill should be done as a controlled one-way import from Firestore into Postgres:
 
 1. Export or page through Firestore collections in bounded batches.
-2. Upsert `users` into `accounts`, then `classes`, `classes/{classId}/students`, co-teachers, materials/jobs, conversations/messages/attachments, feedback, profiles/revisions, reviews, support records, usage records, lockouts, logs, and invites.
+2. Upsert `users` into `accounts`, then `classes`, `classes/{classId}/students`, co-teachers, materials/jobs, conversations/messages/attachments, feedback, profiles/revisions, reviews, support records, usage records, lockouts, and logs.
 3. Preserve original Firestore document IDs as Postgres primary keys where routes already expose those IDs.
 4. Keep files in Firebase Storage/GCS and copy only metadata/storage keys into Postgres.
 5. Run parity checks comparing record counts and sampled API responses.
@@ -52,7 +52,7 @@ Backfill should be done as a controlled one-way import from Firestore into Postg
 
 Firestore code paths still exist for these reasons:
 
-- `users`, `classes`, roster, materials, conversations, messages, attachments, feedback, learning profiles, reviews, support, usage, lockouts, logs, and invites: legacy fallback reads or write fallback when Postgres is not configured/unavailable.
+- `users`, `classes`, roster, materials, conversations, messages, attachments, feedback, learning profiles, reviews, support, usage, lockouts, and logs: legacy fallback reads or write fallback when Postgres is not configured/unavailable.
 - `userPresence`: optional realtime/presence data that is still Firestore-backed.
 - Firebase Storage/GCS metadata references: files remain in object storage by design.
 - Firestore security rules: retained while fallback reads and legacy clients still exist.

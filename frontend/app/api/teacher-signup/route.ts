@@ -1,10 +1,5 @@
-import { createHash, timingSafeEqual } from "crypto";
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { NextResponse } from "next/server";
-import { writeAuditLog } from "@/lib/audit-log";
-import { checkAbuseLockout, recordAbuseFailure, resetAbuseFailures } from "@/lib/abuse-lockout";
-import { getTeacherInvitePostgres, markTeacherInviteUsedPostgres } from "@/lib/data/operational";
-import { isPostgresConfigured, shouldFallbackToFirestoreWhenPostgresFails } from "@/lib/data/postgres";
 import { assertAccountUsernameAvailable, upsertAccountProfile } from "@/lib/data/server";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
@@ -12,7 +7,6 @@ export const runtime = "nodejs";
 
 type TeacherSignupBody = {
   displayName?: unknown;
-  inviteToken?: unknown;
   username?: unknown;
 };
 
@@ -25,66 +19,23 @@ class TeacherSignupError extends Error {
   }
 }
 
-const teacherInviteSignupLockoutPolicy = {
-  resetWindowMs: 60 * 60 * 1000,
-  lockoutSteps: [
-    { failures: 5, cooldownMs: 5 * 60 * 1000 },
-    { failures: 10, cooldownMs: 30 * 60 * 1000 },
-    { failures: 20, cooldownMs: 24 * 60 * 60 * 1000 }
-  ]
-};
-
 export async function POST(request: Request) {
-  let inviteAbuseScope: Parameters<typeof recordAbuseFailure>[0] | null = null;
-
   try {
     const token = getBearerToken(request);
 
     if (!token) {
-      return NextResponse.json({ error: "Sign in with the teacher invite link first." }, { status: 401 });
+      return NextResponse.json({ error: "Sign in before creating a teacher profile." }, { status: 401 });
     }
 
     assertFirebaseAdminAuthReady();
     const decodedToken = await adminAuth!.verifyIdToken(token);
     const body = (await request.json().catch(() => ({}))) as TeacherSignupBody;
-    const inviteToken = String(body.inviteToken ?? "").trim();
-    const inviteTokenHash = resolveInviteDocumentId(inviteToken);
-    const abuseScope = {
-      actorUid: decodedToken.uid,
-      identifier: `${inviteTokenHash}:${String(decodedToken.email ?? "").trim().toLowerCase()}`,
-      namespace: "teacher_invite.signup",
-      request,
-      route: "/api/teacher-signup"
-    };
-    inviteAbuseScope = abuseScope;
-    const lockout = await checkAbuseLockout(abuseScope, teacherInviteSignupLockoutPolicy);
-
-    if (lockout.locked) {
-      return genericTeacherInviteError();
-    }
-
-    const bootstrapInviteIsValid = isValidBootstrapTeacherInviteToken(inviteToken);
-    const postgresInvite = !bootstrapInviteIsValid && inviteToken && isPostgresConfigured()
-      ? await readTeacherInvitePostgres(inviteTokenHash)
-      : null;
-    const inviteReference = bootstrapInviteIsValid || postgresInvite
-      ? null
-      : adminDb!.collection("teacherInvites").doc(inviteTokenHash);
-
-    if (!bootstrapInviteIsValid && !inviteToken) {
-      await recordAbuseFailure(abuseScope, teacherInviteSignupLockoutPolicy);
-      return genericTeacherInviteError();
-    }
 
     const displayName =
       firstString(body.displayName, decodedToken.name, decodedToken.email) || "Chandra teacher";
     const email = String(decodedToken.email ?? "").trim().toLowerCase();
     const username = normalizeUsername(body.username, email);
     await assertUsernameIsAvailable(username, decodedToken.uid);
-
-    if (!bootstrapInviteIsValid && postgresInvite && !isUsablePostgresInvite(postgresInvite)) {
-      throw new TeacherSignupError("Teacher signup failed.", 403);
-    }
 
     const profile = {
       createdAt: FieldValue.serverTimestamp(),
@@ -108,31 +59,10 @@ export async function POST(request: Request) {
         throw new TeacherSignupError("This account already has a different role.", 409);
       }
 
-      if (inviteReference) {
-        const inviteSnapshot = await transaction.get(inviteReference);
-        const invite = inviteSnapshot.data();
-        const expiresAt = invite?.expiresAt;
-
-        if (
-          !inviteSnapshot.exists
-          || invite?.usedAt
-          || invite?.revokedAt
-          || !(expiresAt instanceof Timestamp)
-          || expiresAt.toMillis() <= Date.now()
-        ) {
-          throw new TeacherSignupError("Teacher signup failed.", 403);
-        }
-
-        transaction.update(inviteReference, {
-          usedAt: FieldValue.serverTimestamp(),
-          usedByEmail: email,
-          usedByUid: decodedToken.uid
-        });
-      }
-
       transaction.set(userReference, profile);
     });
-	    await upsertAccountProfile({
+
+    await upsertAccountProfile({
       id: decodedToken.uid,
       firebaseUid: decodedToken.uid,
       email,
@@ -140,37 +70,7 @@ export async function POST(request: Request) {
       displayName,
       profile,
       username
-	    });
-
-    if (postgresInvite) {
-      const usedInvite = await markTeacherInviteUsedPostgres({
-        id: inviteTokenHash,
-        usedBy: decodedToken.uid,
-        usedByEmail: email
-      });
-
-      if (!usedInvite) {
-        throw new TeacherSignupError("Teacher signup failed.", 403);
-      }
-    }
-
-    await resetAbuseFailures(abuseScope);
-    if (inviteReference || postgresInvite) {
-      await writeAuditLog({
-        actor: {
-          email,
-          uid: decodedToken.uid
-        },
-        eventType: "teacher_invite.used",
-        metadata: {
-          inviteId: inviteTokenHash
-        },
-        route: "/api/teacher-signup",
-        target: {
-          inviteId: inviteTokenHash
-        }
-      });
-    }
+    });
 
     return NextResponse.json({
       profile: {
@@ -180,14 +80,6 @@ export async function POST(request: Request) {
     });
   } catch (caughtError) {
     if (caughtError instanceof TeacherSignupError) {
-      if (caughtError.status === 403) {
-        if (inviteAbuseScope) {
-          await recordAbuseFailure(inviteAbuseScope, teacherInviteSignupLockoutPolicy);
-        }
-
-        return genericTeacherInviteError();
-      }
-
       return NextResponse.json({ error: caughtError.message }, { status: caughtError.status });
     }
 
@@ -201,10 +93,6 @@ export async function POST(request: Request) {
   }
 }
 
-function genericTeacherInviteError() {
-  return NextResponse.json({ error: "Teacher signup failed." }, { status: 403 });
-}
-
 function getBearerToken(request: Request) {
   const authorization = request.headers.get("authorization") ?? "";
 
@@ -213,55 +101,6 @@ function getBearerToken(request: Request) {
   }
 
   return authorization.slice("Bearer ".length).trim();
-}
-
-function isValidBootstrapTeacherInviteToken(inviteToken: string) {
-  const expectedToken = String(process.env.TEACHER_SIGNUP_TOKEN ?? "").trim();
-
-  if (!expectedToken || !inviteToken) {
-    return false;
-  }
-
-  const expectedTokenBuffer = Buffer.from(expectedToken);
-  const inviteTokenBuffer = Buffer.from(inviteToken);
-
-  return expectedTokenBuffer.length === inviteTokenBuffer.length
-    && timingSafeEqual(expectedTokenBuffer, inviteTokenBuffer);
-}
-
-function hashInviteToken(inviteToken: string) {
-  return createHash("sha256").update(inviteToken).digest("hex");
-}
-
-function resolveInviteDocumentId(inviteToken: string) {
-  if (!inviteToken) {
-    return "missing";
-  }
-
-  return /^[a-f0-9]{64}$/i.test(inviteToken) ? inviteToken.toLowerCase() : hashInviteToken(inviteToken);
-}
-
-async function readTeacherInvitePostgres(inviteId: string) {
-  try {
-    return await getTeacherInvitePostgres(inviteId);
-  } catch (caughtError) {
-    if (!shouldFallbackToFirestoreWhenPostgresFails()) {
-      throw caughtError;
-    }
-
-    console.warn("Teacher invite Postgres read failed; using Firestore fallback.", caughtError);
-    return null;
-  }
-}
-
-function isUsablePostgresInvite(invite: Awaited<ReturnType<typeof getTeacherInvitePostgres>>) {
-  return Boolean(
-    invite
-      && !invite.usedAt
-      && !invite.revokedAt
-      && (!invite.expiresAt || invite.expiresAt.getTime() > Date.now())
-      && invite.status === "active"
-  );
 }
 
 function firstString(...values: unknown[]) {

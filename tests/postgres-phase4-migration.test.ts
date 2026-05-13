@@ -52,22 +52,6 @@ test("rate limits, lockouts, audit logs, security events, and chat errors write 
   assert.match(operational, /INSERT INTO chat_error_references/);
 });
 
-test("teacher invite lifecycle is Postgres-first with Firestore teacherInvites fallback", () => {
-  const inviteRoute = source("frontend/app/api/teacher-invites/route.ts");
-  const signupRoute = source("frontend/app/api/teacher-signup/route.ts");
-  const operational = source("frontend/lib/data/operational.ts");
-
-  assert.match(inviteRoute, /createTeacherInvitePostgres/);
-  assert.match(inviteRoute, /listTeacherInvitesPostgres/);
-  assert.match(inviteRoute, /revokeTeacherInvitePostgres/);
-  assert.match(inviteRoute, /collection\("teacherInvites"\)/);
-  assert.match(signupRoute, /getTeacherInvitePostgres/);
-  assert.match(signupRoute, /markTeacherInviteUsedPostgres/);
-  assert.match(signupRoute, /collection\("teacherInvites"\)/);
-  assert.match(operational, /INSERT INTO teacher_invites/);
-  assert.match(operational, /UPDATE teacher_invites/);
-});
-
 test("health check reports Postgres, Firebase Admin/Auth, Storage, and PDF OCR table status", () => {
   const health = source("frontend/app/api/health/route.ts");
 
