@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { ReactElement, ReactNode } from "react";
 import { AuthNav } from "@/components/AuthNav";
+import { LandingMotion } from "@/components/LandingMotion";
 
 const navLinks = ["Features", "How it works", "Teachers", "Students", "Pricing"];
 
@@ -52,6 +53,7 @@ const studentItems = [
 export default function HomePage() {
   return (
     <main className="chandra-home">
+      <LandingMotion />
       <nav className="landing-nav" aria-label="Main navigation">
         <Link className="landing-brand" href="/" aria-label="Chandra home">
           <CrescentIcon />
@@ -69,23 +71,23 @@ export default function HomePage() {
 
       <section className="landing-hero-grid">
         <div className="hero-copy">
-          <div className="hero-pill">
+          <div className="hero-pill" data-motion="hero-pill">
             <SparkleIcon />
             <span>Teacher-guided AI for classroom learning</span>
           </div>
-          <h1>Teacher-guided AI tutoring that keeps students doing the thinking.</h1>
-          <p>
+          <h1 data-motion="hero-heading">Teacher-guided AI tutoring that keeps students doing the thinking.</h1>
+          <p data-motion="hero-copy">
             Chandra lets teachers set tutoring rules, anchor AI support in class materials, and
             spot where students are getting stuck, so homework stays focused on learning instead
             of answer copying.
           </p>
-          <div className="hero-actions">
+          <div className="hero-actions" data-motion="hero-cta">
             <Link className="landing-secondary-button" href="#how-it-works">
               <PlayIcon />
               See how it works
             </Link>
           </div>
-          <div className="trust-row" aria-label="Chandra benefits">
+          <div className="trust-row" aria-label="Chandra benefits" data-motion="hero-trust">
             {trustItems.map(({ icon: Icon, label }) => (
               <span key={label}>
                 <Icon />
@@ -95,19 +97,19 @@ export default function HomePage() {
           </div>
         </div>
 
-        <div className="hero-product" aria-label="Before and after Chandra comparison">
+        <div className="hero-product" aria-label="Before and after Chandra comparison" data-motion="hero-product">
           <BeforeAfterComparison />
         </div>
       </section>
 
       <div className="landing-info-grid">
-        <section className="below-hero-grid" id="features">
-          <div className="section-rule-title">
+        <section className="below-hero-grid" id="features" data-motion-reveal="section">
+          <div className="section-rule-title" data-motion="section-title">
             <span>WHY CHANDRA</span>
           </div>
           <div className="feature-card-row">
             {features.map(({ icon: Icon, title, copy }) => (
-              <article className="feature-card" key={title}>
+              <article className="feature-card" key={title} data-motion="scroll-card">
                 <span className="feature-icon">
                   <Icon />
                 </span>
@@ -120,13 +122,13 @@ export default function HomePage() {
           </div>
         </section>
 
-        <section className="steps-section" id="how-it-works">
-          <div className="section-rule-title">
+        <section className="steps-section" id="how-it-works" data-motion-reveal="timeline">
+          <div className="section-rule-title" data-motion="section-title">
             <span>HOW IT WORKS</span>
           </div>
           <div className="step-row">
             {steps.map(({ icon: Icon, label }, index) => (
-              <article className="step-card" key={label}>
+              <article className="step-card" key={label} data-motion="timeline-step">
                 <div className="step-number">{index + 1}</div>
                 <span className="step-icon">
                   <Icon />
@@ -138,12 +140,12 @@ export default function HomePage() {
         </section>
       </div>
 
-      <section className="audience-grid">
+      <section className="audience-grid" data-motion-reveal="section">
         <AudiencePanel id="teachers" icon={TeacherBoardIcon} title="For teachers" items={teacherItems} />
         <AudiencePanel id="students" icon={UserCircleIcon} title="For students" items={studentItems} />
       </section>
 
-      <section className="cta-band" id="pricing">
+      <section className="cta-band" id="pricing" data-motion-reveal="section">
         <h2>Give students support without giving away the work.</h2>
         <div>
           <Link className="landing-primary-button" href="/auth">
@@ -176,7 +178,7 @@ export default function HomePage() {
 function BeforeAfterComparison() {
   return (
     <article className="comparison-card" aria-labelledby="comparison-heading">
-      <h2 id="comparison-heading">
+      <h2 id="comparison-heading" data-motion="comparison-title">
         <span>Before</span>
         <span aria-hidden="true"> / </span>
         <span>After Chandra</span>
@@ -195,7 +197,7 @@ function BeforeAfterComparison() {
             carried by <strong>ATP.</strong>
           </p>
         </ComparisonPanel>
-        <span className="comparison-vs" aria-hidden="true">
+        <span className="comparison-vs" aria-hidden="true" data-motion="comparison-vs">
           vs.
         </span>
         <ComparisonPanel
@@ -242,12 +244,12 @@ function ComparisonPanel({
   tone: "success" | "warning";
 }) {
   return (
-    <section className={`comparison-panel ${tone}`}>
-      <div className="comparison-panel-head">
+    <section className={`comparison-panel ${tone}`} data-motion="comparison-panel">
+      <div className="comparison-panel-head" data-motion="comparison-panel-head">
         <h3>{title}</h3>
         <span>{badge}</span>
       </div>
-      <div className="comparison-dialogue">
+      <div className="comparison-dialogue" data-motion="comparison-student">
         <span className="comparison-avatar">S</span>
         <div>
           <p className="comparison-meta">Student asks:</p>
@@ -255,14 +257,14 @@ function ComparisonPanel({
         </div>
       </div>
       <ProblemCard />
-      <div className="comparison-dialogue comparison-response-row">
+      <div className="comparison-dialogue comparison-response-row" data-motion="comparison-response">
         <span className="comparison-avatar response">{responseLabel === "Chandra" ? "C" : "AI"}</span>
         <div className="comparison-response">
           <p className="comparison-meta">{responseLabel} response:</p>
           {children}
         </div>
       </div>
-      <div className="comparison-strip">
+      <div className="comparison-strip" data-motion="comparison-strip">
         {tone === "success" ? <CheckIcon /> : <AlertIcon />}
         <span>{footer}</span>
       </div>
@@ -272,7 +274,7 @@ function ComparisonPanel({
 
 function ProblemCard() {
   return (
-    <div className="comparison-problem">
+    <div className="comparison-problem" data-motion="comparison-problem">
       <p>Problem #3</p>
       <span>Which molecule stores energy that is used to power the Calvin cycle?</span>
       <ol type="A">
