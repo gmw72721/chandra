@@ -1,11 +1,11 @@
 import Link from "next/link";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { AuthNav } from "@/components/AuthNav";
 
 const navLinks = ["Features", "How it works", "Teachers", "Students", "Pricing"];
 
 const trustItems = [
-  { icon: ShieldIcon, label: "No credit card required" },
+  { icon: SparkleIcon, label: "Keeps students thinking" },
   { icon: UsersIcon, label: "Teacher-controlled help" },
   { icon: BookIcon, label: "Grounded in class materials" }
 ];
@@ -75,13 +75,11 @@ export default function HomePage() {
           </div>
           <h1>Teacher-guided AI tutoring that keeps students doing the thinking.</h1>
           <p>
-            Chandra helps teachers set tutoring rules, ground AI help in class materials, and
-            review where students get stuck—without turning homework into answer copying.
+            Chandra lets teachers set tutoring rules, anchor AI support in class materials, and
+            spot where students are getting stuck, so homework stays focused on learning instead
+            of answer copying.
           </p>
           <div className="hero-actions">
-            <Link className="landing-primary-button" href="/auth">
-              Create account
-            </Link>
             <Link className="landing-secondary-button" href="#how-it-works">
               <PlayIcon />
               See how it works
@@ -97,9 +95,8 @@ export default function HomePage() {
           </div>
         </div>
 
-        <div className="hero-product" aria-label="Chandra tutoring preview">
-          <ChatMockup />
-          <TeacherControls />
+        <div className="hero-product" aria-label="Before and after Chandra comparison">
+          <BeforeAfterComparison />
         </div>
       </section>
 
@@ -176,88 +173,115 @@ export default function HomePage() {
   );
 }
 
-function ChatMockup() {
+function BeforeAfterComparison() {
   return (
-    <article className="chat-mockup">
-      <div className="chat-header">
-        <span className="chat-header-icon">
-          <BookIcon />
+    <article className="comparison-card" aria-labelledby="comparison-heading">
+      <h2 id="comparison-heading">
+        <span>Before</span>
+        <span aria-hidden="true"> / </span>
+        <span>After Chandra</span>
+      </h2>
+      <div className="comparison-grid">
+        <ComparisonPanel
+          badge="Answer dumping"
+          footer="Student gets the answer, but skips the reasoning."
+          responseLabel="AI"
+          title="Without Chandra"
+          tone="warning"
+        >
+          <p>
+            Start by looking for the molecule that directly stores usable energy for the cell. The
+            Calvin cycle uses energy made during the light-dependent reactions, and that energy is
+            carried by <strong>ATP.</strong>
+          </p>
+        </ComparisonPanel>
+        <span className="comparison-vs" aria-hidden="true">
+          vs.
         </span>
-        <div>
-          <h2>Biology Homework</h2>
-          <p>Photosynthesis worksheet</p>
-        </div>
-      </div>
-      <div className="chat-message-row student-row">
-        <span className="avatar soft">S</span>
-        <div className="message-stack">
-          <p className="message-meta">Student <span>9:41 AM</span></p>
-          <div className="student-bubble">
-            I&apos;m stuck on #3. How does light energy get converted to chemical energy?
+        <ComparisonPanel
+          badge="Guided learning"
+          footer="Student reasons through the concept before choosing."
+          responseLabel="Chandra"
+          title="With Chandra"
+          tone="success"
+        >
+          <p>
+            Start by sorting the choices by their job: two are gases, one carries high-energy
+            electrons, and one is the cell&apos;s short-term energy carrier. Which choice matches the
+            molecule that would power the Calvin cycle?
+          </p>
+          <div className="comparison-chip-row">
+            <span>
+              <CheckIcon />
+              Requires attempt
+            </span>
+            <span>
+              <ShieldIcon />
+              No final answers
+            </span>
           </div>
-        </div>
-      </div>
-      <div className="chat-message-row chandra-row">
-        <span className="avatar strong">C</span>
-        <div className="message-stack">
-          <p className="message-meta">Chandra <span>9:41 AM</span></p>
-          <div className="chandra-bubble">
-            <p>Let&apos;s take the next step together.</p>
-            <p>
-              Hint: Focus on what happens to light energy in the light-dependent reactions and the
-              molecule that stores that energy.
-            </p>
-          </div>
-        </div>
-      </div>
-      <div className="hint-chip-row">
-        <span>
-          <SparkleIcon />
-          Hint level: Guided step
-        </span>
-        <span>
-          <DocumentIcon />
-          Source: Biology Notes, p. 12
-        </span>
-      </div>
-      <div className="mock-input">
-        <span>Ask a follow-up question...</span>
-        <button type="button" aria-label="Send follow-up question">
-          <SendIcon />
-        </button>
+        </ComparisonPanel>
       </div>
     </article>
   );
 }
 
-function TeacherControls() {
-  const controls = [
-    { icon: LockIcon, title: "Homework mode", copy: "AI help is tailored for homework assignments" },
-    { icon: ShieldIcon, title: "No final answers", copy: "Chandra won't provide final answers" },
-    { icon: ClipboardIcon, title: "Require student attempt", copy: "Students must attempt before getting help" }
-  ];
-
+function ComparisonPanel({
+  badge,
+  children,
+  footer,
+  responseLabel,
+  title,
+  tone
+}: {
+  badge: string;
+  children: ReactNode;
+  footer: string;
+  responseLabel: string;
+  title: string;
+  tone: "success" | "warning";
+}) {
   return (
-    <aside className="teacher-controls-card">
-      <div className="teacher-controls-head">
-        <h2>Teacher controls</h2>
-        <SettingsIcon />
+    <section className={`comparison-panel ${tone}`}>
+      <div className="comparison-panel-head">
+        <h3>{title}</h3>
+        <span>{badge}</span>
       </div>
-      <div className="control-list">
-        {controls.map(({ icon: Icon, title, copy }) => (
-          <div className="control-item" key={title}>
-            <span className="control-icon">
-              <Icon />
-            </span>
-            <div>
-              <h3>{title}</h3>
-              <p>{copy}</p>
-            </div>
-            <span className="toggle-on" aria-label={`${title} enabled`} />
-          </div>
-        ))}
+      <div className="comparison-dialogue">
+        <span className="comparison-avatar">S</span>
+        <div>
+          <p className="comparison-meta">Student asks:</p>
+          <p className="comparison-question">&ldquo;I&apos;m stuck on #3. Where do I start?&rdquo;</p>
+        </div>
       </div>
-    </aside>
+      <ProblemCard />
+      <div className="comparison-dialogue comparison-response-row">
+        <span className="comparison-avatar response">{responseLabel === "Chandra" ? "C" : "AI"}</span>
+        <div className="comparison-response">
+          <p className="comparison-meta">{responseLabel} response:</p>
+          {children}
+        </div>
+      </div>
+      <div className="comparison-strip">
+        {tone === "success" ? <CheckIcon /> : <AlertIcon />}
+        <span>{footer}</span>
+      </div>
+    </section>
+  );
+}
+
+function ProblemCard() {
+  return (
+    <div className="comparison-problem">
+      <p>Problem #3</p>
+      <span>Which molecule stores energy that is used to power the Calvin cycle?</span>
+      <ol type="A">
+        <li>O<sub>2</sub></li>
+        <li>NADPH</li>
+        <li>ATP</li>
+        <li>CO<sub>2</sub></li>
+      </ol>
+    </div>
   );
 }
 
@@ -455,39 +479,12 @@ function CheckIcon() {
   );
 }
 
-function SendIcon() {
+function AlertIcon() {
   return (
     <IconSvg>
-      <path d="M21 3L10 14" />
-      <path d="M21 3l-7 18-4-7-7-4 18-7Z" />
-    </IconSvg>
-  );
-}
-
-function LockIcon() {
-  return (
-    <IconSvg>
-      <rect x="6" y="10" width="12" height="10" rx="2" />
-      <path d="M8.5 10V7.5a3.5 3.5 0 0 1 7 0V10" />
-    </IconSvg>
-  );
-}
-
-function ClipboardIcon() {
-  return (
-    <IconSvg>
-      <path d="M9 4h6l1 2h3v15H5V6h3l1-2Z" />
-      <path d="M9 11l2 2 4-4" />
-      <path d="M9 17h6" />
-    </IconSvg>
-  );
-}
-
-function SettingsIcon() {
-  return (
-    <IconSvg>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7.5 7.5 0 0 0-1.7-1L14.5 3h-5l-.3 3.1a7.5 7.5 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7.5 7.5 0 0 0 1.7 1l.3 3.1h5l.3-3.1a7.5 7.5 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5c.1-.3.1-.7.1-1Z" />
+      <path d="M12 4l9 16H3l9-16Z" />
+      <path d="M12 9v5" />
+      <path d="M12 17h.01" />
     </IconSvg>
   );
 }
