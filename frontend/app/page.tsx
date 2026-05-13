@@ -1,6 +1,7 @@
 import Link from "next/link";
-import type { ReactElement, ReactNode } from "react";
+import type { ReactElement } from "react";
 import { AuthNav } from "@/components/AuthNav";
+import { BeforeAfterComparison } from "@/components/BeforeAfterComparison";
 import { LandingMotion } from "@/components/LandingMotion";
 
 const navLinks = ["Features", "How it works", "Teachers", "Students", "Pricing"];
@@ -172,118 +173,6 @@ export default function HomePage() {
         <p>© 2024 Chandra. All rights reserved.</p>
       </footer>
     </main>
-  );
-}
-
-function BeforeAfterComparison() {
-  return (
-    <article className="comparison-card" aria-labelledby="comparison-heading">
-      <h2 id="comparison-heading" data-motion="comparison-title">
-        <span>Before</span>
-        <span aria-hidden="true"> / </span>
-        <span>After Chandra</span>
-      </h2>
-      <div className="comparison-grid">
-        <ComparisonPanel
-          badge="Answer dumping"
-          footer="Student gets the answer, but skips the reasoning."
-          responseLabel="AI"
-          title="Without Chandra"
-          tone="warning"
-        >
-          <p>
-            Start by looking for the molecule that directly stores usable energy for the cell. The
-            Calvin cycle uses energy made during the light-dependent reactions, and that energy is
-            carried by <strong>ATP.</strong>
-          </p>
-        </ComparisonPanel>
-        <span className="comparison-vs" aria-hidden="true" data-motion="comparison-vs">
-          vs.
-        </span>
-        <ComparisonPanel
-          badge="Guided learning"
-          footer="Student reasons through the concept before choosing."
-          responseLabel="Chandra"
-          title="With Chandra"
-          tone="success"
-        >
-          <p>
-            Start by sorting the choices by their job: two are gases, one carries high-energy
-            electrons, and one is the cell&apos;s short-term energy carrier. Which choice matches the
-            molecule that would power the Calvin cycle?
-          </p>
-          <div className="comparison-chip-row">
-            <span>
-              <CheckIcon />
-              Requires attempt
-            </span>
-            <span>
-              <ShieldIcon />
-              No final answers
-            </span>
-          </div>
-        </ComparisonPanel>
-      </div>
-    </article>
-  );
-}
-
-function ComparisonPanel({
-  badge,
-  children,
-  footer,
-  responseLabel,
-  title,
-  tone
-}: {
-  badge: string;
-  children: ReactNode;
-  footer: string;
-  responseLabel: string;
-  title: string;
-  tone: "success" | "warning";
-}) {
-  return (
-    <section className={`comparison-panel ${tone}`} data-motion="comparison-panel">
-      <div className="comparison-panel-head" data-motion="comparison-panel-head">
-        <h3>{title}</h3>
-        <span>{badge}</span>
-      </div>
-      <div className="comparison-dialogue" data-motion="comparison-student">
-        <span className="comparison-avatar">S</span>
-        <div>
-          <p className="comparison-meta">Student asks:</p>
-          <p className="comparison-question">&ldquo;I&apos;m stuck on #3. Where do I start?&rdquo;</p>
-        </div>
-      </div>
-      <ProblemCard />
-      <div className="comparison-dialogue comparison-response-row" data-motion="comparison-response">
-        <span className="comparison-avatar response">{responseLabel === "Chandra" ? "C" : "AI"}</span>
-        <div className="comparison-response">
-          <p className="comparison-meta">{responseLabel} response:</p>
-          {children}
-        </div>
-      </div>
-      <div className="comparison-strip" data-motion="comparison-strip">
-        {tone === "success" ? <CheckIcon /> : <AlertIcon />}
-        <span>{footer}</span>
-      </div>
-    </section>
-  );
-}
-
-function ProblemCard() {
-  return (
-    <div className="comparison-problem" data-motion="comparison-problem">
-      <p>Problem #3</p>
-      <span>Which molecule stores energy that is used to power the Calvin cycle?</span>
-      <ol type="A">
-        <li>O<sub>2</sub></li>
-        <li>NADPH</li>
-        <li>ATP</li>
-        <li>CO<sub>2</sub></li>
-      </ol>
-    </div>
   );
 }
 
