@@ -13,6 +13,8 @@ Teacher-guided AI tutoring for classrooms. Teachers configure class-specific tut
 
 The backend is not public API surface for browsers. Browser requests go to the Next.js app. The Next.js server calls FastAPI with `X-Chandra-Internal-Secret` and a Cloud Run identity token.
 
+
+
 ## Stack
 
 - Next.js 16, React 19, TypeScript
