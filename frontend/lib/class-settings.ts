@@ -241,7 +241,7 @@ export const defaultAiRequestLimitSettings: AiRequestLimitSettings = {
   teacherPreviewDaily: 50
 };
 
-export const estimatedAiTokensPerStudentMessageLimit = 1_000;
+export const estimatedAiTokensPerStudentMessageLimit = 10_000;
 
 export const defaultClassModelSettings: ClassModelSettings = {
   modelId: defaultOpenRouterModelId,

@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -89,8 +90,21 @@ STRUCTURED_SECTION_ORDER = [
     ("formula", "Formula"),
     ("example", "Example"),
     ("checkWork", "Check your work"),
+    ("sourceNote", "Source"),
     ("nextStep", "Next step"),
 ]
+FINAL_JSON_MAIN_TEXT_KEY = "mainText"
+FINAL_JSON_SECTION_KEYS = {
+    "problem",
+    "answer",
+    "hint",
+    "explanation",
+    "formula",
+    "example",
+    "checkWork",
+    "sourceNote",
+    "nextStep",
+}
 OPTIONAL_STRUCTURED_SECTION_LABELS = (
     "hint",
     "small hint",
@@ -103,6 +117,8 @@ OPTIONAL_STRUCTURED_SECTION_LABELS = (
     "similar example",
     "check your work",
     "check work",
+    "source note",
+    "source",
     "next step",
     "your next step",
     "question",
@@ -119,6 +135,8 @@ STRUCTURED_LABEL_TO_KEY = {
     "similar example": "example",
     "check your work": "checkWork",
     "check work": "checkWork",
+    "source note": "sourceNote",
+    "source": "sourceNote",
     "next step": "nextStep",
     "your next step": "nextStep",
     "question": "nextStep",
@@ -340,7 +358,7 @@ def build_pdf_rag_graph(
         input_token_breakdown = build_input_token_breakdown(state, messages)
         final_model = state.get("model") or DEFAULT_OPENROUTER_MODEL
         final_reasoning_effort = ROUTER_REASONING_EFFORT
-        response = await traced_openrouter_chat(
+        response = await traced_openrouter_chat_streaming(
             client,
             name="langgraph.context-grounded-answer",
             model=final_model,
@@ -689,14 +707,19 @@ def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) 
         "Choose the number of options that best fits the actual ambiguity; do not pad the list to reach the maximum. "
         "The confusionPrompt is only the line above the options; it must not list, summarize, or describe every button choice. Do not reuse a canned generic prompt like `I'm not sure which part would help most yet`; write the prompt for the actual uncertainty Chandra has on this turn. "
         "Each choice must have id, a descriptive label of 4 to 10 words that names the support path, and message that reads like a student-sendable message. Choices must obey help-depth and academic-integrity limits and must not promise final answers, full solutions, answer keys, submission-ready wording, or bypassing teacher policy. "
-        "JSON shape: {\"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, "
+        "Return ordered valid JSON only. Physical JSON key order matters because fields stream to the student in the order you generate them. Put student-facing streamable fields before or alongside decision metadata, so the UI can render visible content while you finish the decision. "
+        "Use mainText for the unlabeled answer bubble. Use sections only for non-empty visible sections that add distinct value; omit every unused section key entirely. Never repeat the same text in mainText and sections. If sections.problem contains the problem statement, mainText must not restate, summarize, prefix, or quote that same problem. sectionOrder must include mainText when mainText is non-empty, and only include non-empty section keys in the exact render order you choose. "
+        "If sections.problem is present, emit the top-level sections object before mainText, put sections.problem as the first key inside sections, put problem first in sectionOrder, and emit any non-duplicative mainText only after sections. "
+        "Treat sections.problem as an extraction-only field: it may contain only the academic exercise/question/task statement. Do not append hint, answer, explanation, source/location note, lookup status, offer to help, attempt request, or next-step language inside sections.problem. If you want to give a hint or next action, put it in sections.hint or sections.nextStep only when the turn actually asks for tutoring help; for a pure source/problem lookup, omit hint and nextStep. "
+        "JSON schema: {\"mainText\": string, \"sections\": {\"problem\"?: string, \"answer\"?: string, \"hint\"?: string, \"explanation\"?: string, \"formula\"?: string, \"example\"?: string, \"checkWork\"?: string, \"sourceNote\"?: string, \"nextStep\"?: string}, \"sectionOrder\": string[], \"metadata\": object, \"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, "
         "\"search_query\": string, \"searches\": [{\"query\": string, \"retrieval_reason\": string, \"top_k\": number}], \"help_level\": string, \"student_response\": string, \"memory_used\": boolean, "
         "\"tutorPlan\": {\"activeProblemId\": string, \"studentIntent\": string, \"needsRetrieval\": boolean, \"retrievalReason\": string, \"currentUnderstandingLevel\": number, \"nextHelpDepth\": number, \"answerSeekingRisk\": \"low|medium|high\", \"currentStep\": string, \"currentSubstep\": string, \"currentStepStatus\": \"not_started|in_progress|completed|unclear\", \"currentStepCompleted\": boolean, \"responseStrategy\": string, \"shouldAskQuestion\": boolean, \"shouldGiveWorkedStep\": boolean, \"shouldAvoidFullSolution\": boolean, \"stateUpdates\": object}, "
         "\"structuredOutput\": {\"sections\": object, \"sectionOrder\": array, \"confusionPrompt\": string, \"confusionChoices\": [{\"id\": string, \"label\": string, \"message\": string}], \"metadata\": object}}. "
         "Allowed section keys are answer, problem, hint, explanation, formula, example, checkWork, sourceNote, nextStep. "
-        "Use sections intelligently instead of following a fixed template: include only the sections that help this turn, choose "
+        "Use sections sparingly instead of following a fixed template: include only the sections that help this turn, choose "
         "their order in sectionOrder, and put each idea in the section where it belongs. Decide the order by what the student "
         "needs first: task text/context, then the direct answer, then supporting rule/concept/example/check, with nextStep last. "
+        "Do not duplicate any section text in mainText, especially problem statements. When problem is the first student-facing section, emit sections.problem first in the JSON stream; do not emit mainText first and rely on sectionOrder to fix it later. "
         "For substantive tutoring replies, shape sections according to tutorPlan.nextHelpDepth, not a fixed template. "
         "Depth 1 uses one short answer or Hint plus one question, especially for vague stuck messages like `I am lost`; do not include redundant Hint and nextStep. "
         "Depth 2 may use Hint and one nextStep. Depth 3 may use one worked step in answer or explanation plus a nextStep. Depth 4 may use explanation/check sections when policy allows. "
@@ -710,8 +733,9 @@ def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) 
         "For repeated stuck follow-ups, the nextStep is allowed to be a smaller sub-question inside the same currentStep; do not use it to advance to a later mathematical step. If prior help already named a broad method, narrow the hint to the specific missing object, definition, target space, assumption, comparison, representation, or notation choice rather than naming the method again. "
         "Before using the problem section, classify the candidate text: use problem only for the exact academic exercise, question, "
         "or task statement from the student, active metadata, or retrieved source. Never put `You said...`, lookup/checking status, "
-        "clarifying questions, requests for a page/title/textbook, source notes, offers, hints, or next steps in problem; put those "
-        "in answer or sourceNote, or leave structuredOutput empty if a plain response is enough. "
+        "clarifying questions, requests for a page/title/textbook, source notes, offers, hints, answers, explanations, attempt requests, or next steps in problem; put those "
+        "in answer, hint, nextStep, or sourceNote only when they are appropriate for the student's intent, or leave structuredOutput empty if a plain response is enough. "
+        "Before returning, audit sections.problem sentence by sentence: every sentence must be part of the original exercise/task wording. If any sentence starts like `Hint:`, `Try`, `To start`, `I found`, `This is on`, `If you want`, `Please send`, or `Your next step`, it is not problem text and must not appear in sections.problem. "
         "If structuredOutput.sections.problem is present, also set structuredOutput.metadata.problemNumber when visible and "
         "structuredOutput.metadata.problemSummary to a short noun phrase of at most 12 words describing the task without solving it. "
         "When needs_search is true, do not ask the student to send, upload, type, paste, or share a page image, screenshot, "
@@ -719,11 +743,9 @@ def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) 
         "available class OCR metadata. For requested problem/source lookups, if you include an interim student_response, use "
         "a short search-status sentence such as `I'm checking the class materials for that problem.` and do not include a nextStep. Leave structuredOutput "
         "empty unless it contains actual task text already provided by the student or active metadata. If the search is for a bare numbered problem, do not ask for the page/title/text while the lookup runs. "
-        "When needs_search is true, structuredOutput may still contain a useful immediate student-facing response from the "
-        "student message, active metadata, or chat history, such as the problem statement, a conceptual hint, a relevant formula, "
-        "or a clarification. Do not invent source facts before retrieval. Also say what you are checking next in a short "
-        "plain sentence in the answer or sourceNote section, while the search runs. Do not put retrieval status, page lookup, "
-        "or source lookup progress in problem or nextStep. "
+        "When needs_search is true, keep visible output minimal while retrieval runs. Prefer one short mainText or student_response status sentence. "
+        "Leave sections empty unless they contain actual task text already provided by the student or active metadata. Do not stream or output hint, formula, example, explanation, checkWork, sourceNote, or nextStep sections just to fill the schema while search is pending. "
+        "Do not invent source facts before retrieval, and do not put retrieval status, page lookup, or source lookup progress in problem or nextStep. "
         "If the latest student turn includes uploaded homework attachments and the request is class-relevant, inspect the attached image/PDF parts in this primary call and use them as Knowledge context; also request class-material retrieval when the student asks for a specific source item, a numbered problem/page, or class PDFs could help locate, compare, or support the answer. Do not say you cannot see the upload. "
         "Special case: when the latest student turn selects a problem from the upload, for example `Help me with problem 2.14 from this upload.`, inspect the uploaded image/PDF/OCR in this primary call. If that problem is visible or present in the upload, set needs_search false, leave searches empty, and put the exact full visible task statement word-for-word in structuredOutput.sections.problem with structuredOutput.metadata.problemNumber before giving any hint. Do not summarize, shorten, paraphrase, infer, or replace the problem with a phrase like `prove the rank inequalities`; copy the complete exercise text, including subparts, equations, references to earlier exercises, and constraints that are visible in the upload. Search class OCR/PDF metadata only if the selected problem is not found in the uploaded image/PDF/OCR. "
         "If the upload or selected page visibly contains multiple problems/exercises/questions and there is no active problem or clear referenced item, ask which problem on the page the student wants to focus on; do not ask why they provided the page. "
@@ -877,7 +899,9 @@ def parse_primary_tutor_response(response: dict[str, Any], fallback: dict[str, A
         retrieval_reason=retrieval_reason,
     )
 
-    structured_output = normalize_backend_structured_output(parsed.get("structuredOutput") or parsed.get("structured_output"))
+    structured_output = normalize_backend_structured_output(
+        parsed.get("structuredOutput") or parsed.get("structured_output")
+    ) or structured_output_from_ordered_json_payload(parsed, source_confidence="low")
     if structured_output_is_problem_selection(structured_output):
         needs_search = False
         first_search = {}
@@ -891,6 +915,8 @@ def parse_primary_tutor_response(response: dict[str, Any], fallback: dict[str, A
         if had_confusion_choices:
             structured_output = None
     student_response = str(parsed.get("student_response") or "").strip()
+    if not student_response:
+        student_response = coerce_structured_section_text(parsed.get("mainText") or parsed.get("main_text"))
     if structured_output and structured_output.get("confusionChoices"):
         student_response = normalize_confusion_choice_student_response(structured_output)
     if structured_output and not student_response:
@@ -1258,6 +1284,80 @@ def normalize_backend_structured_output(value: Any) -> dict[str, Any] | None:
     }
 
 
+def structured_output_from_ordered_json_payload(
+    value: Any,
+    *,
+    source_confidence: str = "low",
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+
+    main_text = coerce_structured_section_text(value.get("mainText") or value.get("main_text"))
+    raw_sections = value.get("sections") if isinstance(value.get("sections"), dict) else {}
+    sections: dict[str, str] = {}
+    for key in FINAL_JSON_SECTION_KEYS:
+        text = coerce_structured_section_text(raw_sections.get(key))
+        if text:
+            sections[key] = text
+
+    if not sections:
+        return None
+
+    metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    repair_misplaced_problem_section(sections)
+    suppress_duplicated_structured_sections(sections)
+    raw_order = value.get("sectionOrder") or value.get("section_order")
+    requested_order = [str(item) for item in raw_order] if isinstance(raw_order, list) else []
+    section_order = ordered_json_structured_section_order(requested_order, sections, has_main_text=bool(main_text))
+    problem = str(sections.get("problem") or "")
+    problem_metadata = structured_problem_metadata(metadata, problem)
+
+    return {
+        "sections": sections,
+        **({"sectionOrder": section_order} if section_order else {}),
+        "metadata": {
+            "hintLevel": metadata.get("hintLevel") if metadata.get("hintLevel") in {"none", "small_hint", "guided_step", "worked_example", "refusal"} else "guided_step",
+            **problem_metadata,
+            "sourceConfidence": metadata.get("sourceConfidence") if metadata.get("sourceConfidence") in {"high", "medium", "low"} else source_confidence,
+            "studentActionNeeded": metadata.get("studentActionNeeded") if metadata.get("studentActionNeeded") in {"none", "show_attempt", "try_next_step", "answer_question", "review_source", "paste_problem", "ask_teacher"} else "try_next_step",
+            "mode": metadata.get("mode") if metadata.get("mode") in {"guided_problem_solving", "socratic", "check_work", "reading_helper", "exam_review", "source_lookup", "direct_answer_refusal", "clarification", "off_topic_redirect"} else "guided_problem_solving",
+        },
+    }
+
+
+def ordered_json_structured_section_order(raw_order: list[str], sections: dict[str, str], *, has_main_text: bool = False) -> list[str]:
+    order: list[str] = []
+    for raw_key in raw_order:
+        if raw_key == FINAL_JSON_MAIN_TEXT_KEY:
+            if has_main_text and FINAL_JSON_MAIN_TEXT_KEY not in order:
+                order.append(FINAL_JSON_MAIN_TEXT_KEY)
+            continue
+        if raw_key in FINAL_JSON_SECTION_KEYS and raw_key in sections and raw_key not in order:
+            order.append(raw_key)
+
+    if has_main_text and FINAL_JSON_MAIN_TEXT_KEY not in order:
+        order.insert(0, FINAL_JSON_MAIN_TEXT_KEY)
+
+    for key, _label in STRUCTURED_SECTION_ORDER:
+        if key in sections and key not in order:
+            order.append(key)
+
+    return order
+
+
+def visible_text_from_ordered_json_output(answer: str) -> str:
+    parsed = parse_json_object_from_text(answer)
+    if not parsed:
+        return ""
+
+    main_text = coerce_structured_section_text(parsed.get("mainText") or parsed.get("main_text"))
+    if main_text:
+        return main_text
+
+    structured = structured_output_from_ordered_json_payload(parsed)
+    return structured_output_to_text(structured or {}) if structured else ""
+
+
 def normalize_confusion_choice_student_response(structured_output: dict[str, Any]) -> str:
     prompt = coerce_structured_section_text(structured_output.get("confusionPrompt"))
     sections = structured_output.get("sections")
@@ -1449,6 +1549,43 @@ def suppress_duplicated_structured_sections(sections: dict[str, str]) -> None:
         [sections.get("answer"), sections.get("hint"), sections.get("explanation"), sections.get("checkWork")],
     ):
         sections.pop("nextStep", None)
+
+
+def suppress_duplicate_problem_answer(answer: str, structured_output: dict[str, Any] | None) -> str:
+    if not isinstance(structured_output, dict):
+        return answer
+
+    sections = structured_output.get("sections")
+    if not isinstance(sections, dict):
+        return answer
+
+    problem = str(sections.get("problem") or "").strip()
+    if problem and answer_duplicates_problem_section(answer, problem):
+        return ""
+
+    return answer
+
+
+def answer_duplicates_problem_section(answer: str, problem: str) -> bool:
+    normalized_answer = normalize_problem_answer_text(answer)
+    normalized_problem = normalize_problem_answer_text(problem)
+    if not normalized_answer or not normalized_problem:
+        return False
+
+    return normalized_answer == normalized_problem or (
+        len(normalized_problem) >= 24
+        and (normalized_answer.endswith(normalized_problem) or normalized_problem in normalized_answer)
+    )
+
+
+def normalize_problem_answer_text(value: str) -> str:
+    text = re.sub(
+        r"^\s*(?:\*\*)?(?:problem|exercise|question)(?:\s+\d+(?:\.\d+)*)?(?:\*\*)?\s*:\s*",
+        "",
+        value or "",
+        flags=re.IGNORECASE,
+    )
+    return normalize_comparable_section_text(text)
 
 
 def section_repeats_earlier_content(section_content: str, previous_sections: list[str | None]) -> bool:
@@ -2264,6 +2401,171 @@ def parse_json_object_from_text(text: str) -> dict[str, Any] | None:
 
 def escape_invalid_json_backslashes(candidate: str) -> str:
     return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", candidate)
+
+
+class FinalAnswerJsonSectionScanner:
+    """Incrementally scans final-answer JSON and emits string deltas for known visible fields."""
+
+    def __init__(self) -> None:
+        self.stack: list[dict[str, Any]] = []
+        self.in_string = False
+        self.string_is_key = False
+        self.key_buffer: list[str] = []
+        self.target_section = ""
+        self.escape = False
+        self.unicode_escape = ""
+
+    def feed(self, chunk: str) -> list[dict[str, str]]:
+        events: list[dict[str, str]] = []
+        for character in chunk:
+            events.extend(self._feed_character(character))
+        return events
+
+    def close(self) -> list[dict[str, str]]:
+        if self.in_string and self.target_section:
+            section = self.target_section
+            self.target_section = ""
+            self.in_string = False
+            return [{"type": "section_done", "section": section}]
+        return []
+
+    def _feed_character(self, character: str) -> list[dict[str, str]]:
+        if self.in_string:
+            return self._feed_string_character(character)
+        if character.isspace():
+            return []
+        if character == "{":
+            self.stack.append({"type": "object", "path": self._current_value_path(), "expecting_key": True, "current_key": None})
+            return []
+        if character == "}":
+            if self.stack:
+                self.stack.pop()
+            self._mark_parent_value_finished()
+            return []
+        if character == "[":
+            self.stack.append({"type": "array", "path": self._current_value_path()})
+            self._mark_parent_value_finished()
+            return []
+        if character == "]":
+            if self.stack:
+                self.stack.pop()
+            self._mark_parent_value_finished()
+            return []
+        if character == ",":
+            if self.stack and self.stack[-1].get("type") == "object":
+                self.stack[-1]["expecting_key"] = True
+                self.stack[-1]["current_key"] = None
+            return []
+        if character == '"':
+            self._start_string()
+            if self.target_section:
+                return [{"type": "section_start", "section": self.target_section}]
+        return []
+
+    def _feed_string_character(self, character: str) -> list[dict[str, str]]:
+        if self.unicode_escape:
+            self.unicode_escape += character
+            if len(self.unicode_escape) < 5:
+                return []
+            decoded = self._decode_unicode_escape(self.unicode_escape[1:])
+            self.unicode_escape = ""
+            self.escape = False
+            return self._append_string_character(decoded)
+        if self.escape:
+            self.escape = False
+            if character == "u":
+                self.unicode_escape = "u"
+                return []
+            return self._append_string_character(decode_json_escape(character))
+        if character == "\\":
+            self.escape = True
+            return []
+        if character == '"':
+            return self._finish_string()
+        return self._append_string_character(character)
+
+    def _append_string_character(self, character: str) -> list[dict[str, str]]:
+        if self.string_is_key:
+            self.key_buffer.append(character)
+            return []
+        if self.target_section:
+            return [{"type": "section_delta", "section": self.target_section, "delta": character}]
+        return []
+
+    def _finish_string(self) -> list[dict[str, str]]:
+        self.in_string = False
+        self.escape = False
+        self.unicode_escape = ""
+        if self.string_is_key:
+            if self.stack and self.stack[-1].get("type") == "object":
+                self.stack[-1]["current_key"] = "".join(self.key_buffer)
+                self.stack[-1]["expecting_key"] = False
+            self.string_is_key = False
+            self.key_buffer = []
+            return []
+        if self.target_section:
+            section = self.target_section
+            self.target_section = ""
+            self._mark_parent_value_finished()
+            return [{"type": "section_done", "section": section}]
+        self._mark_parent_value_finished()
+        return []
+
+    def _start_string(self) -> None:
+        self.in_string = True
+        self.escape = False
+        self.unicode_escape = ""
+        self.key_buffer = []
+        self.target_section = ""
+        context = self.stack[-1] if self.stack else {}
+        self.string_is_key = bool(context.get("type") == "object" and context.get("expecting_key", True))
+        if not self.string_is_key:
+            self.target_section = target_section_for_json_path(self._current_value_path())
+
+    def _current_value_path(self) -> list[str]:
+        if not self.stack:
+            return []
+        context = self.stack[-1]
+        path = list(context.get("path") or [])
+        if context.get("type") == "object" and context.get("current_key"):
+            path.append(str(context.get("current_key")))
+        return path
+
+    def _mark_parent_value_finished(self) -> None:
+        if self.stack and self.stack[-1].get("type") == "object":
+            self.stack[-1]["current_key"] = None
+
+    @staticmethod
+    def _decode_unicode_escape(hex_digits: str) -> str:
+        try:
+            return chr(int(hex_digits, 16))
+        except ValueError:
+            return f"\\u{hex_digits}"
+
+
+def target_section_for_json_path(path: list[str]) -> str:
+    if path == [FINAL_JSON_MAIN_TEXT_KEY]:
+        return FINAL_JSON_MAIN_TEXT_KEY
+    if len(path) == 2 and path[0] == "sections" and path[1] in FINAL_JSON_SECTION_KEYS:
+        return path[1]
+    return ""
+
+
+def decode_json_escape(character: str) -> str:
+    return {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }.get(character, character)
+
+
+def stream_section_event_for_call(event: dict[str, str], call: str) -> dict[str, str]:
+    return {**event, "call": call}
 
 
 def compact_recent_chat_history(messages: list[dict[str, Any]], *, limit: int) -> list[dict[str, str]]:
@@ -3475,7 +3777,7 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
             else "If you answer directly, keep it concise and course-focused."
         ),
         "Student-uploaded files may be attached as image_url or file parts and represented as Knowledge items with extracted OCR text or summaries. Inspect uploaded image_url parts directly only when the student asks about a class-relevant image such as homework, notes, a worksheet, a problem, a diagram, a reading, or another academic task for this class; do not say you only have upload metadata when a class-relevant uploaded image part is present. If the primary tutor turn trace says or implies that Chandra cannot see a class-relevant image, treat that as stale planning context and override it by inspecting the attached image_url part. Treat uploads as the student's attempt only when their usedAs label is student_attempt.",
-        "When the latest student turn includes an uploaded image or PDF and the request is class-relevant, inspect the uploaded file directly or use its extracted text as Knowledge context, then consider selected class OCR/PDF context as well. If a problem is visible in the upload, put only the exact full academic task statement word-for-word in `Problem:` and save it through the internal Problem context block; do not summarize or paraphrase the exercise. If no academic problem is visible in the upload, use selected class material when available; otherwise say briefly what is missing. For unrelated uploaded photos or personal images such as pets, people, rooms, food, memes, or scenery, do not describe or react to the image; briefly redirect back to the course.",
+        "When the latest student turn includes an uploaded image or PDF and the request is class-relevant, inspect the uploaded file directly or use its extracted text as Knowledge context, then consider selected class OCR/PDF context as well. If a problem is visible in the upload, put only the exact full academic task statement word-for-word in `Problem:` and save it through metadata.problemContext; do not summarize or paraphrase the exercise. If no academic problem is visible in the upload, use selected class material when available; otherwise say briefly what is missing. For unrelated uploaded photos or personal images such as pets, people, rooms, food, memes, or scenery, do not describe or react to the image; briefly redirect back to the course.",
         "If the uploaded image/PDF or selected page contains multiple problems/exercises/questions and no single active problem can be identified, ask which problem on the page the student wants to focus on. Do not ask why they provided the page.",
         f"Primary tutor turn trace for internal use only: {compact_json_dumps(decision)}",
         f"TutorPlan for internal use only: {compact_json_dumps(state.get('tutor_plan') or decision.get('tutorPlan') or {})}",
@@ -3519,16 +3821,27 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
         f"{final_unclear_source_instruction(source_usage)}",
         "Use printed_page_start as the document page number when available. page_start and page_end are source PDF page indexes.",
         "For task-location answers, use a concise shape like `That item is Problem/Question N in Section X, on printed page P of Title.`",
-        "For exercise/question/task lookup by number, exercise, page, or title, first decide whether you have the exact academic exercise/question/task statement. Only then put that statement in a separate `Problem:` section and quote the full visible problem statement exactly. For bare numbered requests like `2.24`, inspect the attached page asset and OCR metadata yourself; if the page lists unlabeled numbered items such as `2.24. Find ...`, extract the matching numbered block until the next problem/item starts. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. When returning the problem, only return the problem directly in that section; do not include `You said...`, lookup/checking status, requests for a page/title/textbook, location/source context, offers, hints, next steps, attempt requests, or commentary inside `Problem:`. Put any brief location note, offer, clarification, or attempt request outside `Problem:` in the main answer or final direct question. Do not repeat the same problem text again in the unlabeled main reply.",
+        "For exercise/question/task lookup by number, exercise, page, or title, first decide whether you have the exact academic exercise/question/task statement. Only then put that statement in a separate `Problem:` section and quote the full visible problem statement exactly. For bare numbered requests like `2.24`, inspect the attached page asset and OCR metadata yourself; if the page lists unlabeled numbered items such as `2.24. Find ...`, extract the matching numbered block until the next problem/item starts. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. When returning the problem, only return the problem directly in that section; do not include `You said...`, lookup/checking status, requests for a page/title/textbook, location/source context, offers, hints, answers, explanations, next steps, attempt requests, or commentary inside `Problem:`. Put any brief location note, offer, clarification, or attempt request outside `Problem:` in the main answer or final direct question. Do not repeat the same problem text again in the unlabeled main reply.",
+        "For exact source lookup, choose exactly one outcome before writing JSON. FOUND outcome: if you can identify the requested exercise/question/task statement, put that statement only in sections.problem, include problem first in sectionOrder, and do not write any `couldn't find`, `not on this page`, `not enough context`, `please send/paste`, missing-source language, hint, next-step request, or tutoring guidance in mainText, sections.answer, sections.hint, sections.sourceNote, or sections.nextStep. NOT_FOUND outcome: if the selected sources are insufficient or mismatched, do not include sections.problem at all; explain the missing source briefly in mainText or sections.sourceNote and ask for the needed source only if appropriate. These outcomes are mutually exclusive.",
         "Do not restate long task text the student already supplied unless needed for clarity.",
+        (
+            "Final output format: return only valid JSON, with no markdown fence and no text outside JSON. "
+            "Use this schema exactly, but order top-level JSON keys to match the render order because fields stream as you generate them: {\"mainText\": string, \"sections\": {\"problem\"?: string, \"answer\"?: string, \"hint\"?: string, \"explanation\"?: string, \"formula\"?: string, \"example\"?: string, \"checkWork\"?: string, \"sourceNote\"?: string, \"nextStep\"?: string}, \"sectionOrder\": string[], \"metadata\": {\"hintLevel\"?: string, \"studentActionNeeded\"?: string, \"mode\"?: string, \"problemNumber\"?: string, \"problemSummary\"?: string, \"problemContext\"?: {\"relation\"?: string, \"problem\"?: string, \"expected_answer\"?: string, \"source_type\"?: string, \"source_document_id\"?: string, \"source_page\"?: string, \"confidence\"?: string}, \"referencedSources\"?: [{\"doc_id\"?: string, \"page\"?: string, \"reason\"?: string}]}}. "
+            "Put the unlabeled answer bubble text in mainText. Put optional labeled content only in sections. "
+            "Treat sections.problem as extraction-only: every sentence inside it must be part of the original academic exercise/question/task text. Never append hint, answer, explanation, source/location note, offer, attempt request, or next-step wording to sections.problem. "
+            "Do not duplicate content across fields: if sections.problem contains the exercise/question/task statement, mainText must be empty or contain only a brief non-duplicative location/transition note. Never write `Problem: ...` in mainText when sections.problem is present. "
+            "sectionOrder must include mainText when mainText is non-empty, and only include section keys that have non-empty content. "
+            "Choose sectionOrder intentionally based on what this student needs first, not a fixed template; generate JSON keys in the same order you want the UI to render. If problem is first in sectionOrder, emit the top-level sections object before mainText, put problem as the first key inside sections, and emit any mainText only after sections. "
+            "Escape JSON backslashes in LaTeX, for example write \\\\operatorname inside JSON strings."
+        ),
         (
             "Structured section labels: when useful, choose the exact sectionOrder that best supports this specific reply instead of following "
             "a fixed template, and include only sections that add value. Decide the order by why the student needs each part: task text/context first, "
             "then the direct reply, then supporting rule, concept, example, or work check, with the immediate action last. Put each idea in its natural section: problem text in `Problem:`, "
             "formulas or symbolic rules in `Formula:`, conceptual reasoning in `Why this works:`, similar-but-different practice in `Example:`, "
             "source/context notes in `sourceNote`, and neutral review of shown student work in `Check your work:`. Use optional sections only when they add new value; never output sections just because the schema supports them. For guided tutoring replies, include a brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when each part has a different job. Orientation names the kind of task or thinking move without repeating the hint; `Hint:` gives one key idea tied to the exact student task; `nextStep` asks for one small, checkable student action. If the student says the previous hint was unhelpful, repetitive, too vague, or did not add more, do not restate it; make the next help narrower by naming the specific missing object, definition, target space, assumption, comparison, representation, or notation choice. If the main answer already gives the key clue, equation, theorem, or method, omit `Hint:`. If `Hint:` already gives the action, omit `nextStep` or make it a meaningfully different request such as showing the student's attempt. For broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`; if `Hint:` would restate a definition, fact list, or summary already in the main reply, omit it entirely. Before using `Problem:`, classify the candidate text and use that section only for the found or student-supplied academic exercise/question/task statement, "
-            "not for an issue/error, status update, clarification, or source lookup progress. If you use `Problem:`, put only the problem statement there and place `problem` first in sectionOrder; never put `You said...`, offers, hints, next steps, "
-            "attempt requests, requests for source details, source context, or commentary inside that section. For bare stuck follow-ups, do not use both `Hint:` and `nextStep` unless `nextStep` only asks the student to show work; otherwise prefer one short `Hint:` and leave `nextStep` empty. Use `Hint:` for one short nudge or leading question, usually one sentence, "
+            "not for an issue/error, status update, clarification, or source lookup progress. If you use `Problem:`, put only the problem statement there, place `problem` first in sectionOrder, and generate sections.problem before mainText in the JSON stream; never put `You said...`, offers, hints, answers, explanations, next steps, "
+            "attempt requests, requests for source details, source context, or commentary inside that section, and never repeat the same problem statement in mainText or sections.answer. Before returning, audit `Problem:` sentence by sentence: if text starts like `Hint:`, `Try`, `To start`, `I found`, `This is on`, `If you want`, `Please send`, or `Your next step`, it is not problem text and must be moved out or omitted. For pure lookup/location requests, omit `Hint:` and `nextStep` entirely after returning the found problem. For bare stuck follow-ups, do not use both `Hint:` and `nextStep` unless `nextStep` only asks the student to show work; otherwise prefer one short `Hint:` and leave `nextStep` empty. Use `Hint:` for one short nudge or leading question, usually one sentence, "
             "not definitions, citations, offers, or multiple ideas. Use `Why this works:` for concept reasoning, but do not include "
             "offers, attempt requests, or workflow prompts; put those in the final direct question/next action. Keep the final direct question/next action to a concrete request or action, not a hint-style leading question. Use `Formula:` only for formulas, equations, symbolic rules, or a very short rule name; never include explanatory prose, source/page notes, examples, filled-in task values, hints, or why/when commentary in `Formula:`. If there is a special-case formula, include only the symbolic special-case line in `Formula:` and explain the condition elsewhere. Use `Example:` only for a similar "
             "different problem, and `Check your work:` only when responding to a student attempt; keep it neutral, with prompts like `One place to tighten is...`, not verdict labels. Before returning, audit that no `Hint:` text is inside the next action, no prose is inside `Formula:`, and no offers are inside `Why this works:`. Do not write `Answer:`, `Question:`, "
@@ -3539,18 +3852,17 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
         "Use `$...$` or `$$...$$`; do not use `\\(...\\)`, `\\[...\\]`, or plain bracketed math.",
         "Do not use unrelated OCR metadata, whole-course OCR, raw storage paths, chunk IDs, Firebase/GCS paths, or outside knowledge.",
         (
-            "Internal-only academic task tracking: At the end you may add a `Problem context:` block for the backend only. "
-            "In this block, problem means the exercise/question/task the student is working on, not an error or issue. "
-            "Use newline-separated `key: value` fields with keys relation, problem, expected_answer, source_type, "
-            "source_document_id, source_page, confidence. Allowed relation values: same_problem, "
-            "different_problem, unknown. Allowed source_type values: assignment_question, pdf, uploaded_image, "
-            "conversation_extracted, unknown. For problems found in a student-uploaded image, use source_type uploaded_image; for problems found in a student-uploaded PDF, use source_type pdf and source_document_id as the attachment filename or id. Allowed confidence values: low, medium, high. Include expected_answer "
-            "only when it is explicit in assignment data, an answer key, or a provided source."
+            "Internal-only academic task tracking: put the old `Problem context:` block fields inside metadata.problemContext, never outside the required JSON. "
+            "In metadata.problemContext, problem means the exercise/question/task the student is working on, not an error or issue. "
+            "Use keys relation, problem, expected_answer, source_type, source_document_id, source_page, confidence. Allowed relation values: same_problem, different_problem, unknown. "
+            "Allowed source_type values: assignment_question, pdf, uploaded_image, conversation_extracted, unknown. For problems found in a student-uploaded image, use source_type uploaded_image; for problems found in a student-uploaded PDF, use source_type pdf and source_document_id as the attachment filename or id. "
+            "Allowed confidence values: low, medium, high. Include expected_answer only when it is explicit in assignment data, an answer key, or a provided source. "
+            "Also use metadata.problemNumber and metadata.problemSummary when they are clear."
         ),
         (
-            "Internal-only source tracking: At the end, add a `Referenced sources:` block for the backend only when you used selected OCR/PDF pages. "
-            "List one used source per line as `doc_id: <selected doc_id>; page: <printed_page_start or page_start>; reason: <brief use>`. "
-            "Only include pages you actually used in the student-facing answer. If you did not use any selected page, omit this block."
+            "Internal-only source tracking: put the old `Referenced sources:` block records inside metadata.referencedSources, never outside the required JSON. "
+            "Each referencedSources item may include doc_id, page, and reason. "
+            "When source context matters to the student, put a concise page/source note in sections.sourceNote."
         ),
         "Before sending the student-facing reply, privately check intent, page fit, policy, citations, and privacy. If needed, fix the reply once.",
         f"Clean Knowledge context package:\n{compact_json_dumps(knowledge_context)}",
@@ -3795,7 +4107,18 @@ def encoded_page_asset_content_parts(assets: list[dict[str, Any]]) -> list[dict[
                 }
             )
 
-        content_parts.append(encoded_page_asset_ocr_part(asset, str(asset.get("ocr_text") or asset.get("chunk_text") or "").strip()))
+        has_visual_or_file_asset = bool(
+            full_pdf_data_url
+            or file_data_url
+            or (isinstance(image_url, dict) and image_url.get("url"))
+        )
+        content_parts.append(
+            encoded_page_asset_ocr_part(
+                asset,
+                str(asset.get("ocr_text") or asset.get("chunk_text") or "").strip(),
+                include_ocr_text=not has_visual_or_file_asset,
+            )
+        )
 
     return content_parts
 
@@ -3893,7 +4216,12 @@ def encode_page_asset_job(job: dict[str, Any]) -> dict[str, Any] | None:
 
     if kind == "ocr_text":
         asset = job.get("asset") if isinstance(job.get("asset"), dict) else {}
-        return encoded_page_asset_ocr_part(asset, str(job.get("text") or ""))
+        has_visual_or_file_asset = bool(
+            asset.get("full_pdf_data_url")
+            or asset.get("file_data_url")
+            or (isinstance(asset.get("image_url"), dict) and asset.get("image_url", {}).get("url"))
+        )
+        return encoded_page_asset_ocr_part(asset, str(job.get("text") or ""), include_ocr_text=not has_visual_or_file_asset)
 
     if kind == "image_url":
         return {
@@ -3924,7 +4252,7 @@ def encode_page_asset_job(job: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def encoded_page_asset_ocr_part(asset: dict[str, Any], ocr_text: str) -> dict[str, Any]:
+def encoded_page_asset_ocr_part(asset: dict[str, Any], ocr_text: str, *, include_ocr_text: bool = True) -> dict[str, Any]:
     used_as = infer_selected_page_used_as(asset)
     metadata = {
         "docId": asset.get("doc_id"),
@@ -3949,13 +4277,18 @@ def encoded_page_asset_ocr_part(asset: dict[str, Any], ocr_text: str) -> dict[st
         "usedAs": used_as,
         "uiColor": knowledge_ui_color_token(used_as),
     }
+    body = (
+        "OCR text:\n"
+        f"{ocr_text}"
+        if include_ocr_text
+        else "OCR text omitted because an image or PDF asset for this page is attached. Use the attached asset directly; use this metadata for citation and retrieval context."
+    )
     return {
         "type": "text",
         "text": (
             "Selected OCR page/problem metadata:\n"
             f"{compact_json_dumps(metadata)}\n\n"
-            "OCR text:\n"
-            f"{ocr_text}"
+            f"{body}"
         ),
     }
 
@@ -4368,6 +4701,10 @@ def find_referenced_page_asset(reference: dict[str, Any], assets: list[dict[str,
 
 
 def referenced_source_records_from_answer(answer: str) -> list[dict[str, Any]]:
+    json_records = referenced_source_records_from_json_answer(answer)
+    if json_records:
+        return json_records
+
     block = referenced_sources_block(answer)
     if not block:
         return []
@@ -4391,6 +4728,37 @@ def referenced_source_records_from_answer(answer: str) -> list[dict[str, Any]]:
         page = fields.get("page") or fields.get("printed_page") or fields.get("page_number")
         if doc_id or page:
             records.append({"doc_id": doc_id or "", "page": nonnegative_int(page)})
+
+    return records
+
+
+def referenced_source_records_from_json_answer(answer: str) -> list[dict[str, Any]]:
+    parsed = parse_json_object_from_text(answer)
+    metadata = parsed.get("metadata") if isinstance(parsed, dict) else None
+    if not isinstance(metadata, dict):
+        return []
+
+    raw_references = metadata.get("referencedSources") or metadata.get("referenced_sources")
+    if isinstance(raw_references, dict):
+        raw_references = [raw_references]
+    if not isinstance(raw_references, list):
+        return []
+
+    records: list[dict[str, Any]] = []
+    for item in raw_references:
+        if not isinstance(item, dict):
+            continue
+
+        doc_id = (
+            item.get("doc_id")
+            or item.get("docId")
+            or item.get("source_document_id")
+            or item.get("sourceDocumentId")
+            or ""
+        )
+        page = item.get("page") or item.get("printed_page") or item.get("page_number") or item.get("source_page")
+        if doc_id or page:
+            records.append({"doc_id": str(doc_id or ""), "page": nonnegative_int(page)})
 
     return records
 
@@ -4894,15 +5262,114 @@ async def traced_openrouter_chat(
         return response
 
 
+async def traced_openrouter_chat_streaming(
+    client: Any,
+    *,
+    name: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    state: PdfRagState,
+    prompt_key: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    on_content_delta: Any | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    if not hasattr(client, "stream_chat"):
+        return await traced_openrouter_chat(
+            client,
+            name=name,
+            model=model,
+            messages=messages,
+            state=state,
+            prompt_key=prompt_key,
+            metadata={**(metadata or {}), "streaming_fallback": "client_missing_stream_chat"},
+            **kwargs,
+        )
+
+    prompt = None
+    prompt_objects = state.get("langfuse_prompt_objects") or {}
+    if prompt_key:
+        prompt = prompt_objects.get(prompt_key)
+
+    with langfuse_generation(
+        name,
+        model=model,
+        input=summarize_messages_for_langfuse(messages),
+        metadata={
+            "class_id": state.get("class_id"),
+            "conversation_id": state.get("conversation_id"),
+            "streaming": True,
+            **(metadata or {}),
+        },
+        prompt=prompt,
+    ) as generation:
+        try:
+            stream = client.stream_chat(model=model, messages=messages, **kwargs)
+            if inspect.isawaitable(stream):
+                stream = await stream
+            response: dict[str, Any] | None = None
+            content_parts: list[str] = []
+            finish_reason: str | None = None
+            usage = empty_token_usage()
+            tool_calls: list[dict[str, Any]] = []
+
+            async for event in stream:
+                if not isinstance(event, dict):
+                    continue
+
+                event_type = event.get("type")
+                if event_type == "content_delta":
+                    delta = str(event.get("delta") or "")
+                    if delta:
+                        content_parts.append(delta)
+                        if on_content_delta is not None:
+                            maybe_awaitable = on_content_delta(delta)
+                            if inspect.isawaitable(maybe_awaitable):
+                                await maybe_awaitable
+                elif event_type == "tool_call_delta" and isinstance(event.get("tool_call"), dict):
+                    tool_calls.append(event["tool_call"])
+                elif event_type == "finish":
+                    finish_reason = str(event.get("finish_reason") or "")
+                elif event_type == "usage" and isinstance(event.get("usage"), dict):
+                    usage = normalize_token_usage(event.get("usage"))
+                elif event_type == "done" and isinstance(event.get("response"), dict):
+                    response = event["response"]
+
+            if response is None:
+                response = {
+                    "content": "".join(content_parts),
+                    "finish_reason": finish_reason,
+                    "tool_calls": tool_calls,
+                    "usage": usage,
+                    "raw": {},
+                }
+        except Exception as error:
+            mark_langfuse_error(generation, error)
+            raise
+
+        update_langfuse_observation(
+            generation,
+            output={
+                "content": response.get("content") or "",
+                "finish_reason": response.get("finish_reason"),
+                "tool_call_count": len(response.get("tool_calls") or []),
+            },
+            usage=response.get("usage"),
+            metadata={"finish_reason": response.get("finish_reason"), "streaming": True},
+        )
+        return response
+
+
 async def call_primary_tutor_model(
     client: Any,
     state: PdfRagState,
     heuristic: dict[str, Any],
+    on_content_delta: Any | None = None,
 ) -> dict[str, Any]:
     model = state.get("model") or DEFAULT_OPENROUTER_MODEL
     messages = build_primary_tutor_messages(state, heuristic)
     max_tokens = primary_tutor_max_tokens(state)
-    response = await traced_openrouter_chat(
+    response = await traced_openrouter_chat_streaming(
         client,
         name="langgraph.primary-tutor-turn",
         model=model,
@@ -4910,13 +5377,14 @@ async def call_primary_tutor_model(
         state=state,
         prompt_key="primary_tutor_turn",
         metadata={"purpose": "primary_tutor_turn", "max_tokens": max_tokens},
+        on_content_delta=on_content_delta,
         temperature=state.get("temperature", 0.4),
         max_tokens=max_tokens,
         reasoning_effort=ROUTER_REASONING_EFFORT,
     )
 
     if provider_stopped_for_length(response) and max_tokens < PRIMARY_TUTOR_LENGTH_RETRY_MAX_TOKENS:
-        response = await traced_openrouter_chat(
+        response = await traced_openrouter_chat_streaming(
             client,
             name="langgraph.primary-tutor-turn.retry",
             model=model,
@@ -4924,6 +5392,7 @@ async def call_primary_tutor_model(
             state=state,
             prompt_key="primary_tutor_turn",
             metadata={"purpose": "primary_tutor_turn_retry", "max_tokens": min(max_tokens * 2, PRIMARY_TUTOR_LENGTH_RETRY_MAX_TOKENS)},
+            on_content_delta=on_content_delta,
             temperature=state.get("temperature", 0.4),
             max_tokens=min(max_tokens * 2, PRIMARY_TUTOR_LENGTH_RETRY_MAX_TOKENS),
             reasoning_effort=ROUTER_REASONING_EFFORT,
@@ -5103,7 +5572,26 @@ async def run_pdf_rag_agent_stream(
         state["chat_retrieval_memory"] = await asyncio.to_thread(read_chat_retrieval_memory, snapshot_side_effect_value(state))
         state["stage_history"] = append_stage(state, "load_chat_retrieval_memory")
         heuristic = build_retrieval_decision(state)
-        response = await call_primary_tutor_model(client, state, heuristic)
+        primary_scanner = FinalAnswerJsonSectionScanner()
+        pending_primary_section_events: list[dict[str, str]] = []
+
+        def capture_primary_delta(delta: str) -> None:
+            pending_primary_section_events.extend(
+                stream_section_event_for_call(event, "primary_tutor_turn")
+                for event in primary_scanner.feed(delta)
+            )
+
+        primary_response_task = asyncio.create_task(
+            call_primary_tutor_model(client, state, heuristic, on_content_delta=capture_primary_delta)
+        )
+        while not primary_response_task.done() or pending_primary_section_events:
+            while pending_primary_section_events:
+                yield pending_primary_section_events.pop(0)
+            if not primary_response_task.done():
+                await asyncio.sleep(0.01)
+        response = await primary_response_task
+        for section_event in primary_scanner.close():
+            yield stream_section_event_for_call(section_event, "primary_tutor_turn")
         decision = parse_primary_tutor_response(response, heuristic)
         decision = enforce_ambiguous_student_upload_clarification(decision, state)
         decision = enforce_selected_upload_problem_response(decision, state)
@@ -5226,18 +5714,38 @@ async def run_pdf_rag_agent_stream(
             }
             final_model = state.get("model") or DEFAULT_OPENROUTER_MODEL
             final_reasoning_effort = ROUTER_REASONING_EFFORT
-            response = await traced_openrouter_chat(
-                client,
-                name="langgraph.context-grounded-answer",
-                model=final_model,
-                messages=final_messages,
-                state=state,
-                prompt_key="context_grounded_answer",
-                metadata={"purpose": "context_grounded_answer", "streaming": True},
-                temperature=state.get("temperature", 0.4),
-                max_tokens=state.get("max_tokens"),
-                reasoning_effort=final_reasoning_effort,
+            scanner = FinalAnswerJsonSectionScanner()
+            pending_section_events: list[dict[str, str]] = []
+
+            def capture_final_delta(delta: str) -> None:
+                pending_section_events.extend(
+                    stream_section_event_for_call(event, "context_grounded_answer")
+                    for event in scanner.feed(delta)
+                )
+
+            response_task = asyncio.create_task(
+                traced_openrouter_chat_streaming(
+                    client,
+                    name="langgraph.context-grounded-answer",
+                    model=final_model,
+                    messages=final_messages,
+                    state=state,
+                    prompt_key="context_grounded_answer",
+                    metadata={"purpose": "context_grounded_answer", "streaming": True},
+                    on_content_delta=capture_final_delta,
+                    temperature=state.get("temperature", 0.4),
+                    max_tokens=state.get("max_tokens"),
+                    reasoning_effort=final_reasoning_effort,
+                )
             )
+            while not response_task.done() or pending_section_events:
+                while pending_section_events:
+                    yield pending_section_events.pop(0)
+                if not response_task.done():
+                    await asyncio.sleep(0.01)
+            response = await response_task
+            for section_event in scanner.close():
+                yield stream_section_event_for_call(section_event, "context_grounded_answer")
             state["answer"] = response.get("content") or ""
             state["finish_reason"] = response.get("finish_reason") or ""
             state["stage_history"] = append_stage(state, "context_grounded_answer")
@@ -5280,6 +5788,7 @@ async def run_pdf_rag_agent_stream(
 
 def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -> dict[str, Any]:
     raw_answer = answer if answer is not None else answer_or_page_fallback(state)
+    visible_raw_answer = visible_text_from_ordered_json_output(raw_answer) or raw_answer
     preliminary_sources = sources_for_answer(state, raw_answer)
     problem_context = parse_problem_context_from_answer(raw_answer, state, preliminary_sources)
     student_provided_problem_text = student_provided_problem_text_from_state(state)
@@ -5327,7 +5836,7 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
         state.pop("problem_understanding_state_suppressed", None)
         sync_problem_understanding_state_to_active_context(state, active_problem_context)
     state["used_page_assets"] = page_assets_for_memory_from_answer(state, raw_answer)
-    answer_without_context = remove_problem_context_from_student_text(raw_answer).strip()
+    answer_without_context = remove_problem_context_from_student_text(visible_raw_answer).strip()
     answer = suppress_repeated_problem_section_for_followup(answer_without_context, state)
     if not answer:
         fallback_state = dict(state)
@@ -5336,14 +5845,20 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
 
     sources = preliminary_sources
     retrieval_confidence = normalize_retrieval_confidence(state.get("retrieval_confidence"))
+    json_structured_output = (
+        structured_tutor_output_from_answer(raw_answer, state, sources)
+        if parse_json_object_from_text(raw_answer)
+        else None
+    )
     structured_output = (
         state.get("structured_output_override")
         if isinstance(state.get("structured_output_override"), dict)
         and isinstance((state.get("structured_output_override") or {}).get("sections"), dict)
-        else structured_tutor_output_from_answer(answer, state, sources)
+        else json_structured_output or structured_tutor_output_from_answer(answer, state, sources)
     )
     structured_output = suppress_structured_problem_section_for_followup(structured_output, state)
     structured_output = suppress_depth_one_over_scaffolding(structured_output, state)
+    answer = suppress_duplicate_problem_answer(answer, structured_output)
     gate = answer_leak_gate(
         answer=answer,
         structured_output=structured_output,
@@ -5602,7 +6117,7 @@ def parse_problem_context_from_answer(
     sources: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     match = re.search(r"(?:^|\n)\s*Problem context\s*:\s*(?P<body>.*)\s*$", answer or "", flags=re.IGNORECASE | re.DOTALL)
-    fields = parse_problem_context_fields(match.group("body") if match else "")
+    fields = problem_context_fields_from_json_answer(answer) or parse_problem_context_fields(match.group("body") if match else "")
     first_source = (sources or [None])[0] or {}
     inferred_problem_context = (
         infer_problem_context_from_answer(answer, state, first_source)
@@ -5652,6 +6167,42 @@ def parse_problem_context_from_answer(
         "source_chunk_id": source_chunk_id,
         "confidence": confidence,
     }
+
+
+def problem_context_fields_from_json_answer(answer: str) -> dict[str, str]:
+    parsed = parse_json_object_from_text(answer)
+    metadata = parsed.get("metadata") if isinstance(parsed, dict) else None
+    if not isinstance(metadata, dict):
+        return {}
+
+    raw_context = metadata.get("problemContext") or metadata.get("problem_context")
+    if not isinstance(raw_context, dict):
+        return {}
+
+    fields: dict[str, str] = {}
+    for raw_key in (
+        "relation",
+        "problem",
+        "expected_answer",
+        "source_type",
+        "source_document_id",
+        "source_page",
+        "source_chunk_id",
+        "confidence",
+    ):
+        value = raw_context.get(raw_key)
+        if value is None:
+            camel_key = snake_to_lower_camel(raw_key)
+            value = raw_context.get(camel_key)
+        if value is not None:
+            fields[raw_key] = str(value).strip()
+
+    return fields
+
+
+def snake_to_lower_camel(value: str) -> str:
+    parts = value.split("_")
+    return parts[0] + "".join(part.capitalize() for part in parts[1:])
 
 
 def source_type_for_visible_problem(state: PdfRagState, sources: list[dict[str, Any]]) -> str:
@@ -7250,6 +7801,23 @@ def structured_tutor_output_from_answer(
     sources: list[dict[str, Any]],
 ) -> dict[str, Any]:
     source_confidence = normalize_retrieval_confidence(state.get("retrieval_confidence"))
+    parsed_json_answer = parse_json_object_from_text(answer)
+    json_structured_output = structured_output_from_ordered_json_payload(
+        parsed_json_answer,
+        source_confidence=source_confidence,
+    )
+    if json_structured_output:
+        metadata = json_structured_output.get("metadata") if isinstance(json_structured_output.get("metadata"), dict) else {}
+        problem = str((json_structured_output.get("sections") or {}).get("problem") or "")
+        return {
+            **json_structured_output,
+            "metadata": {
+                **metadata,
+                **structured_problem_metadata(metadata, problem, sources),
+                "sourceConfidence": source_confidence,
+            },
+        }
+
     answer_text = normalize_wrapped_reference_numbers((answer or "").strip())
     direct_refusal = is_direct_answer_refusal(answer_text)
     paste_request = asks_for_pasted_problem_or_source(answer_text)

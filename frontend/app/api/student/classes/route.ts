@@ -16,6 +16,7 @@ type StudentClassSummary = {
   name: string;
   openingMessage?: string;
   section: string;
+  studentPromptPlaceholder?: string;
   studentChatEnabled: boolean;
   themeColor: string;
 };
@@ -167,6 +168,9 @@ async function getStudentClassSummary(
       ? { openingMessage: String(classData.openingMessage ?? "").trim() }
       : {}),
     section: String(classData.section ?? "").trim(),
+    ...(String(classData.studentPromptPlaceholder ?? "").trim()
+      ? { studentPromptPlaceholder: String(classData.studentPromptPlaceholder ?? "").trim() }
+      : {}),
     studentChatEnabled: readTutorAccessEnabled(classData.tutorAccess) !== false && classData.studentChatEnabled !== false,
     themeColor: normalizeTeacherClassThemeColor(classData.themeColor)
   };

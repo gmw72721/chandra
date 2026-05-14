@@ -34,9 +34,10 @@ const tutorStructuredSectionKeys = [
 ] as const;
 
 export function normalizeTutorResponse(payload: Partial<TutorApiResponse>): TutorApiResponse {
-  const message = String(payload.message ?? payload.content ?? "");
+  const rawMessage = String(payload.message ?? payload.content ?? "");
   const retrievalConfidence = normalizeRetrievalConfidence(payload.retrievalConfidence);
-  const structuredOutput = normalizeStructuredTutorOutput(payload.structuredOutput, message);
+  const structuredOutput = normalizeStructuredTutorOutput(payload.structuredOutput, rawMessage);
+  const message = suppressDuplicateProblemMessage(rawMessage, structuredOutput);
 
   return {
     assistantMessageId: payload.assistantMessageId,
@@ -48,6 +49,31 @@ export function normalizeTutorResponse(payload: Partial<TutorApiResponse>): Tuto
     sources: Array.isArray(payload.sources) ? payload.sources : [],
     ...(structuredOutput ? { structuredOutput } : {})
   };
+}
+
+function suppressDuplicateProblemMessage(message: string, structuredOutput: TutorStructuredOutput | undefined) {
+  const problem = structuredOutput?.sections.problem;
+  if (!problem) {
+    return message;
+  }
+
+  if (answerDuplicatesProblemSection(message, problem)) {
+    return "";
+  }
+
+  return message;
+}
+
+function answerDuplicatesProblemSection(answer: string, problem: string) {
+  const normalizedAnswer = normalizeProblemDuplicateText(answer);
+  const normalizedProblem = normalizeProblemDuplicateText(problem);
+  return Boolean(
+    normalizedAnswer &&
+      normalizedProblem &&
+      (normalizedAnswer === normalizedProblem ||
+        (normalizedProblem.length >= 24 &&
+          (normalizedAnswer.endsWith(normalizedProblem) || normalizedAnswer.includes(normalizedProblem))))
+  );
 }
 
 export function normalizeStructuredTutorOutput(
@@ -63,10 +89,13 @@ export function normalizeStructuredTutorOutput(
   const metadataRecord = isRecord(record.metadata) ? record.metadata : record;
   const explicitSectionAnswer = optionalStringValue(sectionsRecord.answer);
   const explicitLegacyAnswer = optionalStringValue(record.answer);
-  const rawAnswer = normalizeWrappedReferenceNumbers(explicitSectionAnswer ?? explicitLegacyAnswer ?? fallbackAnswer);
+  let rawAnswer = normalizeWrappedReferenceNumbers(explicitSectionAnswer ?? explicitLegacyAnswer ?? fallbackAnswer);
   const splitProblem = splitProblemSectionFollowup(stringValue(sectionsRecord.problem));
   const problem = looksLikeAcademicProblemSection(splitProblem.problem) ? splitProblem.problem : "";
   const misplacedProblemAnswer = splitProblem.problem && !problem ? splitProblem.problem : "";
+  if (problem && answerDuplicatesProblemSection(rawAnswer, problem)) {
+    rawAnswer = "";
+  }
   const rawHint = stringValue(sectionsRecord.hint);
   const explanation = stringValue(sectionsRecord.explanation);
   const formula = stringValue(sectionsRecord.formula);
@@ -445,6 +474,12 @@ function normalizeComparableSectionText(value: string) {
     .replace(/[.!?]+$/g, "")
     .trim()
     .toLowerCase();
+}
+
+function normalizeProblemDuplicateText(value: string) {
+  return normalizeComparableSectionText(
+    value.replace(/^(?:\*\*)?(?:problem|exercise|question)(?:\s+\d+(?:\.\d+)*)?(?:\*\*)?\s*:\s*/i, "")
+  );
 }
 
 function normalizeWrappedReferenceNumbers(text: string) {

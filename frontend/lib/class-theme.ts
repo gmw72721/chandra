@@ -16,7 +16,7 @@ export const teacherClassThemeColorOptions: Array<{
   { id: "indigo", label: "Indigo", color: "#3949ab" },
   { id: "blue", label: "Blue", color: "#0b66a0" },
   { id: "teal", label: "Teal", color: "#075b60" },
-  { id: "emerald", label: "Forest Green", color: "#346048" },
+  { id: "emerald", label: "Forest", color: "#346048" },
   { id: "rose", label: "Rose", color: "#b94e55" }
 ];
 

@@ -110,6 +110,56 @@ def test_normalize_backend_structured_output_unwraps_section_text_objects() -> N
     }
 
 
+def test_json_problem_context_preserves_internal_tracking_contract() -> None:
+    answer = json.dumps(
+        {
+            "mainText": "Use the statement from the upload.",
+            "sections": {},
+            "sectionOrder": ["mainText"],
+            "metadata": {
+                "problemContext": {
+                    "relation": "same_problem",
+                    "problem": "Problem 4. Find x.",
+                    "expected_answer": "x = 2",
+                    "source_type": "uploaded_image",
+                    "source_document_id": "student-upload.png",
+                    "source_page": "1",
+                    "confidence": "high",
+                }
+            },
+        }
+    )
+
+    context = graph_module.parse_problem_context_from_answer(answer, {}, [])
+
+    assert context["relation"] == "same_problem"
+    assert context["problem"] == "Problem 4. Find x."
+    assert context["expected_answer"] == "x = 2"
+    assert context["source_type"] == "uploaded_image"
+    assert context["source_document_id"] == "student-upload.png"
+    assert context["source_page"] == 1
+    assert context["confidence"] == "high"
+
+
+def test_json_referenced_sources_preserves_internal_source_tracking_contract() -> None:
+    answer = json.dumps(
+        {
+            "mainText": "That item is on printed page 80.",
+            "sections": {"sourceNote": "Rank Worksheet, printed page 80."},
+            "sectionOrder": ["mainText", "sourceNote"],
+            "metadata": {
+                "referencedSources": [
+                    {"doc_id": "material-rank", "page": "80", "reason": "matched requested problem"}
+                ]
+            },
+        }
+    )
+
+    records = graph_module.referenced_source_records_from_answer(answer)
+
+    assert records == [{"doc_id": "material-rank", "page": 80}]
+
+
 def test_decision_prompt_searches_source_lookup_before_asking_for_more_detail() -> None:
     heuristic = graph_module.retrieval_decision(
         decision_source="search_required",
@@ -2185,6 +2235,63 @@ def test_final_prompt_escalates_repeated_unhelpful_hint_without_repeating() -> N
     assert "previous hint was unhelpful, repetitive, too vague, or did not add more" in instruction_text
     assert "add one new concrete distinction or prerequisite idea" in instruction_text
     assert "specific missing object, definition, target space, assumption, comparison, representation, or notation choice" in instruction_text
+
+
+def test_context_grounded_prompt_makes_lookup_found_and_not_found_mutually_exclusive() -> None:
+    state = {
+        "answer_policy": {"refuseAnswerOnlyRequests": True},
+        "messages": [{"role": "user", "content": "problem 2.20"}],
+        "page_assets": [ocr_page(problem_numbers=["2.20"])],
+        "retrieval_decision": {
+            "needs_search": True,
+            "retrieval_reason": "student_requested_problem",
+            "tutorPlan": {"studentIntent": "source_lookup"},
+        },
+        "source_usage": {"useClassMaterialsFirst": True},
+    }
+
+    messages = graph_module.build_context_grounded_answer_messages(state)
+    instruction_text = messages[0]["content"][1]["text"]
+
+    assert "choose exactly one outcome before writing JSON" in instruction_text
+    assert "FOUND outcome" in instruction_text
+    assert "NOT_FOUND outcome" in instruction_text
+    assert "These outcomes are mutually exclusive" in instruction_text
+    assert "do not write any `couldn't find`" in instruction_text
+    assert "do not include sections.problem at all" in instruction_text
+    assert "fields stream as you generate them" in instruction_text
+    assert "emit the top-level sections object before mainText" in instruction_text
+    assert "put problem as the first key inside sections" in instruction_text
+    assert "hint, next-step request, or tutoring guidance" in instruction_text
+    assert "Treat sections.problem as extraction-only" in instruction_text
+    assert "For pure lookup/location requests, omit `Hint:` and `nextStep` entirely" in instruction_text
+
+
+def test_primary_prompt_streams_problem_before_main_text_when_problem_section_is_present() -> None:
+    heuristic = graph_module.retrieval_decision(
+        decision_source="search_required",
+        needs_search=True,
+        retrieval_reason="student_requested_problem",
+        query="problem 2.20",
+        active_record=None,
+        memory_used=False,
+    )
+    messages = graph_module.build_primary_tutor_messages(
+        {
+            "answer_policy": {"refuseAnswerOnlyRequests": True},
+            "messages": [{"role": "user", "content": "problem 2.20"}],
+            "source_usage": {"useClassMaterialsFirst": True},
+        },
+        heuristic,
+    )
+    system_prompt = messages[0]["content"]
+
+    assert "Physical JSON key order matters" in system_prompt
+    assert "emit the top-level sections object before mainText" in system_prompt
+    assert "put sections.problem as the first key inside sections" in system_prompt
+    assert "do not emit mainText first and rely on sectionOrder to fix it later" in system_prompt
+    assert "Treat sections.problem as an extraction-only field" in system_prompt
+    assert "for a pure source/problem lookup, omit hint and nextStep" in system_prompt
 
 
 def test_unclear_attempt_keeps_current_step_and_counts_repeated_stuck() -> None:

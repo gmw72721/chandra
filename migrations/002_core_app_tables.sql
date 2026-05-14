@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS classes (
   section TEXT NOT NULL DEFAULT '',
   join_code TEXT UNIQUE,
   student_chat_enabled BOOLEAN NOT NULL DEFAULT true,
+  student_prompt_placeholder TEXT NOT NULL DEFAULT '',
   appearance TEXT NOT NULL DEFAULT '',
   theme_color TEXT NOT NULL DEFAULT '',
   answer_policy JSONB NOT NULL DEFAULT '{}'::jsonb,

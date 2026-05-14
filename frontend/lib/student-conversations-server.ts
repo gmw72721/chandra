@@ -56,6 +56,7 @@ const maxTitleLength = 72;
 const maxDocumentIdLength = 200;
 const maxTeacherReviewNoteLength = 1000;
 const presenceActiveWindowMs = 90 * 1000;
+const internalProblemIdentifierPattern = /^(?:problem|knowledge)_[a-z0-9_-]+$/i;
 const conversationReviewStatuses = new Set<ConversationReviewStatus>([
   "new",
   "reviewed",
@@ -1133,7 +1134,7 @@ function conversationDocToSummary(id: string, data: Record<string, unknown>): St
     tags: Array.isArray(data.tags) ? data.tags.map(String) : undefined,
     teacherId: String(data.teacherId ?? ""),
     teacherName: stringOrUndefined(data.teacherName),
-    title: String(data.title ?? "Conversation"),
+    title: safeConversationSummaryTitle(String(data.title ?? "Conversation"), problemMetadata),
     updatedAt: serializeFirestoreValue(data.updatedAt)
   };
 }
@@ -1158,7 +1159,7 @@ function conversationRecordToSummary(conversation: Awaited<ReturnType<typeof get
     tags: conversation.tags.length ? conversation.tags : undefined,
     teacherId: conversation.teacherId ?? "",
     teacherName: stringOrUndefined(conversation.teacherName),
-    title: conversation.title || "Conversation",
+    title: safeConversationSummaryTitle(conversation.title || "Conversation", problemMetadata),
     updatedAt: conversation.updatedAt.toISOString()
   };
 }
@@ -1373,7 +1374,8 @@ function conversationProblemMetadata(data: Record<string, unknown>) {
     normalizeProblemNumber(data.problemNumber) ||
     normalizeProblemNumber(currentProblem.problemNumber) ||
     firstProblemNumberFromText(String(currentProblem.problemText ?? ""));
-  const problemLabel = stringOrUndefined(data.problemLabel) || (problemNumber ? `Problem ${problemNumber}` : undefined);
+  const storedProblemLabel = normalizeStoredProblemLabel(data.problemLabel);
+  const problemLabel = storedProblemLabel || (problemNumber ? `Problem ${problemNumber}` : undefined);
   const problemSummary =
     normalizeProblemSummary(data.problemSummary) ||
     normalizeProblemSummary(currentProblem.title) ||
@@ -1384,6 +1386,26 @@ function conversationProblemMetadata(data: Record<string, unknown>) {
     ...(problemNumber ? { problemNumber } : {}),
     ...(problemSummary ? { problemSummary } : {})
   };
+}
+
+function normalizeStoredProblemLabel(value: unknown) {
+  const label = stringOrUndefined(value);
+
+  if (!label || /\b(?:problem|knowledge)_[a-z0-9_-]+\b/i.test(label)) {
+    return undefined;
+  }
+
+  return label;
+}
+
+function safeConversationSummaryTitle(title: string, problemMetadata: { problemSummary?: string }) {
+  const normalizedTitle = truncateConversationTitle(title);
+
+  if (!/\b(?:problem|knowledge)_[a-z0-9_-]+\b/i.test(normalizedTitle)) {
+    return normalizedTitle;
+  }
+
+  return problemMetadata.problemSummary ? sentenceCase(problemMetadata.problemSummary) : "Conversation";
 }
 
 function firstProblemNumberFromSources(sources: TutorSource[] | undefined) {
@@ -1473,7 +1495,13 @@ function firstProblemNumberFromText(text: string) {
 }
 
 function normalizeProblemNumber(value: unknown) {
-  return String(value ?? "").trim().replace(/^#/, "").slice(0, 40);
+  const normalized = String(value ?? "").trim().replace(/^#/, "").slice(0, 40);
+
+  if (!normalized || internalProblemIdentifierPattern.test(normalized)) {
+    return "";
+  }
+
+  return normalized;
 }
 
 function normalizeProblemSummary(value: unknown) {

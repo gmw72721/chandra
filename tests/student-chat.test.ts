@@ -272,6 +272,19 @@ test("conversation titles use topic labels from the first prompt", () => {
   assert.match(source, /return "Need help"/);
 });
 
+test("conversation problem titles do not expose internal problem ids", () => {
+  const serverSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+
+  assert.match(serverSource, /internalProblemIdentifierPattern/);
+  assert.match(serverSource, /normalizeStoredProblemLabel/);
+  assert.match(serverSource, /safeConversationSummaryTitle/);
+  assert.match(serverSource, /internalProblemIdentifierPattern\.test\(normalized\)/);
+  assert.match(studentSource, /hasInternalProblemIdentifier\(problemLabel\)/);
+  assert.match(studentSource, /hasInternalProblemIdentifier\(title\)/);
+  assert.match(studentSource, /sentenceCaseDisplayTitle\(conversation\.problemSummary\)/);
+});
+
 test("teacher roster can open a student's saved conversations", () => {
   const teacherSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
   const conversationRouteSource = readFileSync(
@@ -636,6 +649,32 @@ test("student chat response normalization preserves problem section", () => {
   });
 });
 
+test("student chat response normalization removes problem text duplicated in main content", () => {
+  const problem =
+    "2.14. Given the setup of Exercise 2.13, prove the following inequalities: (i) rank(KL) <= min(rank(L), rank(K)).";
+  const response = normalizeTutorResponse({
+    content: `Problem: ${problem}`,
+    retrievalConfidence: "high",
+    sources: [],
+    structuredOutput: {
+      sections: {
+        problem
+      },
+      sectionOrder: ["problem"],
+      metadata: {
+        hintLevel: "none",
+        mode: "source_lookup",
+        sourceConfidence: "high",
+        studentActionNeeded: "review_source"
+      }
+    }
+  });
+
+  assert.equal(response.content, "");
+  assert.equal(response.message, "");
+  assert.deepEqual(response.structuredOutput?.sections, { answer: "", problem });
+});
+
 test("student chat response normalization moves status text out of problem section", () => {
   const response = normalizeTutorResponse({
     content: "You said: 2.20",
@@ -973,10 +1012,54 @@ test("student chat keeps quick lookup messages when final answer arrives", () =>
 test("student chat appends final assistant response after quick response", () => {
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
 
-  assert.match(studentSource, /quickResponseMessageId = quickResponseMessageId \|\| `quick-\$\{studentMessage\.id\}`/);
-  assert.match(studentSource, /upsertFinalAssistantMessage\(current, assistantMessage\)/);
+  assert.match(studentSource, /let quickResponseMessageId = `quick-\$\{studentMessage\.id\}`/);
+  assert.match(studentSource, /const streamingAssistantMessageId = quickResponseMessageId/);
+  assert.match(studentSource, /upsertFinalAssistantMessage\(removeChatMessageById\(current, streamingAssistantMessageId\), assistantMessage\)/);
   assert.doesNotMatch(studentSource, /hasSameVisibleAssistantAnswer/);
   assert.doesNotMatch(studentSource, /quickResponseIndex/);
+});
+
+test("student chat streams provisional sections and replaces them with final response", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+
+  assert.match(studentSource, /type: "section_start"/);
+  assert.match(studentSource, /type: "section_delta"/);
+  assert.match(studentSource, /type: "section_done"/);
+  assert.match(studentSource, /function progressForSectionStreamEvent/);
+  assert.match(studentSource, /current\?\.searches\.length/);
+  assert.match(studentSource, /event\.call === "context_grounded_answer" \? "Checking class materials\." : "Starting the answer\."/);
+  assert.doesNotMatch(studentSource, /Writing the answer\./);
+  assert.match(studentSource, /function upsertStreamedAssistantSection/);
+  assert.match(studentSource, /role: "assistant"/);
+  assert.match(studentSource, /content: section === "mainText" \? nextText : currentContent/);
+  assert.match(studentSource, /\[structuredSection\]: nextText/);
+  assert.match(studentSource, /"problem"/);
+  assert.match(studentSource, /"hint"/);
+  assert.match(studentSource, /"example"/);
+  assert.match(studentSource, /"checkWork"/);
+  assert.match(studentSource, /existingStreamingState\.sectionOrder\.includes\(section\)/);
+  assert.match(studentSource, /structuredSectionOrder = streamingSectionOrder\.filter/);
+  assert.match(studentSource, /orderedSection !== "mainText"/);
+  assert.match(studentSource, /streamingState: \{/);
+  assert.match(studentSource, /event\.type !== "section_done"/);
+  assert.match(studentSource, /\.\.\.\(event\.type === "section_done" \? \{ \[section\]: true \} : \{\}\)/);
+  assert.match(studentSource, /studentActionNeeded: "try_next_step"/);
+  assert.match(studentSource, /removeChatMessageById\(current, streamingAssistantMessageId\)/);
+});
+
+test("student chat renders active streaming sections with caret and plain text", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+
+  assert.match(studentSource, /Writing\.\.\./);
+  assert.match(studentSource, /function StreamingPlainText/);
+  assert.match(studentSource, /function streamingPlaceholderBlockForSection/);
+  assert.match(studentSource, /orderStreamingAssistantBlocks/);
+  assert.match(studentSource, /streaming-caret/);
+  assert.match(studentSource, /active-section/);
+  assert.match(studentSource, /section-answer/);
+  assert.match(styles, /\.assistant-message-bubble\.streaming/);
+  assert.match(styles, /@keyframes streaming-caret-blink/);
 });
 
 test("student chat response normalization repairs split decimal example next step", () => {
@@ -1009,11 +1092,11 @@ test("student assistant renderer falls back for old messages without structured 
   const messageFormatSource = readFileSync(join(repoRoot, "frontend/lib/chat-message-format.ts"), "utf8");
 
   assert.match(source, /assistantMessageBlocks\(message\)/);
-  assert.match(messageFormatSource, /return message\.structuredOutput \? message\.structuredOutput\.sections\.answer : message\.content/);
+  assert.match(messageFormatSource, /return message\.structuredOutput \? message\.content \|\| message\.structuredOutput\.sections\.answer : message\.content/);
   assert.match(source, /messageBlocks\.map/);
   assert.match(messageFormatSource, /assistantStructuredSections\(message: ChatMessage\)/);
   assert.match(messageFormatSource, /Your next step/);
-  assert.doesNotMatch(source, /hintLevel|studentActionNeeded|sourceConfidence/);
+  assert.match(source, /message\.structuredOutput\?\.confusionChoices/);
 });
 
 test("tutor prompt keeps simple greetings as natural chat replies", () => {
@@ -1535,6 +1618,7 @@ test("student chat tolerates partial structured output in message history", () =
 
   assert.match(source, /z\.record\(z\.unknown\(\)\)/);
   assert.match(source, /event\.type === "quick_response"/);
+  assert.match(source, /event\.type === "section_delta"/);
   assert.match(source, /normalizeStructuredTutorOutput\(event\.structuredOutput, message\)/);
 });
 
@@ -1768,6 +1852,41 @@ test("paused student accounts can read saved conversations but cannot compose", 
   assert.match(studentSource, /activeClass\?\.chatBlocked[\s\S]*Chat is paused for this account/);
   assert.match(studentSource, /disabled=\{studentChatPaused\}/);
   assert.match(studentSource, /disabled=\{isSending \|\| studentChatPaused\}/);
+});
+
+test("student composer uses class-specific placeholder metadata with fallback", () => {
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const classesRouteSource = readFileSync(join(repoRoot, "frontend/app/api/student/classes/route.ts"), "utf8");
+  const createClassRouteSource = readFileSync(join(repoRoot, "frontend/app/api/classes/route.ts"), "utf8");
+
+  assert.match(studentSource, /studentPromptPlaceholder\?: string/);
+  assert.match(studentSource, /activeClass\?\.studentPromptPlaceholder\?\.trim\(\)/);
+  assert.match(studentSource, /Ask about a concept, assignment, reading, or homework question\.\.\./);
+  assert.match(classesRouteSource, /studentPromptPlaceholder\?: string/);
+  assert.match(classesRouteSource, /classData\.studentPromptPlaceholder/);
+  assert.match(createClassRouteSource, /buildDefaultStudentPromptPlaceholder/);
+});
+
+test("student conversation rows expose stronger active and quieter metadata styling", () => {
+  const stylesSource = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+
+  assert.match(stylesSource, /grid-template-columns: 292px minmax\(0, 1fr\)/);
+  assert.match(stylesSource, /background:\s*[\s\S]*#fbfaf7/);
+  assert.match(stylesSource, /border-right: 1px solid #d8d2c6/);
+  assert.match(stylesSource, /student-conversation-row\[aria-pressed="true"\]::before/);
+  assert.match(stylesSource, /background: var\(--theme-primary\)/);
+  assert.match(stylesSource, /student-conversation-row:focus-visible/);
+  assert.match(stylesSource, /student-conversation-copy strong[\s\S]*font-weight: 650/);
+  assert.match(stylesSource, /student-conversation-copy span[\s\S]*font-size: 0\.7rem/);
+});
+
+test("student chat keeps a readable desktop conversation width", () => {
+  const stylesSource = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+
+  assert.match(stylesSource, /student-workspace-message[\s\S]*max-width: 820px/);
+  assert.match(stylesSource, /assistant-message-bubble[\s\S]*max-width: 760px/);
+  assert.match(stylesSource, /student-message-bubble[\s\S]*max-width: min\(560px, 70%\)/);
+  assert.match(stylesSource, /student-composer[\s\S]*max-width: 820px/);
 });
 
 test("AI request quota day buckets reset by UTC day", () => {

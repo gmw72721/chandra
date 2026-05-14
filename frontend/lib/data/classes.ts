@@ -13,6 +13,7 @@ export type ClassRecord = {
   section: string;
   joinCode: string | null;
   studentChatEnabled: boolean;
+  studentPromptPlaceholder: string;
   appearance: string;
   themeColor: string;
   settings: {
@@ -58,6 +59,7 @@ type ClassRow = {
   section: string;
   join_code: string | null;
   student_chat_enabled: boolean;
+  student_prompt_placeholder: string;
   appearance: string;
   theme_color: string;
   answer_policy: Record<string, unknown>;
@@ -100,6 +102,7 @@ export type UpsertClassInput = {
   section?: string;
   joinCode?: string | null;
   studentChatEnabled?: boolean;
+  studentPromptPlaceholder?: string;
   appearance?: string;
   themeColor?: string;
   settings?: Partial<ClassRecord["settings"]>;
@@ -110,12 +113,12 @@ export async function upsertClass(input: UpsertClassInput, client?: PostgresQuer
     client,
     `INSERT INTO classes (
       id, teacher_id, teacher_name, name, section, join_code, student_chat_enabled,
-      appearance, theme_color, answer_policy, model_settings, notification_settings, privacy_settings,
+      student_prompt_placeholder, appearance, theme_color, answer_policy, model_settings, notification_settings, privacy_settings,
       response_format, source_defaults, source_usage, tutor_access
     ) VALUES (
       $1, $2, $3, $4, $5, $6, $7,
-      $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb,
-      $14::jsonb, $15::jsonb, $16::jsonb, $17::jsonb
+      $8, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb,
+      $15::jsonb, $16::jsonb, $17::jsonb, $18::jsonb
     )
     ON CONFLICT (id) DO UPDATE SET
       teacher_id = EXCLUDED.teacher_id,
@@ -124,6 +127,7 @@ export async function upsertClass(input: UpsertClassInput, client?: PostgresQuer
       section = EXCLUDED.section,
       join_code = EXCLUDED.join_code,
       student_chat_enabled = EXCLUDED.student_chat_enabled,
+      student_prompt_placeholder = EXCLUDED.student_prompt_placeholder,
       appearance = EXCLUDED.appearance,
       theme_color = EXCLUDED.theme_color,
       answer_policy = classes.answer_policy || EXCLUDED.answer_policy,
@@ -143,6 +147,7 @@ export async function upsertClass(input: UpsertClassInput, client?: PostgresQuer
       input.section?.trim() ?? "",
       input.joinCode?.trim() || null,
       input.studentChatEnabled ?? true,
+      input.studentPromptPlaceholder?.trim() ?? "",
       input.appearance ?? "",
       input.themeColor ?? "",
       JSON.stringify(input.settings?.answerPolicy ?? {}),
@@ -359,6 +364,7 @@ export async function updateClassSettings(input: {
   sourceUsage?: Record<string, unknown>;
   studentFacingInstructions?: string;
   studentChatEnabled?: boolean;
+  studentPromptPlaceholder?: string;
   teacherName?: string;
   tutorAccess?: Record<string, unknown>;
   themeColor?: string;
@@ -386,7 +392,8 @@ export async function updateClassSettings(input: {
       student_facing_instructions = coalesce($18, student_facing_instructions),
       student_chat_enabled = coalesce($19, student_chat_enabled),
       teacher_name = coalesce($20, teacher_name),
-      tutor_access = coalesce($21::jsonb, tutor_access)
+      tutor_access = coalesce($21::jsonb, tutor_access),
+      student_prompt_placeholder = coalesce($22, student_prompt_placeholder)
     WHERE id = $1
     RETURNING *`,
     [
@@ -410,7 +417,8 @@ export async function updateClassSettings(input: {
       input.studentFacingInstructions ?? null,
       input.studentChatEnabled ?? null,
       input.teacherName ?? null,
-      input.tutorAccess ? JSON.stringify(input.tutorAccess) : null
+      input.tutorAccess ? JSON.stringify(input.tutorAccess) : null,
+      input.studentPromptPlaceholder ?? null
     ]
   );
 
@@ -540,6 +548,7 @@ function rowToClass(row: ClassRow): ClassRecord {
     section: row.section,
     joinCode: row.join_code,
     studentChatEnabled: row.student_chat_enabled,
+    studentPromptPlaceholder: row.student_prompt_placeholder,
     appearance: row.appearance,
     themeColor: row.theme_color,
     settings: {

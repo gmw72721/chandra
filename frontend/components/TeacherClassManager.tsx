@@ -8040,7 +8040,7 @@ function PrimaryIconRail({
         type="button"
         onClick={onOpenDrawer}
       >
-        C
+        <ChandraMoonMarkIcon />
       </button>
 
       <nav className="rail-nav" aria-label="Dashboard sections">
@@ -8073,7 +8073,7 @@ function PrimaryIconRail({
           type="button"
           onClick={onToggleTheme}
         >
-          <MoonIcon />
+          <ThemeToggleIcon nextAppearance={nextAppearance} />
         </button>
       </div>
     </aside>
@@ -8195,7 +8195,7 @@ function SidebarDrawer({
               type="button"
               onClick={onToggleTheme}
             >
-              <MoonIcon />
+              <ThemeToggleIcon nextAppearance={nextAppearance} />
             </button>
           </div>
           <button className="sidebar-signout-button drawer-signout-button" type="button" onClick={onSignOut}>
@@ -8312,7 +8312,7 @@ function PersistentPrimarySidebar({
             type="button"
             onClick={onToggleTheme}
           >
-            <MoonIcon />
+            <ThemeToggleIcon nextAppearance={nextAppearance} />
           </button>
         </div>
         <button className="sidebar-signout-button drawer-signout-button" type="button" onClick={onSignOut}>
@@ -8761,6 +8761,35 @@ function MoonIcon() {
         stroke="currentColor"
         strokeLinejoin="round"
         strokeWidth="1.8"
+      />
+    </svg>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" height="18" viewBox="0 0 24 24" width="18">
+      <circle cx="12" cy="12" r="3.8" stroke="currentColor" strokeWidth="1.8" />
+      <path
+        d="M12 2.8v2.1M12 19.1v2.1M4.9 4.9l1.5 1.5M17.6 17.6l1.5 1.5M2.8 12h2.1M19.1 12h2.1M4.9 19.1l1.5-1.5M17.6 6.4l1.5-1.5"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.8"
+      />
+    </svg>
+  );
+}
+
+function ThemeToggleIcon({ nextAppearance }: { nextAppearance: string }) {
+  return nextAppearance === "light" ? <SunIcon /> : <MoonIcon />;
+}
+
+function ChandraMoonMarkIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" height="24" viewBox="0 0 24 24" width="24">
+      <path
+        d="M18.9 16.6c-4.4 1.2-8.7-1.9-8.7-6.5 0-2.3 1.1-4.4 2.9-5.6-4.3.2-7.7 3.8-7.7 8.1 0 4.5 3.6 8.1 8.1 8.1 2.2 0 4.2-.9 5.4-2.4.4-.5.2-1.3 0-1.7Z"
+        fill="currentColor"
       />
     </svg>
   );

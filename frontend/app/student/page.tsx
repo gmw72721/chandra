@@ -21,6 +21,7 @@ import {
 } from "@/lib/class-theme";
 import { normalizeOpeningMessage } from "@/lib/class-settings";
 import {
+  type AssistantMessageBlock,
   assistantMessageBlocks,
   normalizeMarkdownMath,
   normalizeStructuredSectionMarkdown
@@ -63,6 +64,29 @@ type ChatProgressSearch = {
   searchNumber?: number;
 };
 
+const streamedSectionKeys = [
+  "mainText",
+  "problem",
+  "answer",
+  "hint",
+  "explanation",
+  "formula",
+  "example",
+  "checkWork",
+  "sourceNote",
+  "nextStep"
+] as const;
+type StreamedSectionKey = (typeof streamedSectionKeys)[number];
+type StructuredStreamedSectionKey = Exclude<StreamedSectionKey, "mainText">;
+type StreamingAssistantState = {
+  activeSections: Partial<Record<StreamedSectionKey, boolean>>;
+  completedSections: Partial<Record<StreamedSectionKey, boolean>>;
+  sectionOrder: StreamedSectionKey[];
+};
+type StreamingChatMessage = ChatMessage & {
+  streamingState?: StreamingAssistantState;
+};
+
 type ChatStreamEvent =
   | { message: string; stage: string; type: "step" }
   | {
@@ -91,6 +115,14 @@ type ChatStreamEvent =
       type: "search_batch";
     }
   | { errorCode?: string; errorId?: string; message: string; stage: string; type: "error" }
+  | { call?: "primary_tutor_turn" | "context_grounded_answer"; section: string; type: "section_start" }
+  | {
+      call?: "primary_tutor_turn" | "context_grounded_answer";
+      delta: string;
+      section: string;
+      type: "section_delta";
+    }
+  | { call?: "primary_tutor_turn" | "context_grounded_answer"; section: string; type: "section_done" }
   | { payload: TutorApiResponse; type: "final" };
 
 type StudentVisibleClass = {
@@ -101,6 +133,7 @@ type StudentVisibleClass = {
   name: string;
   openingMessage?: string;
   section: string;
+  studentPromptPlaceholder?: string;
   studentChatEnabled?: boolean;
   themeColor?: TeacherClassThemeColor;
 };
@@ -209,6 +242,10 @@ export function StudentWorkspace() {
   const [attachmentError, setAttachmentError] = useState("");
   const [isDraggingAttachment, setIsDraggingAttachment] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [isSendMotionActive, setIsSendMotionActive] = useState(false);
+  const [justSentMessageId, setJustSentMessageId] = useState("");
+  const sendMotionTimerRef = useRef<number | null>(null);
+  const justSentTimerRef = useRef<number | null>(null);
   const [chatProgress, setChatProgress] = useState<ChatProgress | null>(null);
   const [classLoadError, setClassLoadError] = useState<{ classId: string; message: string } | null>(null);
   const [loadedClassId, setLoadedClassId] = useState("");
@@ -423,6 +460,7 @@ export function StudentWorkspace() {
         ? "Your teacher has paused chat for this class."
         : "";
   const studentChatPaused = Boolean(studentChatPauseMessage);
+  const studentComposerPlaceholder = getStudentComposerPlaceholder(activeClass);
   const compactClassLabel = formatCompactClassLabel(className);
   const visibleClassCode = activeClass?.joinCode || activeClass?.id || activeCourseId;
   const visibleConversationSummaries = useMemo(
@@ -520,6 +558,17 @@ export function StudentWorkspace() {
   useEffect(() => {
     resizeStudentComposerTextarea(draftTextareaRef.current);
   }, [draft]);
+
+  useEffect(() => {
+    return () => {
+      if (sendMotionTimerRef.current) {
+        window.clearTimeout(sendMotionTimerRef.current);
+      }
+      if (justSentTimerRef.current) {
+        window.clearTimeout(justSentTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!openHeaderDropdown) {
@@ -1116,6 +1165,16 @@ export function StudentWorkspace() {
 
     const sentAttachmentIds = attachments.map((attachment) => attachment.id);
     const nextMessages = [...messages, studentMessage];
+    if (sendMotionTimerRef.current) {
+      window.clearTimeout(sendMotionTimerRef.current);
+    }
+    if (justSentTimerRef.current) {
+      window.clearTimeout(justSentTimerRef.current);
+    }
+    setIsSendMotionActive(true);
+    setJustSentMessageId(studentMessage.id);
+    sendMotionTimerRef.current = window.setTimeout(() => setIsSendMotionActive(false), 620);
+    justSentTimerRef.current = window.setTimeout(() => setJustSentMessageId(""), 760);
     setMessages(nextMessages);
     if (options.clearComposer) {
       setDraft("");
@@ -1128,7 +1187,9 @@ export function StudentWorkspace() {
       searches: []
     });
     let pendingFeedbackPrompt: FeedbackModalState | null = null;
-    let quickResponseMessageId = "";
+    let quickResponseMessageId = `quick-${studentMessage.id}`;
+    const streamingAssistantMessageId = quickResponseMessageId;
+    let contextGroundedStreamStarted = false;
 
     try {
       const token = await user.getIdToken();
@@ -1176,12 +1237,26 @@ export function StudentWorkspace() {
           }));
         }
 
+        if (event.type === "section_start" || event.type === "section_delta" || event.type === "section_done") {
+          setChatProgress((current) => progressForSectionStreamEvent(current, event));
+          if (event.call === "context_grounded_answer" && !contextGroundedStreamStarted) {
+            contextGroundedStreamStarted = true;
+            setMessages((current) => removeChatMessageById(current, streamingAssistantMessageId));
+          }
+          setMessages((current) =>
+            upsertStreamedAssistantSection({
+              event,
+              messageId: streamingAssistantMessageId,
+              messages: current
+            })
+          );
+        }
+
         if (event.type === "quick_response") {
           setChatProgress((current) => ({
             message: "Checking class materials.",
             searches: current?.searches ?? []
           }));
-          quickResponseMessageId = quickResponseMessageId || `quick-${studentMessage.id}`;
           setMessages((current) =>
             upsertChatMessage(current, {
               id: quickResponseMessageId,
@@ -1268,7 +1343,9 @@ export function StudentWorkspace() {
         structuredOutput: data.structuredOutput
       };
 
-      setMessages((current) => upsertFinalAssistantMessage(current, assistantMessage));
+      setMessages((current) =>
+        upsertFinalAssistantMessage(removeChatMessageById(current, streamingAssistantMessageId), assistantMessage)
+      );
       pendingFeedbackPrompt = buildFeedbackPromptCandidate({
         assistantMessage,
         classId: activeCourseId,
@@ -1466,6 +1543,17 @@ export function StudentWorkspace() {
 
     event.preventDefault();
     event.currentTarget.form?.requestSubmit();
+  }
+
+  const showStarterGuidance = isOnlyWelcomeMessage(messages) && !isSending;
+
+  function chooseStarterPrompt(prompt: string, mode: StudentMessageMode = "ask") {
+    setStudentMessageMode(mode);
+    setDraft(prompt);
+    requestAnimationFrame(() => {
+      resizeStudentComposerTextarea(draftTextareaRef.current);
+      draftTextareaRef.current?.focus();
+    });
   }
 
   return (
@@ -1840,10 +1928,17 @@ export function StudentWorkspace() {
               <p className="form-error chat-error">{conversationMessagesError}</p>
             ) : null}
             <div className="message-list student-message-list">
+              {showStarterGuidance ? (
+                <StudentStarterPanel
+                  isDisabled={studentChatPaused || !activeCourseId}
+                  onPromptSelect={chooseStarterPrompt}
+                />
+              ) : null}
               {messages.map((message) => (
                 <StudentChatMessage
                   debugEnabled={isTeacherPreview && isTeacherDebugMode}
                   debugOptions={tutorDebugOptions}
+                  isJustSent={message.id === justSentMessageId}
                   isLatestKnowledgeMessage={latestKnowledgeMessageId === message.id}
                   isSending={isSending}
                   message={message}
@@ -1857,6 +1952,8 @@ export function StudentWorkspace() {
             <form
               className={`composer student-composer${isDraggingAttachment ? " is-dragging" : ""}${
                 studentChatPaused ? " is-paused" : ""
+              }${isSendMotionActive ? " is-send-motion" : ""}${
+                isSending ? " is-sending" : ""
               }`}
               onDragLeave={() => setIsDraggingAttachment(false)}
               onDragOver={handleAttachmentDragOver}
@@ -1936,13 +2033,14 @@ export function StudentWorkspace() {
                     : activeCourseId
                       ? studentMessageMode === "work"
                         ? "Paste your attempt or upload work..."
-                        : "Ask about a problem, step, or equation..."
+                        : studentComposerPlaceholder
                       : "Join a class to start chatting."
                 }
                 rows={1}
               />
               <button className="student-send-button" type="submit" disabled={!canSendMessage}>
-                {isSending ? "Sending" : isUploadingAttachment ? "Uploading" : "Send"}
+                <span className="student-send-label">{isSending ? "Sending" : isUploadingAttachment ? "Uploading" : "Send"}</span>
+                {isSending ? <span className="student-send-motion-dot" aria-hidden="true" /> : null}
               </button>
             </form>
           </section>
@@ -1961,6 +2059,52 @@ function resizeStudentComposerTextarea(textarea: HTMLTextAreaElement | null) {
   const nextHeight = Math.min(textarea.scrollHeight, studentComposerTextareaMaxHeight);
   textarea.style.height = `${nextHeight}px`;
   textarea.style.overflowY = textarea.scrollHeight > studentComposerTextareaMaxHeight ? "auto" : "hidden";
+}
+
+function StudentStarterPanel({
+  isDisabled,
+  onPromptSelect
+}: {
+  isDisabled: boolean;
+  onPromptSelect: (prompt: string, mode?: StudentMessageMode) => void;
+}) {
+  const starterPrompts: Array<{ label: string; mode?: StudentMessageMode; prompt: string }> = [
+    {
+      label: "Ask about a problem",
+      prompt: "Can you help me understand where to start on this problem?"
+    },
+    {
+      label: "Check my work",
+      mode: "work",
+      prompt: "Can you check my work and tell me what I should revisit?"
+    },
+    {
+      label: "Explain a concept",
+      prompt: "Can you explain this concept using my class materials?"
+    }
+  ];
+
+  return (
+    <section className="student-starter-panel" aria-labelledby="student-starter-heading">
+      <span className="student-starter-kicker">Tutoring workspace</span>
+      <h2 id="student-starter-heading">Start with the problem or step you want to work on.</h2>
+      <p>
+        Paste a prompt, upload a worksheet image or PDF, or ask Chandra to check an attempt. Short questions are fine.
+      </p>
+      <div className="student-starter-actions" aria-label="Starter prompts">
+        {starterPrompts.map((starterPrompt) => (
+          <button
+            disabled={isDisabled}
+            key={starterPrompt.label}
+            type="button"
+            onClick={() => onPromptSelect(starterPrompt.prompt, starterPrompt.mode)}
+          >
+            {starterPrompt.label}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 function MessageModeMenu({
@@ -2161,6 +2305,7 @@ function StudentFeedbackPopover({
 const StudentChatMessage = memo(function StudentChatMessage({
   debugEnabled,
   debugOptions,
+  isJustSent,
   isLatestKnowledgeMessage,
   isSending,
   onChoiceSelect,
@@ -2168,6 +2313,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
 }: {
   debugEnabled: boolean;
   debugOptions: TutorDebugOptions;
+  isJustSent: boolean;
   isLatestKnowledgeMessage: boolean;
   isSending: boolean;
   message: ChatMessage;
@@ -2175,7 +2321,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
 }) {
   if (message.role === "student") {
     return (
-      <article className="student-workspace-message student">
+      <article className={`student-workspace-message student${isJustSent ? " is-just-sent" : ""}`}>
         <div className="student-message-stack">
           <div className="message-meta-row">
             <div className="message-meta">You</div>
@@ -2193,7 +2339,13 @@ const StudentChatMessage = memo(function StudentChatMessage({
     );
   }
 
-  const messageBlocks = assistantMessageBlocks(message);
+  const streamingState = (message as StreamingChatMessage).streamingState;
+  const messageBlocks = streamingState
+    ? orderStreamingAssistantBlocks(assistantMessageBlocks(message), streamingState, message)
+    : assistantMessageBlocks(message);
+  const isStreaming = Boolean(
+    streamingState && Object.values(streamingState.activeSections).some(Boolean)
+  );
   const sourceChips = message.sources?.length ? sourceChipDetails(message) : [];
   const confusionChoices = message.structuredOutput?.confusionChoices;
   const confusionPrompt = message.structuredOutput?.confusionPrompt?.trim();
@@ -2204,24 +2356,52 @@ const StudentChatMessage = memo(function StudentChatMessage({
       : undefined;
 
   return (
-    <article className={`student-workspace-message assistant${isLatestKnowledgeMessage ? " has-new-knowledge" : ""}`}>
+    <article
+      className={`student-workspace-message assistant${isLatestKnowledgeMessage ? " has-new-knowledge" : ""}${
+        streamingState ? " is-streaming" : ""
+      }`}
+    >
       <span className="chandra-message-avatar" aria-hidden="true">
         C
       </span>
       <div className="assistant-message-stack">
         <div className="message-meta-row">
           <div className="message-meta">Chandra</div>
+          {isStreaming ? <div className="message-meta streaming-meta">Writing...</div> : null}
           {debugEnabled ? <MessageDebugDetails message={message} options={debugOptions} /> : null}
         </div>
-        {messageBlocks.map((block) =>
-          block.kind === "answer" ? (
-            <div className="assistant-message-bubble" key={block.kind}>
-              <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-                {normalizeMarkdownMath(block.content)}
-              </ReactMarkdown>
+        {!messageBlocks.length && streamingState ? (
+          <div className="assistant-message-bubble streaming active-section">
+            <span className="streaming-placeholder">Writing</span>
+            <span className="streaming-caret" aria-hidden="true" />
+          </div>
+        ) : null}
+        {messageBlocks.map((block) => {
+          const sectionKey = streamedSectionKeyFromBlock(block.kind, streamingState);
+          const isActiveSection = Boolean(sectionKey && streamingState?.activeSections[sectionKey]);
+          const isCompletedSection = Boolean(sectionKey && streamingState?.completedSections[sectionKey]);
+
+          return block.kind === "answer" ? (
+            <div
+              className={`assistant-message-bubble${isActiveSection ? " streaming active-section" : ""}`}
+              key={block.kind}
+            >
+              {isActiveSection ? (
+                <StreamingPlainText content={block.content} />
+              ) : (
+                <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                  {normalizeMarkdownMath(block.content)}
+                </ReactMarkdown>
+              )}
+              {isActiveSection ? <span className="streaming-caret" aria-hidden="true" /> : null}
             </div>
           ) : (
-            <div className={`assistant-structured-section ${block.kind}`} key={block.kind}>
+            <div
+              className={`assistant-structured-section ${block.kind}${isActiveSection ? " streaming active-section" : ""}${
+                isCompletedSection ? " streaming-complete" : ""
+              }`}
+              key={block.kind}
+            >
               <strong>
                 {block.kind === "problem" || block.kind === "example" || block.kind === "formula" ? (
                   <KnowledgeItemTypeIcon
@@ -2231,12 +2411,17 @@ const StudentChatMessage = memo(function StudentChatMessage({
                 ) : null}
                 {block.label}
               </strong>
-              <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-                {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(block.content, block.kind))}
-              </ReactMarkdown>
+              {isActiveSection ? (
+                <StreamingPlainText content={block.content} />
+              ) : (
+                <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                  {normalizeMarkdownMath(normalizeStructuredSectionMarkdown(block.content, block.kind))}
+                </ReactMarkdown>
+              )}
+              {isActiveSection ? <span className="streaming-caret" aria-hidden="true" /> : null}
             </div>
-          )
-        )}
+          );
+        })}
         {confusionChoices?.length ? (
           <TutorConfusionChoices
             choices={confusionChoices}
@@ -2274,6 +2459,100 @@ function sameDisplayedText(left: string, right: string) {
 
 function compactDisplayedText(value: string) {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function StreamingPlainText({ content }: { content: string }) {
+  return <p className="streaming-plain-text">{content || "\u00a0"}</p>;
+}
+
+function orderStreamingAssistantBlocks(
+  blocks: AssistantMessageBlock[],
+  streamingState: StreamingAssistantState,
+  message: ChatMessage
+) {
+  const blockBySection = new Map<StreamedSectionKey, (typeof blocks)[number]>();
+
+  for (const block of blocks) {
+    const section = streamedSectionKeyFromBlock(block.kind, streamingState);
+    if (section && !blockBySection.has(section)) {
+      blockBySection.set(section, block);
+    }
+  }
+
+  const orderedBlocks = streamingState.sectionOrder
+    .map((section) => blockBySection.get(section) ?? streamingPlaceholderBlockForSection(section, message, streamingState))
+    .filter((block): block is (typeof blocks)[number] => Boolean(block));
+  const orderedSections = new Set(
+    orderedBlocks
+      .map((block) => streamedSectionKeyFromBlock(block.kind, streamingState))
+      .filter((section): section is StreamedSectionKey => Boolean(section))
+  );
+
+  return [
+    ...orderedBlocks,
+    ...blocks.filter((block) => {
+      const section = streamedSectionKeyFromBlock(block.kind, streamingState);
+      return !section || !orderedSections.has(section);
+    })
+  ].filter((block, index, allBlocks) => allBlocks.indexOf(block) === index);
+}
+
+function streamingPlaceholderBlockForSection(
+  section: StreamedSectionKey,
+  message: ChatMessage,
+  streamingState: StreamingAssistantState
+): AssistantMessageBlock | undefined {
+  const content = streamingSectionText(message, section);
+  if (section === "mainText") {
+    return { content, kind: "answer" };
+  }
+
+  if (section === "answer") {
+    const hasMainTextBlock = streamingState.sectionOrder.includes("mainText") || Boolean(message.content);
+    return hasMainTextBlock
+      ? { content, kind: "section-answer", label: "Answer" }
+      : { content, kind: "answer" };
+  }
+
+  const labels: Record<StructuredStreamedSectionKey, { kind: string; label: string }> = {
+    answer: { kind: "section-answer", label: "Answer" },
+    checkWork: { kind: "check-work", label: "Check your work" },
+    example: { kind: "example", label: "Similar example" },
+    explanation: { kind: "explanation", label: "Why this works" },
+    formula: { kind: "formula", label: "Formula" },
+    hint: { kind: "hint", label: "Hint" },
+    nextStep: { kind: "next-step", label: "Your next step" },
+    problem: { kind: "problem", label: "Problem" },
+    sourceNote: { kind: "source-note", label: "Source" }
+  };
+  return { content, ...labels[section] };
+}
+
+function streamingSectionText(message: ChatMessage, section: StreamedSectionKey) {
+  if (section === "mainText") {
+    return message.content;
+  }
+
+  return String(message.structuredOutput?.sections[section] ?? "");
+}
+
+function streamedSectionKeyFromBlock(kind: string, streamingState?: StreamingAssistantState): StreamedSectionKey | undefined {
+  if (kind === "answer") {
+    return streamingState?.activeSections.mainText || streamingState?.completedSections.mainText ? "mainText" : "answer";
+  }
+
+  const blockToSection: Record<string, StructuredStreamedSectionKey> = {
+    "check-work": "checkWork",
+    example: "example",
+    explanation: "explanation",
+    formula: "formula",
+    hint: "hint",
+    "next-step": "nextStep",
+    problem: "problem",
+    "section-answer": "answer",
+    "source-note": "sourceNote"
+  };
+  return blockToSection[kind];
 }
 
 function TutorConfusionChoices({
@@ -3500,20 +3779,7 @@ function chatProgressDisplay(progress: ChatProgress) {
   const hasMaterialSignal = /\b(search|checking|looking|locating|retriev|source|page|pdf|class material|materials)\b/.test(
     normalizedMessage
   );
-  const hasWritingSignal =
-    /\b(writ|draft|compos|respond|reply|answer|final)\b/.test(normalizedMessage) ||
-    /\bprepar(?:e|ing)\b/.test(normalizedMessage);
-  const isWriting = hasWritingSignal && !hasMaterialSignal;
-  const isSearching = !isWriting && (progress.searches.length > 0 || hasMaterialSignal);
-
-  if (isWriting) {
-    return {
-      isSearching: false,
-      main: "Chandra is writing",
-      searchRows: [],
-      secondary: "Turning this into a helpful next step..."
-    };
-  }
+  const isSearching = progress.searches.length > 0 || hasMaterialSignal;
 
   if (isSearching) {
     const searchRows = progress.searches.map((search) => ({
@@ -4369,6 +4635,111 @@ function upsertChatMessage(messages: ChatMessage[], message: ChatMessage) {
   return messages.map((currentMessage, index) => (index === existingIndex ? message : currentMessage));
 }
 
+function progressForSectionStreamEvent(
+  current: ChatProgress | null,
+  event: Extract<ChatStreamEvent, { type: "section_delta" | "section_done" | "section_start" }>
+): ChatProgress {
+  if (current?.searches.length) {
+    return current;
+  }
+
+  return {
+    message: event.call === "context_grounded_answer" ? "Checking class materials." : "Starting the answer.",
+    searches: current?.searches ?? []
+  };
+}
+
+function removeChatMessageById(messages: ChatMessage[], messageId: string) {
+  return messages.filter((message) => message.id !== messageId);
+}
+
+function upsertStreamedAssistantSection({
+  event,
+  messageId,
+  messages
+}: {
+  event: Extract<ChatStreamEvent, { type: "section_delta" | "section_done" | "section_start" }>;
+  messageId: string;
+  messages: ChatMessage[];
+}) {
+  const section = normalizeStreamedSectionKey(event.section);
+  if (!section) {
+    return messages;
+  }
+
+  const existing = messages.find((message) => message.id === messageId) as StreamingChatMessage | undefined;
+  const existingStructuredOutput = existing?.structuredOutput;
+  const existingSections = existingStructuredOutput?.sections ?? { answer: "" };
+  const existingStreamingState = existing?.streamingState ?? {
+    activeSections: {},
+    completedSections: {},
+    sectionOrder: []
+  };
+  const streamingSectionOrder = existingStreamingState.sectionOrder.includes(section)
+    ? existingStreamingState.sectionOrder
+    : [...existingStreamingState.sectionOrder, section];
+  const structuredSectionOrder = streamingSectionOrder.filter(
+    (orderedSection): orderedSection is StructuredStreamedSectionKey => orderedSection !== "mainText"
+  );
+  const currentContent = existing?.content ?? "";
+  const structuredSection = section === "mainText" ? undefined : section;
+  const currentSectionText = section === "mainText" ? currentContent : structuredSectionText(existingSections, structuredSection);
+  const nextText =
+    event.type === "section_delta" ? `${currentSectionText}${event.delta}` : currentSectionText;
+  const activeSections = {
+    ...existingStreamingState.activeSections,
+    [section]: event.type !== "section_done"
+  };
+  const completedSections = {
+    ...existingStreamingState.completedSections,
+    ...(event.type === "section_done" ? { [section]: true } : {})
+  };
+  const nextMessage: StreamingChatMessage = {
+    id: messageId,
+    role: "assistant",
+    content: section === "mainText" ? nextText : currentContent,
+    createdAt: existing?.createdAt ?? new Date().toISOString(),
+    debugInfo: existing?.debugInfo,
+    langGraphTrace: existing?.langGraphTrace,
+    retrievalConfidence: existing?.retrievalConfidence,
+    sources: existing?.sources ?? [],
+    structuredOutput: {
+      sections:
+        structuredSection === undefined
+          ? existingSections
+          : {
+              ...existingSections,
+              [structuredSection]: nextText
+            },
+      sectionOrder: structuredSectionOrder,
+      metadata: existingStructuredOutput?.metadata ?? {
+        hintLevel: "guided_step",
+        mode: "guided_problem_solving",
+        sourceConfidence: "low",
+        studentActionNeeded: "try_next_step"
+      }
+    },
+    streamingState: {
+      activeSections,
+      completedSections,
+      sectionOrder: streamingSectionOrder
+    }
+  };
+
+  return upsertChatMessage(messages, nextMessage);
+}
+
+function normalizeStreamedSectionKey(section: string): StreamedSectionKey | undefined {
+  return streamedSectionKeys.find((candidate) => candidate === section);
+}
+
+function structuredSectionText(
+  sections: NonNullable<ChatMessage["structuredOutput"]>["sections"],
+  section: StructuredStreamedSectionKey | undefined
+) {
+  return section ? String(sections[section] ?? "") : "";
+}
+
 function upsertFinalAssistantMessage(messages: ChatMessage[], message: ChatMessage) {
   const existingIndex = messages.findIndex((currentMessage) => currentMessage.id === message.id);
 
@@ -4812,12 +5183,20 @@ function mergeStudentClasses(classes: StudentClassSummary[], activeClass: Studen
       joinCode: activeClass.joinCode,
       name: activeClass.name,
       section: activeClass.section,
+      studentPromptPlaceholder: activeClass.studentPromptPlaceholder,
       studentChatEnabled: activeClass.studentChatEnabled
     });
   }
 
   return Array.from(classMap.values()).sort((firstClass, secondClass) =>
     [firstClass.name, firstClass.section].join(" ").localeCompare([secondClass.name, secondClass.section].join(" "))
+  );
+}
+
+function getStudentComposerPlaceholder(activeClass: StudentVisibleClass | null) {
+  return (
+    activeClass?.studentPromptPlaceholder?.trim() ||
+    "Ask about a concept, assignment, reading, or homework question..."
   );
 }
 
@@ -5001,11 +5380,38 @@ function formatConversationMeta(conversation: StudentConversationSummary) {
 }
 
 function formatConversationDisplayTitle(conversation: StudentConversationSummary) {
-  return conversation.problemLabel || conversation.title;
+  const problemLabel = conversation.problemLabel?.trim() ?? "";
+  const title = conversation.title.trim();
+
+  if (problemLabel && !hasInternalProblemIdentifier(problemLabel)) {
+    return problemLabel;
+  }
+
+  if (hasInternalProblemIdentifier(title)) {
+    return conversation.problemSummary?.trim() ? sentenceCaseDisplayTitle(conversation.problemSummary) : "Conversation";
+  }
+
+  return title || "Conversation";
 }
 
 function formatConversationHoverTitle(conversation: StudentConversationSummary) {
-  return [formatConversationDisplayTitle(conversation), conversation.problemSummary].filter(Boolean).join(": ");
+  const displayTitle = formatConversationDisplayTitle(conversation);
+  const problemSummary = conversation.problemSummary?.trim();
+
+  if (!problemSummary || displayTitle.toLowerCase() === problemSummary.toLowerCase()) {
+    return displayTitle;
+  }
+
+  return [displayTitle, problemSummary].join(": ");
+}
+
+function hasInternalProblemIdentifier(value: string) {
+  return /\b(?:problem|knowledge)_[a-z0-9_-]+\b/i.test(value);
+}
+
+function sentenceCaseDisplayTitle(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : "Conversation";
 }
 
 function formatConversationCompactLabel(title: string) {

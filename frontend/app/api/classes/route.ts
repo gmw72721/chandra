@@ -60,6 +60,7 @@ export async function POST(request: Request) {
 
     const classCode = await createUniqueClassCode();
     const tutorDefaults = buildDefaultClassTutorSettings({ name, section });
+    const studentPromptPlaceholder = buildDefaultStudentPromptPlaceholder({ name });
     const classData = {
       answerPolicy: defaultAnswerPolicySettings,
       behaviorInstructions: defaultBehaviorInstructions,
@@ -81,6 +82,7 @@ export async function POST(request: Request) {
       sourceUsage: defaultSourceUsageSettings,
       studentChatEnabled: defaultTutorAccessSettings.enabled,
       studentFacingInstructions: tutorDefaults.studentFacingInstructions,
+      studentPromptPlaceholder,
       teacherId: decodedToken.uid,
       teacherName,
       tutorAccess: defaultTutorAccessSettings,
@@ -95,6 +97,7 @@ export async function POST(request: Request) {
       section,
       joinCode: classCode,
       studentChatEnabled: defaultTutorAccessSettings.enabled,
+      studentPromptPlaceholder,
       appearance: defaultTeacherClassAppearance,
       themeColor: defaultTeacherClassThemeColor,
       settings: {
@@ -119,6 +122,16 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ error: "Class creation failed." }, { status: 500 });
   }
+}
+
+function buildDefaultStudentPromptPlaceholder({ name }: { name: string }) {
+  const normalizedName = name.trim().toLowerCase();
+
+  if (/\bbiology\b|\bbio\b/.test(normalizedName)) {
+    return "Ask about a concept, lab, reading, or homework question...";
+  }
+
+  return "Ask about a concept, assignment, reading, or homework question...";
 }
 
 function getBearerToken(request: Request) {

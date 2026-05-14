@@ -54,6 +54,7 @@ export type TeacherClass = {
   responseFormat?: ResponseFormatSettings;
   sourceDefaults?: SourceDefaultsSettings;
   sourceUsage?: SourceUsageSettings;
+  studentPromptPlaceholder?: string;
   studentFacingInstructions?: string;
   studentChatEnabled?: boolean;
   tutorAccess?: TutorAccessSettings;

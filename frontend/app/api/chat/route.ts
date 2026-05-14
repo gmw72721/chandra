@@ -1418,6 +1418,12 @@ function streamTutorResponse(preparedRequest: PreparedBackendChatRequest, reques
               send({
                 ...quickResponseEvent
               });
+            } else if (
+              event.type === "section_start" ||
+              event.type === "section_delta" ||
+              event.type === "section_done"
+            ) {
+              send(event);
             } else {
               send(event);
             }

@@ -24,7 +24,7 @@ const defaultSectionOrder: TutorStructuredSectionKey[] = [
 ];
 
 export function assistantMessageAnswerContent(message: ChatMessage) {
-  return message.structuredOutput ? message.structuredOutput.sections.answer : message.content;
+  return message.structuredOutput ? message.content || message.structuredOutput.sections.answer : message.content;
 }
 
 export function assistantMessageBlocks(message: ChatMessage): AssistantMessageBlock[] {
@@ -34,7 +34,7 @@ export function assistantMessageBlocks(message: ChatMessage): AssistantMessageBl
 
   const sections = message.structuredOutput.sections;
   const sectionMap: Record<TutorStructuredSectionKey, AssistantMessageBlock | undefined> = {
-    answer: sections.answer ? { content: sections.answer, kind: "answer" } : undefined,
+    answer: message.content || sections.answer ? { content: message.content || sections.answer, kind: "answer" } : undefined,
     problem: sections.problem ? { content: sections.problem, kind: "problem", label: "Problem" } : undefined,
     hint: sections.hint ? { content: sections.hint, kind: "hint", label: "Hint" } : undefined,
     explanation: sections.explanation ? { content: sections.explanation, kind: "explanation", label: "Why this works" } : undefined,

@@ -343,6 +343,7 @@ function classRecordToData(
     sourceDefaults: record.settings.sourceDefaults,
     sourceUsage: record.settings.sourceUsage,
     studentChatEnabled: record.studentChatEnabled,
+    studentPromptPlaceholder: record.studentPromptPlaceholder,
     teacherId: record.teacherId,
     teacherName: record.teacherName,
     themeColor: record.themeColor,
