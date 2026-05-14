@@ -60,6 +60,46 @@ test("student settings can return to chat view", () => {
   assert.match(source, /onBackToChat=\{\(\) => setStudentMainView\("chat"\)\}/);
 });
 
+test("student workspace accent variables remain controlled by theme color", () => {
+  const stylesSource = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+  const finalStudentLayoutBlock = stylesSource.slice(
+    stylesSource.lastIndexOf(".student-workspace-shell,\n.student-workspace-shell[data-appearance],")
+  );
+
+  assert.doesNotMatch(finalStudentLayoutBlock, /--theme-primary:\s*#[0-9a-fA-F]{6}/);
+  assert.doesNotMatch(finalStudentLayoutBlock, /--theme-primary-strong:\s*#[0-9a-fA-F]{6}/);
+  assert.match(finalStudentLayoutBlock, /--selected-row-bg:\s*var\(--theme-primary-soft\)/);
+  assert.match(finalStudentLayoutBlock, /--selected-row-border:\s*var\(--theme-primary-ring\)/);
+});
+
+test("student theme settings layout keeps selected controls visually grouped", () => {
+  const stylesSource = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+  const themeCardRuleIndex = stylesSource.indexOf(".student-theme-settings-card");
+  const darkActivePillRuleIndex = stylesSource.indexOf(
+    '.student-workspace-shell[data-appearance="dark"] .student-settings-pill[aria-pressed="true"]'
+  );
+  const darkBasePillRuleIndex = stylesSource.indexOf(
+    '.student-workspace-shell[data-appearance="dark"] .student-settings-secondary-button'
+  );
+
+  assert.match(stylesSource, /\.student-theme-settings-card\s*\{[\s\S]*?align-content:\s*start;/);
+  assert.ok(themeCardRuleIndex > stylesSource.indexOf(".student-settings-card"));
+  assert.ok(darkActivePillRuleIndex > darkBasePillRuleIndex);
+  assert.match(
+    stylesSource.slice(darkActivePillRuleIndex, darkActivePillRuleIndex + 180),
+    /background:\s*var\(--theme-primary-soft\)/
+  );
+});
+
+test("student active class badges use the selected theme color", () => {
+  const stylesSource = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+
+  assert.match(stylesSource, /\.student-class-option mark\s*\{[\s\S]*?background:\s*var\(--theme-primary-soft\)/);
+  assert.match(stylesSource, /\.student-membership-row mark\s*\{[\s\S]*?background:\s*var\(--theme-primary-soft\)/);
+  assert.doesNotMatch(stylesSource, /\.student-class-option mark\s*\{[\s\S]*?rgba\(47, 125, 69/);
+  assert.doesNotMatch(stylesSource, /\.student-membership-row mark\s*\{[\s\S]*?rgba\(47, 125, 69/);
+});
+
 test("student chat posts the saved class and auth token to the tutor API", () => {
   const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
   const apiClientSource = readFileSync(join(repoRoot, "frontend/lib/api-client.ts"), "utf8");

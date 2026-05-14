@@ -18629,7 +18629,7 @@ button.student-row[aria-pressed="true"] {
 
 .student-class-option mark {
   border-radius: 999px;
-  background: rgba(47, 125, 69, 0.12);
+  background: var(--theme-primary-soft);
   padding: 4px 9px;
   color: var(--theme-primary);
   font-size: 0.68rem;
@@ -20678,6 +20678,10 @@ button.student-row[aria-pressed="true"] {
   align-content: start;
 }
 
+.student-theme-settings-card {
+  align-content: start;
+}
+
 .student-debug-toggle {
   display: inline-grid;
   grid-template-columns: auto 1fr;
@@ -20772,7 +20776,7 @@ button.student-row[aria-pressed="true"] {
 
 .student-membership-row mark {
   border-radius: 999px;
-  background: rgba(47, 125, 69, 0.12);
+  background: var(--theme-primary-soft);
   padding: 4px 10px;
   color: var(--theme-primary);
   font-size: 0.76rem;
@@ -20864,6 +20868,10 @@ button.student-row[aria-pressed="true"] {
 .student-workspace-shell[data-appearance="dark"] .student-settings-save-button {
   background: var(--theme-primary);
   color: #2f382d;
+}
+
+.student-workspace-shell[data-appearance="dark"] .student-settings-pill[aria-pressed="true"] {
+  background: var(--theme-primary-soft);
 }
 
 .student-workspace-shell[data-appearance="dark"] .student-settings-data-list,
@@ -24093,11 +24101,6 @@ button.student-row[aria-pressed="true"] {
 .student-workspace-shell,
 .student-workspace-shell[data-appearance],
 .student-workspace-shell[data-appearance="light"] {
-  --theme-primary: #2f7d45;
-  --theme-primary-strong: #27683b;
-  --theme-primary-soft: rgba(47, 125, 69, 0.08);
-  --theme-primary-ring: rgba(47, 125, 69, 0.2);
-  --theme-primary-shadow: rgba(47, 125, 69, 0.12);
   --text-primary: #111827;
   --text-secondary: #344054;
   --text-muted: #667085;
@@ -24108,8 +24111,8 @@ button.student-row[aria-pressed="true"] {
   --input-border: #cfd8e3;
   --row-bg: #ffffff;
   --row-hover-bg: #f2f6f5;
-  --selected-row-bg: rgba(47, 125, 69, 0.09);
-  --selected-row-border: rgba(47, 125, 69, 0.26);
+  --selected-row-bg: var(--theme-primary-soft);
+  --selected-row-border: var(--theme-primary-ring);
   --student-main-bg: #f4f6fa;
   --student-sidebar-bg: #eef2f6;
   --student-composer-bg: rgba(255, 255, 255, 0.94);
@@ -24124,11 +24127,6 @@ button.student-row[aria-pressed="true"] {
 }
 
 .student-workspace-shell[data-appearance="dark"] {
-  --theme-primary: #5db978;
-  --theme-primary-strong: #459b61;
-  --theme-primary-soft: rgba(93, 185, 120, 0.12);
-  --theme-primary-ring: rgba(93, 185, 120, 0.26);
-  --theme-primary-shadow: rgba(93, 185, 120, 0.12);
   --text-primary: #f4f7fb;
   --text-secondary: #d2dbe8;
   --text-muted: #a5b1c4;
@@ -24139,8 +24137,8 @@ button.student-row[aria-pressed="true"] {
   --input-border: rgba(148, 163, 184, 0.34);
   --row-bg: rgba(17, 27, 44, 0.86);
   --row-hover-bg: rgba(29, 42, 65, 0.92);
-  --selected-row-bg: rgba(93, 185, 120, 0.14);
-  --selected-row-border: rgba(93, 185, 120, 0.34);
+  --selected-row-bg: var(--theme-primary-soft);
+  --selected-row-border: var(--theme-primary-ring);
   --student-main-bg: #0d1524;
   --student-sidebar-bg: #09111f;
   --student-composer-bg: rgba(19, 30, 49, 0.94);
