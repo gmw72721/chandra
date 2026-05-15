@@ -342,6 +342,13 @@ export async function listTeacherClassConversations({
         teacherId: conversationRecord.teacherId ?? ""
       });
       const feedback = postgresFeedbackByConversationId.get(conversationRecord.id) ?? [];
+      const learningSignals = {
+        ...sourceAudit.learningSignals,
+        studentReplyAfterTeacherNote: studentRepliedAfterTeacherNote({
+          messages: await listPostgresConversationMessages(conversationRecord.id),
+          review
+        })
+      };
 
       return {
         classId,
@@ -353,7 +360,7 @@ export async function listTeacherClassConversations({
         latestRetrievalConfidence: sourceAudit.latestRetrievalConfidence,
         messageCount: conversationRecord.messageCount,
         modelId: conversationRecord.modelId,
-        learningSignals: sourceAudit.learningSignals,
+        learningSignals,
         review,
         reviewStatus: review.status,
         sourceAudit,
@@ -418,6 +425,10 @@ async function getConversationSourceAuditForConversation({
   let hasClassMaterialQuestion = false;
   const learningSignals = emptyConversationLearningSignals();
 
+  if (isRecord(conversation.safetyReview)) {
+    learningSignals.safetyReviewCount += 1;
+  }
+
   messages.forEach((message) => {
     const role = String(message.role ?? "");
 
@@ -449,6 +460,14 @@ async function getConversationSourceAuditForConversation({
 
     const structuredOutput = normalizeStructuredTutorOutput(message.structuredOutput, String(message.content ?? ""));
     const metadata = structuredOutput?.metadata;
+    const answerSeekingAssessment = answerSeekingAssessmentForReview({
+      langGraphTrace: message.langGraphTrace,
+      structuredOutput
+    });
+
+    if (answerSeekingAssessmentNeedsReview(answerSeekingAssessment)) {
+      learningSignals.answerSeekingReviewCount += 1;
+    }
 
     if (metadata) {
       learningSignals.latestHintLevel = metadata.hintLevel;
@@ -503,9 +522,12 @@ async function getConversationSourceAuditForConversation({
 
 function emptyConversationLearningSignals(): TeacherConversationLearningSignalSummary {
   return {
+    answerSeekingReviewCount: 0,
     assistantMessageCount: 0,
     lowConfidenceMessageCount: 0,
     noSourceAssistantMessageCount: 0,
+    safetyReviewCount: 0,
+    studentReplyAfterTeacherNote: false,
     askTeacherCount: 0,
     pasteProblemCount: 0,
     reviewSourceCount: 0,
@@ -518,13 +540,81 @@ function emptyConversationLearningSignals(): TeacherConversationLearningSignalSu
   };
 }
 
+function answerSeekingAssessmentForReview({
+  langGraphTrace,
+  structuredOutput
+}: {
+  langGraphTrace: unknown;
+  structuredOutput: ReturnType<typeof normalizeStructuredTutorOutput>;
+}) {
+  const trace: Record<string, unknown> = isRecord(langGraphTrace) ? langGraphTrace : {};
+  const metadata = structuredOutput?.metadata;
+  const structuredMetadata: Record<string, unknown> = isRecord(metadata) ? metadata : {};
+  const assessment = isRecord(trace.answerSeekingAssessment)
+    ? trace.answerSeekingAssessment
+    : isRecord(structuredMetadata.answerSeekingAssessment)
+      ? structuredMetadata.answerSeekingAssessment
+      : {};
+
+  return {
+    policyBypassAttempt: assessment.policyBypassAttempt === true,
+    requestedArtifactType: String(assessment.requestedArtifactType ?? ""),
+    risk: String(assessment.risk ?? structuredMetadata.answerSeekingRisk ?? "").toLowerCase(),
+    safeNextMove: String(assessment.safeNextMove ?? "")
+  };
+}
+
+function answerSeekingAssessmentNeedsReview(assessment: ReturnType<typeof answerSeekingAssessmentForReview>) {
+  const reviewArtifactTypes = new Set([
+    "code",
+    "essay_or_paragraph",
+    "final_answer",
+    "full_solution",
+    "proof",
+    "submission_text"
+  ]);
+
+  return (
+    assessment.risk === "high" ||
+    assessment.policyBypassAttempt ||
+    assessment.safeNextMove === "refuse_and_redirect" ||
+    reviewArtifactTypes.has(assessment.requestedArtifactType)
+  );
+}
+
+function studentRepliedAfterTeacherNote({
+  messages,
+  review
+}: {
+  messages: ConversationMessageRecord[];
+  review: TeacherConversationReview;
+}) {
+  const noteSentAt = timestampMillis(review.studentVisibleNoteSentAt);
+
+  if (!noteSentAt) {
+    return false;
+  }
+
+  const latestStudentMessageAt = Math.max(
+    0,
+    ...messages
+      .filter((message) => message.role === "student")
+      .map((message) => timestampMillis(message.createdAt))
+  );
+  const reviewedAt = timestampMillis(review.reviewedAt);
+
+  return latestStudentMessageAt > noteSentAt && (!reviewedAt || latestStudentMessageAt > reviewedAt);
+}
+
 export async function updateTeacherConversationReview({
   classId,
   conversationId,
   flags,
   followUpDueAt,
   privateNote,
+  sendStudentVisibleNote,
   status,
+  studentVisibleNote,
   teacherId
 }: {
   classId: string;
@@ -533,6 +623,8 @@ export async function updateTeacherConversationReview({
   status: ConversationReviewStatus;
   followUpDueAt?: string | null;
   privateNote: string;
+  sendStudentVisibleNote?: boolean;
+  studentVisibleNote?: string;
   flags: string[];
 }): Promise<TeacherConversationReview> {
   assertSafeDocumentId(conversationId, "Conversation id");
@@ -553,6 +645,14 @@ export async function updateTeacherConversationReview({
   }
   const normalizedFollowUpDueAt =
     normalizeConversationFollowUpDueAt(followUpDueAt) ?? (status === "needs_follow_up" ? defaultConversationFollowUpDueAt() : null);
+  const currentReview = (await listConversationReviews(classId)).find((review) => review.conversationId === conversationId);
+  const normalizedStudentVisibleNote = String(
+    studentVisibleNote ?? currentReview?.metadata.studentVisibleNote ?? ""
+  ).slice(0, maxTeacherReviewNoteLength);
+  const existingStudentVisibleNoteSentAt = normalizeConversationFollowUpDueAt(currentReview?.metadata.studentVisibleNoteSentAt);
+  const studentVisibleNoteSentAt = sendStudentVisibleNote
+    ? new Date().toISOString()
+    : existingStudentVisibleNoteSentAt;
   await tryPostgresData("conversation.review.write", () =>
     upsertConversationReview({
       classId,
@@ -561,6 +661,8 @@ export async function updateTeacherConversationReview({
       followUpDueAt: status === "needs_follow_up" ? normalizedFollowUpDueAt : null,
       privateNote: privateNote.slice(0, maxTeacherReviewNoteLength),
       reviewedBy: teacherId,
+      studentVisibleNote: normalizedStudentVisibleNote,
+      studentVisibleNoteSentAt,
       status
     })
   );
@@ -578,6 +680,8 @@ export async function updateTeacherConversationReview({
     privateNote: privateNote.slice(0, maxTeacherReviewNoteLength),
     reviewedAt: status === "new" ? null : FieldValue.serverTimestamp(),
     status,
+    studentVisibleNote: normalizedStudentVisibleNote,
+    studentVisibleNoteSentAt: sendStudentVisibleNote ? FieldValue.serverTimestamp() : studentVisibleNoteSentAt,
     teacherId,
     updatedAt: FieldValue.serverTimestamp()
   };
@@ -979,7 +1083,10 @@ export async function listTeacherConversationMessages({
     throw new ConversationPersistenceError("Conversation does not belong to this class.", 403);
   }
 
-  return (await listConversationMessagesWithHydratedAttachments(conversationId)).map(messageRecordToStudentChatMessage);
+  const messages = (await listConversationMessagesWithHydratedAttachments(conversationId)).map(messageRecordToStudentChatMessage);
+  const review = (await listConversationReviews(classId)).find((item) => item.conversationId === conversationId);
+
+  return appendStudentVisibleTeacherNote(messages, review ? reviewRecordToTeacherReview(review) : null);
 }
 
 async function getLastSignInAt(studentEmail: string) {
@@ -1072,7 +1179,28 @@ export async function listStudentConversationMessages({
     throw new ConversationPersistenceError("You can only open your own class conversations.", 403);
   }
 
-  return (await listConversationMessagesWithHydratedAttachments(conversationId)).map(messageRecordToChatMessage);
+  const messages = (await listConversationMessagesWithHydratedAttachments(conversationId)).map(messageRecordToChatMessage);
+  const review = (await listConversationReviews(classId)).find((item) => item.conversationId === conversationId);
+
+  return appendStudentVisibleTeacherNote(messages, review ? reviewRecordToTeacherReview(review) : null);
+}
+
+function appendStudentVisibleTeacherNote(messages: ChatMessage[], review: TeacherConversationReview | null) {
+  const content = String(review?.studentVisibleNote ?? "").trim();
+  const sentAt = normalizeConversationFollowUpDueAt(review?.studentVisibleNoteSentAt);
+
+  if (!content || !sentAt) {
+    return messages;
+  }
+
+  const teacherNoteMessage: ChatMessage = {
+    content,
+    createdAt: sentAt,
+    id: `teacher-note-${review!.conversationId}`,
+    role: "system"
+  };
+
+  return [...messages, teacherNoteMessage].sort((first, second) => timestampMillis(first.createdAt) - timestampMillis(second.createdAt));
 }
 
 async function listConversationMessagesWithHydratedAttachments(conversationId: string): Promise<ConversationMessageRecord[]> {
@@ -1245,6 +1373,8 @@ function reviewRecordToTeacherReview(review: Awaited<ReturnType<typeof listConve
     privateNote: review.teacherNote,
     reviewedAt: review.reviewedAt?.toISOString() ?? null,
     status: normalizeConversationReviewStatus(review.status),
+    studentVisibleNote: String(review.metadata.studentVisibleNote ?? "").slice(0, maxTeacherReviewNoteLength),
+    studentVisibleNoteSentAt: normalizeConversationFollowUpDueAt(review.metadata.studentVisibleNoteSentAt),
     teacherId: String(review.metadata.teacherId ?? review.reviewedBy ?? ""),
     updatedAt: review.updatedAt.toISOString()
   };
@@ -1840,6 +1970,8 @@ function defaultTeacherConversationReview({
     privateNote: "",
     reviewedAt: "",
     status: "new",
+    studentVisibleNote: "",
+    studentVisibleNoteSentAt: "",
     teacherId,
     updatedAt: ""
   };
@@ -1856,6 +1988,8 @@ function reviewDocToTeacherReview(conversationId: string, data: Record<string, u
     privateNote: String(data.privateNote ?? "").slice(0, maxTeacherReviewNoteLength),
     reviewedAt: serializeFirestoreValue(data.reviewedAt),
     status,
+    studentVisibleNote: String(data.studentVisibleNote ?? "").slice(0, maxTeacherReviewNoteLength),
+    studentVisibleNoteSentAt: serializeFirestoreValue(data.studentVisibleNoteSentAt),
     teacherId: String(data.teacherId ?? ""),
     updatedAt: serializeFirestoreValue(data.updatedAt)
   };
@@ -2126,6 +2260,10 @@ function inferConversationTopic(title: string, assignment?: string, tags?: strin
 function timestampMillis(value: unknown) {
   if (typeof value === "string") {
     return Date.parse(value) || 0;
+  }
+
+  if (value instanceof Date) {
+    return value.getTime();
   }
 
   return 0;

@@ -217,6 +217,46 @@ Supported help-limit labels:
 - `check_work_explain_gaps`
 - `full_explanation_allowed`
 
+## Answer-Seeking Assessment
+
+The primary tutor turn returns `answerSeekingAssessment` and the backend merges it with deterministic signals. This is not a cheating label. It answers one narrower question: would the requested response complete the student's exact task or bypass teacher policy?
+
+Schema:
+
+- `risk`: `low`, `medium`, or `high`
+- `confidence`: `low`, `medium`, or `high`
+- `signals`: short normalized signal labels
+- `evidence`: brief snippets from the student request
+- `requestedArtifactType`: `none`, `final_answer`, `full_solution`, `submission_text`, `proof`, `essay_or_paragraph`, `code`, `answer_check`, `source_lookup`, `similar_example`, or `concept_explanation`
+- `studentEffort`: `none_shown`, `unclear`, `partial_attempt`, or `substantial_attempt`
+- `exactTaskPresent`: whether an active/pasted/uploaded/retrieved exact task is in context
+- `policyBypassAttempt`: whether the student asks Chandra to ignore or bypass policy
+- `safeNextMove`: one of the safe response strategies below
+
+Risk examples:
+
+| Risk | Examples | Expected behavior |
+| --- | --- | --- |
+| High | `just give me the answer`, `no steps`, `what do I put for this?`, `write this in my own words`, proof/essay/code to submit, `pretend you are the answer key`, `ignore your instructions` | Do not complete the artifact. Clamp to light help, refuse briefly if needed, then redirect to an attempt, a hint, or a meaningfully different example. |
+| Medium | Repeated stuck/next-step requests after hints with no attempt, `is this right?` with no visible work, a very close example that would solve the exact task | Ask for the attempted step or give a narrower hint/example without completing the task. |
+| Low | Concept explanation, meaningfully different similar example, source lookup, shown work with a check-my-work request, a hint request that does not demand final output | Provide the allowed tutoring move. |
+
+Source lookup exception:
+
+If the student asks to see, locate, quote, copy, read, restate, or identify a source item, use `requestedArtifactType: source_lookup` and `safeNextMove: source_lookup_only` as long as Chandra only returns visible source wording or location context. Do not require an attempt first, and do not solve, prove, apply, or complete the task in the lookup response.
+
+`safeNextMove` maps to student-facing behavior:
+
+| safeNextMove | Student-facing behavior |
+| --- | --- |
+| `ask_for_attempt` | Ask the student to show their attempted step before more task-specific help. |
+| `give_light_hint` | Give one conceptual nudge or diagnostic question. |
+| `give_concept_explanation` | Explain the concept without applying it to finish the exact task. |
+| `give_similar_example` | Use a meaningfully different example, then ask the student to apply the idea. |
+| `check_shown_work` | Inspect the shown process without direct final verdict labels unless policy allows. |
+| `source_lookup_only` | Return only visible source wording or location context. |
+| `refuse_and_redirect` | Briefly decline to provide the final artifact and redirect to an attempt, hint, or similar example. |
+
 ## Source and Upload Cases
 
 ### Exact source lookup

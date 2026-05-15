@@ -60,11 +60,67 @@ test("teacher assistant validates student navigation against class roster", asyn
   );
 });
 
+test("teacher assistant can resolve a student profile by roster query without exposing chat transcripts", async () => {
+  const result = await executeTeacherAssistantToolWithActor({
+    actor,
+    args: { classId: "class-1", query: "Gavin Williams" },
+    classId: "class-1",
+    dependencies: {
+      listStudents: async () => [{ displayName: "Gavin Williams", email: "gavin@example.com", id: "student-1" }]
+    },
+    toolName: "open_student_profile_by_query"
+  });
+
+  assert.equal(result.status, "success");
+  assert.equal(result.action?.href, "/teacher/classes/class-1/students/gavin%40example.com");
+  assert.equal(result.data, undefined);
+});
+
+test("teacher assistant can resolve a conversation review by metadata query without exposing messages", async () => {
+  const result = await executeTeacherAssistantToolWithActor({
+    actor,
+    args: { classId: "class-1", query: "Problem 5.13" },
+    classId: "class-1",
+    dependencies: {
+      getClassConversations: async () => [
+        {
+          classId: "class-1",
+          conversationId: "conv-1",
+          feedback: [],
+          feedbackSummary: { openCount: 0, resolvedCount: 0 },
+          id: "conv-1",
+          lastMessageAt: "2026-05-15T00:00:00.000Z",
+          latestRetrievalConfidence: "low",
+          learningSignals: [],
+          messageCount: 4,
+          modelId: "model-1",
+          review: { followUpDueAt: "", privateNote: "", status: "new", updatedAt: "" },
+          reviewStatus: "new",
+          sourceAudit: { latestRetrievalConfidence: "low", learningSignals: [], sourceCount: 2 },
+          studentEmail: "gavin@example.com",
+          studentId: "student-1",
+          studentName: "Gavin Williams",
+          teacherId: "teacher-1",
+          title: "Problem 5.13",
+          topic: "Problem 5.13"
+        }
+      ]
+    },
+    toolName: "open_conversation_review_by_query"
+  });
+
+  assert.equal(result.status, "success");
+  assert.equal(result.action?.href, "/teacher/conversations?classId=class-1&conversationId=conv-1");
+  assert.equal(result.data, undefined);
+});
+
 test("teacher assistant maps tools to scoped permissions", () => {
   assert.equal(permissionForTool("get_teacher_dashboard_summary"), "viewOverview");
   assert.equal(permissionForTool("get_review_queue"), "viewConversations");
   assert.equal(permissionForTool("search_students"), "viewRoster");
   assert.equal(permissionForTool("search_conversations"), "viewConversations");
+  assert.equal(permissionForTool("open_student_profile_by_query"), "viewRoster");
+  assert.equal(permissionForTool("open_conversation_review_by_query"), "viewConversations");
   assert.equal(permissionForTool("get_class_materials"), "viewMaterials");
   assert.equal(permissionForTool("get_class_settings"), "manageClassSettings");
   assert.equal(permissionForTool("update_tutor_access_settings"), "manageClassSettings");

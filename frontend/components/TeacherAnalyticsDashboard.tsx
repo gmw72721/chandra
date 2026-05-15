@@ -1,7 +1,9 @@
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
+import { conversationNeedsTeacherReview as conversationNeedsTeacherReviewNow } from "@/lib/conversation-review-utils";
 import type {
   ConversationReviewStatus,
   RetrievalConfidence,
+  StudentFeedback,
   TeacherClassOverview,
   TeacherClassOverviewPriorityRow,
   TeacherConversationSourceAuditSummary
@@ -18,9 +20,11 @@ type SvgIconName =
   | "file"
   | "heart"
   | "home"
+  | "key"
   | "message"
   | "monitor"
   | "moon"
+  | "pulse"
   | "question"
   | "settings"
   | "spark"
@@ -32,7 +36,18 @@ const sidebarItems: SvgIconName[] = ["message", "home", "users", "book", "file",
 
 type AnalyticsConversationRow = {
   id: string;
+  feedbackSummary?: {
+    openCount: number;
+  };
+  feedback?: StudentFeedback[];
+  followUpDueAt?: unknown;
+  lastMessageAt: unknown;
   lastMessageLabel: string;
+  learningSignals?: {
+    answerSeekingReviewCount?: number;
+    safetyReviewCount?: number;
+    studentReplyAfterTeacherNote?: boolean;
+  };
   latestRetrievalConfidence?: RetrievalConfidence;
   messageCount: number;
   sourceAudit: TeacherConversationSourceAuditSummary;
@@ -47,13 +62,22 @@ type AnalyticsConversationRow = {
 type TeacherAnalyticsDashboardContentProps = {
   classLabel?: string;
   dateLabel?: string;
+  maxDate?: string;
   overview?: TeacherClassOverview | null;
   priorityRows?: TeacherClassOverviewPriorityRow[];
   reviewRows?: AnalyticsConversationRow[];
+  selectedDate?: string;
+  joinCode?: string;
+  sourceCount?: number;
   studentCount?: number;
+  onAddSource?: () => void;
+  onCopyJoinCode?: () => void;
+  onDateChange?: (date: string) => void;
+  onPauseChat?: () => void;
   onOpenPriorityStudent?: (row: TeacherClassOverviewPriorityRow) => void;
   onReviewConversation?: (row: AnalyticsConversationRow) => void;
-  onReviewProfiles?: () => void;
+  onReviewToday?: () => void;
+  onUsageDecision?: (row: AnalyticsConversationRow, decision: "approve" | "deny") => void;
 };
 
 export function TeacherAnalyticsDashboard() {
@@ -92,341 +116,361 @@ export function TeacherAnalyticsDashboard() {
 export function TeacherAnalyticsDashboardContent({
   classLabel = "Class",
   dateLabel,
+  maxDate,
   overview,
   priorityRows = [],
   reviewRows = [],
+  selectedDate,
+  joinCode,
+  sourceCount = 0,
   studentCount = 0,
+  onAddSource,
+  onCopyJoinCode,
+  onDateChange,
+  onPauseChat,
   onOpenPriorityStudent,
   onReviewConversation,
-  onReviewProfiles
+  onReviewToday,
+  onUsageDecision
 }: TeacherAnalyticsDashboardContentProps = {}) {
   const metrics = overview?.metrics;
   const summary = overview?.summary;
   const totalStudents = metrics?.totalStudents || studentCount;
-  const activeStudentsToday = summary?.activeStudentsToday ?? 0;
-  const activeStudentPercent = totalStudents ? Math.round((activeStudentsToday / totalStudents) * 100) : 0;
-  const visibleReviewRows = reviewRows.filter((row) => conversationNeedsTeacherReview(row.status)).slice(0, 7);
+  const selectedDashboardDate = selectedDate ?? overview?.date ?? dateKeyForAnalyticsDate(new Date());
+  const [isCalendarOpen, setIsCalendarOpen] = useState(false);
+  const [visibleCalendarMonth, setVisibleCalendarMonth] = useState(() => overviewDateToLocalDate(selectedDashboardDate));
+  const dashboardReferenceDate = overviewDateToLocalDate(selectedDashboardDate);
+  const historicalReviewRows = reviewRows.filter((row) => isOnOrBeforeEndOfDate(row.lastMessageAt, dashboardReferenceDate));
+  const allReviewRowsToCheck = historicalReviewRows.filter((row) =>
+    conversationNeedsTeacherReviewNow({
+      feedbackSummary: row.feedbackSummary ?? { openCount: 0 },
+      followUpDueAt: row.followUpDueAt,
+      learningSignals: row.learningSignals,
+      status: row.status
+    })
+  );
+  const visibleReviewRows = allReviewRowsToCheck.slice(0, 4);
   const reviewQueueByConversationId = new Map((overview?.reviewQueueRows ?? []).map((row) => [row.conversationId, row]));
-  const reviewSummaryStats = buildReviewSummaryStats(reviewRows);
-  const profileTotal =
-    (metrics?.draftLearningProfiles ?? 0) +
-    (metrics?.missingLearningProfiles ?? 0) +
-    (metrics?.reviewedLearningProfiles ?? 0);
-  const topics = summary?.topTopics ?? [];
-  const overviewDateLabel = dateLabel ?? formatOverviewButtonDate(overview?.date, overview?.dateLabel);
+  const overviewDateLabel =
+    dateLabel ??
+    formatOverviewButtonDate(
+      selectedDashboardDate,
+      overview?.date === selectedDashboardDate ? overview?.dateLabel : undefined
+    );
+  const selectedDateIsToday = selectedDashboardDate === dateKeyForAnalyticsDate(new Date());
+  const weeklyStats = buildWeeklyChatStats(historicalReviewRows, dashboardReferenceDate);
+  const weeklyReviewRows = historicalReviewRows.filter((row) => weeklyStats.dateKeys.has(dateKeyForAnalyticsValue(row.lastMessageAt)));
+  const activeStudentsThisWeek = weeklyStats.activeStudentCount || summary?.activeStudentsToday || metrics?.activeNow || 0;
+  const allChatUsers = buildStudentChatRows(weeklyReviewRows, priorityRows);
+  const chatUsers = allChatUsers.slice(0, 5);
+  const weeklyChats = weeklyStats.total;
+  const averageChatCount = calculateAverageChatCount(allChatUsers, totalStudents);
+  const followUpRows = allChatUsers.filter((row) => isAboveClassAverage(row.chatsThisWeek, averageChatCount)).slice(0, 4);
+  const topUserMax = Math.max(...chatUsers.map((row) => row.chatsThisWeek), 1);
+  const readySourceLabel = sourceCount ? "Ready" : "Add sources";
+  const calendarWeeks = buildCalendarWeeks(visibleCalendarMonth, selectedDashboardDate, maxDate);
 
   return (
     <div className="analytics-dashboard-content">
       <header className="analytics-page-header" aria-label="Dashboard overview">
         <div className="analytics-page-title">
-          <h1>Today&apos;s Teacher Dashboard</h1>
-          <p>
-            {classLabel} · {totalStudents} {totalStudents === 1 ? "student" : "students"}
-          </p>
+          <h1>{selectedDateIsToday ? "Today" : "Daily overview"}</h1>
+          <p>{classLabel}</p>
         </div>
         <div className="analytics-header-actions">
-          <button className="analytics-selector" type="button">
-            <DashboardIcon name="calendar" />
-            {overviewDateLabel}
-            <DashboardIcon name="chevron" />
-          </button>
-          <button className="analytics-primary-action" type="button">
+          <div className="analytics-date-menu">
+            <button
+              aria-expanded={isCalendarOpen}
+              aria-haspopup="dialog"
+              className="analytics-date-picker"
+              type="button"
+              onClick={() => {
+                setVisibleCalendarMonth(overviewDateToLocalDate(selectedDashboardDate));
+                setIsCalendarOpen((isOpen) => !isOpen);
+              }}
+            >
+              <DashboardIcon name="calendar" />
+              <span>{overviewDateLabel}</span>
+              <DashboardIcon name="chevron" />
+            </button>
+            {isCalendarOpen ? (
+              <div className="analytics-calendar-popover" role="dialog" aria-label="Choose dashboard date">
+                <div className="analytics-calendar-header">
+                  <button
+                    aria-label="Previous month"
+                    className="analytics-calendar-nav previous"
+                    type="button"
+                    onClick={() => setVisibleCalendarMonth((date) => shiftCalendarMonth(date, -1))}
+                  >
+                    <DashboardIcon name="chevron" />
+                  </button>
+                  <strong>{formatCalendarMonth(visibleCalendarMonth)}</strong>
+                  <button
+                    aria-label="Next month"
+                    className="analytics-calendar-nav"
+                    type="button"
+                    onClick={() => setVisibleCalendarMonth((date) => shiftCalendarMonth(date, 1))}
+                  >
+                    <DashboardIcon name="chevron" />
+                  </button>
+                </div>
+                <div className="analytics-calendar-grid" role="grid" aria-label={formatCalendarMonth(visibleCalendarMonth)}>
+                  {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+                    <span className="analytics-calendar-weekday" key={day}>
+                      {day}
+                    </span>
+                  ))}
+                  {calendarWeeks.flat().map((day) => (
+                    <button
+                      aria-label={formatCalendarDayLabel(day.date)}
+                      className={[
+                        "analytics-calendar-day",
+                        day.isCurrentMonth ? "" : "outside",
+                        day.isSelected ? "selected" : "",
+                        day.isToday ? "today" : ""
+                      ].filter(Boolean).join(" ")}
+                      disabled={day.isDisabled}
+                      key={day.dateKey}
+                      role="gridcell"
+                      type="button"
+                      onClick={() => {
+                        onDateChange?.(day.dateKey);
+                        setVisibleCalendarMonth(day.date);
+                        setIsCalendarOpen(false);
+                      }}
+                    >
+                      {day.date.getDate()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <button className="analytics-primary-action" type="button" onClick={onReviewToday}>
             Review today
           </button>
         </div>
       </header>
 
-      <section className="analytics-glance-card analytics-card">
-          <div className="analytics-glance-copy">
-            <h1>Today at a glance</h1>
-            <p>{summary?.body ?? "Overview data is loading for this class."}</p>
-            {topics.length ? (
-              <div className="analytics-topic-row">
-                {topics.map((topic, index) => (
-                  <span className={`analytics-topic-pill ${index % 2 ? "purple" : "green"}`} key={topic}>
-                    {topic}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-          </div>
-          <div className="analytics-metric-strip">
-            <Metric
-              icon="question"
-              label="Questions today"
-              value={String(summary?.questionsToday ?? metrics?.questionsToday ?? 0)}
-              detail="vs yesterday"
-              delta={formatDelta((summary?.questionsToday ?? metrics?.questionsToday ?? 0) - (metrics?.questionsPreviousDay ?? 0))}
-            />
-            <Metric
-              icon="message"
-              label="Conversations today"
-              value={String(summary?.conversationCountToday ?? 0)}
-              detail="vs yesterday"
-              delta={formatDelta((summary?.conversationCountToday ?? 0) - (metrics?.conversationCountPreviousDay ?? 0))}
-            />
-            <Metric
-              icon="users"
-              label="Active students"
-              value={String(activeStudentsToday)}
-              detail={totalStudents ? `${activeStudentPercent}% of class` : "No roster"}
-              detailTone={activeStudentsToday ? "green" : undefined}
-            />
-            <Metric
-              icon="student"
-              label="Students inactive"
-              value={String(metrics?.noActivity ?? 0)}
-              detail={(metrics?.noActivity ?? 0) ? "No activity today" : "All active today"}
-              detailTone={(metrics?.noActivity ?? 0) ? "orange" : undefined}
-            />
-            <Metric
-              icon="check"
-              label="Active now"
-              value={String(metrics?.activeNow ?? 0)}
-              detail="Live"
-              detailTone={(metrics?.activeNow ?? 0) ? "green" : undefined}
-            />
-          </div>
+      <section className="analytics-kpi-grid" aria-label="Class metrics">
+        <KpiCard detail="Enrolled" icon="users" label="Students" tone="green" value={String(totalStudents)} />
+        <KpiCard detail="All students" icon="message" label="Chats this week" tone="green" value={String(weeklyChats)} />
+        <KpiCard detail="Students" icon="pulse" label="Active this week" tone="green" value={String(activeStudentsThisWeek)} />
+        <KpiCard
+          detail="Needs review"
+          icon="alert"
+          label="Chats to check"
+          tone="orange"
+          value={String(allReviewRowsToCheck.length)}
+        />
       </section>
 
-      <section className="analytics-content-grid">
-          <div className="analytics-left-column">
-            <section className="analytics-card review-queue-card">
-              <div className="analytics-card-heading">
-                <div className="analytics-title-with-badge">
-                  <span className="analytics-count-badge">{reviewRows.filter((row) => conversationNeedsTeacherReview(row.status)).length}</span>
-                  <div>
-                    <h2>Teacher Review Queue</h2>
-                    <p>Conversations that need your attention</p>
-                  </div>
-                </div>
+      <section className="analytics-overview-grid">
+        <section className="analytics-card analytics-overview-panel">
+          <div className="analytics-card-heading">
+            <div>
+              <h2>Students to Follow Up With</h2>
+              <p>Students who used chat much more than the class average this week</p>
+            </div>
+          </div>
+          <div className="analytics-compact-table follow-up-table" role="table" aria-label="Students to follow up with">
+            <div className="analytics-compact-table-header" role="row">
+              <span>Student</span>
+              <span>Chats this week</span>
+              <span>Class average</span>
+              <span>Action</span>
+            </div>
+            {followUpRows.map((row) => (
+              <div className="analytics-compact-table-row" role="row" key={row.id}>
+                <span className="analytics-student-cell">
+                  <span className={`analytics-avatar ${avatarTone(row.studentName)}`}>{initialsForName(row.studentName, row.studentEmail)}</span>
+                  <strong>{row.studentName}</strong>
+                </span>
+                <span>{row.chatsThisWeek}</span>
+                <span>{averageChatCount}</span>
+                <button className="analytics-row-action" type="button" onClick={() => onOpenPriorityStudent?.(studentChatRowToPriorityRow(row))}>
+                  Open student
+                </button>
               </div>
+            ))}
+          </div>
+          {!followUpRows.length ? <p className="analytics-empty-state">No students need follow-up right now.</p> : null}
+        </section>
 
-              <div className="analytics-table" role="table" aria-label="Teacher review queue">
-                <div className="analytics-table-header" role="row">
-                  <span>Student</span>
-                  <span>Issue</span>
-                  <span>Confidence</span>
-                  <span>Last active</span>
-                  <span>Action</span>
-                  <span aria-hidden="true" />
-                </div>
-                {visibleReviewRows.map((row) => {
-                  const overviewRow = reviewQueueByConversationId.get(row.id);
-                  const confidence = confidenceForConversation(row);
+        <section className="analytics-card analytics-overview-panel">
+          <div className="analytics-card-heading">
+            <div>
+              <h2>Chats to Check</h2>
+            </div>
+          </div>
+          <div className="analytics-compact-table check-table" role="table" aria-label="Chats to check">
+            <div className="analytics-compact-table-header" role="row">
+              <span>Student</span>
+              <span>Reason</span>
+              <span>Time</span>
+              <span>Action</span>
+            </div>
+            {visibleReviewRows.map((row) => {
+              const overviewRow = reviewQueueByConversationId.get(row.id);
+              const isUsageRequest = conversationHasOpenUsageRequest(row);
 
-                  return (
-                  <div className="analytics-table-row" role="row" key={row.id}>
-                    <div className="analytics-student-cell">
-                      <span className={`analytics-avatar ${avatarTone(row.studentName)}`}>{initialsForName(row.studentName, row.studentEmail)}</span>
-                      <strong>{row.studentName}</strong>
-                    </div>
-                    <div className="analytics-issue-cell">
-                      <strong>{overviewRow?.issue ?? issueForConversation(row)}</strong>
-                      <span>{overviewRow?.suggestedAction ?? row.title}</span>
-                    </div>
-                    <span className={`analytics-confidence ${confidence.tone}`}>
-                      <i />
-                      {confidence.label}
-                    </span>
-                    <span className="analytics-last-active">{row.lastMessageLabel}</span>
-                    <button className="analytics-row-action" type="button" onClick={() => onReviewConversation?.(row)}>
-                      Review chat
-                    </button>
-                    <button className="analytics-dots-button" aria-label={`More actions for ${row.studentName}`} type="button">
-                      <DashboardIcon name="dots" />
-                    </button>
-                  </div>
-                  );
-                })}
-              </div>
-              {!visibleReviewRows.length ? (
-                <p className="analytics-empty-state">No conversations currently need review.</p>
-              ) : null}
-            </section>
-
-            <section className="analytics-card priority-card">
-              <div className="analytics-card-heading">
-                <div>
-                  <h2>Priority Students</h2>
-                  <p>Students who may benefit from extra support or follow-up</p>
-                </div>
-              </div>
-              <div className="analytics-priority-list">
-                {priorityRows.map((row) => (
-                  <div className="analytics-priority-row" key={row.id}>
+              return (
+                <div className="analytics-compact-table-row" role="row" key={row.id}>
+                  <span className="analytics-student-cell">
                     <span className={`analytics-avatar ${avatarTone(row.studentName)}`}>{initialsForName(row.studentName, row.studentEmail)}</span>
                     <strong>{row.studentName}</strong>
-                    <span className={`analytics-priority-tag ${priorityToneClass(row.tone)}`}>{row.status}</span>
-                    <span className="analytics-priority-note">{row.issue}</span>
-                    <button className="analytics-open-button" type="button" onClick={() => onOpenPriorityStudent?.(row)}>
-                      Open
-                    </button>
-                  </div>
-                ))}
-              </div>
-              {!priorityRows.length ? (
-                <p className="analytics-empty-state">No priority students right now.</p>
-              ) : null}
-            </section>
-          </div>
-
-          <aside className="analytics-right-column">
-            <section className="analytics-card summary-card">
-              <div className="analytics-card-heading compact">
-                <div className="analytics-title-with-icon">
-                  <span className="analytics-card-icon pale">
-                    <DashboardIcon name="spark" />
                   </span>
-                  <h2>AI Tutor Review Summary</h2>
+                  <span>{issueForConversation(row, overviewRow?.issue)}</span>
+                  <span className="analytics-time-cell">{row.lastMessageLabel}</span>
+                  {isUsageRequest ? (
+                    <span className="analytics-decision-actions">
+                      <button type="button" onClick={() => onUsageDecision?.(row, "deny")}>
+                        No
+                      </button>
+                      <button type="button" onClick={() => onUsageDecision?.(row, "approve")}>
+                        Yes
+                      </button>
+                    </span>
+                  ) : (
+                    <button className="analytics-row-action" type="button" onClick={() => onReviewConversation?.(row)}>
+                      Review
+                    </button>
+                  )}
                 </div>
-              </div>
-              <div className="analytics-summary-grid">
-                {reviewSummaryStats.map(([icon, value, label, tone]) => (
-                  <div className="analytics-summary-stat" key={label}>
-                    <DashboardIcon name={icon as SvgIconName} />
-                    <strong className={tone}>{value}</strong>
-                    <span>{label}</span>
-                  </div>
-                ))}
-              </div>
-            </section>
+              );
+            })}
+          </div>
+          {!visibleReviewRows.length ? <p className="analytics-empty-state">No chats currently need review.</p> : null}
+        </section>
 
-            <section className="analytics-card profile-health-card">
-              <div className="analytics-card-heading compact">
-                <div className="analytics-title-with-icon">
-                  <DashboardIcon name="heart" />
-                  <h2>Learning Profile Health</h2>
-                </div>
+        <section className="analytics-card analytics-chart-card">
+          <div className="analytics-card-heading">
+            <div>
+              <h2>Chats This Week</h2>
+            </div>
+          </div>
+          <LineChart labels={weeklyStats.labels} values={weeklyStats.values} />
+        </section>
+
+        <section className="analytics-card analytics-chart-card">
+          <div className="analytics-card-heading">
+            <div>
+              <h2>Top Chat Users This Week</h2>
+            </div>
+          </div>
+          <div className={`analytics-bar-chart ${chatUsers.length === 1 ? "single" : ""}`} aria-label="Top chat users this week">
+            {chatUsers.map((row) => (
+              <div className="analytics-bar-item" key={row.id}>
+                <strong className="analytics-bar-value">{row.chatsThisWeek}</strong>
+                <span className="analytics-bar-column" style={{ "--bar-height": `${Math.max(8, Math.round((row.chatsThisWeek / topUserMax) * 100))}%` } as CSSProperties}>
+                  <span />
+                </span>
+                <small>{splitStudentName(row.studentName)}</small>
               </div>
-              <div className="analytics-health-grid">
-                <HealthStat
-                  icon="clipboard"
-                  tone="green"
-                  label="Draft profiles"
-                  value={String(metrics?.draftLearningProfiles ?? 0)}
-                  percent={formatPercent(metrics?.draftLearningProfiles ?? 0, profileTotal)}
-                />
-                <HealthStat
-                  icon="alert"
-                  tone="orange"
-                  label="Missing profiles"
-                  value={String(metrics?.missingLearningProfiles ?? 0)}
-                  percent={formatPercent(metrics?.missingLearningProfiles ?? 0, profileTotal)}
-                />
-                <HealthStat
-                  icon="check"
-                  tone="green"
-                  label="Reviewed profiles"
-                  value={String(metrics?.reviewedLearningProfiles ?? 0)}
-                  percent={formatPercent(metrics?.reviewedLearningProfiles ?? 0, profileTotal)}
-                />
-              </div>
-              <button className="analytics-profile-action" type="button" onClick={onReviewProfiles}>
-                Review profiles
-              </button>
-            </section>
-          </aside>
+            ))}
+            {!chatUsers.length ? <p className="analytics-empty-state">No chat activity in this window.</p> : null}
+          </div>
+        </section>
+      </section>
+
+      <section className="analytics-control-grid" aria-label="Class controls">
+        <StatusCard
+          actionLabel="Pause Chat"
+          icon="message"
+          label="Chat"
+          status="On"
+          onAction={onPauseChat}
+        />
+        <StatusCard
+          actionLabel="Copy"
+          icon="key"
+          label="Join Code"
+          status={joinCode?.trim() || "Set up"}
+          onAction={onCopyJoinCode}
+        />
+        <StatusCard
+          actionLabel="Add Source"
+          icon="file"
+          label="Sources"
+          status={readySourceLabel}
+          onAction={onAddSource}
+        />
       </section>
     </div>
   );
 }
 
-function Metric({
-  detail,
-  detailTone,
-  delta,
+function StatusCard({
+  actionLabel,
   icon,
   label,
-  value
+  status,
+  onAction
 }: {
-  detail: string;
-  detailTone?: "green" | "orange";
-  delta?: string;
+  actionLabel: string;
   icon: SvgIconName;
   label: string;
-  value: string;
+  status: string;
+  onAction?: () => void;
 }) {
   return (
-    <div className="analytics-metric">
-      <DashboardIcon name={icon} />
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <small className={detailTone}>
-        {detail}
-        {delta ? <b>{delta}</b> : null}
-      </small>
+    <div className="analytics-status-card analytics-card">
+      <div>
+        <DashboardIcon name={icon} />
+        <span>
+          <strong>{label}</strong>
+          <em>{status}</em>
+        </span>
+      </div>
+      <button type="button" onClick={onAction}>{actionLabel}</button>
     </div>
   );
 }
 
-function HealthStat({
+function KpiCard({
+  detail,
   icon,
   label,
-  percent,
   tone,
   value
 }: {
   icon: SvgIconName;
+  detail: string;
   label: string;
-  percent: string;
   tone: "green" | "orange";
   value: string;
 }) {
   return (
-    <div className="analytics-health-stat">
-      <span className={`analytics-health-icon ${tone}`}>
+    <div className="analytics-kpi-card analytics-card">
+      <span className={`analytics-kpi-icon ${tone}`}>
         <DashboardIcon name={icon} />
       </span>
-      <div className="analytics-health-copy">
-        <span>{label}</span>
+      <span>
+        <em>{label}</em>
         <strong>{value}</strong>
-        <small>{percent}</small>
-        <i style={{ "--health-percent": percent } as CSSProperties} />
-      </div>
+        <small>{detail}</small>
+      </span>
     </div>
   );
 }
 
-function buildReviewSummaryStats(rows: AnalyticsConversationRow[]) {
-  const totals = rows.reduce(
-    (currentTotals, row) => {
-      const signals = row.sourceAudit.learningSignals;
+function issueForConversation(row: AnalyticsConversationRow, fallbackIssue?: string) {
+  if ((row.feedbackSummary?.openCount ?? 0) > 0) {
+    return conversationHasOpenUsageRequest(row) ? "Usage request" : "Review requested";
+  }
 
-      currentTotals.lowConfidence +=
-        signals.lowConfidenceMessageCount || Number(row.sourceAudit.lowSourceConfidence || row.latestRetrievalConfidence === "low");
-      currentTotals.offTopic += Number(row.topic.toLowerCase().includes("off-topic") || signals.latestMode === "off_topic_redirect");
-      currentTotals.sourceCheck +=
-        signals.reviewSourceCount + signals.noSourceAssistantMessageCount + Number(row.sourceAudit.noSourceUsedWarning);
-      currentTotals.incomplete += signals.askTeacherCount + signals.stuckOutcomeCount;
+  if ((row.learningSignals?.safetyReviewCount ?? 0) > 0) {
+    return "Safety review";
+  }
 
-      return currentTotals;
-    },
-    { incomplete: 0, lowConfidence: 0, offTopic: 0, sourceCheck: 0 }
-  );
+  if ((row.learningSignals?.answerSeekingReviewCount ?? 0) > 0) {
+    return "Answer-seeking check";
+  }
 
-  return [
-    ["alert", String(totals.lowConfidence), "Low-confidence responses", "red"],
-    ["message", String(totals.offTopic), "Off-topic tutor replies", "orange"],
-    ["clipboard", String(totals.sourceCheck), "Need source check", "blue"],
-    ["spark", String(totals.incomplete), "Incomplete scaffolding", "purple"]
-  ] as const;
-}
+  if (row.learningSignals?.studentReplyAfterTeacherNote) {
+    return "Student replied to teacher";
+  }
 
-function conversationNeedsTeacherReview(status: ConversationReviewStatus) {
-  return status === "new" || status === "needs_follow_up" || status === "misunderstanding_spotted" || status === "ai_answer_needs_review";
-}
-
-function confidenceForConversation(row: AnalyticsConversationRow) {
-  const confidence = row.latestRetrievalConfidence ?? (row.sourceAudit.lowSourceConfidence ? "low" : row.sourceAudit.sourceCount ? "high" : "medium");
-
-  return {
-    label: `${confidence[0]?.toUpperCase()}${confidence.slice(1)}`,
-    tone: confidence
-  };
-}
-
-function issueForConversation(row: AnalyticsConversationRow) {
   if (row.sourceAudit.lowSourceConfidence || row.latestRetrievalConfidence === "low") {
     return "Source accuracy";
   }
@@ -447,27 +491,11 @@ function issueForConversation(row: AnalyticsConversationRow) {
     return "AI answer review";
   }
 
-  return row.topic || "New conversation";
+  return fallbackIssue === "Usage request needs decision" ? "Usage request" : fallbackIssue || row.topic || "New chat";
 }
 
-function priorityToneClass(tone: TeacherClassOverviewPriorityRow["tone"]) {
-  if (tone === "high" || tone === "failed") {
-    return "danger";
-  }
-
-  if (tone === "follow-up" || tone === "inactive") {
-    return "warning";
-  }
-
-  if (tone === "ai-review" || tone === "draft") {
-    return "purple";
-  }
-
-  if (tone === "note") {
-    return "blue";
-  }
-
-  return "neutral";
+function conversationHasOpenUsageRequest(row: AnalyticsConversationRow) {
+  return row.feedback?.some((feedback) => feedback.status !== "resolved" && feedback.kind === "usage_request") ?? false;
 }
 
 function initialsForName(name: string, email?: string) {
@@ -483,22 +511,6 @@ function avatarTone(value: string) {
   const total = value.split("").reduce((sum, character) => sum + character.charCodeAt(0), 0);
 
   return tones[total % tones.length];
-}
-
-function formatDelta(value: number) {
-  if (value > 0) {
-    return `+${value}`;
-  }
-
-  return String(value);
-}
-
-function formatPercent(value: number, total: number) {
-  if (!total) {
-    return "0%";
-  }
-
-  return `${Math.round((value / total) * 100)}%`;
 }
 
 function formatOverviewButtonDate(date?: string, fallback?: string) {
@@ -518,6 +530,275 @@ function formatOverviewButtonDate(date?: string, fallback?: string) {
     timeZone: "UTC",
     year: "numeric"
   });
+}
+
+type StudentChatRow = {
+  chatsThisWeek: number;
+  id: string;
+  priorityRow?: TeacherClassOverviewPriorityRow;
+  studentEmail?: string;
+  studentId?: string;
+  studentName: string;
+};
+
+function buildStudentChatRows(
+  reviewRows: AnalyticsConversationRow[],
+  priorityRows: TeacherClassOverviewPriorityRow[]
+): StudentChatRow[] {
+  const rowsByStudent = new Map<string, StudentChatRow>();
+
+  for (const row of reviewRows) {
+    const key = row.studentEmail || row.studentId || row.studentName;
+    const existing = rowsByStudent.get(key);
+
+    if (existing) {
+      existing.chatsThisWeek += Math.max(row.messageCount, 1);
+      continue;
+    }
+
+    rowsByStudent.set(key, {
+      chatsThisWeek: Math.max(row.messageCount, 1),
+      id: key,
+      studentEmail: row.studentEmail,
+      studentId: row.studentId,
+      studentName: row.studentName
+    });
+  }
+
+  for (const row of priorityRows) {
+    const key = row.studentEmail || row.studentId || row.studentName;
+    const existing = rowsByStudent.get(key);
+
+    if (existing) {
+      existing.priorityRow = row;
+    }
+  }
+
+  return Array.from(rowsByStudent.values()).sort((first, second) => second.chatsThisWeek - first.chatsThisWeek);
+}
+
+function studentChatRowToPriorityRow(row: StudentChatRow): TeacherClassOverviewPriorityRow {
+  return row.priorityRow ?? {
+    action: "viewChats",
+    actionLabel: "View chats",
+    id: row.id,
+    issue: "High chat volume this week",
+    status: "High volume",
+    studentEmail: row.studentEmail ?? "",
+    studentId: row.studentId ?? "",
+    studentName: row.studentName,
+    tone: "high"
+  };
+}
+
+function calculateAverageChatCount(rows: StudentChatRow[], studentCount: number) {
+  const divisor = Math.max(studentCount || rows.length, 1);
+  const total = rows.reduce((sum, row) => sum + row.chatsThisWeek, 0);
+
+  return Math.max(Math.round(total / divisor), 0);
+}
+
+function isAboveClassAverage(chatCount: number, averageChatCount: number) {
+  if (!averageChatCount) {
+    return chatCount >= 5;
+  }
+
+  return chatCount >= Math.max(averageChatCount + 3, Math.ceil(averageChatCount * 1.5));
+}
+
+function splitStudentName(name: string) {
+  const [first, ...rest] = name.split(/\s+/).filter(Boolean);
+  const last = rest.join(" ");
+
+  return last ? (
+    <>
+      {first}
+      <br />
+      {last}
+    </>
+  ) : (
+    first || "Student"
+  );
+}
+
+function buildWeeklyChatStats(rows: AnalyticsConversationRow[], referenceDate: Date) {
+  const dates = rollingSevenDatesFor(referenceDate);
+  const labels = dates.map((date) => date.toLocaleDateString("en-US", { weekday: "short" }));
+  const dateKeys = new Set(dates.map(dateKeyForAnalyticsDate));
+  const countsByDate = new Map(Array.from(dateKeys, (dateKey) => [dateKey, 0]));
+  const activeStudents = new Set<string>();
+
+  for (const row of rows) {
+    const dateKey = dateKeyForAnalyticsValue(row.lastMessageAt);
+
+    if (!dateKey || !dateKeys.has(dateKey)) {
+      continue;
+    }
+
+    const chatCount = Math.max(row.messageCount, 1);
+    countsByDate.set(dateKey, (countsByDate.get(dateKey) ?? 0) + chatCount);
+    activeStudents.add(row.studentEmail || row.studentId || row.studentName);
+  }
+
+  const values = dates.map((date) => countsByDate.get(dateKeyForAnalyticsDate(date)) ?? 0);
+
+  return {
+    activeStudentCount: activeStudents.size,
+    dateKeys,
+    labels,
+    total: values.reduce((sum, value) => sum + value, 0),
+    values
+  };
+}
+
+function rollingSevenDatesFor(referenceDate: Date) {
+  const start = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate());
+  start.setDate(start.getDate() - 6);
+
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    return date;
+  });
+}
+
+function overviewDateToLocalDate(date?: string) {
+  if (!date) {
+    return new Date();
+  }
+
+  const [year, month, day] = date.split("-").map(Number);
+
+  if (!year || !month || !day) {
+    return new Date();
+  }
+
+  return new Date(year, month - 1, day);
+}
+
+type CalendarDay = {
+  date: Date;
+  dateKey: string;
+  isCurrentMonth: boolean;
+  isDisabled: boolean;
+  isSelected: boolean;
+  isToday: boolean;
+};
+
+function buildCalendarWeeks(visibleMonth: Date, selectedDate: string, maxDate?: string): CalendarDay[][] {
+  const firstOfMonth = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1);
+  const start = new Date(firstOfMonth);
+  start.setDate(firstOfMonth.getDate() - firstOfMonth.getDay());
+  const todayKey = dateKeyForAnalyticsDate(new Date());
+  const days = Array.from({ length: 42 }, (_, index): CalendarDay => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    const dateKey = dateKeyForAnalyticsDate(date);
+
+    return {
+      date,
+      dateKey,
+      isCurrentMonth: date.getMonth() === visibleMonth.getMonth(),
+      isDisabled: Boolean(maxDate && dateKey > maxDate),
+      isSelected: dateKey === selectedDate,
+      isToday: dateKey === todayKey
+    };
+  });
+
+  return Array.from({ length: 6 }, (_, index) => days.slice(index * 7, index * 7 + 7));
+}
+
+function shiftCalendarMonth(date: Date, monthDelta: number) {
+  return new Date(date.getFullYear(), date.getMonth() + monthDelta, 1);
+}
+
+function formatCalendarMonth(date: Date) {
+  return date.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
+function formatCalendarDayLabel(date: Date) {
+  return date.toLocaleDateString("en-US", { day: "numeric", month: "long", year: "numeric" });
+}
+
+function dateKeyForAnalyticsValue(value: unknown) {
+  const date = coerceAnalyticsDate(value);
+
+  return date ? dateKeyForAnalyticsDate(date) : "";
+}
+
+function isOnOrBeforeEndOfDate(value: unknown, date: Date) {
+  const itemDate = coerceAnalyticsDate(value);
+
+  if (!itemDate) {
+    return false;
+  }
+
+  const endOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+  return itemDate.getTime() <= endOfDay.getTime();
+}
+
+function dateKeyForAnalyticsDate(date: Date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function coerceAnalyticsDate(value: unknown) {
+  if (typeof value === "string") {
+    const millis = Date.parse(value);
+    return Number.isNaN(millis) ? null : new Date(millis);
+  }
+
+  if (value instanceof Date) {
+    return value;
+  }
+
+  if (value && typeof value === "object" && "toDate" in value && typeof value.toDate === "function") {
+    const date = value.toDate() as Date;
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  return null;
+}
+
+function LineChart({ labels, values }: { labels: string[]; values: number[] }) {
+  const maxValue = Math.max(...values, 1);
+  const points = values
+    .map((value, index) => {
+      const x = 34 + index * 64;
+      const y = 126 - (value / maxValue) * 104;
+
+      return `${x},${y}`;
+    })
+    .join(" ");
+  return (
+    <svg className="analytics-line-chart" viewBox="0 0 440 170" role="img" aria-label="Chats this week line chart">
+      {[0, 1, 2, 3, 4].map((line) => (
+        <line x1="28" x2="424" y1={22 + line * 26} y2={22 + line * 26} key={line} />
+      ))}
+      <polyline points={points} />
+      {values.map((value, index) => {
+        const x = 34 + index * 64;
+        const y = 126 - (value / maxValue) * 104;
+
+        return (
+          <g key={`${value}-${index}`}>
+            <text className="analytics-line-value" x={x} y={Math.max(14, y - 10)}>
+              {value}
+            </text>
+            <circle cx={x} cy={y} r="4" />
+          </g>
+        );
+      })}
+      {labels.map((label, index) => (
+        <text x={34 + index * 64} y="158" key={`${label}-${index}`}>
+          {label}
+        </text>
+      ))}
+    </svg>
+  );
 }
 
 function DashboardIcon({ name }: { name: SvgIconName }) {
@@ -595,6 +876,13 @@ function DashboardIcon({ name }: { name: SvgIconName }) {
           <path d="m4 11 8-7 8 7v8.5A1.5 1.5 0 0 1 18.5 21H15v-6H9v6H5.5A1.5 1.5 0 0 1 4 19.5V11Z" stroke="currentColor" strokeLinejoin="round" strokeWidth="1.8" />
         </svg>
       );
+    case "key":
+      return (
+        <svg {...common}>
+          <circle cx="8.5" cy="12" r="3.5" stroke="currentColor" strokeWidth="1.8" />
+          <path d="M12 12h8M17 12v3M14.5 12v2" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+        </svg>
+      );
     case "message":
       return (
         <svg {...common}>
@@ -612,6 +900,12 @@ function DashboardIcon({ name }: { name: SvgIconName }) {
       return (
         <svg {...common}>
           <path d="M20 14.7A7.8 7.8 0 0 1 9.3 4 8 8 0 1 0 20 14.7Z" stroke="currentColor" strokeLinejoin="round" strokeWidth="1.8" />
+        </svg>
+      );
+    case "pulse":
+      return (
+        <svg {...common}>
+          <path d="M3.5 12h3l2-5 4.2 10 2.2-5h5.6" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.9" />
         </svg>
       );
     case "question":

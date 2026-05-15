@@ -6970,6 +6970,22 @@ button.student-row[aria-pressed="true"] {
   font-size: 0.74rem;
 }
 
+.student-visible-note-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  color: #374151;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.student-visible-note-label span {
+  color: #6b7280;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
 .student-timeline-grid dl {
   display: grid;
   gap: 5px;
@@ -12722,6 +12738,23 @@ button.student-row[aria-pressed="true"] {
   overflow-x: auto;
   border-color: var(--theme-primary-ring);
   background: var(--theme-primary-soft);
+}
+
+.teacher-note-message-bubble {
+  width: fit-content;
+  max-width: min(620px, 100%);
+  border: 1px solid rgba(56, 124, 75, 0.28);
+  border-left: 3px solid #3b7f4b;
+  border-radius: 8px;
+  background: rgba(239, 248, 240, 0.96);
+  color: #1f3f28;
+  padding: 12px 16px;
+  font-size: 0.94rem;
+  line-height: 1.55;
+}
+
+.teacher-note-message-bubble p {
+  margin: 0;
 }
 
 .assistant-message-bubble .katex,
@@ -21746,6 +21779,7 @@ button.student-row[aria-pressed="true"] {
   gap: 14px;
 }
 
+.teacher-dashboard[data-active-tab="overview"] .analytics-date-picker,
 .teacher-dashboard[data-active-tab="overview"] .analytics-selector,
 .teacher-dashboard[data-active-tab="overview"] .analytics-primary-action,
 .teacher-dashboard[data-active-tab="overview"] .analytics-row-action,
@@ -21760,6 +21794,130 @@ button.student-row[aria-pressed="true"] {
   font-size: 0.9rem;
   font-weight: 650;
   box-shadow: 0 1px 2px rgba(32, 41, 59, 0.04);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-date-picker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 190px;
+  cursor: pointer;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-date-menu {
+  position: relative;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 20;
+  width: 292px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--card-bg-strong);
+  box-shadow: 0 18px 42px rgba(24, 34, 54, 0.16);
+  padding: 14px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-header {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-header strong {
+  color: var(--text-primary);
+  font-size: 0.96rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-nav {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--card-border);
+  border-radius: 7px;
+  background: var(--card-bg);
+  color: var(--text-primary);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-nav.previous svg {
+  transform: rotate(90deg);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-nav:not(.previous) svg {
+  transform: rotate(-90deg);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-nav:hover,
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-nav:focus-visible {
+  outline: none;
+  border-color: var(--theme-primary-ring);
+  background: var(--theme-primary-soft);
+  color: var(--theme-primary);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 5px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-weekday {
+  display: grid;
+  place-items: center;
+  height: 24px;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-day {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 1;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-day.outside {
+  color: var(--text-muted);
+  opacity: 0.55;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-day.today {
+  border-color: var(--theme-primary-ring);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-day.selected {
+  border-color: var(--theme-primary);
+  background: var(--theme-primary);
+  color: var(--on-primary);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-day:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-day:not(:disabled):not(.selected):hover,
+.teacher-dashboard[data-active-tab="overview"] .analytics-calendar-day:not(:disabled):not(.selected):focus-visible {
+  outline: none;
+  background: var(--theme-primary-soft);
+  color: var(--theme-primary);
 }
 
 .teacher-dashboard[data-active-tab="overview"] .analytics-primary-action {
@@ -21777,6 +21935,8 @@ button.student-row[aria-pressed="true"] {
   font-weight: 700;
 }
 
+.teacher-dashboard[data-active-tab="overview"] .analytics-date-picker:hover,
+.teacher-dashboard[data-active-tab="overview"] .analytics-date-picker:focus-within,
 .teacher-dashboard[data-active-tab="overview"] .analytics-selector:hover,
 .teacher-dashboard[data-active-tab="overview"] .analytics-row-action:hover,
 .teacher-dashboard[data-active-tab="overview"] .analytics-open-button:hover,
@@ -22269,6 +22429,444 @@ button.student-row[aria-pressed="true"] {
 
   .teacher-dashboard[data-active-tab="overview"] .analytics-health-stat {
     grid-template-columns: 34px minmax(0, 1fr);
+  }
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-dashboard-content {
+  gap: 18px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-control-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-status-card {
+  display: grid;
+  gap: 14px;
+  min-height: 126px;
+  padding: 22px 26px 20px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-status-card > div {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-status-card svg {
+  width: 28px;
+  height: 28px;
+  color: var(--text-primary);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-status-card span,
+.teacher-dashboard[data-active-tab="overview"] .analytics-kpi-card span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-status-card strong,
+.teacher-dashboard[data-active-tab="overview"] .analytics-kpi-card em {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-status-card em {
+  overflow: hidden;
+  color: var(--theme-primary);
+  font-style: normal;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-status-card button {
+  min-height: 38px;
+  border: 1px solid var(--theme-primary);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--theme-primary);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-status-card button:hover,
+.teacher-dashboard[data-active-tab="overview"] .analytics-status-card button:focus-visible {
+  outline: none;
+  background: var(--theme-primary-soft);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-kpi-card {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-height: 126px;
+  padding: 22px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-kpi-icon {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-kpi-icon.green {
+  background: var(--theme-primary-soft);
+  color: var(--theme-primary);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-kpi-icon.orange {
+  background: var(--analytics-orange-soft);
+  color: var(--analytics-orange);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-kpi-card strong {
+  color: var(--text-primary);
+  font-size: 1.85rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-kpi-card small {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.18fr);
+  gap: 24px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-overview-panel,
+.teacher-dashboard[data-active-tab="overview"] .analytics-chart-card {
+  min-width: 0;
+  padding: 18px 22px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-card-heading {
+  margin-bottom: 14px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-card-heading h2 {
+  font-size: 1.12rem;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-card-heading p {
+  margin-top: 5px;
+  font-size: 0.82rem;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-compact-table {
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-header,
+.teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-row {
+  display: grid;
+  align-items: center;
+  column-gap: 12px;
+  min-width: 0;
+  padding: 0 10px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .follow-up-table .analytics-compact-table-header,
+.teacher-dashboard[data-active-tab="overview"] .follow-up-table .analytics-compact-table-row {
+  grid-template-columns: minmax(132px, 1fr) minmax(82px, 0.5fr) minmax(82px, 0.5fr) minmax(118px, auto);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .check-table .analytics-compact-table-header,
+.teacher-dashboard[data-active-tab="overview"] .check-table .analytics-compact-table-row {
+  grid-template-columns: minmax(132px, 0.82fr) minmax(150px, 1.08fr) minmax(118px, 0.68fr) minmax(118px, auto);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-header {
+  min-height: 36px;
+  border-bottom: 1px solid var(--card-border);
+  background: rgba(0, 0, 0, 0.025);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-row {
+  min-height: 46px;
+  border-bottom: 1px solid var(--card-border);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-row:last-child {
+  border-bottom: 0;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-row > .analytics-time-cell {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-row > .analytics-row-action {
+  min-width: 0;
+  width: 100%;
+  padding-inline: 8px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-decision-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(42px, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-decision-actions button {
+  min-height: 34px;
+  border: 1px solid var(--card-border);
+  border-radius: 7px;
+  background: var(--card-bg);
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-decision-actions button:last-child {
+  border-color: var(--theme-primary);
+  background: var(--theme-primary);
+  color: var(--on-primary);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-row:hover {
+  background: rgba(var(--theme-bg-rgb), 0.045);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-student-cell {
+  gap: 10px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-avatar {
+  background: var(--theme-primary);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-line-chart {
+  display: block;
+  width: 100%;
+  min-height: 188px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-line-chart line {
+  stroke: var(--card-border);
+  stroke-width: 1;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-line-chart polyline {
+  fill: none;
+  stroke: var(--theme-primary);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-line-chart circle {
+  fill: var(--theme-primary);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-line-chart text {
+  fill: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  text-anchor: middle;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-line-chart .analytics-line-value {
+  fill: var(--text-primary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-bar-chart {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(54px, 1fr));
+  align-items: end;
+  gap: clamp(14px, 3.6vw, 52px);
+  min-height: 196px;
+  border-top: 1px solid rgba(38, 42, 35, 0.16);
+  background-image: none;
+  padding: 16px 28px 0;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-bar-chart.single {
+  grid-template-columns: minmax(104px, 150px);
+  justify-content: start;
+  gap: 0;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-bar-item {
+  position: relative;
+  display: grid;
+  grid-template-rows: 22px 112px 44px;
+  justify-items: center;
+  align-items: end;
+  gap: 0;
+  min-width: 0;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-bar-item::before {
+  content: "";
+  position: absolute;
+  top: 31px;
+  right: 0;
+  left: 0;
+  height: 112px;
+  background-image: linear-gradient(to bottom, rgba(38, 42, 35, 0.16) 1px, transparent 1px);
+  background-size: 100% 28px;
+  pointer-events: none;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-bar-value {
+  position: relative;
+  z-index: 2;
+  align-self: end;
+  min-width: 34px;
+  border: 1px solid rgba(var(--theme-bg-rgb), 0.2);
+  border-radius: 999px;
+  background: var(--card-bg-strong);
+  color: var(--theme-primary);
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.1;
+  padding: 4px 8px;
+  text-align: center;
+  box-shadow: 0 1px 2px rgba(32, 41, 59, 0.06);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-bar-column {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: min(64px, 76%);
+  height: 112px;
+  min-width: 34px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-bar-column::after {
+  content: "";
+  position: absolute;
+  right: -18px;
+  bottom: 0;
+  left: -18px;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(38, 42, 35, 0.3);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-bar-column > span {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: var(--bar-height);
+  min-height: 8px;
+  border-radius: 6px 6px 0 0;
+  background: linear-gradient(180deg, var(--theme-primary), var(--theme-primary-strong));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-bar-item small {
+  position: relative;
+  z-index: 1;
+  align-self: start;
+  overflow: hidden;
+  max-width: 104px;
+  margin-top: 12px;
+  color: var(--text-primary);
+  font-size: 0.72rem;
+  font-weight: 750;
+  line-height: 1.12;
+  text-align: center;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 1180px) {
+  .teacher-dashboard[data-active-tab="overview"] .analytics-control-grid,
+  .teacher-dashboard[data-active-tab="overview"] .analytics-kpi-grid,
+  .teacher-dashboard[data-active-tab="overview"] .analytics-overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-status-card,
+  .teacher-dashboard[data-active-tab="overview"] .analytics-kpi-card {
+    min-height: 0;
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-compact-table {
+    overflow-x: auto;
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-header,
+  .teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-row {
+    min-width: 640px;
+  }
+}
+
+@media (max-width: 680px) {
+  .teacher-dashboard[data-active-tab="overview"] .analytics-page-header,
+  .teacher-dashboard[data-active-tab="overview"] .analytics-header-actions {
+    align-items: stretch;
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-date-picker,
+  .teacher-dashboard[data-active-tab="overview"] .analytics-selector,
+  .teacher-dashboard[data-active-tab="overview"] .analytics-primary-action {
+    width: 100%;
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-date-menu {
+    width: 100%;
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-calendar-popover {
+    right: auto;
+    left: 0;
+    width: min(292px, 100%);
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-bar-chart {
+    grid-template-columns: repeat(5, minmax(38px, 1fr));
+    gap: 10px;
+    padding-inline: 8px;
   }
 }
 

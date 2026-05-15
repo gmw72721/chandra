@@ -135,8 +135,6 @@ npm test
 python3 -m pytest tests/test_provider_retries.py tests/test_backend_visibility.py
 ```
 
-Langfuse tracing, prompt links, and evals are documented in `docs/LANGFUSE.md`.
-
 ## Deployment
 
 Frontend deploys through Firebase App Hosting backend `chandra-frontend`.

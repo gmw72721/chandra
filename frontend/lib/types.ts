@@ -447,6 +447,8 @@ export type TeacherConversationReview = {
   status: ConversationReviewStatus;
   followUpDueAt?: unknown;
   privateNote: string;
+  studentVisibleNote?: string;
+  studentVisibleNoteSentAt?: unknown;
   reviewedAt: unknown;
   updatedAt: unknown;
   flags: string[];
@@ -462,9 +464,12 @@ export type TeacherConversationSourceAuditSummary = {
 };
 
 export type TeacherConversationLearningSignalSummary = {
+  answerSeekingReviewCount: number;
   assistantMessageCount: number;
   lowConfidenceMessageCount: number;
   noSourceAssistantMessageCount: number;
+  safetyReviewCount: number;
+  studentReplyAfterTeacherNote: boolean;
   askTeacherCount: number;
   pasteProblemCount: number;
   reviewSourceCount: number;
@@ -527,6 +532,7 @@ export type TutorTrace = {
   problemUnderstandingState?: TutorProblemUnderstandingState;
   retrievalDecision?: Record<string, unknown>;
   retrievalReason?: string;
+  answerSeekingAssessment?: Record<string, unknown>;
   searchQueries: string[];
   selectedMetadataRecords?: Array<Record<string, unknown>>;
   selectedPages: Array<{

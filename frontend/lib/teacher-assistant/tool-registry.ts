@@ -47,7 +47,9 @@ type AssistantToolDependencies = {
   }) => Promise<NotificationUpdateResult>;
   getClassConversations?: (classId: string) => Promise<TeacherConversationReviewSummary[]>;
   listClassMaterials?: (classId: string) => Promise<MaterialRecord[]>;
-  listStudents?: (classId: string) => Promise<Array<{ email?: string; id?: string; studentEmail?: string }>>;
+  listStudents?: (
+    classId: string
+  ) => Promise<Array<{ displayName?: string; email?: string; id?: string; name?: string; studentEmail?: string }>>;
 };
 
 const classIdSchema = z.object({ classId: z.string().min(1).max(200).optional() }).passthrough();
@@ -59,12 +61,20 @@ const studentNavigationSchema = classIdSchema.extend({
   newTab: z.boolean().optional(),
   studentEmail: z.string().email()
 });
+const studentQueryNavigationSchema = classIdSchema.extend({
+  newTab: z.boolean().optional(),
+  query: z.string().min(1).max(200)
+});
 const searchStudentsSchema = classIdSchema.extend({
   query: z.string().max(200).optional()
 });
 const conversationNavigationSchema = classIdSchema.extend({
   conversationId: z.string().min(1).max(200),
   newTab: z.boolean().optional()
+});
+const conversationQueryNavigationSchema = classIdSchema.extend({
+  newTab: z.boolean().optional(),
+  query: z.string().min(1).max(200)
 });
 const searchConversationsSchema = classIdSchema.extend({
   query: z.string().max(200).optional(),
@@ -111,8 +121,11 @@ const toolPermissions: Record<string, ClassAccessPermission> = {
   navigate_sources_section: "viewMaterials",
   navigate_teacher_tab: "viewOverview",
   open_conversation_review: "viewConversations",
+  open_conversation_review_by_query: "viewConversations",
   open_student_conversations: "viewConversations",
+  open_student_conversations_by_query: "viewConversations",
   open_student_profile: "viewRoster",
+  open_student_profile_by_query: "viewRoster",
   open_student_view: "teacherPreviewChat",
   search_conversations: "viewConversations",
   search_materials: "viewMaterials",
@@ -180,10 +193,16 @@ export async function executeTeacherAssistantToolWithActor(input: {
       return navigateAiTutorSection(input.args, input.classId);
     case "open_student_profile":
       return openStudentProfile(input.args, input.classId, input.dependencies);
+    case "open_student_profile_by_query":
+      return openStudentProfileByQuery(input.args, input.classId, input.dependencies);
     case "open_student_conversations":
       return openStudentConversations(input.args, input.classId, input.dependencies);
+    case "open_student_conversations_by_query":
+      return openStudentConversationsByQuery(input.args, input.classId, input.dependencies);
     case "open_conversation_review":
       return openConversationReview(input.args, input.classId, input.dependencies);
+    case "open_conversation_review_by_query":
+      return openConversationReviewByQuery(input.args, input.classId, input.dependencies);
     case "open_student_view":
       return openStudentView(input.args, input.classId);
     case "get_teacher_dashboard_summary":
@@ -313,6 +332,32 @@ async function openStudentProfile(
   return navigationResult("open_student_profile", `Open ${studentEmail}'s profile.`, href, parsed.newTab);
 }
 
+async function openStudentProfileByQuery(
+  args: Record<string, unknown>,
+  classId: string,
+  dependencies?: AssistantToolDependencies
+): Promise<TeacherAssistantToolResult> {
+  const parsed = studentQueryNavigationSchema.parse(args);
+  const student = await resolveSingleStudentByQuery(classId, parsed.query, dependencies);
+
+  if (!student) {
+    return {
+      content: "I could not find exactly one matching student. Try a more specific name or email.",
+      status: "success",
+      summary: "Student profile was not opened because the roster match was empty or ambiguous.",
+      toolName: "open_student_profile_by_query"
+    };
+  }
+
+  const href = `/teacher/classes/${encodeURIComponent(classId)}/students/${encodeURIComponent(student.email)}`;
+  return navigationResult(
+    "open_student_profile_by_query",
+    `Open ${student.displayName || student.email}'s profile.`,
+    href,
+    parsed.newTab
+  );
+}
+
 async function openStudentConversations(
   args: Record<string, unknown>,
   classId: string,
@@ -323,6 +368,51 @@ async function openStudentConversations(
   const href = buildTeacherAssistantTabHref("conversations", { classId, student: studentEmail });
 
   return navigationResult("open_student_conversations", `Open ${studentEmail}'s conversations.`, href, parsed.newTab);
+}
+
+async function openStudentConversationsByQuery(
+  args: Record<string, unknown>,
+  classId: string,
+  dependencies?: AssistantToolDependencies
+): Promise<TeacherAssistantToolResult> {
+  const parsed = studentQueryNavigationSchema.parse(args);
+  const { searchConversationsTool } = await import("./read-tools.ts");
+  const data = await searchConversationsTool(
+    {
+      classId,
+      query: parsed.query
+    },
+    { listTeacherClassConversations: dependencies?.getClassConversations }
+  );
+  const matchingStudents = new Map(
+    data.results
+      .filter((conversation) => conversation.studentEmail)
+      .map((conversation) => [
+        conversation.studentEmail.trim().toLowerCase(),
+        conversation.studentName || conversation.studentEmail
+      ])
+  );
+
+  if (matchingStudents.size !== 1) {
+    return {
+      content:
+        matchingStudents.size > 1
+          ? "I found multiple matching students with conversations. Try a more specific name or email."
+          : "I could not find matching saved conversations for that student.",
+      status: "success",
+      summary: "Student conversations were not opened because the conversation match was empty or ambiguous.",
+      toolName: "open_student_conversations_by_query"
+    };
+  }
+
+  const [[studentEmail, studentName]] = [...matchingStudents.entries()];
+  const href = buildTeacherAssistantTabHref("conversations", { classId, student: studentEmail });
+  return navigationResult(
+    "open_student_conversations_by_query",
+    `Open ${studentName}'s conversations.`,
+    href,
+    parsed.newTab
+  );
 }
 
 async function openConversationReview(
@@ -348,6 +438,43 @@ async function openConversationReview(
   return navigationResult("open_conversation_review", `Open conversation "${conversation.title}".`, href, parsed.newTab);
 }
 
+async function openConversationReviewByQuery(
+  args: Record<string, unknown>,
+  classId: string,
+  dependencies?: AssistantToolDependencies
+): Promise<TeacherAssistantToolResult> {
+  const parsed = conversationQueryNavigationSchema.parse(args);
+  const { searchConversationsTool } = await import("./read-tools.ts");
+  const data = await searchConversationsTool(
+    {
+      classId,
+      query: parsed.query
+    },
+    { listTeacherClassConversations: dependencies?.getClassConversations }
+  );
+
+  if (data.results.length !== 1) {
+    return {
+      content:
+        data.results.length > 1
+          ? "I found multiple matching conversations. Try a more specific student, topic, or problem."
+          : "I could not find a matching conversation in this class.",
+      status: "success",
+      summary: "Conversation review was not opened because the match was empty or ambiguous.",
+      toolName: "open_conversation_review_by_query"
+    };
+  }
+
+  const conversation = data.results[0];
+  const href = buildTeacherAssistantTabHref("conversations", { classId, conversationId: conversation.conversationId });
+  return navigationResult(
+    "open_conversation_review_by_query",
+    `Open conversation "${conversation.title}".`,
+    href,
+    parsed.newTab
+  );
+}
+
 function openStudentView(args: Record<string, unknown>, classId: string): TeacherAssistantToolResult {
   const parsed = studentViewSchema.parse(args);
   const href = `/teacher/student-view?classId=${encodeURIComponent(classId)}`;
@@ -366,6 +493,42 @@ async function getTeacherDashboardSummary(classId: string): Promise<TeacherAssis
     summary: data.summary.body,
     toolName: "get_teacher_dashboard_summary"
   };
+}
+
+async function resolveSingleStudentByQuery(
+  classId: string,
+  query: string,
+  dependencies?: AssistantToolDependencies
+) {
+  const { searchStudentsForAssistantWithDependencies } = await import("./read-tools.ts");
+  const students = await searchStudentsForAssistantWithDependencies(
+    { classId, query },
+    {
+      listRosterActivity: dependencies?.listStudents
+        ? async () => (await dependencies.listStudents?.(classId) ?? []).map((student) => ({
+            chatBlocked: false,
+            conversationCount: 0,
+            displayName: student.displayName ?? student.name ?? student.email ?? student.studentEmail ?? student.id ?? "Student",
+            lastActiveAt: "",
+            lastChatTopic: "",
+            questionsPerDay: 0,
+            questionsToday: 0,
+            recentConversations: [],
+            status: "no_activity" as const,
+            studentEmail: student.email ?? student.studentEmail ?? "",
+            studentId: student.id ?? student.email ?? student.studentEmail ?? "",
+            teacherNotes: "",
+            totalQuestions: 0
+          }))
+        : undefined
+    }
+  );
+
+  if (students.length !== 1) {
+    return null;
+  }
+
+  return students[0];
 }
 
 async function getReviewQueue(classId: string): Promise<TeacherAssistantToolResult> {
@@ -397,7 +560,7 @@ async function searchStudents(
         ? async () => (await dependencies.listStudents?.(classId) ?? []).map((student) => ({
             chatBlocked: false,
             conversationCount: 0,
-            displayName: student.email ?? student.studentEmail ?? student.id ?? "Student",
+            displayName: student.displayName ?? student.name ?? student.email ?? student.studentEmail ?? student.id ?? "Student",
             lastActiveAt: "",
             lastChatTopic: "",
             questionsPerDay: 0,

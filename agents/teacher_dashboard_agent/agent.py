@@ -67,7 +67,7 @@ def navigate_ai_tutor_section(section: str, assistant_context_id: str) -> dict[s
 
 
 def open_student_profile(student_email: str, assistant_context_id: str, new_tab: bool = False) -> dict[str, Any]:
-    """Open a student's profile after Chandra validates class roster membership."""
+    """Open a student's profile by email after Chandra validates class roster membership. If the teacher gives a name, call search_students first."""
     return call_chandra_tool(
         "open_student_profile",
         {"studentEmail": student_email, "newTab": new_tab},
@@ -75,8 +75,17 @@ def open_student_profile(student_email: str, assistant_context_id: str, new_tab:
     )
 
 
+def open_student_profile_by_query(query: str, assistant_context_id: str, new_tab: bool = False) -> dict[str, Any]:
+    """Resolve one roster student by name/email and return a Chandra profile navigation action without exposing chat transcripts."""
+    return call_chandra_tool(
+        "open_student_profile_by_query",
+        {"query": query, "newTab": new_tab},
+        assistant_context_id,
+    )
+
+
 def open_student_conversations(student_email: str, assistant_context_id: str, new_tab: bool = False) -> dict[str, Any]:
-    """Open a student's conversations after Chandra validates class roster membership."""
+    """Open a student's conversations by email after Chandra validates class roster membership. If the teacher gives a name, call search_students first."""
     return call_chandra_tool(
         "open_student_conversations",
         {"studentEmail": student_email, "newTab": new_tab},
@@ -84,11 +93,29 @@ def open_student_conversations(student_email: str, assistant_context_id: str, ne
     )
 
 
+def open_student_conversations_by_query(query: str, assistant_context_id: str, new_tab: bool = False) -> dict[str, Any]:
+    """Resolve one roster student by name/email and return a Chandra conversations navigation action without exposing chat transcripts."""
+    return call_chandra_tool(
+        "open_student_conversations_by_query",
+        {"query": query, "newTab": new_tab},
+        assistant_context_id,
+    )
+
+
 def open_conversation_review(conversation_id: str, assistant_context_id: str, new_tab: bool = False) -> dict[str, Any]:
-    """Open a conversation review after Chandra validates the conversation belongs to this class."""
+    """Open a conversation review by id after Chandra validates class ownership. If the teacher gives a student/topic, call search_conversations first."""
     return call_chandra_tool(
         "open_conversation_review",
         {"conversationId": conversation_id, "newTab": new_tab},
+        assistant_context_id,
+    )
+
+
+def open_conversation_review_by_query(query: str, assistant_context_id: str, new_tab: bool = False) -> dict[str, Any]:
+    """Resolve one conversation by metadata search and return a Chandra review navigation action without exposing message transcripts."""
+    return call_chandra_tool(
+        "open_conversation_review_by_query",
+        {"query": query, "newTab": new_tab},
         assistant_context_id,
     )
 
@@ -109,7 +136,7 @@ def get_review_queue(assistant_context_id: str) -> dict[str, Any]:
 
 
 def search_students(query: str, assistant_context_id: str) -> dict[str, Any]:
-    """Search current class roster by student name or email."""
+    """Search current class roster by student name or email. Use this to resolve names before opening student profiles or conversations."""
     return call_chandra_tool("search_students", {"query": query}, assistant_context_id)
 
 
@@ -202,6 +229,9 @@ root_agent = Agent(
         "Never invent Chandra URLs. Call Chandra navigation tools for routes, tabs, panes, student pages, and conversation pages. "
         "For navigation-only requests, call exactly the matching navigation tool and do not call dashboard or review read tools first. "
         "Navigation tools and read tools do not require confirmation. Do not ask for confirmation before opening tabs, pages, or links. "
+        "When the teacher asks to open a student by name, prefer open_student_profile_by_query or open_student_conversations_by_query. Do not ask for an email unless Chandra reports the roster match is ambiguous or empty. "
+        "When the teacher asks to open a conversation by student, topic, problem, or review description, prefer open_conversation_review_by_query. Do not ask for a conversation id unless Chandra reports the match is ambiguous or empty. "
+        "Do not request or expose raw student chat transcripts. Use metadata and Chandra navigation actions only. "
         "Use read tools only when the teacher asks for a summary, review queue, or class data. "
         "Use only tools listed in chandra_context.allowed_tool_names. "
         "Respect max_tool_calls from the user turn. Stop when the requested action is complete. "
@@ -216,8 +246,11 @@ root_agent = Agent(
         navigate_sources_section,
         navigate_ai_tutor_section,
         open_student_profile,
+        open_student_profile_by_query,
         open_student_conversations,
+        open_student_conversations_by_query,
         open_conversation_review,
+        open_conversation_review_by_query,
         open_student_view,
         get_teacher_dashboard_summary,
         get_review_queue,

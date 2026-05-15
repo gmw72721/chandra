@@ -29,7 +29,9 @@ export async function PATCH(
       flags?: unknown;
       followUpDueAt?: unknown;
       privateNote?: unknown;
+      sendStudentVisibleNote?: unknown;
       status?: unknown;
+      studentVisibleNote?: unknown;
     };
     const status = String(data.status ?? "new") as ConversationReviewStatus;
 
@@ -48,7 +50,10 @@ export async function PATCH(
       flags: Array.isArray(data.flags) ? data.flags.map(String) : [],
       followUpDueAt,
       privateNote: String(data.privateNote ?? "").slice(0, 1000),
+      sendStudentVisibleNote: data.sendStudentVisibleNote === true,
       status,
+      studentVisibleNote:
+        data.studentVisibleNote === undefined ? undefined : String(data.studentVisibleNote ?? "").slice(0, 1000),
       teacherId: uid
     });
 
@@ -57,6 +62,7 @@ export async function PATCH(
       eventType: "conversation.review.updated",
       metadata: {
         flags: Array.isArray(data.flags) ? data.flags.map(String) : [],
+        sendStudentVisibleNote: data.sendStudentVisibleNote === true,
         status
       },
       route: "/api/classes/[classId]/conversations/[conversationId]/review",

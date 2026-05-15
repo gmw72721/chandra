@@ -12,7 +12,8 @@ test("active reviewed profile appears in the tutor prompt", () => {
 
   assert.match(promptSource, /Private student learning profile/);
   assert.match(chatRouteSource, /getActiveStudentLearningProfileTutorContext/);
-  assert.match(chatRouteSource, /studentLearningProfileContext\.digest/);
+  assert.match(chatRouteSource, /privateBackendLearningProfileContext\(studentLearningProfileContext\)/);
+  assert.match(chatRouteSource, /digest: profileContext\.digest/);
   assert.match(profileSource, /if \(!profileDocument\?\.active \|\| !profileDocument\.teacherReviewed \|\| !profileDocument\.activeProfile\)/);
   assert.match(profileSource, /digest: buildStudentLearningProfileDigest\(profileDocument\)/);
 });

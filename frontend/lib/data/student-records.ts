@@ -210,6 +210,8 @@ export async function upsertConversationReview(input: {
   followUpDueAt?: string | null;
   privateNote?: string;
   reviewedBy?: string;
+  studentVisibleNote?: string;
+  studentVisibleNoteSentAt?: string | null;
   status: string;
 }, client?: PostgresQueryClient) {
   const result = await runPostgresQuery<ConversationReviewRow>(
@@ -232,7 +234,15 @@ export async function upsertConversationReview(input: {
       input.status,
       input.privateNote ?? "",
       input.reviewedBy ?? null,
-      JSON.stringify({ flags: input.flags ?? [], followUpDueAt: input.followUpDueAt ?? null, teacherId: input.reviewedBy ?? "" })
+      JSON.stringify({
+        flags: input.flags ?? [],
+        followUpDueAt: input.followUpDueAt ?? null,
+        ...(input.studentVisibleNote === undefined ? {} : { studentVisibleNote: input.studentVisibleNote }),
+        ...(input.studentVisibleNoteSentAt === undefined
+          ? {}
+          : { studentVisibleNoteSentAt: input.studentVisibleNoteSentAt ?? null }),
+        teacherId: input.reviewedBy ?? ""
+      })
     ]
   );
 

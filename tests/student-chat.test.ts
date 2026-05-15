@@ -112,6 +112,71 @@ test("student chat posts the saved class and auth token to the tutor API", () =>
   assert.doesNotMatch(apiClientSource, /NEXT_PUBLIC_API_BASE_URL/);
 });
 
+test("student chat safety moderates only the latest student message before side effects", () => {
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const helperSource = readFileSync(join(repoRoot, "frontend/lib/student-chat-safety.ts"), "utf8");
+  const buildRequestSource = routeSource.slice(routeSource.indexOf("async function buildBackendChatRequest"));
+
+  assert.match(helperSource, /\[\.\.\.messages\]\.reverse\(\)\.find\(\(message\) => message\.role === "student"\)/);
+  assert.match(helperSource, /studentChatSafetyModerationModel = "omni-moderation-latest"/);
+  assert.match(helperSource, /https:\/\/api\.openai\.com\/v1\/moderations/);
+  assert.match(helperSource, /return text;/);
+  assert.ok(
+    buildRequestSource.indexOf("checkLatestStudentChatSafety") <
+      buildRequestSource.indexOf("prepareStudentConversationPersistenceForTutor")
+  );
+  assert.ok(
+    buildRequestSource.indexOf("checkLatestStudentChatSafety") <
+      buildRequestSource.indexOf("reserveAiTokenUsage")
+  );
+  assert.ok(routeSource.indexOf("checkLatestStudentChatSafety") < routeSource.indexOf("/api/langgraph/chat"));
+  assert.ok(routeSource.indexOf("checkLatestStudentChatSafety") < routeSource.indexOf("/api/langgraph/chat/stream"));
+});
+
+test("student chat safety blocked payloads avoid raw text and use fixed support messages", () => {
+  const helperSource = readFileSync(join(repoRoot, "frontend/lib/student-chat-safety.ts"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const sendMessageSource = studentSource.slice(studentSource.indexOf("async function sendStudentMessage"));
+
+  assert.match(helperSource, /selfHarmStudentSafetyMessage = \[/);
+  assert.match(helperSource, /call or text 988/);
+  assert.match(helperSource, /988lifeline\.org/);
+  assert.match(helperSource, /call 911/);
+  assert.match(helperSource, /violenceStudentSafetyMessage = \[/);
+  assert.match(helperSource, /call 911 now/);
+  assert.match(helperSource, /supportMessageForSafetyCategories/);
+  assert.match(routeSource, /StudentChatSafetyBlockedError/);
+  assert.match(routeSource, /studentChatSafetyBlockedPayload/);
+  assert.match(helperSource, /CHAT_SAFETY_BLOCKED/);
+  assert.match(helperSource, /createHash\("sha256"\)/);
+  assert.match(helperSource, /messageHash/);
+  assert.doesNotMatch(helperSource, /rawMessage|messageText|messageContent:\s*event|content:\s*messageContent/);
+  assert.ok(sendMessageSource.indexOf("const response = await fetch") < sendMessageSource.indexOf("setMessages(nextMessages);"));
+});
+
+test("student chat safety counts trigger teacher review and urgent escalation metadata", () => {
+  const helperSource = readFileSync(join(repoRoot, "frontend/lib/student-chat-safety.ts"), "utf8");
+  const backendSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
+
+  assert.match(helperSource, /dailyReviewThreshold = 5/);
+  assert.match(helperSource, /event\.count > dailyReviewThreshold/);
+  assert.match(helperSource, /upsertConversationReview/);
+  assert.match(helperSource, /getConversationById/);
+  assert.match(helperSource, /upsertConversation/);
+  assert.match(helperSource, /title: "Safety review needed"/);
+  assert.match(helperSource, /status: "needs_follow_up"/);
+  assert.match(helperSource, /urgentDailyReviewThreshold = 3/);
+  assert.match(helperSource, /event\.urgentCount > urgentDailyReviewThreshold/);
+  assert.match(helperSource, /student_chat\.safety_urgent_escalation/);
+  assert.match(helperSource, /writeSecurityLog/);
+  assert.match(helperSource, /studentChatSafetyDailyCounts/);
+  assert.match(helperSource, /studentChatSafetyEvents/);
+  assert.match(backendSource, /reject_safety_blocked_payload\(request\)/);
+  assert.match(backendSource, /CHAT_SAFETY_BLOCKED/);
+  assert.match(backendSource, /Safety-blocked chat payloads must not reach the tutor backend/);
+});
+
 test("teacher preview accepts co-teachers and does not load student-only history", () => {
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
   const tutorChatAuthSource = readFileSync(join(repoRoot, "frontend/lib/tutor-chat-auth.ts"), "utf8");
@@ -1437,7 +1502,7 @@ test("show my work mode marks student attempts for provider feedback", () => {
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
 
   assert.match(studentSource, /studentMessageMode/);
-  assert.match(studentSource, /Show my work/);
+  assert.match(studentSource, /Check my work/);
   assert.match(routeSource, /studentMessageMode: z\.enum\(\["ask", "work"\]\)\.optional\(\)/);
   assert.match(promptSource, /Student message mode: Show my work/);
   assert.match(promptSource, /reasoning-focused feedback/);
@@ -1990,7 +2055,7 @@ test("student chat header uses compact context and tutoring time popovers", () =
   assert.match(studentSource, /Tutoring time unavailable/);
   assert.match(studentSource, /errorMessage=\{aiUsageError\}/);
   assert.match(studentSource, /kind="tutoringTime"/);
-  assert.match(studentSource, /student-header-usage-percent/);
+  assert.match(stylesSource, /student-header-usage-percent/);
   assert.match(studentSource, /student-header-control-label/);
   assert.match(studentSource, /Feedback/);
   assert.match(studentSource, /showUsageHeader \? \(\s*<div className="student-header-control-wrap">[\s\S]*student-usage-popover/);
@@ -2330,8 +2395,8 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(graphSource, /primary tutor turn/);
   assert.match(graphSource, /bare stuck\/start follow-up/);
   assert.match(graphSource, /Depth 1 uses one short answer or Hint plus one question, especially for vague stuck messages like `I am lost`/);
-  assert.match(graphSource, /mainChat already gives the key clue, equation, theorem, or method, omit hint/);
-  assert.match(graphSource, /If hint already gives the action, do not repeat it in mainChat/);
+  assert.match(graphSource, /mainChat already gives the key clue, equation, theorem, or method, omit `Hint:`/);
+  assert.match(graphSource, /If `Hint:` gives the key clue or action, do not restate or paraphrase it in mainChat/);
   assert.match(graphSource, /previous hint was unhelpful, repetitive, too vague, or did not add more/);
   assert.match(graphSource, /one new concrete distinction or prerequisite idea, or a narrower sub-question/);
   assert.match(graphSource, /never output sections just because the schema supports them/);

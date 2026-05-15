@@ -15,6 +15,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ clas
       conversationNeedsTeacherReview({
         feedbackSummary: conversation.feedbackSummary,
         followUpDueAt: conversation.review.followUpDueAt,
+        learningSignals: conversation.learningSignals,
         status: conversation.reviewStatus
       })
     );
@@ -27,7 +28,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ clas
       ).length,
       total: conversations.length,
       unreviewed: openConversations.filter(
-        (conversation) => conversation.reviewStatus === "new" || conversation.feedbackSummary.openCount > 0
+        (conversation) =>
+          conversation.feedbackSummary.openCount > 0 ||
+          conversation.learningSignals.answerSeekingReviewCount > 0 ||
+          conversation.learningSignals.safetyReviewCount > 0 ||
+          conversation.learningSignals.studentReplyAfterTeacherNote
       ).length
     };
 

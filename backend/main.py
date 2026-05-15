@@ -20,19 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-from .langfuse_observability import (
-    flush_langfuse,
-    langfuse_generation,
-    langfuse_span,
-    langfuse_tags,
-    mark_langfuse_error,
-    summarize_messages_for_langfuse,
-    tutor_trace_input,
-    tutor_trace_output,
-    update_langfuse_observation,
-)
 from .material_visibility import is_student_visible_ready_material
-from .langfuse_prompts import compile_langfuse_text_prompt
 from .observability import (
     better_stack_logging_status,
     capture_exception,
@@ -99,7 +87,6 @@ app = FastAPI(title="Chandra API")
 configure_logging()
 _LANGGRAPH_OPENROUTER_CLIENT: Any | None = None
 _LEGACY_OPENROUTER_HTTP_CLIENT: httpx.AsyncClient | None = None
-BACKEND_TUTOR_SYSTEM_LANGFUSE_PROMPT_NAME = "chandra/tutor-system"
 
 
 def configured_cors_origins() -> list[str]:
@@ -378,6 +365,7 @@ async def langgraph_chat(
         max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
         max_total_message_chars=MAX_PROVIDER_TOTAL_MESSAGE_CHARS,
     )
+    reject_safety_blocked_payload(request)
     enforce_ai_usage_reservation(request.aiUsageReservation, student_id=request.studentId)
 
     try:
@@ -389,57 +377,30 @@ async def langgraph_chat(
         ) from error
 
     try:
-        with langfuse_span(
-            "fastapi.langgraph-chat",
-            input=tutor_trace_input(
-                messages=request.messages,
-                class_id=request.classId,
-                conversation_id=request.conversationId,
-                model=request.modelId,
-                route="/api/langgraph/chat",
-                attachment_count=len(request.studentAttachmentFiles),
-            ),
-            metadata={
-                "latest_student_message_id": request.latestStudentMessageId,
-                "professor_id": request.professorId,
-                "reasoning_effort": request.reasoningEffort,
-            },
-            user_id=request.studentId or request.professorId,
-            session_id=request.conversationId,
-            tags=langfuse_tags(feature="tutor-chat", route="/api/langgraph/chat", workflow="langgraph"),
-        ) as trace:
-            try:
-                response = await run_pdf_rag_agent(
-                    class_id=request.classId,
-                    messages=request.messages,
-                    model=request.modelId,
-                    temperature=request.temperature,
-                    max_tokens=request.maxTokens,
-                    reasoning_effort=request.reasoningEffort,
-                    answer_policy=request.answerPolicy,
-                    ai_usage_reservation=request.aiUsageReservation,
-                    behavior_instructions=request.behaviorInstructions,
-                    behavior_title=request.behaviorTitle,
-                    model_settings=request.modelSettings,
-                    response_format=request.responseFormat,
-                    source_usage=request.sourceUsage,
-                    debug_options=request.debugOptions,
-                    student_profile_context=request.studentLearningProfileContext,
-                    student_attachment_files=request.studentAttachmentFiles,
-                    professor_id=request.professorId,
-                    professor_name=request.professorName,
-                    conversation_id=request.conversationId,
-                    latest_student_message_id=request.latestStudentMessageId,
-                    student_id=request.studentId,
-                    openrouter_client=shared_langgraph_openrouter_client(),
-                )
-                update_langfuse_observation(trace, output=tutor_trace_output(response))
-                return response
-            except Exception as error:
-                mark_langfuse_error(trace, error)
-                raise
-            finally:
-                flush_langfuse()
+        return await run_pdf_rag_agent(
+            class_id=request.classId,
+            messages=request.messages,
+            model=request.modelId,
+            temperature=request.temperature,
+            max_tokens=request.maxTokens,
+            reasoning_effort=request.reasoningEffort,
+            answer_policy=request.answerPolicy,
+            ai_usage_reservation=request.aiUsageReservation,
+            behavior_instructions=request.behaviorInstructions,
+            behavior_title=request.behaviorTitle,
+            model_settings=request.modelSettings,
+            response_format=request.responseFormat,
+            source_usage=request.sourceUsage,
+            debug_options=request.debugOptions,
+            student_profile_context=request.studentLearningProfileContext,
+            student_attachment_files=request.studentAttachmentFiles,
+            professor_id=request.professorId,
+            professor_name=request.professorName,
+            conversation_id=request.conversationId,
+            latest_student_message_id=request.latestStudentMessageId,
+            student_id=request.studentId,
+            openrouter_client=shared_langgraph_openrouter_client(),
+        )
     except RuntimeError as error:
         if "AI usage limit reached" in str(error):
             raise HTTPException(status_code=429, detail="AI usage limit reached.") from error
@@ -459,6 +420,7 @@ async def langgraph_chat_stream(
         max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS,
         max_total_message_chars=MAX_PROVIDER_TOTAL_MESSAGE_CHARS,
     )
+    reject_safety_blocked_payload(request)
     enforce_ai_usage_reservation(request.aiUsageReservation, student_id=request.studentId)
 
     try:
@@ -471,54 +433,32 @@ async def langgraph_chat_stream(
 
     async def events():
         try:
-            with langfuse_span(
-                "fastapi.langgraph-chat-stream",
-                input=tutor_trace_input(
-                    messages=request.messages,
-                    class_id=request.classId,
-                    conversation_id=request.conversationId,
-                    model=request.modelId,
-                    route="/api/langgraph/chat/stream",
-                    attachment_count=len(request.studentAttachmentFiles),
-                ),
-                metadata={
-                    "latest_student_message_id": request.latestStudentMessageId,
-                    "professor_id": request.professorId,
-                    "reasoning_effort": request.reasoningEffort,
-                },
-                user_id=request.studentId or request.professorId,
-                session_id=request.conversationId,
-                tags=langfuse_tags(feature="tutor-chat", route="/api/langgraph/chat/stream", workflow="langgraph-stream"),
-            ) as trace:
-                async for event in run_pdf_rag_agent_stream(
-                    class_id=request.classId,
-                    messages=request.messages,
-                    model=request.modelId,
-                    temperature=request.temperature,
-                    max_tokens=request.maxTokens,
-                    reasoning_effort=request.reasoningEffort,
-                    answer_policy=request.answerPolicy,
-                    ai_usage_reservation=request.aiUsageReservation,
-                    behavior_instructions=request.behaviorInstructions,
-                    behavior_title=request.behaviorTitle,
-                    model_settings=request.modelSettings,
-                    response_format=request.responseFormat,
-                    source_usage=request.sourceUsage,
-                    debug_options=request.debugOptions,
-                    student_profile_context=request.studentLearningProfileContext,
-                    student_attachment_files=request.studentAttachmentFiles,
-                    professor_id=request.professorId,
-                    professor_name=request.professorName,
-                    conversation_id=request.conversationId,
-                    latest_student_message_id=request.latestStudentMessageId,
-                    student_id=request.studentId,
-                    openrouter_client=shared_langgraph_openrouter_client(),
-                ):
-                    if isinstance(event, dict) and event.get("type") == "final":
-                        update_langfuse_observation(trace, output=tutor_trace_output(event.get("payload") or {}))
-                    yield json.dumps(event) + "\n"
+            async for event in run_pdf_rag_agent_stream(
+                class_id=request.classId,
+                messages=request.messages,
+                model=request.modelId,
+                temperature=request.temperature,
+                max_tokens=request.maxTokens,
+                reasoning_effort=request.reasoningEffort,
+                answer_policy=request.answerPolicy,
+                ai_usage_reservation=request.aiUsageReservation,
+                behavior_instructions=request.behaviorInstructions,
+                behavior_title=request.behaviorTitle,
+                model_settings=request.modelSettings,
+                response_format=request.responseFormat,
+                source_usage=request.sourceUsage,
+                debug_options=request.debugOptions,
+                student_profile_context=request.studentLearningProfileContext,
+                student_attachment_files=request.studentAttachmentFiles,
+                professor_id=request.professorId,
+                professor_name=request.professorName,
+                conversation_id=request.conversationId,
+                latest_student_message_id=request.latestStudentMessageId,
+                student_id=request.studentId,
+                openrouter_client=shared_langgraph_openrouter_client(),
+            ):
+                yield json.dumps(event) + "\n"
         except Exception as error:
-            mark_langfuse_error(locals().get("trace"), error)
             await capture_exception(error, event="langgraph.stream_error")
             traceback.print_exc()
             yield json.dumps(
@@ -528,8 +468,6 @@ async def langgraph_chat_stream(
                     "type": "error",
                 }
             ) + "\n"
-        finally:
-            flush_langfuse()
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
 
@@ -543,6 +481,28 @@ def describe_stream_error(error: Exception) -> str:
         return message
 
     return f"{error.__class__.__name__}: the tutor service crashed while processing this request. Check the FastAPI terminal for the traceback."
+
+
+def reject_safety_blocked_payload(request: LangGraphChatRequest) -> None:
+    markers: list[Any] = [request.debugOptions or {}]
+    markers.extend(request.messages)
+
+    for marker in markers:
+        if not isinstance(marker, dict):
+            continue
+
+        metadata = marker.get("metadata")
+        if has_safety_blocked_marker(marker) or (isinstance(metadata, dict) and has_safety_blocked_marker(metadata)):
+            raise HTTPException(status_code=400, detail="Safety-blocked chat payloads must not reach the tutor backend.")
+
+
+def has_safety_blocked_marker(value: dict[str, Any]) -> bool:
+    return (
+        value.get("safetyBlocked") is True
+        or value.get("unsafe") is True
+        or value.get("errorCode") == "CHAT_SAFETY_BLOCKED"
+        or value.get("code") == "CHAT_SAFETY_BLOCKED"
+    )
 
 
 def enforce_ai_usage_reservation(ai_usage_reservation: Optional[dict[str, Any]], *, student_id: Optional[str] = None) -> None:
@@ -629,40 +589,18 @@ async def chat(request: ChatRequest, authorization: Optional[str] = Header(defau
             "sources": source_metadata(retrieval_hits),
         }
 
-    with langfuse_span(
-        "fastapi.legacy-chat",
-        input=tutor_trace_input(
-            messages=[message.model_dump() for message in request.messages],
-            class_id=course_id,
-            conversation_id=None,
-            model=model_id,
-            route="/api/chat",
-        ),
-        metadata={"role": scope["role"]},
-        user_id=scope["uid"],
-        tags=langfuse_tags(feature="tutor-chat", route="/api/chat", workflow="legacy"),
-    ) as trace:
-        try:
-            response_text = await call_openrouter(
-                model_id,
-                system_prompt,
-                request.messages,
-                temperature=request.temperature if request.temperature is not None else creativity_to_temperature(model_settings["creativity"]),
-                max_tokens=request.maxTokens or verbose_to_max_tokens(model_settings["verbose"]),
-                reasoning_effort=request.reasoningEffort or model_settings["reasoningEffort"],
-                trace_metadata={"class_id": course_id, "role": scope["role"]},
-            )
-            response_payload = {
-                "content": response_text,
-                "sources": source_metadata(retrieval_hits),
-            }
-            update_langfuse_observation(trace, output=tutor_trace_output(response_payload, answer=response_text))
-            return response_payload
-        except Exception as error:
-            mark_langfuse_error(trace, error)
-            raise
-        finally:
-            flush_langfuse()
+    response_text = await call_openrouter(
+        model_id,
+        system_prompt,
+        request.messages,
+        temperature=request.temperature if request.temperature is not None else creativity_to_temperature(model_settings["creativity"]),
+        max_tokens=request.maxTokens or verbose_to_max_tokens(model_settings["verbose"]),
+        reasoning_effort=request.reasoningEffort or model_settings["reasoningEffort"],
+    )
+    return {
+        "content": response_text,
+        "sources": source_metadata(retrieval_hits),
+    }
 
 
 def authorize_tutor_chat_request(request: ChatRequest, authorization: Optional[str]) -> dict[str, str]:
@@ -1244,27 +1182,7 @@ async def build_tutor_system_prompt(course_id: str, retrieval_hits: list[dict[st
                 source_context,
             ]
         )
-        return compile_langfuse_text_prompt(
-            BACKEND_TUTOR_SYSTEM_LANGFUSE_PROMPT_NAME,
-            fallback=local_prompt,
-            variables={
-                "class_name": str(class_name),
-                "class_section": str(section),
-                **backend_tutor_system_langfuse_variables(
-                    behavior_title,
-                    instructions,
-                    refusal_style,
-                    answer_policy=answer_policy,
-                    source_usage=source_usage,
-                    model_settings=model_settings,
-                    response_format=response_format,
-                    default_assignment_context=(teacher_class or {}).get("defaultAssignmentContext"),
-                    opening_message=(teacher_class or {}).get("openingMessage"),
-                    student_facing_instructions=(teacher_class or {}).get("studentFacingInstructions"),
-                ),
-                "source_context": source_context,
-            },
-        )
+        return local_prompt
 
     if not course or not policy:
         raise HTTPException(status_code=400, detail="Course policy not found.")
@@ -1285,86 +1203,7 @@ async def build_tutor_system_prompt(course_id: str, retrieval_hits: list[dict[st
             source_context,
         ]
     )
-    return compile_langfuse_text_prompt(
-        BACKEND_TUTOR_SYSTEM_LANGFUSE_PROMPT_NAME,
-        fallback=local_prompt,
-        variables={
-            "class_name": str(course["name"]),
-            "class_section": str(course["section"]),
-            **backend_tutor_system_langfuse_variables(
-                policy["title"],
-                policy["instructions"],
-                policy["refusalStyle"],
-                policy.get("retrievalGuidance"),
-            ),
-            "source_context": source_context,
-        },
-    )
-
-
-def backend_tutor_system_langfuse_variables(
-    policy_title: str,
-    instructions: list[str],
-    refusal_style: str,
-    retrieval_guidance: Optional[str] = None,
-    answer_policy: Optional[dict[str, Any]] = None,
-    source_usage: Optional[dict[str, Any]] = None,
-    model_settings: Optional[dict[str, Any]] = None,
-    response_format: Optional[dict[str, Any]] = None,
-    default_assignment_context: Optional[str] = None,
-    opening_message: Optional[str] = None,
-    student_facing_instructions: Optional[str] = None,
-) -> dict[str, str]:
-    answer_policy = normalize_answer_policy(answer_policy)
-    source_usage = normalize_source_usage(source_usage)
-    model_settings = normalize_model_settings(model_settings)
-    response_format = normalize_response_format(response_format)
-    return {
-        "policy_title": str(policy_title),
-        "tutor_behavior_instructions": "\n".join(tutor_behavior_lines(policy_title)),
-        "teacher_instructions": "\n".join(f"- {instruction}" for instruction in instructions),
-        "student_facing_instructions_block": (
-            f"Student-facing class instructions: {student_facing_instructions}" if student_facing_instructions else ""
-        ),
-        "opening_message_block": f"Default student opening message: {opening_message}" if opening_message else "",
-        "default_assignment_context_block": (
-            f"Default assignment context: {default_assignment_context}" if default_assignment_context else ""
-        ),
-        "refusal_style": str(refusal_style),
-        "retrieval_guidance_block": f"Retrieval guidance: {retrieval_guidance}" if retrieval_guidance else "",
-        "reasoning_effort": str(model_settings["reasoningEffort"]),
-        "creativity": str(model_settings["creativity"]),
-        "verbose": verbose_label(str(model_settings["verbose"])),
-        "verbose_style_line": verbose_style_line(str(model_settings["verbose"])),
-        "tutor_voice_instructions": "\n".join(tutor_voice_lines(str(response_format["tutorVoice"]))),
-        "response_verbosity_instructions": "\n".join(response_verbosity_lines(str(model_settings["verbose"]))),
-        "model_response_controls": "\n".join(model_response_control_lines(model_settings)),
-        "answer_policy_instructions": "\n".join(answer_policy_lines(answer_policy)),
-        "student_learning_profile_instructions": "",
-        "tutoring_response_shape_instructions": "\n".join(tutoring_response_shape_lines()),
-        "academic_integrity_instructions": "\n".join(academic_integrity_lines(answer_policy)),
-        "source_usage_instructions": "\n".join(source_usage_lines(source_usage, answer_policy)),
-        "source_citation_instruction": (
-            "- When using source material, mention the source title naturally and include page numbers or section references when available."
-            if source_usage["citeSourcePages"]
-            else "- When using source material, mention the source title naturally, but citations are optional unless needed for clarity."
-        ),
-        "source_quote_instruction": source_quote_instruction(source_usage),
-        "answer_only_source_instruction": (
-            "- For direct-answer requests, use retrieved textbook/readings/examples to teach a similar example, not to finish the student's exact task."
-            if answer_policy["refuseAnswerOnlyRequests"]
-            else ""
-        ),
-        "retrieval_instruction": (
-            "Use the retrieved context as the available class-material match. If it does not clearly answer the student's request, ask one brief clarification question instead of inventing details."
-        ),
-        "unclear_source_instruction": (
-            "- If the retrieved source does not clearly match the student's assignment or problem, ask one brief clarification question."
-            if source_usage["askClarificationIfSourceUnclear"]
-            else "- If the retrieved source is weak, say what is uncertain and give a cautious general explanation without inventing source details."
-        ),
-        "response_format_instructions": "\n".join(response_format_lines(response_format)),
-    }
+    return local_prompt
 
 
 def build_core_tutor_instructions(
@@ -1934,7 +1773,6 @@ async def call_openrouter(model_id: Optional[str], system_prompt: str, messages:
     temperature: float = 0.4,
     max_tokens: Optional[int] = None,
     reasoning_effort: Optional[str] = None,
-    trace_metadata: Optional[dict[str, Any]] = None,
 ) -> str:
     payload = {
         "model": model_id or os.getenv("DEFAULT_MODEL", DEFAULT_OPENROUTER_MODEL),
@@ -1961,54 +1799,32 @@ async def call_openrouter(model_id: Optional[str], system_prompt: str, messages:
         "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Chandra"),
     }
 
-    with langfuse_generation(
-        "fastapi.legacy-openrouter-chat",
-        model=str(payload["model"]),
-        input=summarize_messages_for_langfuse(payload["messages"]),
-        metadata={
-            "max_tokens": max_tokens,
-            "purpose": "legacy_tutor_chat",
-            "reasoning_effort": reasoning_effort,
-            "temperature": temperature,
-            **(trace_metadata or {}),
-        },
-    ) as generation:
-        try:
-            response = await legacy_openrouter_http_client().post(
-                os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
-                + "/chat/completions",
-                json=payload,
-                headers=headers,
-            )
-
-            response.raise_for_status()
-        except httpx.HTTPStatusError as error:
-            mark_langfuse_error(generation, error)
-            log_provider_failure(
-                provider="openrouter",
-                provider_error_class=error.__class__.__name__,
-                provider_status=error.response.status_code,
-            )
-            await capture_exception(
-                error,
-                event="provider.openrouter_error",
-                provider="openrouter",
-                providerErrorClass=error.__class__.__name__,
-                providerStatus=error.response.status_code,
-            )
-            raise
-        except Exception as error:
-            mark_langfuse_error(generation, error)
-            raise
-
-        data = response.json()
-        content = data["choices"][0]["message"]["content"] or "I could not generate a response."
-        update_langfuse_observation(
-            generation,
-            output={"content": content, "finish_reason": data.get("choices", [{}])[0].get("finish_reason")},
-            usage=data.get("usage"),
+    try:
+        response = await legacy_openrouter_http_client().post(
+            os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+            + "/chat/completions",
+            json=payload,
+            headers=headers,
         )
-        return content
+
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        log_provider_failure(
+            provider="openrouter",
+            provider_error_class=error.__class__.__name__,
+            provider_status=error.response.status_code,
+        )
+        await capture_exception(
+            error,
+            event="provider.openrouter_error",
+            provider="openrouter",
+            providerErrorClass=error.__class__.__name__,
+            providerStatus=error.response.status_code,
+        )
+        raise
+
+    data = response.json()
+    return data["choices"][0]["message"]["content"] or "I could not generate a response."
 
 
 def create_demo_tutor_response(question: str, retrieval_hits: list[dict[str, Any]]) -> str:

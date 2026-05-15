@@ -19,7 +19,6 @@
     "migrate:postgres": "node scripts/apply-postgres-migrations.mjs",
     "migrate:tutor-settings": "node scripts/migrate-tutor-settings-schema.mjs",
     "eval:retrieval:live": "node --env-file=.env.local --experimental-strip-types scripts/live-retrieval-eval.mjs",
-    "eval:langfuse": "node --env-file=.env.local scripts/run-langfuse-evals.mjs",
     "backfill:postgres": "node scripts/backfill-firestore-to-postgres.mjs",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "test:retrieval": "node --test --experimental-strip-types tests/retrieval-ranking.test.ts tests/retrieval-eval.test.ts",
@@ -28,9 +27,6 @@
   },
   "dependencies": {
     "@google-cloud/storage": "^7.19.0",
-    "@langfuse/client": "^5.3.0",
-    "@langfuse/otel": "^5.3.0",
-    "@opentelemetry/sdk-node": "^0.217.0",
     "clsx": "^2.1.1",
     "firebase": "^12.12.1",
     "firebase-admin": "^13.8.0",

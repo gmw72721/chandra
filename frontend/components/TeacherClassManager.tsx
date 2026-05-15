@@ -110,6 +110,7 @@ import type {
   StudentLearningProfileDocument,
   StudentRosterActivitySummary,
   TeacherClassOverview,
+  TeacherConversationLearningSignalSummary,
   TeacherConversationReviewSummary,
   TeacherConversationSourceAuditSummary,
   TeacherOverviewStatusTone,
@@ -231,6 +232,7 @@ type RosterSort = {
 type RosterDetailFocus = "activity" | "notes";
 type ConversationFilter =
   | "all"
+  | "needsReview"
   | "unreviewed"
   | "activeToday"
   | "highMessageCount"
@@ -253,6 +255,7 @@ type ConversationReviewRow = {
   id: string;
   lastMessageAt: unknown;
   lastMessageLabel: string;
+  learningSignals: TeacherConversationLearningSignalSummary;
   followUpDueAt?: unknown;
   messageCount: number;
   modelId: string;
@@ -360,8 +363,9 @@ const settingsPaneSlugs: Record<SettingsPane, string> = {
   usage: "usage"
 };
 const conversationFilterSlugs: Partial<Record<ConversationFilter, string>> = {
-  all: "needs-review",
+  all: "all",
   feedback: "feedback",
+  needsReview: "needs-review",
   needsFollowUp: "follow-ups",
   reviewed: "reviewed"
 };
@@ -708,6 +712,13 @@ const classAppearanceOptions = ["light", "dark"] as const;
 const shortDateFormatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 const longDateFormatter = new Intl.DateTimeFormat(undefined, { month: "long", day: "numeric", year: "numeric" });
 const overviewDateFormatter = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
+function localDateInputValue(date: Date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
+}
 const knowledgeFilterKinds = Object.fromEntries(
   knowledgeTypeOptions.map((option) => [option.label, option.aliases])
 ) as Record<KnowledgeTypeFilter, TutorKnowledgeKind[]>;
@@ -790,6 +801,7 @@ export function TeacherClassManager({
     unreviewed: number;
   } | null>(null);
   const [classOverview, setClassOverview] = useState<TeacherClassOverview | null>(null);
+  const [overviewDate, setOverviewDate] = useState(() => localDateInputValue(new Date()));
   const [isLoadingClassOverview, setIsLoadingClassOverview] = useState(false);
   const [selectedStudentLearningProfile, setSelectedStudentLearningProfile] =
     useState<StudentLearningProfileDocument | null>(null);
@@ -849,7 +861,7 @@ export function TeacherClassManager({
   const [rosterFilter, setRosterFilter] = useState<RosterFilter>("all");
   const [rosterSort, setRosterSort] = useState<RosterSort>(null);
   const [rosterPageState, setRosterPageState] = useState({ page: 1, resetKey: "" });
-  const [conversationFilter, setConversationFilter] = useState<ConversationFilter>("all");
+  const [conversationFilter, setConversationFilter] = useState<ConversationFilter>("needsReview");
   const [conversationSearchQuery, setConversationSearchQuery] = useState("");
   const [problemSearchQuery, setProblemSearchQuery] = useState("");
   const [selectedProblemId, setSelectedProblemId] = useState("");
@@ -862,6 +874,7 @@ export function TeacherClassManager({
   const [isProfessorReviewOpen, setIsProfessorReviewOpen] = useState(false);
   const [teacherNotesByStudentId, setTeacherNotesByStudentId] = useState<Record<string, string>>({});
   const [conversationNotesById, setConversationNotesById] = useState<Record<string, string>>({});
+  const [conversationStudentVisibleNotesById, setConversationStudentVisibleNotesById] = useState<Record<string, string>>({});
   const [conversationFollowUpDueById, setConversationFollowUpDueById] = useState<Record<string, string>>({});
   const [checkedConversationIds, setCheckedConversationIds] = useState<string[]>([]);
   const [feedbackTeacherNotesById, setFeedbackTeacherNotesById] = useState<Record<string, string>>({});
@@ -1232,6 +1245,11 @@ export function TeacherClassManager({
   );
   const selectedConversationPrivateNote = selectedConversationReviewRow
     ? conversationNotesById[selectedConversationReviewRow.id] ?? selectedConversationReviewRow.review.privateNote
+    : "";
+  const selectedConversationStudentVisibleNote = selectedConversationReviewRow
+    ? conversationStudentVisibleNotesById[selectedConversationReviewRow.id] ??
+      selectedConversationReviewRow.review.studentVisibleNote ??
+      ""
     : "";
   const isConversationNoteHighlighted = Boolean(
     selectedConversationReviewRow && highlightedNoteConversationId === selectedConversationReviewRow.id
@@ -1653,7 +1671,7 @@ export function TeacherClassManager({
         const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles";
         const response = await fetch(
           apiUrl(
-            `/api/classes/${encodeURIComponent(activeClassId)}/overview?timezone=${encodeURIComponent(timezone)}`
+            `/api/classes/${encodeURIComponent(activeClassId)}/overview?timezone=${encodeURIComponent(timezone)}&date=${encodeURIComponent(overviewDate)}`
           ),
           {
             headers: {
@@ -1686,7 +1704,7 @@ export function TeacherClassManager({
       isCancelled = true;
       window.clearTimeout(loadingTimer);
     };
-  }, [activeClassId, user]);
+  }, [activeClassId, overviewDate, user]);
 
   useEffect(() => {
     if (!activeClassId || !selectedStudent || !user) {
@@ -2713,13 +2731,15 @@ export function TeacherClassManager({
   async function saveConversationReview(
     row: ConversationReviewRow,
     status: ConversationReviewStatus = row.status,
-    followUpDueAt?: string | null
+    followUpDueAt?: string | null,
+    sendStudentVisibleNote = false
   ) {
     if (!activeClassId || !user || savingReviewConversationId) {
       return;
     }
 
     const privateNote = conversationNotesById[row.id] ?? row.review.privateNote;
+    const studentVisibleNote = conversationStudentVisibleNotesById[row.id] ?? row.review.studentVisibleNote ?? "";
     const nextFollowUpDueAt =
       status === "needs_follow_up"
         ? followUpDueAt ??
@@ -2748,6 +2768,8 @@ export function TeacherClassManager({
             flags: row.review.flags,
             followUpDueAt: nextFollowUpDueAt ? new Date(nextFollowUpDueAt).toISOString() : null,
             privateNote,
+            sendStudentVisibleNote,
+            studentVisibleNote,
             status
           })
         }
@@ -2775,6 +2797,10 @@ export function TeacherClassManager({
       setConversationNotesById((currentNotes) => ({
         ...currentNotes,
         [row.id]: data.review!.privateNote
+      }));
+      setConversationStudentVisibleNotesById((currentNotes) => ({
+        ...currentNotes,
+        [row.id]: data.review!.studentVisibleNote ?? ""
       }));
       setConversationFollowUpDueById((currentDueDates) => ({
         ...currentDueDates,
@@ -2811,7 +2837,13 @@ export function TeacherClassManager({
         setSelectedConversationId(nextConversation?.id ?? "");
         setSelectedConversationClassId(activeClassId);
       }
-      setReviewSaveMessage(status === row.status ? "Note saved" : `Marked ${formatConversationStatus(data.review.status)}`);
+      setReviewSaveMessage(
+        sendStudentVisibleNote
+          ? "Message sent to student"
+          : status === row.status
+            ? "Note saved"
+            : `Marked ${formatConversationStatus(data.review.status)}`
+      );
       setClassConversationMetrics(null);
     } catch (caughtError) {
       setReviewSaveMessage("");
@@ -2821,7 +2853,11 @@ export function TeacherClassManager({
     }
   }
 
-  async function saveStudentFeedbackReview(feedback: StudentFeedback, status: StudentFeedbackStatus) {
+  async function saveStudentFeedbackReview(
+    feedback: StudentFeedback,
+    status: StudentFeedbackStatus,
+    usageDecision?: "approve" | "deny"
+  ) {
     if (!activeClassId || !user || savingFeedbackId) {
       return;
     }
@@ -2832,14 +2868,18 @@ export function TeacherClassManager({
     );
     const usageAllowancePercent =
       feedback.kind === "usage_request"
-        ? Number.isFinite(rawUsageAllowancePercent) && rawUsageAllowancePercent > 0
-          ? rawUsageAllowancePercent
-          : 25
+        ? usageDecision === "deny"
+          ? 0
+          : Number.isFinite(rawUsageAllowancePercent) && rawUsageAllowancePercent > 0
+            ? rawUsageAllowancePercent
+            : 25
         : undefined;
 
     setSavingFeedbackId(feedback.id);
     setReviewSaveMessage(
-      feedback.kind === "usage_request" && status === "resolved"
+      feedback.kind === "usage_request" && usageDecision === "deny"
+        ? "Declining usage request..."
+        : feedback.kind === "usage_request" && status === "resolved"
         ? "Approving usage request..."
         : status === "resolved"
           ? "Resolving feedback..."
@@ -2901,13 +2941,15 @@ export function TeacherClassManager({
       }));
       setFeedbackUsageAllowanceById((currentAllowances) => ({
         ...currentAllowances,
-        [savedFeedback.id]: String(savedFeedback.usageAllowancePercent || usageAllowancePercent || 25)
+        [savedFeedback.id]: String(savedFeedback.usageAllowancePercent ?? usageAllowancePercent ?? 25)
       }));
       setClassOverview(null);
       setClassConversationMetrics(null);
       setReviewSaveMessage(
         savedFeedback.kind === "usage_request" && savedFeedback.usageAllowancePercent
           ? `Usage request approved: +${savedFeedback.usageAllowancePercent}% today`
+          : savedFeedback.kind === "usage_request" && usageDecision === "deny"
+            ? "Usage request declined"
           : status === "resolved"
             ? "Feedback resolved"
             : "Feedback reviewed"
@@ -3013,6 +3055,7 @@ export function TeacherClassManager({
       const savedReviews = await Promise.all(
         checkedConversationRows.map(async (row) => {
           const privateNote = conversationNotesById[row.id] ?? row.review.privateNote;
+          const studentVisibleNote = conversationStudentVisibleNotesById[row.id] ?? row.review.studentVisibleNote ?? "";
           const followUpDueAt =
             status === "needs_follow_up"
               ? conversationFollowUpDueById[row.id] ??
@@ -3033,6 +3076,7 @@ export function TeacherClassManager({
                 flags: row.review.flags,
                 followUpDueAt: followUpDueAt ? new Date(followUpDueAt).toISOString() : null,
                 privateNote,
+                studentVisibleNote,
                 status
               })
             }
@@ -3067,6 +3111,13 @@ export function TeacherClassManager({
         const nextNotes = { ...currentNotes };
         savedReviews.forEach(({ conversationId, review }) => {
           nextNotes[conversationId] = review.privateNote;
+        });
+        return nextNotes;
+      });
+      setConversationStudentVisibleNotesById((currentNotes) => {
+        const nextNotes = { ...currentNotes };
+        savedReviews.forEach(({ conversationId, review }) => {
+          nextNotes[conversationId] = review.studentVisibleNote ?? "";
         });
         return nextNotes;
       });
@@ -3834,7 +3885,7 @@ export function TeacherClassManager({
     setIsProfessorReviewOpen(false);
     setRosterSearchQuery("");
     setRosterFilter("all");
-    setConversationFilter("all");
+    setConversationFilter("needsReview");
     setConversationSearchQuery("");
     setProblemSearchQuery("");
     setSelectedProblemId("");
@@ -3866,7 +3917,8 @@ export function TeacherClassManager({
     id: ConversationFilter | "students";
     label: string;
   }> = [
-    { count: conversationMetrics.unreviewed, icon: <StrugglingTopicsIcon />, id: "all", label: "Needs Review" },
+    { count: conversationMetrics.total, icon: <ChatIcon />, id: "all", label: "All conversations" },
+    { count: conversationMetrics.unreviewed, icon: <StrugglingTopicsIcon />, id: "needsReview", label: "Needs Review" },
     { count: conversationMetrics.followUp, icon: <FlagIcon />, id: "needsFollowUp", label: "Follow-Ups" },
     { count: conversationReviewRows.reduce((sum, row) => sum + row.feedbackSummary.openCount, 0), icon: <ChatIcon />, id: "feedback", label: "Feedback" },
     { icon: <CheckCircleIcon />, id: "reviewed", label: "Reviewed" },
@@ -4254,16 +4306,33 @@ export function TeacherClassManager({
                 {activeTab === "overview" ? (
                   <TeacherAnalyticsDashboardContent
                     classLabel={`${selectedClass.name} - ${formatSectionLabel(selectedClass.section)}`}
+                    joinCode={selectedClass.joinCode}
+                    maxDate={localDateInputValue(new Date())}
                     overview={classOverview}
                     priorityRows={classOverview?.priorityRows ?? []}
                     reviewRows={conversationReviewRows}
+                    selectedDate={overviewDate}
+                    sourceCount={overviewReadySourceCount}
                     studentCount={rosterRows.length || students.length}
+                    onAddSource={() => setIsKnowledgeDialogOpen(true)}
+                    onCopyJoinCode={() => void copyClassInvite(selectedClass, "code")}
+                    onDateChange={setOverviewDate}
                     onOpenPriorityStudent={(row) => openOverviewRoster(row.studentName, row.studentId, row.studentEmail)}
+                    onPauseChat={() => navigateTeacherSubtab("knowledge", "access")}
                     onReviewConversation={(row) => openOverviewConversation(row.title, row.studentName, row.id)}
-                    onReviewProfiles={() => {
-                      navigateTeacherTab("roster");
-                      setIsRosterDetailOpen(true);
-                      setRosterDetailFocus("activity");
+                    onReviewToday={() => openOverviewConversation()}
+                    onUsageDecision={(row, decision) => {
+                      const usageRequest = row.feedback?.find(
+                        (feedback) => feedback.status !== "resolved" && feedback.kind === "usage_request"
+                      );
+
+                      if (usageRequest) {
+                        void saveStudentFeedbackReview(
+                          usageRequest,
+                          "resolved",
+                          decision === "approve" ? "approve" : "deny"
+                        );
+                      }
                     }}
                   />
                 ) : null}
@@ -6833,20 +6902,41 @@ export function TeacherClassManager({
                                     >
                                       Send response
                                     </button>
-                                    <button
-                                      disabled={savingFeedbackId === feedback.id || feedback.status === "reviewed"}
-                                      type="button"
-                                      onClick={() => void saveStudentFeedbackReview(feedback, "reviewed")}
-                                    >
-                                      Reviewed
-                                    </button>
-                                    <button
-                                      disabled={savingFeedbackId === feedback.id || feedback.status === "resolved"}
-                                      type="button"
-                                      onClick={() => void saveStudentFeedbackReview(feedback, "resolved")}
-                                    >
-                                      {feedback.kind === "usage_request" ? "Approve usage" : "Resolve"}
-                                    </button>
+                                    {feedback.kind === "usage_request" ? (
+                                      <>
+                                        <button
+                                          disabled={savingFeedbackId === feedback.id || feedback.status === "resolved"}
+                                          type="button"
+                                          onClick={() => void saveStudentFeedbackReview(feedback, "resolved", "deny")}
+                                        >
+                                          No
+                                        </button>
+                                        <button
+                                          disabled={savingFeedbackId === feedback.id || feedback.status === "resolved"}
+                                          type="button"
+                                          onClick={() => void saveStudentFeedbackReview(feedback, "resolved", "approve")}
+                                        >
+                                          Yes
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <button
+                                          disabled={savingFeedbackId === feedback.id || feedback.status === "reviewed"}
+                                          type="button"
+                                          onClick={() => void saveStudentFeedbackReview(feedback, "reviewed")}
+                                        >
+                                          Reviewed
+                                        </button>
+                                        <button
+                                          disabled={savingFeedbackId === feedback.id || feedback.status === "resolved"}
+                                          type="button"
+                                          onClick={() => void saveStudentFeedbackReview(feedback, "resolved")}
+                                        >
+                                          Resolve
+                                        </button>
+                                      </>
+                                    )}
                                   </div>
                                 </article>
                               ))}
@@ -6996,6 +7086,53 @@ export function TeacherClassManager({
                                 : "Save note"}
                             </button>
                             <span>Private to you</span>
+                          </div>
+                          <label className="student-visible-note-label" htmlFor="conversation-student-visible-note">
+                            Message student on this chat
+                            <span>
+                              {selectedConversationReviewRow?.review.studentVisibleNoteSentAt
+                                ? `Sent ${formatConversationDate(selectedConversationReviewRow.review.studentVisibleNoteSentAt)}`
+                                : "Not sent yet"}
+                            </span>
+                          </label>
+                          <textarea
+                            id="conversation-student-visible-note"
+                            maxLength={1000}
+                            placeholder="Write a note the student will see in this chat..."
+                            rows={3}
+                            value={selectedConversationStudentVisibleNote}
+                            onChange={(event) => {
+                              if (!selectedConversationReviewRow) {
+                                return;
+                              }
+                              setConversationStudentVisibleNotesById((currentNotes) => ({
+                                ...currentNotes,
+                                [selectedConversationReviewRow.id]: event.target.value
+                              }));
+                            }}
+                          />
+                          <div className="review-note-actions">
+                            <button
+                              disabled={
+                                !selectedConversationReviewRow ||
+                                savingReviewConversationId === selectedConversationReviewRow.id ||
+                                !selectedConversationStudentVisibleNote.trim()
+                              }
+                              type="button"
+                              onClick={() => {
+                                if (selectedConversationReviewRow) {
+                                  void saveConversationReview(
+                                    selectedConversationReviewRow,
+                                    selectedConversationReviewRow.status,
+                                    undefined,
+                                    true
+                                  );
+                                }
+                              }}
+                            >
+                              Send to student
+                            </button>
+                            <span>Visible in student chat</span>
                           </div>
                         </section>
 
@@ -9700,6 +9837,7 @@ function buildConversationReviewRows(
       id: conversation.id,
       lastMessageAt: conversation.lastMessageAt,
       lastMessageLabel: formatConversationDate(conversation.lastMessageAt) || "No messages",
+      learningSignals: conversation.learningSignals,
       messageCount: conversation.messageCount,
       modelId: conversation.modelId,
       review: conversation.review,
@@ -9844,6 +9982,10 @@ function conversationMatchesFilter({
 
   if (filter === "needsFollowUp") {
     return row.status === "needs_follow_up";
+  }
+
+  if (filter === "all") {
+    return true;
   }
 
   if (!conversationNeedsTeacherReview(row)) {

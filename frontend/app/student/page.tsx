@@ -330,6 +330,8 @@ export function StudentWorkspace() {
       classLoadError?.classId !== activeCourseId
   );
 
+  const activeSelectedConversationId = selectedConversationClassId === activeCourseId ? selectedConversationId : "";
+
   useEffect(() => {
     if (!firebaseReady || !profile) {
       return;
@@ -422,7 +424,13 @@ export function StudentWorkspace() {
 
     user
       .getIdToken()
-      .then((token) => fetchStudentFeedbackResponses({ classId: activeCourseId, token }))
+      .then((token) =>
+        fetchStudentFeedbackResponses({
+          classId: activeCourseId,
+          conversationId: activeSelectedConversationId,
+          token
+        })
+      )
       .then((feedback) => {
         if (!isCancelled) {
           setStudentFeedbackResponses(
@@ -439,7 +447,7 @@ export function StudentWorkspace() {
     return () => {
       isCancelled = true;
     };
-  }, [activeCourseId, firebaseReady, isTeacherPreview, profile?.role, user]);
+  }, [activeCourseId, activeSelectedConversationId, firebaseReady, isTeacherPreview, profile?.role, user]);
 
   const activeStudentClass = useMemo(
     () => studentClasses.find((studentClass) => studentClass.id === activeCourseId) ?? null,
@@ -497,7 +505,6 @@ export function StudentWorkspace() {
         .sort(compareConversationSummariesByRecentActivity),
     [activeCourseId, conversationSummaries, user?.uid]
   );
-  const activeSelectedConversationId = selectedConversationClassId === activeCourseId ? selectedConversationId : "";
   const visibleStudentClasses = useMemo(
     () => mergeStudentClasses(studentClasses, activeClass),
     [activeClass, studentClasses]
@@ -1214,11 +1221,6 @@ export function StudentWorkspace() {
     setJustSentMessageId(studentMessage.id);
     sendMotionTimerRef.current = window.setTimeout(() => setIsSendMotionActive(false), 620);
     justSentTimerRef.current = window.setTimeout(() => setJustSentMessageId(""), 760);
-    setMessages(nextMessages);
-    if (options.clearComposer) {
-      setDraft("");
-      clearComposerAttachments({ revokeLocalUrls: false });
-    }
     sendInFlightRef.current = true;
     setIsSending(true);
     setChatProgress({
@@ -1267,11 +1269,21 @@ export function StudentWorkspace() {
       });
 
       if (!response.ok) {
-        const data = (await response.json()) as { aiUsageStatus?: StudentAiUsageStatus; error?: string };
+        const data = (await response.json()) as {
+          aiUsageStatus?: StudentAiUsageStatus;
+          error?: string;
+          errorCode?: string;
+        };
         if (data.aiUsageStatus) {
           setAiUsageStatus(data.aiUsageStatus);
         }
         throw new Error(data.error ?? "Chat request failed");
+      }
+
+      setMessages(nextMessages);
+      if (options.clearComposer) {
+        setDraft("");
+        clearComposerAttachments({ revokeLocalUrls: false });
       }
 
       const showExactSearches = isTeacherPreview && isTeacherDebugMode;
@@ -2527,6 +2539,23 @@ const StudentChatMessage = memo(function StudentChatMessage({
             </ReactMarkdown>
           </div>
           {message.attachments?.length ? <MessageAttachmentList attachments={message.attachments} /> : null}
+        </div>
+      </article>
+    );
+  }
+
+  if (message.role === "system") {
+    return (
+      <article className="student-workspace-message teacher-note">
+        <div className="assistant-message-stack">
+          <div className="message-meta-row">
+            <div className="message-meta">Teacher note</div>
+          </div>
+          <div className="teacher-note-message-bubble">
+            <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+              {normalizeMarkdownMath(message.content)}
+            </ReactMarkdown>
+          </div>
         </div>
       </article>
     );
@@ -5387,12 +5416,20 @@ async function sendStudentFeedback({
 
 async function fetchStudentFeedbackResponses({
   classId,
+  conversationId,
   token
 }: {
   classId: string;
+  conversationId?: string;
   token: string;
 }) {
-  const response = await fetch(apiUrl(`/api/student/feedback?courseId=${encodeURIComponent(classId)}`), {
+  const query = new URLSearchParams({ courseId: classId });
+
+  if (conversationId) {
+    query.set("conversationId", conversationId);
+  }
+
+  const response = await fetch(apiUrl(`/api/student/feedback?${query.toString()}`), {
     headers: {
       Authorization: `Bearer ${token}`
     }

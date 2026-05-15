@@ -6,6 +6,10 @@ const allowedTools = [
   "get_review_queue",
   "get_teacher_dashboard_summary",
   "navigate_teacher_tab",
+  "open_conversation_review_by_query",
+  "open_student_profile",
+  "open_student_profile_by_query",
+  "open_student_conversations_by_query",
   "open_student_view",
   "search_conversations",
   "search_students",
@@ -18,7 +22,7 @@ test("teacher assistant policy limits navigation-only requests to navigation too
 
   assert.equal(policy.maxToolCalls, 1);
   assert.equal(policy.reason, "navigation_only");
-  assert.deepEqual(policy.allowedToolNames, ["navigate_teacher_tab", "open_student_view"]);
+  assert.deepEqual(policy.allowedToolNames, ["open_student_view", "navigate_teacher_tab"]);
 });
 
 test("teacher assistant policy exposes focused read/write tools by request type", () => {
@@ -26,7 +30,18 @@ test("teacher assistant policy exposes focused read/write tools by request type"
   assert.equal(studentPolicy.reason, "student_focused");
   assert.ok(studentPolicy.allowedToolNames.includes("search_students"));
 
+  const namedProfilePolicy = selectTeacherAssistantToolPolicy("go to Gavin Williams profile", allowedTools);
+  assert.equal(namedProfilePolicy.reason, "student_focused");
+  assert.equal(namedProfilePolicy.maxToolCalls, 3);
+  assert.ok(namedProfilePolicy.allowedToolNames.includes("search_students"));
+  assert.ok(namedProfilePolicy.allowedToolNames.includes("open_student_profile_by_query"));
+
   const settingsPolicy = selectTeacherAssistantToolPolicy("turn off tutor chat", allowedTools);
   assert.equal(settingsPolicy.reason, "settings_focused");
   assert.ok(settingsPolicy.allowedToolNames.includes("update_tutor_access_settings"));
+
+  const studentConversationPolicy = selectTeacherAssistantToolPolicy("open Gavin Williams conversations", allowedTools);
+  assert.equal(studentConversationPolicy.reason, "conversation_focused");
+  assert.ok(studentConversationPolicy.allowedToolNames.includes("search_students"));
+  assert.ok(studentConversationPolicy.allowedToolNames.includes("open_student_conversations_by_query"));
 });

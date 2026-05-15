@@ -3,7 +3,7 @@ import { RequireAuth } from "@/components/RequireAuth";
 import { TeacherClassManager } from "@/components/TeacherClassManager";
 
 const teacherSubtabs: Record<string, Set<string>> = {
-  conversations: new Set(["feedback", "follow-ups", "needs-review", "reviewed"]),
+  conversations: new Set(["all", "feedback", "follow-ups", "needs-review", "reviewed"]),
   knowledge: new Set(["access", "advanced", "class-instructions", "help-rules", "tutor-mode", "voice-detail"]),
   settings: new Set(["account", "appearance", "class-access", "general", "notifications", "privacy", "usage"]),
   sources: new Set(["source-settings", "sources"])

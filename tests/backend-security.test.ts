@@ -100,11 +100,12 @@ test("production backend internal URLs and OpenRouter referer do not silently fa
   assert.match(assetsSource, /BACKEND_SHARED_SECRET/);
   assert.equal(existsSync(join(repoRoot, "frontend/app/api/internal/pdf-page-assets/route.ts")), true);
   const assetRoute = readFileSync(join(repoRoot, "frontend/app/api/internal/pdf-page-assets/route.ts"), "utf8");
+  const assetPayloadHelper = readFileSync(join(repoRoot, "frontend/lib/pdf-page-assets-payload.ts"), "utf8");
   assert.match(assetRoute, /BACKEND_SHARED_SECRET/);
   assert.match(assetRoute, /timingSafeEqual/);
   assert.match(assetRoute, /maxRequestedPages = 12/);
   assert.match(assetRoute, /INTERNAL_PDF_PAGE_ASSET_MAX_TOTAL_BYTES/);
-  assert.match(assetRoute, /getPdfPageAssetRecords/);
+  assert.match(assetPayloadHelper, /getPdfPageAssetRecords/);
   assert.doesNotMatch(assetRoute, /storagePath: z\.string/);
   assert.match(openRouterSource, /OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production/);
   assert.match(fastApiSource, /OPENROUTER_HTTP_REFERER or FRONTEND_ORIGIN is required in production/);

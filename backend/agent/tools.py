@@ -9,6 +9,7 @@ from typing import Any, Protocol
 import httpx
 
 from backend.internal_next import internal_next_base_url, reusable_async_client
+from backend.retrieval.pdf_page_assets import merge_page_asset_payloads
 
 logger = logging.getLogger(__name__)
 _NEXT_SEARCH_CLIENT: httpx.AsyncClient | None = None
@@ -233,6 +234,7 @@ async def search_pdf_pages_via_next(
             },
             json={
                 "classId": class_id,
+                "includeAssets": True,
                 "professorId": professor_id,
                 "query": query,
                 "retrievalReason": retrieval_reason,
@@ -257,7 +259,15 @@ async def search_pdf_pages_via_next(
         return []
 
     pages = payload.get("pages") if isinstance(payload, dict) else []
-    return pages if isinstance(pages, list) else []
+    assets = payload.get("assets") if isinstance(payload, dict) else []
+    normalized_pages = [page for page in pages if isinstance(page, dict)] if isinstance(pages, list) else []
+    if normalized_pages and isinstance(assets, list) and assets:
+        return merge_page_asset_payloads(
+            normalized_pages,
+            [asset for asset in assets if isinstance(asset, dict)],
+        )
+
+    return normalized_pages
 
 
 def next_search_http_client() -> httpx.AsyncClient:
@@ -292,10 +302,22 @@ def normalize_pdf_page_result(page: dict[str, Any] | Any) -> dict[str, Any]:
         "page_start": max(1, min(page_start, page_end)),
         "page_end": max(page_start, page_end),
         "page_asset_checksum_sha256": str(source.get("pageAssetChecksumSha256") or source.get("page_asset_checksum_sha256") or ""),
+        "page_asset_bucket": str(source.get("pageAssetBucket") or source.get("page_asset_bucket") or source.get("pageAssetStorageBucket") or source.get("page_asset_storage_bucket") or ""),
+        "page_asset_path": str(source.get("pageAssetPath") or source.get("page_asset_path") or source.get("pageAssetStoragePath") or source.get("page_asset_storage_path") or ""),
+        "page_asset_uri": str(source.get("pageAssetUri") or source.get("page_asset_uri") or ""),
         "page_asset_mime_type": str(source.get("pageAssetMimeType") or source.get("page_asset_mime_type") or ""),
         "page_asset_size_bytes": source.get("pageAssetSizeBytes") if source.get("pageAssetSizeBytes") is not None else source.get("page_asset_size_bytes"),
         "page_asset_storage_bucket": str(source.get("pageAssetStorageBucket") or source.get("page_asset_storage_bucket") or ""),
         "page_asset_storage_path": str(source.get("pageAssetStoragePath") or source.get("page_asset_storage_path") or ""),
+        "full_pdf_bucket": str(source.get("fullPdfBucket") or source.get("full_pdf_bucket") or ""),
+        "full_pdf_path": str(source.get("fullPdfPath") or source.get("full_pdf_path") or ""),
+        "full_pdf_uri": str(source.get("fullPdfUri") or source.get("full_pdf_uri") or ""),
+        "full_pdf_mime_type": str(source.get("fullPdfMimeType") or source.get("full_pdf_mime_type") or "application/pdf"),
+        "full_pdf_size_bytes": source.get("fullPdfSizeBytes") if source.get("fullPdfSizeBytes") is not None else source.get("full_pdf_size_bytes") if source.get("full_pdf_size_bytes") is not None else source.get("fullPdfSize") if source.get("fullPdfSize") is not None else source.get("full_pdf_size"),
+        "full_pdf_sha256": str(source.get("fullPdfSha256") or source.get("full_pdf_sha256") or ""),
+        "full_pdf_data_url": source.get("full_pdf_data_url") or source.get("fullPdfDataUrl"),
+        "full_pdf_file_name": source.get("full_pdf_file_name") or source.get("fullPdfFileName"),
+        "full_pdf_skipped_reason": str(source.get("full_pdf_skipped_reason") or source.get("fullPdfSkippedReason") or ""),
         "printed_page_start": source.get("printed_page_start") or source.get("printedPageStart"),
         "printed_page_end": source.get("printed_page_end") or source.get("printedPageEnd"),
         "professor_id": str(source.get("professorId") or source.get("professor_id") or ""),
@@ -318,4 +340,8 @@ def normalize_pdf_page_result(page: dict[str, Any] | Any) -> dict[str, Any]:
         "storage_bucket": str(source.get("storageBucket") or source.get("storage_bucket") or ""),
         "storage_path": str(source.get("storagePath") or source.get("storage_path") or ""),
         "material_type": str(source.get("material_type") or source.get("materialType") or source.get("kind") or ""),
+        "file_data_url": source.get("file_data_url") or source.get("fileDataUrl"),
+        "file_name": source.get("file_name") or source.get("fileName"),
+        "image_url": source.get("image_url") or source.get("imageUrl"),
+        "images": source.get("images") if isinstance(source.get("images"), list) else [],
     }

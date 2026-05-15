@@ -162,6 +162,7 @@ function buildPriorityRows(
         conversationNeedsTeacherReviewNow({
           feedbackSummary: conversation.feedbackSummary,
           followUpDueAt: conversation.review.followUpDueAt,
+          learningSignals: conversation.learningSignals,
           status: conversation.reviewStatus
         })
     )
@@ -235,11 +236,12 @@ function buildReviewQueueRows(
 }
 
 function conversationNeedsTeacherReview(
-  conversation: Pick<TeacherConversationReviewSummary, "feedbackSummary" | "review" | "reviewStatus">
+  conversation: Pick<TeacherConversationReviewSummary, "feedbackSummary" | "learningSignals" | "review" | "reviewStatus">
 ) {
   return conversationNeedsTeacherReviewNow({
     feedbackSummary: conversation.feedbackSummary,
     followUpDueAt: conversation.review.followUpDueAt,
+    learningSignals: conversation.learningSignals,
     status: conversation.reviewStatus
   });
 }
@@ -847,6 +849,11 @@ function conversationRiskReasons(conversation: TeacherConversationReviewSummary)
     conversation.reviewStatus === "needs_follow_up" || conversation.reviewStatus === "misunderstanding_spotted"
       ? "Teacher follow-up flag"
       : null,
+    signals.studentReplyAfterTeacherNote ? "Student replied after teacher note" : null,
+    signals.answerSeekingReviewCount
+      ? `${signals.answerSeekingReviewCount} answer-seeking check${signals.answerSeekingReviewCount === 1 ? "" : "s"}`
+      : null,
+    signals.safetyReviewCount ? "Safety review reason recorded" : null,
     conversation.sourceAudit.lowSourceConfidence || signals.lowConfidenceMessageCount
       ? `${Math.max(1, signals.lowConfidenceMessageCount)} low-confidence answer${Math.max(1, signals.lowConfidenceMessageCount) === 1 ? "" : "s"}`
       : null,
@@ -1069,7 +1076,21 @@ function formatReviewQueueStatus(conversation: TeacherConversationReviewSummary)
 
 function reviewQueueIssue(conversation: TeacherConversationReviewSummary) {
   if (conversation.feedbackSummary.openCount > 0) {
-    return "Student feedback needs review";
+    return conversation.feedback.some((feedback) => feedback.status !== "resolved" && feedback.kind === "usage_request")
+      ? "Usage request"
+      : "Student feedback needs review";
+  }
+
+  if (conversation.learningSignals.safetyReviewCount > 0) {
+    return "Safety review reason recorded";
+  }
+
+  if (conversation.learningSignals.answerSeekingReviewCount > 0) {
+    return "Answer-seeking request needs review";
+  }
+
+  if (conversation.learningSignals.studentReplyAfterTeacherNote) {
+    return "Student replied to teacher note";
   }
 
   if (conversation.sourceAudit.lowSourceConfidence || conversation.learningSignals.lowConfidenceMessageCount > 0) {
@@ -1104,6 +1125,18 @@ function reviewQueueSourceLabel(conversation: TeacherConversationReviewSummary) 
     return `${conversation.feedbackSummary.openCount} open feedback ${conversation.feedbackSummary.openCount === 1 ? "item" : "items"}`;
   }
 
+  if (conversation.learningSignals.safetyReviewCount > 0) {
+    return "Safety reason recorded";
+  }
+
+  if (conversation.learningSignals.answerSeekingReviewCount > 0) {
+    return "Answer-seeking signal";
+  }
+
+  if (conversation.learningSignals.studentReplyAfterTeacherNote) {
+    return "Student replied after note";
+  }
+
   const sourceCount = conversation.sourceAudit.sourceCount;
 
   if (sourceCount <= 0) {
@@ -1120,6 +1153,18 @@ function reviewQueueSourceLabel(conversation: TeacherConversationReviewSummary) 
 function reviewQueueSuggestedAction(conversation: TeacherConversationReviewSummary) {
   if (conversation.feedbackSummary.openCount > 0) {
     return "Read the student note with transcript context.";
+  }
+
+  if (conversation.learningSignals.studentReplyAfterTeacherNote) {
+    return "Read the reply and send the next scaffold if needed.";
+  }
+
+  if (conversation.learningSignals.answerSeekingReviewCount > 0) {
+    return "Check that the tutor redirected without giving the final answer.";
+  }
+
+  if (conversation.learningSignals.safetyReviewCount > 0) {
+    return "Review the recorded safety reason and decide the next adult follow-up.";
   }
 
   if (
@@ -1144,6 +1189,10 @@ function reviewQueueSuggestedAction(conversation: TeacherConversationReviewSumma
 function reviewQueueTone(conversation: TeacherConversationReviewSummary): TeacherOverviewStatusTone {
   if (conversation.feedbackSummary.openCount > 0) {
     return "note";
+  }
+
+  if (conversation.learningSignals.safetyReviewCount > 0 || conversation.learningSignals.studentReplyAfterTeacherNote) {
+    return "follow-up";
   }
 
   if (conversation.reviewStatus === "needs_follow_up" || conversation.reviewStatus === "misunderstanding_spotted") {

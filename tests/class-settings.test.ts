@@ -144,13 +144,13 @@ test("class model settings derive token caps from student message caps", () => {
 
   assert.equal(normalized.requestLimits.perStudentDaily, 20);
   assert.equal(normalized.requestLimits.perStudentWeekly, 100);
-  assert.equal(normalized.tokenLimits.perDay, 20_000);
-  assert.equal(normalized.tokenLimits.perWeek, 100_000);
+  assert.equal(normalized.tokenLimits.perDay, 20 * classSettings.estimatedAiTokensPerStudentMessageLimit);
+  assert.equal(normalized.tokenLimits.perWeek, 100 * classSettings.estimatedAiTokensPerStudentMessageLimit);
 });
 
 function loadClassSettingsModule() {
   const source = readFileSync(join(repoRoot, "frontend/lib/class-settings.ts"), "utf8").replace(
-    /import \{ defaultOpenRouterModelId \} from "\.\/model-options";/,
+    /import \{ defaultOpenRouterModelId \} from "\.\/model-options(?:\.ts)?";/,
     'const defaultOpenRouterModelId = "test-model";'
   );
   const transpiled = ts.transpileModule(source, {

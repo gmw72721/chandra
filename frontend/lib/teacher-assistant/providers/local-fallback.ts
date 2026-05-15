@@ -23,6 +23,16 @@ export function createLocalFallbackProvider(): TeacherAssistantProvider {
         return;
       }
 
+      const studentOpenRequest = studentOpenRequestFromMessage(contextualMessage);
+      if (studentOpenRequest) {
+        return yield* resolveAndOpenStudent(input, studentOpenRequest);
+      }
+
+      const conversationOpenQuery = conversationOpenQueryFromMessage(contextualMessage);
+      if (conversationOpenQuery) {
+        return yield* resolveAndOpenConversation(input, conversationOpenQuery);
+      }
+
       const studentSearch = studentSearchFromMessage(contextualMessage);
       if (studentSearch) {
         return yield* runLocalTool(input, "search_students", { classId: input.classId, query: studentSearch });
@@ -76,6 +86,19 @@ async function* runLocalTool(input: AssistantTurnInput, toolName: string, args: 
     content: result.content ?? result.summary,
     type: "message"
   } as const;
+}
+
+async function* resolveAndOpenStudent(
+  input: AssistantTurnInput,
+  request: { mode: "conversations" | "profile"; query: string }
+) {
+  const toolName =
+    request.mode === "conversations" ? "open_student_conversations_by_query" : "open_student_profile_by_query";
+  return yield* runLocalTool(input, toolName, { classId: input.classId, query: request.query });
+}
+
+async function* resolveAndOpenConversation(input: AssistantTurnInput, query: string) {
+  return yield* runLocalTool(input, "open_conversation_review_by_query", { classId: input.classId, query });
 }
 
 export function inferLocalTeacherAssistantToolRequest(message: string, classId: string) {
@@ -239,7 +262,7 @@ function aiTutorSectionFromMessage(message: string) {
   if (message.includes("access")) {
     return "access";
   }
-  if (message.includes("mode")) {
+  if (message.includes("mode") || message.includes("behavior") || message.includes("teaching style")) {
     return "tutorMode";
   }
   if (message.includes("voice") || message.includes("detail")) {
@@ -310,4 +333,42 @@ function materialSearchFromMessage(message: string) {
   const match = message.match(/\b(?:find|search|look up)\s+(?:material|source|pdf|document)?\s*([^?.!]+)/i);
   const candidate = match?.[1]?.trim() ?? "";
   return /\b(material|source|pdf|document|worksheet|homework|textbook|notes)\b/i.test(message) ? candidate : "";
+}
+
+function studentOpenRequestFromMessage(message: string): { mode: "conversations" | "profile"; query: string } | null {
+  const match = message.match(
+    /\b(?:open|go to|goto|navigate to|show|view|take me to)\s+(.+?)\s+(profile|student profile|conversations|conversation|chats|chat history)\b/i
+  );
+
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+
+  const query = cleanLookupQuery(match[1]);
+  if (!query || /\bstudent view\b/i.test(message)) {
+    return null;
+  }
+
+  return {
+    mode: /conversation|chat/i.test(match[2]) ? "conversations" : "profile",
+    query
+  };
+}
+
+function conversationOpenQueryFromMessage(message: string) {
+  const match = message.match(/\b(?:open|go to|goto|navigate to|show|view|take me to)\s+(.+?)\s+(?:conversation|review|chat)\b/i);
+  const query = cleanLookupQuery(match?.[1] ?? "");
+
+  if (!query || /\bstudent\b/i.test(query)) {
+    return "";
+  }
+
+  return query;
+}
+
+function cleanLookupQuery(value: string) {
+  return value
+    .replace(/\b(the|a|an|student|for|about|with)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }

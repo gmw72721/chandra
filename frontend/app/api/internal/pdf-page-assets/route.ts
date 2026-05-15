@@ -1,8 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { downloadGcsPdfAssetBuffer } from "@/lib/gcs-pdf-page-assets";
-import { getPdfPageAssetRecords } from "@/lib/pdf-ocr-postgres";
+import { buildPdfPageAssetPayloads, PdfPageAssetPayloadTooLargeError } from "@/lib/pdf-page-assets-payload";
 
 export const runtime = "nodejs";
 
@@ -44,117 +43,27 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Too many PDF page assets requested." }, { status: 413 });
   }
 
-  const records = await getPdfPageAssetRecords({
-    classId: parsed.data.classId,
-    professorId: parsed.data.professorId,
-    pages: requestedPages
-  });
   const maxTotalBytes = readPositiveInteger(process.env.INTERNAL_PDF_PAGE_ASSET_MAX_TOTAL_BYTES) ?? defaultMaxTotalBytes;
   const maxFullPdfTotalBytes =
     readPositiveInteger(process.env.INTERNAL_FULL_PDF_ASSET_MAX_TOTAL_BYTES) ?? defaultMaxFullPdfTotalBytes;
-  let totalBytes = 0;
-  let fullPdfTotalBytes = 0;
-  const attachedFullPdfMaterials = new Set<string>();
-  const skippedFullPdfMaterials = new Set<string>();
-  const assets: Array<Record<string, unknown>> = [];
 
-  for (const record of records) {
-    const storageBucket = String(record.page_asset_bucket ?? record.page_asset_storage_bucket ?? "");
-    const storagePath = String(record.page_asset_path ?? record.page_asset_storage_path ?? "");
-    const mimeType = String(record.page_asset_mime_type ?? "application/pdf") || "application/pdf";
-    const declaredSize = Number(record.page_asset_size ?? record.page_asset_size_bytes ?? 0);
-    const fullPdfBucket = String(record.full_pdf_bucket ?? "");
-    const fullPdfPath = String(record.full_pdf_path ?? "");
-    const fullPdfMimeType = String(record.full_pdf_mime_type ?? "application/pdf") || "application/pdf";
-    const fullPdfDeclaredSize = Number(record.full_pdf_size ?? 0);
-    const materialId = String(record.material_id ?? "");
-
-    let pageAssetBuffer: Buffer | null = null;
-
-    if (storageBucket && storagePath) {
-      if (declaredSize > 0 && totalBytes + declaredSize > maxTotalBytes) {
-        return NextResponse.json({ error: "PDF page asset payload is too large." }, { status: 413 });
-      }
-
-      pageAssetBuffer = await downloadGcsPdfAssetBuffer({ bucketName: storageBucket, path: storagePath });
-      totalBytes += pageAssetBuffer.length;
-
-      if (totalBytes > maxTotalBytes) {
-        return NextResponse.json({ error: "PDF page asset payload is too large." }, { status: 413 });
-      }
-    }
-
-    let fullPdfBuffer: Buffer | null = null;
-    let fullPdfSkippedReason = "";
-
-    if (
-      materialId &&
-      fullPdfBucket &&
-      fullPdfPath &&
-      !attachedFullPdfMaterials.has(materialId) &&
-      !skippedFullPdfMaterials.has(materialId)
-    ) {
-      if (fullPdfDeclaredSize > 0 && fullPdfTotalBytes + fullPdfDeclaredSize > maxFullPdfTotalBytes) {
-        fullPdfSkippedReason = "full PDF payload would exceed configured byte limit";
-        skippedFullPdfMaterials.add(materialId);
-      } else {
-        fullPdfBuffer = await downloadGcsPdfAssetBuffer({ bucketName: fullPdfBucket, path: fullPdfPath });
-
-        if (fullPdfTotalBytes + fullPdfBuffer.length > maxFullPdfTotalBytes) {
-          fullPdfSkippedReason = "full PDF payload would exceed configured byte limit";
-          fullPdfBuffer = null;
-          skippedFullPdfMaterials.add(materialId);
-        } else {
-          fullPdfTotalBytes += fullPdfBuffer.length;
-          attachedFullPdfMaterials.add(materialId);
-        }
-      }
-    }
-
-    assets.push({
-      classId: record.class_id,
-      docId: materialId,
-      materialId,
-      materialType: record.material_type,
-      mimeType,
-      ocrConfidence: record.ocr_confidence,
-      ocrProvider: record.ocr_provider,
-      ocrSource: record.ocr_source,
-      ocrText: record.ocr_text,
-      fullPdfBucket,
-      fullPdfPath,
-      fullPdfUri: record.full_pdf_uri,
-      fullPdfMimeType,
-      fullPdfSize: fullPdfBuffer?.length ?? record.full_pdf_size,
-      fullPdfSizeBytes: fullPdfBuffer?.length ?? record.full_pdf_size,
-      fullPdfSha256: record.full_pdf_sha256,
-      ...(fullPdfBuffer
-        ? {
-            fullPdfDataUrl: `data:${fullPdfMimeType};base64,${fullPdfBuffer.toString("base64")}`,
-            fullPdfFileName: `${materialId || "source"}.pdf`
-          }
-        : fullPdfSkippedReason
-          ? { fullPdfSkippedReason }
-          : {}),
-      pageAssetBucket: storageBucket,
-      pageAssetPath: storagePath,
-      pageAssetUri: record.page_asset_uri,
-      pageAssetChecksumSha256: record.page_asset_sha256 ?? record.page_asset_checksum_sha256,
-      pageAssetMimeType: mimeType,
-      pageAssetSha256: record.page_asset_sha256 ?? record.page_asset_checksum_sha256,
-      pageAssetSize: pageAssetBuffer?.length ?? declaredSize,
-      pageAssetSizeBytes: pageAssetBuffer?.length ?? declaredSize,
-      pageAssetStorageBucket: storageBucket,
-      pageAssetStoragePath: storagePath,
-      pageEnd: record.page_end,
-      pageNumber: record.page_number,
-      pageStart: record.page_start,
-      title: record.title,
-      ...(pageAssetBuffer ? { dataUrl: `data:${mimeType};base64,${pageAssetBuffer.toString("base64")}` } : {})
+  try {
+    const assets = await buildPdfPageAssetPayloads({
+      classId: parsed.data.classId,
+      maxFullPdfTotalBytes,
+      maxTotalBytes,
+      pages: requestedPages,
+      professorId: parsed.data.professorId
     });
-  }
 
-  return NextResponse.json({ assets });
+    return NextResponse.json({ assets });
+  } catch (caughtError) {
+    if (caughtError instanceof PdfPageAssetPayloadTooLargeError) {
+      return NextResponse.json({ error: caughtError.message }, { status: 413 });
+    }
+
+    throw caughtError;
+  }
 }
 
 function expandRequestedPages(pages: z.infer<typeof pageRequestSchema>[]) {

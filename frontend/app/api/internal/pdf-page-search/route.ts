@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { buildPdfPageAssetPayloads, PdfPageAssetPayloadTooLargeError } from "@/lib/pdf-page-assets-payload";
 import { searchPdfOcrMetadata, searchPdfOcrMetadataVectorOnly } from "@/lib/pdf-ocr-postgres";
 import { VertexEmbeddingError, createVertexEmbedding } from "@/lib/vertex-embeddings";
 
@@ -8,11 +9,16 @@ export const runtime = "nodejs";
 
 const requestSchema = z.object({
   classId: z.string().min(1).max(200),
+  includeAssets: z.boolean().optional(),
   materialId: z.string().min(1).max(200).optional(),
   professorId: z.string().min(1).max(200),
   query: z.string().min(1).max(30000),
   topK: z.number().int().min(1).max(20).optional()
 });
+
+const maxRequestedAssetPages = 12;
+const defaultMaxTotalBytes = 20 * 1024 * 1024;
+const defaultMaxFullPdfTotalBytes = 50 * 1024 * 1024;
 
 export async function POST(request: Request) {
   const authError = authorizeInternalRequest(request);
@@ -50,7 +56,10 @@ export async function POST(request: Request) {
     }
   }
 
-  return NextResponse.json({
+  const responsePayload: {
+    assets?: Array<Record<string, unknown>>;
+    pages: Array<Record<string, unknown>>;
+  } = {
     pages: pages.map((page) => ({
       chunk_text: page.chunkText,
       classId: page.classId,
@@ -91,7 +100,58 @@ export async function POST(request: Request) {
       storagePath: page.storagePath,
       title: page.title
     }))
-  });
+  };
+
+  if (parsed.data.includeAssets && pages.length) {
+    try {
+      const assetPages = assetRequestsFromSearchResults(pages);
+
+      if (assetPages.length) {
+        responsePayload.assets = await buildPdfPageAssetPayloads({
+          classId: parsed.data.classId,
+          maxFullPdfTotalBytes:
+            readPositiveInteger(process.env.INTERNAL_FULL_PDF_ASSET_MAX_TOTAL_BYTES) ?? defaultMaxFullPdfTotalBytes,
+          maxTotalBytes: readPositiveInteger(process.env.INTERNAL_PDF_PAGE_ASSET_MAX_TOTAL_BYTES) ?? defaultMaxTotalBytes,
+          pages: assetPages,
+          professorId: parsed.data.professorId
+        });
+      }
+    } catch (caughtError) {
+      if (!(caughtError instanceof PdfPageAssetPayloadTooLargeError)) {
+        throw caughtError;
+      }
+    }
+  }
+
+  return NextResponse.json(responsePayload);
+}
+
+function assetRequestsFromSearchResults(pages: Awaited<ReturnType<typeof searchPdfOcrMetadata>>) {
+  const requests: Array<{ materialId: string; pageNumber: number }> = [];
+  const seen = new Set<string>();
+
+  for (const page of pages) {
+    const materialId = page.materialId || page.docId;
+
+    if (!materialId) {
+      continue;
+    }
+
+    for (let pageNumber = page.pageStart; pageNumber <= page.pageEnd; pageNumber += 1) {
+      if (requests.length >= maxRequestedAssetPages) {
+        return requests;
+      }
+
+      const key = `${materialId}:${pageNumber}`;
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        requests.push({ materialId, pageNumber });
+      }
+    }
+  }
+
+  return requests;
 }
 
 async function createPdfSearchQueryEmbedding(query: string) {
@@ -126,4 +186,9 @@ function authorizeInternalRequest(request: Request) {
   }
 
   return null;
+}
+
+function readPositiveInteger(value: string | undefined) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }

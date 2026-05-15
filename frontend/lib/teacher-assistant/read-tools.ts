@@ -49,6 +49,7 @@ export async function getReviewQueueTool({ classId }: { classId: string }) {
       conversationNeedsTeacherReview({
         feedbackSummary: conversation.feedbackSummary,
         followUpDueAt: conversation.review.followUpDueAt,
+        learningSignals: conversation.learningSignals,
         status: conversation.reviewStatus
       })
     )

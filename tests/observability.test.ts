@@ -124,34 +124,3 @@ test("scheduled job routes ping Better Stack heartbeats after success", () => {
   assert.match(learningProfileRoute, /BETTER_STACK_LEARNING_PROFILE_HEARTBEAT_URL/);
   assert.match(learningProfileRoute, /pingBetterStackHeartbeat/);
 });
-
-test("Langfuse tracing captures tutor workflows without raw payload fields", () => {
-  const backendSource = readFileSync(join(repoRoot, "backend/langfuse_observability.py"), "utf8");
-  const graphSource = readFileSync(join(repoRoot, "backend/agent/graph.py"), "utf8");
-  const mainSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
-  const nextTracingSource = readFileSync(join(repoRoot, "frontend/lib/langfuse-tracing.ts"), "utf8");
-
-  assert.match(backendSource, /SENSITIVE_KEY_PARTS/);
-  assert.match(backendSource, /summarize_messages_for_langfuse/);
-  assert.match(backendSource, /flush_langfuse/);
-  assert.match(graphSource, /traced_openrouter_chat/);
-  assert.match(graphSource, /prompt_key="primary_tutor_turn"/);
-  assert.match(mainSource, /fastapi\.langgraph-chat/);
-  assert.match(mainSource, /fastapi\.legacy-openrouter-chat/);
-  assert.match(nextTracingSource, /LangfuseSpanProcessor/);
-  assert.match(nextTracingSource, /exportMode: "immediate"/);
-});
-
-test("Langfuse eval runner includes practical score categories", () => {
-  const source = readFileSync(join(repoRoot, "scripts/run-langfuse-evals.mjs"), "utf8");
-  const dataset = readFileSync(join(repoRoot, "evals/chandra-tutor-core.json"), "utf8");
-
-  assert.match(source, /correctness_task_success/);
-  assert.match(source, /groundedness_faithfulness/);
-  assert.match(source, /safety_refusal_behavior/);
-  assert.match(source, /output_format_validity/);
-  assert.match(source, /latency_metadata_present/);
-  assert.match(source, /CHANDRA_EVAL_USE_LLM_JUDGE/);
-  assert.match(dataset, /answer-shopping-no-work/);
-  assert.match(dataset, /grounded-source-answer/);
-});

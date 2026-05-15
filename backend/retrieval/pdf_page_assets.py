@@ -44,6 +44,9 @@ async def fetch_pdf_page_assets_via_next(
     if not metadata_pages:
         return []
 
+    if any(has_prefetched_asset_payload(page) for page in metadata_pages):
+        return metadata_pages
+
     class_id = first_nonempty(metadata_pages, "class_id", "classId")
     professor_id = first_nonempty(metadata_pages, "professor_id", "professorId")
     shared_secret = os.getenv("BACKEND_SHARED_SECRET", "").strip()
@@ -142,6 +145,9 @@ def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
         "full_pdf_mime_type": str(page.get("full_pdf_mime_type") or page.get("fullPdfMimeType") or "application/pdf"),
         "full_pdf_size_bytes": page.get("full_pdf_size") if page.get("full_pdf_size") is not None else page.get("fullPdfSize") if page.get("fullPdfSize") is not None else page.get("full_pdf_size_bytes") if page.get("full_pdf_size_bytes") is not None else page.get("fullPdfSizeBytes"),
         "full_pdf_sha256": str(page.get("full_pdf_sha256") or page.get("fullPdfSha256") or ""),
+        "full_pdf_data_url": page.get("full_pdf_data_url") or page.get("fullPdfDataUrl"),
+        "full_pdf_file_name": page.get("full_pdf_file_name") or page.get("fullPdfFileName"),
+        "full_pdf_skipped_reason": str(page.get("full_pdf_skipped_reason") or page.get("fullPdfSkippedReason") or ""),
         "page_asset_bucket": str(page.get("page_asset_bucket") or page.get("pageAssetBucket") or page.get("page_asset_storage_bucket") or page.get("pageAssetStorageBucket") or ""),
         "page_asset_path": str(page.get("page_asset_path") or page.get("pageAssetPath") or page.get("page_asset_storage_path") or page.get("pageAssetStoragePath") or ""),
         "page_asset_uri": str(page.get("page_asset_uri") or page.get("pageAssetUri") or ""),
@@ -150,6 +156,10 @@ def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
         "page_asset_size_bytes": page.get("page_asset_size") if page.get("page_asset_size") is not None else page.get("pageAssetSize") if page.get("pageAssetSize") is not None else page.get("page_asset_size_bytes") if page.get("page_asset_size_bytes") is not None else page.get("pageAssetSizeBytes"),
         "page_asset_storage_bucket": str(page.get("page_asset_storage_bucket") or page.get("pageAssetStorageBucket") or page.get("page_asset_bucket") or page.get("pageAssetBucket") or ""),
         "page_asset_storage_path": str(page.get("page_asset_storage_path") or page.get("pageAssetStoragePath") or page.get("page_asset_path") or page.get("pageAssetPath") or ""),
+        "file_data_url": page.get("file_data_url") or page.get("fileDataUrl"),
+        "file_name": page.get("file_name") or page.get("fileName"),
+        "image_url": page.get("image_url") or page.get("imageUrl"),
+        "images": page.get("images") if isinstance(page.get("images"), list) else [],
         "printed_page_end": printed_page_end,
         "printed_page_start": printed_page_start,
         "professor_id": str(page.get("professor_id") or page.get("professorId") or ""),
@@ -161,6 +171,18 @@ def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
         "storage_path": str(page.get("storage_path") or page.get("storagePath") or ""),
         "title": title,
     }
+
+
+def has_prefetched_asset_payload(page: dict[str, Any]) -> bool:
+    image_url = page.get("image_url") or page.get("imageUrl")
+    return bool(
+        page.get("file_data_url")
+        or page.get("fileDataUrl")
+        or page.get("full_pdf_data_url")
+        or page.get("fullPdfDataUrl")
+        or (isinstance(image_url, dict) and image_url.get("url"))
+        or page.get("images")
+    )
 
 
 def merge_page_asset_payload(page: dict[str, Any], asset: dict[str, Any] | None) -> dict[str, Any]:
