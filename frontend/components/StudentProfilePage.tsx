@@ -77,8 +77,8 @@ export function StudentProfilePage({
   const stats = useMemo(() => buildStudentProfileStats(activity), [activity]);
   const displayName = student?.displayName || activity?.displayName || decodedStudentId || "Student";
   const email = student?.email || activity?.studentEmail || decodedStudentId;
-  const rosterHref = { pathname: "/teacher", query: { classId, student: email, tab: "roster" } };
-  const conversationsHref = { pathname: "/teacher", query: { classId, student: email, tab: "conversations" } };
+  const rosterHref = { pathname: "/teacher/roster", query: { classId, student: email } };
+  const conversationsHref = { pathname: "/teacher/conversations", query: { classId, student: email } };
 
   useEffect(() => {
     if (!classId) {

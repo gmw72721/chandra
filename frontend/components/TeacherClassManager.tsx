@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import type { Route } from "next";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   FormEvent,
   memo,
@@ -200,6 +201,8 @@ const materialUploadExactSteps: Array<{
 ];
 
 type TeacherTab = "overview" | "roster" | "problems" | "sources" | "settings" | "knowledge" | "conversations";
+const teacherTabs: TeacherTab[] = ["overview", "roster", "problems", "sources", "settings", "knowledge", "conversations"];
+const teacherTabsWithSecondarySidebar = new Set<TeacherTab>(["sources", "knowledge", "conversations", "settings"]);
 type SettingsPane =
   | "general"
   | "classAccess"
@@ -322,11 +325,33 @@ type MaterialDetail = {
 };
 
 type TeacherPrimaryNavItem = {
-  href?: string;
+  href?: Route;
   icon: ReactNode;
   id: TeacherTab | "studentView";
   label: string;
 };
+
+function isTeacherTab(value: string | null | undefined): value is TeacherTab {
+  return Boolean(value && teacherTabs.includes(value as TeacherTab));
+}
+
+function teacherTabFromPathname(pathname: string): TeacherTab | null {
+  const segment = pathname.split("/").filter(Boolean)[1];
+  return isTeacherTab(segment) ? segment : null;
+}
+
+function buildTeacherTabHref(tab: TeacherTab, query: Record<string, string | undefined> = {}): Route {
+  const params = new URLSearchParams();
+
+  Object.entries(query).forEach(([key, value]) => {
+    if (value) {
+      params.set(key, value);
+    }
+  });
+
+  const queryString = params.toString();
+  return `/teacher/${tab}${queryString ? `?${queryString}` : ""}` as Route;
+}
 
 const settingsPanes: Array<{
   description: string;
@@ -652,6 +677,7 @@ export function TeacherClassManager({
   };
 } = {}) {
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const { profile, user } = useAuth();
   const [classes, setClasses] = useState<TeacherClass[]>([]);
@@ -834,7 +860,7 @@ export function TeacherClassManager({
 
   useEffect(() => {
     const classId = searchParams.get("classId")?.trim();
-    const tab = searchParams.get("tab");
+    const tab = teacherTabFromPathname(pathname) ?? searchParams.get("tab");
     const student = searchParams.get("student")?.trim();
 
     const syncQueryStateTimer = window.setTimeout(() => {
@@ -842,17 +868,9 @@ export function TeacherClassManager({
         setSelectedClassId(classId);
       }
 
-      if (
-        tab === "overview" ||
-        tab === "roster" ||
-        tab === "problems" ||
-        tab === "sources" ||
-        tab === "settings" ||
-        tab === "knowledge" ||
-        tab === "conversations"
-      ) {
+      if (isTeacherTab(tab)) {
         setActiveTab(tab);
-        setIsSecondarySidebarOpen(tab === "settings" || tab === "sources" || tab === "knowledge" || tab === "conversations");
+        setIsSecondarySidebarOpen(teacherTabsWithSecondarySidebar.has(tab));
       }
 
       if (student) {
@@ -866,7 +884,7 @@ export function TeacherClassManager({
     }, 0);
 
     return () => window.clearTimeout(syncQueryStateTimer);
-  }, [activeClassId, searchParams]);
+  }, [activeClassId, pathname, searchParams]);
 
   useEffect(() => {
     if (!studentProfileRoute) {
@@ -1250,6 +1268,7 @@ export function TeacherClassManager({
   const overviewActiveSourceCount =
     overviewKnowledgeStats.find((stat) => stat.label === "Active for students")?.value ?? overviewReadySourceCount;
   const activeSourceLabel = `${overviewActiveSourceCount} active ${overviewActiveSourceCount === 1 ? "source" : "sources"}`;
+  const activeClassQuery: Record<string, string | undefined> = activeClassId ? { classId: activeClassId } : {};
 
   useEffect(() => {
     if (!selectedClass || selectedClass.joinCode) {
@@ -3512,6 +3531,14 @@ export function TeacherClassManager({
     );
   }
 
+  function navigateTeacherTab(tab: TeacherTab) {
+    setActiveTab(tab);
+    setIsSecondarySidebarOpen(teacherTabsWithSecondarySidebar.has(tab));
+    setIsSidebarDrawerOpen(false);
+    setIsClassSwitcherOpen(false);
+    router.push(buildTeacherTabHref(tab, activeClassQuery));
+  }
+
   function openOverviewRoster(studentName?: string, studentId?: string, studentEmail?: string) {
     const row = studentName || studentId || studentEmail ? findOverviewRosterRow(studentName, studentId, studentEmail) : null;
 
@@ -3523,7 +3550,7 @@ export function TeacherClassManager({
     }
 
     setIsProfessorReviewOpen(false);
-    setActiveTab("roster");
+    navigateTeacherTab("roster");
   }
 
   function openOverviewStudentChats(studentName?: string, studentId?: string, studentEmail?: string) {
@@ -3541,7 +3568,7 @@ export function TeacherClassManager({
     }
 
     setIsProfessorReviewOpen(false);
-    setActiveTab("conversations");
+    navigateTeacherTab("conversations");
   }
 
   function openOverviewConversation(title?: string, studentName?: string, conversationId?: string) {
@@ -3565,7 +3592,7 @@ export function TeacherClassManager({
     }
 
     setIsProfessorReviewOpen(false);
-    setActiveTab("conversations");
+    navigateTeacherTab("conversations");
   }
 
   function openProblemConversation(conversationId?: string, studentId?: string) {
@@ -3587,7 +3614,7 @@ export function TeacherClassManager({
     }
 
     setIsProfessorReviewOpen(false);
-    setActiveTab("conversations");
+    navigateTeacherTab("conversations");
   }
 
   function handleOverviewNextAction(action: NonNullable<TeacherClassOverview["nextActions"]>[number]) {
@@ -3602,7 +3629,7 @@ export function TeacherClassManager({
     }
 
     if (action.action === "openKnowledge") {
-      setActiveTab("sources");
+      navigateTeacherTab("sources");
       return;
     }
 
@@ -3622,7 +3649,7 @@ export function TeacherClassManager({
     }
 
     if (action.action === "testRetrieval") {
-      setActiveTab("sources");
+      navigateTeacherTab("sources");
       return;
     }
 
@@ -3666,19 +3693,19 @@ export function TeacherClassManager({
   }
 
   const teacherPrimaryNavItems: TeacherPrimaryNavItem[] = [
-    { icon: <HomeIcon />, id: "overview", label: "Overview" },
-    { icon: <UserGroupIcon />, id: "roster", label: "Students" },
-    { icon: <LightbulbIcon />, id: "problems", label: "Problems" },
-    { icon: <ChatIcon />, id: "conversations", label: "Conversations" },
-    { icon: <DocumentIcon />, id: "sources", label: "Sources" },
-    { icon: <BookOpenIcon />, id: "knowledge", label: "AI Tutor" },
+    { href: buildTeacherTabHref("overview", activeClassQuery), icon: <HomeIcon />, id: "overview", label: "Overview" },
+    { href: buildTeacherTabHref("roster", activeClassQuery), icon: <UserGroupIcon />, id: "roster", label: "Students" },
+    { href: buildTeacherTabHref("problems", activeClassQuery), icon: <LightbulbIcon />, id: "problems", label: "Problems" },
+    { href: buildTeacherTabHref("conversations", activeClassQuery), icon: <ChatIcon />, id: "conversations", label: "Conversations" },
+    { href: buildTeacherTabHref("sources", activeClassQuery), icon: <DocumentIcon />, id: "sources", label: "Sources" },
+    { href: buildTeacherTabHref("knowledge", activeClassQuery), icon: <BookOpenIcon />, id: "knowledge", label: "AI Tutor" },
     {
-      href: selectedClass ? `/teacher/student-view?classId=${selectedClass.id}` : "/teacher",
+      href: (selectedClass ? `/teacher/student-view?classId=${selectedClass.id}` : "/teacher") as Route,
       icon: <GraduationCapIcon />,
       id: "studentView",
       label: "Student View"
     },
-    { icon: <SettingsIcon />, id: "settings", label: "Settings" }
+    { href: buildTeacherTabHref("settings", activeClassQuery), icon: <SettingsIcon />, id: "settings", label: "Settings" }
   ];
   const conversationSecondaryItems: Array<{
     count?: number;
@@ -3720,7 +3747,10 @@ export function TeacherClassManager({
               label: "Back to students",
               onClick: () => {
                 router.push(
-                  `/teacher?classId=${encodeURIComponent(studentProfileRoute.classId)}&tab=roster&student=${encodeURIComponent(studentProfileEmail)}`
+                  buildTeacherTabHref("roster", {
+                    classId: studentProfileRoute.classId,
+                    student: studentProfileEmail
+                  })
                 );
               }
             },
@@ -3736,7 +3766,10 @@ export function TeacherClassManager({
               label: "Conversations",
               onClick: () => {
                 router.push(
-                  `/teacher?classId=${encodeURIComponent(studentProfileRoute.classId)}&tab=conversations&student=${encodeURIComponent(studentProfileEmail)}`
+                  buildTeacherTabHref("conversations", {
+                    classId: studentProfileRoute.classId,
+                    student: studentProfileEmail
+                  })
                 );
               }
             }
@@ -3763,8 +3796,7 @@ export function TeacherClassManager({
             active: item.id !== "students" && conversationFilter === item.id,
             onClick: () => {
               if (item.id === "students") {
-                setActiveTab("roster");
-                setIsSecondarySidebarOpen(false);
+                navigateTeacherTab("roster");
                 return;
               }
               setConversationFilter(item.id as ConversationFilter);
@@ -3785,11 +3817,11 @@ export function TeacherClassManager({
   const nextAppearance = selectedAppearance === "dark" ? "light" : "dark";
   const handlePrimaryNavigate = (tab: TeacherTab) => {
     if (studentProfileRoute) {
-      router.push(`/teacher?classId=${encodeURIComponent(studentProfileRoute.classId)}&tab=${tab}`);
+      router.push(buildTeacherTabHref(tab, { classId: studentProfileRoute.classId }));
       return;
     }
 
-    const tabSupportsSecondary = tab === "sources" || tab === "knowledge" || tab === "conversations" || tab === "settings";
+    const tabSupportsSecondary = teacherTabsWithSecondarySidebar.has(tab);
     const shouldToggleSecondary = tabSupportsSecondary && activeTab === tab;
 
     setActiveTab(tab);
@@ -3965,7 +3997,10 @@ export function TeacherClassManager({
             onClose={() => {
               if (studentProfileRoute) {
                 router.push(
-                  `/teacher?classId=${encodeURIComponent(studentProfileRoute.classId)}&tab=roster&student=${encodeURIComponent(studentProfileEmail)}`
+                  buildTeacherTabHref("roster", {
+                    classId: studentProfileRoute.classId,
+                    student: studentProfileEmail
+                  })
                 );
                 return;
               }
@@ -4066,7 +4101,7 @@ export function TeacherClassManager({
                     onOpenPriorityStudent={(row) => openOverviewRoster(row.studentName, row.studentId, row.studentEmail)}
                     onReviewConversation={(row) => openOverviewConversation(row.title, row.studentName, row.id)}
                     onReviewProfiles={() => {
-                      setActiveTab("roster");
+                      navigateTeacherTab("roster");
                       setIsRosterDetailOpen(true);
                       setRosterDetailFocus("activity");
                     }}
@@ -4198,7 +4233,7 @@ export function TeacherClassManager({
                               </div>
                             ) : null}
                           </div>
-                          <button className="overview-link-action" type="button" onClick={() => setActiveTab("conversations")}>
+                          <button className="overview-link-action" type="button" onClick={() => navigateTeacherTab("conversations")}>
                             View full activity log
                             <ChevronRightIcon />
                           </button>
@@ -6487,7 +6522,7 @@ export function TeacherClassManager({
                                 }
                                 setSelectedStudentId(selectedConversationReviewRow.studentId);
                                 setSelectedStudentClassId(activeClassId);
-                                setActiveTab("roster");
+                                navigateTeacherTab("roster");
                               }}
                             >
                               Open student profile
@@ -6909,7 +6944,7 @@ export function TeacherClassManager({
                                 }
                                 setSelectedStudentId(selectedConversationReviewRow.studentId);
                                 setSelectedStudentClassId(activeClassId);
-                                setActiveTab("roster");
+                                navigateTeacherTab("roster");
                               }}
                             >
                               Learning profile
@@ -8261,7 +8296,7 @@ function PrimaryIconRail({
             key={item.id}
             label={item.label}
             onClick={() => {
-              if (!item.href) {
+              if (item.id !== "studentView") {
                 onNavigate(item.id as TeacherTab);
               }
             }}
@@ -8358,17 +8393,20 @@ function SidebarDrawer({
             {navItems.map((item) => (
               <SidebarNavItem
                 active={activeTab === item.id}
-                href={item.href}
-                icon={item.icon}
-                key={item.id}
-                label={item.label}
-                onClick={() => {
-                  if (item.href) {
-                    onClose();
-                    return;
+              href={item.href}
+              icon={item.icon}
+              key={item.id}
+              label={item.label}
+              onClick={() => {
+                if (item.href) {
+                  if (item.id !== "studentView") {
+                    onNavigate(item.id as TeacherTab);
                   }
-                  onNavigate(item.id as TeacherTab);
-                }}
+                  onClose();
+                  return;
+                }
+                onNavigate(item.id as TeacherTab);
+              }}
               />
             ))}
           </nav>
@@ -8482,6 +8520,9 @@ function PersistentPrimarySidebar({
               label={item.label}
               onClick={() => {
                 if (item.href) {
+                  if (item.id !== "studentView") {
+                    onNavigate(item.id as TeacherTab);
+                  }
                   return;
                 }
                 onNavigate(item.id as TeacherTab);
@@ -8615,7 +8656,7 @@ function SidebarNavItem({
 }: {
   active?: boolean;
   compact?: boolean;
-  href?: string;
+  href?: Route;
   icon: ReactNode;
   label: string;
   onClick: () => void;
@@ -8632,9 +8673,9 @@ function SidebarNavItem({
 
   if (href) {
     return (
-      <a className={className} href={href} title={label} onClick={onClick}>
+      <Link aria-current={active ? "page" : undefined} className={className} href={href} title={label} onClick={onClick}>
         {content}
-      </a>
+      </Link>
     );
   }
 
