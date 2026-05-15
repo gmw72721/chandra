@@ -9,7 +9,7 @@ export function LandingActions() {
   if (!firebaseReady) {
     return (
       <div className="button-row">
-        <Link className="primary-button" href="/auth">
+        <Link className="primary-button" href="/auth?mode=signup">
           Create Account
         </Link>
       </div>
@@ -23,7 +23,7 @@ export function LandingActions() {
   if (!user) {
     return (
       <div className="button-row">
-        <Link className="primary-button" href="/auth">
+        <Link className="primary-button" href="/auth?mode=signup">
           Create Account
         </Link>
       </div>
@@ -52,7 +52,7 @@ export function LandingActions() {
 
   return (
     <div className="button-row">
-      <Link className="primary-button" href="/auth">
+      <Link className="primary-button" href="/auth?mode=signup">
         Create Account
       </Link>
     </div>

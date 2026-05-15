@@ -95,6 +95,11 @@ import {
   supportedTutorKnowledgeExtensions,
   type TutorKnowledgeKind
 } from "@/lib/tutor-knowledge";
+import {
+  isTeacherAssistantAiTutorSection,
+  isTeacherAssistantSettingsPane,
+  isTeacherAssistantSourceSection
+} from "@/lib/teacher-assistant/routes";
 import type {
   ChatMessage,
   ConversationReviewStatus,
@@ -112,6 +117,7 @@ import type {
 } from "@/lib/types";
 import { useAuth } from "./AuthProvider";
 import { TeacherAnalyticsDashboardContent } from "./TeacherAnalyticsDashboard";
+import { TeacherAssistantWidget } from "./TeacherAssistantWidget";
 import { formatLearningProfileUpdateResult, StudentLearningProfileCard } from "./StudentLearningProfileCard";
 import { StudentProfilePage } from "./StudentProfilePage";
 
@@ -330,6 +336,35 @@ type TeacherPrimaryNavItem = {
   id: TeacherTab | "studentView";
   label: string;
 };
+type TeacherSecondarySubtab = SourceSection | AiTutorSection | SettingsPane | ConversationFilter;
+
+const sourceSectionSlugs: Record<SourceSection, string> = {
+  sources: "sources",
+  sourceSettings: "source-settings"
+};
+const aiTutorSectionSlugs: Record<AiTutorSection, string> = {
+  access: "access",
+  classInstructions: "class-instructions",
+  helpRules: "help-rules",
+  model: "advanced",
+  tutorMode: "tutor-mode",
+  voiceDetail: "voice-detail"
+};
+const settingsPaneSlugs: Record<SettingsPane, string> = {
+  account: "account",
+  appearance: "appearance",
+  classAccess: "class-access",
+  general: "general",
+  notifications: "notifications",
+  privacy: "privacy",
+  usage: "usage"
+};
+const conversationFilterSlugs: Partial<Record<ConversationFilter, string>> = {
+  all: "needs-review",
+  feedback: "feedback",
+  needsFollowUp: "follow-ups",
+  reviewed: "reviewed"
+};
 
 function isTeacherTab(value: string | null | undefined): value is TeacherTab {
   return Boolean(value && teacherTabs.includes(value as TeacherTab));
@@ -351,6 +386,67 @@ function buildTeacherTabHref(tab: TeacherTab, query: Record<string, string | und
 
   const queryString = params.toString();
   return `/teacher/${tab}${queryString ? `?${queryString}` : ""}` as Route;
+}
+
+function buildTeacherSubtabHref(tab: TeacherTab, subtab: TeacherSecondarySubtab, query: Record<string, string | undefined> = {}): Route {
+  const slug = teacherSubtabSlug(tab, subtab);
+  return slug ? (`${buildTeacherTabHref(tab, query).split("?")[0]}/${slug}${buildQueryString(query)}` as Route) : buildTeacherTabHref(tab, query);
+}
+
+function buildQueryString(query: Record<string, string | undefined>) {
+  const params = new URLSearchParams();
+
+  Object.entries(query).forEach(([key, value]) => {
+    if (value) {
+      params.set(key, value);
+    }
+  });
+
+  const queryString = params.toString();
+  return queryString ? `?${queryString}` : "";
+}
+
+function teacherSubtabSlug(tab: TeacherTab, subtab: TeacherSecondarySubtab) {
+  if (tab === "sources") {
+    return sourceSectionSlugs[subtab as SourceSection];
+  }
+  if (tab === "knowledge") {
+    return aiTutorSectionSlugs[subtab as AiTutorSection];
+  }
+  if (tab === "settings") {
+    return settingsPaneSlugs[subtab as SettingsPane];
+  }
+  if (tab === "conversations") {
+    return conversationFilterSlugs[subtab as ConversationFilter];
+  }
+  return undefined;
+}
+
+function teacherSubtabFromPathname(pathname: string, tab: TeacherTab): TeacherSecondarySubtab | null {
+  const slug = pathname.split("/").filter(Boolean)[2];
+
+  if (!slug) {
+    return null;
+  }
+
+  if (tab === "sources") {
+    return findSlugId(sourceSectionSlugs, slug);
+  }
+  if (tab === "knowledge") {
+    return findSlugId(aiTutorSectionSlugs, slug);
+  }
+  if (tab === "settings") {
+    return findSlugId(settingsPaneSlugs, slug);
+  }
+  if (tab === "conversations") {
+    return findSlugId(conversationFilterSlugs, slug);
+  }
+
+  return null;
+}
+
+function findSlugId<T extends string>(slugs: Partial<Record<T, string>>, slug: string): T | null {
+  return (Object.entries(slugs).find(([, value]) => value === slug)?.[0] as T | undefined) ?? null;
 }
 
 const settingsPanes: Array<{
@@ -860,8 +956,14 @@ export function TeacherClassManager({
 
   useEffect(() => {
     const classId = searchParams.get("classId")?.trim();
-    const tab = teacherTabFromPathname(pathname) ?? searchParams.get("tab");
+    const pathTab = teacherTabFromPathname(pathname);
+    const tab = pathTab ?? searchParams.get("tab");
+    const subtab = pathTab ? teacherSubtabFromPathname(pathname, pathTab) : null;
     const student = searchParams.get("student")?.trim();
+    const conversationId = searchParams.get("conversationId")?.trim();
+    const settingsPane = searchParams.get("settingsPane")?.trim();
+    const sourceSection = searchParams.get("sourceSection")?.trim();
+    const aiTutorSection = searchParams.get("aiTutorSection")?.trim();
 
     const syncQueryStateTimer = window.setTimeout(() => {
       if (classId) {
@@ -871,6 +973,10 @@ export function TeacherClassManager({
       if (isTeacherTab(tab)) {
         setActiveTab(tab);
         setIsSecondarySidebarOpen(teacherTabsWithSecondarySidebar.has(tab));
+
+        if (subtab) {
+          applyTeacherSubtab(tab, subtab);
+        }
       }
 
       if (student) {
@@ -880,6 +986,23 @@ export function TeacherClassManager({
         setIsRosterDetailOpen(true);
         setRosterDetailFocus("activity");
         setConversationStudentFilter(decodedStudent.includes("@") ? decodedStudent.toLowerCase() : decodedStudent);
+      }
+
+      if (conversationId) {
+        setSelectedConversationId(conversationId);
+        setSelectedConversationClassId(classId || activeClassId);
+      }
+
+      if (isTeacherAssistantSettingsPane(settingsPane)) {
+        setActiveSettingsPane(settingsPane as SettingsPane);
+      }
+
+      if (isTeacherAssistantSourceSection(sourceSection)) {
+        setActiveSourceSection(sourceSection as SourceSection);
+      }
+
+      if (isTeacherAssistantAiTutorSection(aiTutorSection)) {
+        setActiveAiTutorSection(aiTutorSection as AiTutorSection);
       }
     }, 0);
 
@@ -1269,6 +1392,27 @@ export function TeacherClassManager({
     overviewKnowledgeStats.find((stat) => stat.label === "Active for students")?.value ?? overviewReadySourceCount;
   const activeSourceLabel = `${overviewActiveSourceCount} active ${overviewActiveSourceCount === 1 ? "source" : "sources"}`;
   const activeClassQuery: Record<string, string | undefined> = activeClassId ? { classId: activeClassId } : {};
+
+  function applyTeacherSubtab(tab: TeacherTab, subtab: TeacherSecondarySubtab) {
+    if (tab === "sources" && subtab in sourceSectionSlugs) {
+      setActiveSourceSection(subtab as SourceSection);
+      return;
+    }
+
+    if (tab === "knowledge" && subtab in aiTutorSectionSlugs) {
+      setActiveAiTutorSection(subtab as AiTutorSection);
+      return;
+    }
+
+    if (tab === "settings" && subtab in settingsPaneSlugs) {
+      setActiveSettingsPane(subtab as SettingsPane);
+      return;
+    }
+
+    if (tab === "conversations" && subtab in conversationFilterSlugs) {
+      setConversationFilter(subtab as ConversationFilter);
+    }
+  }
 
   useEffect(() => {
     if (!selectedClass || selectedClass.joinCode) {
@@ -2375,7 +2519,7 @@ export function TeacherClassManager({
 
   async function handleSignOut() {
     await signOutCurrentUser();
-    router.push("/auth");
+    router.push("/auth?mode=signin");
   }
 
   async function handleSignOutAllSessions() {
@@ -2385,7 +2529,7 @@ export function TeacherClassManager({
 
     try {
       await signOutAllSessions();
-      router.push("/auth");
+      router.push("/auth?mode=signin");
     } catch (caughtError) {
       setError(formatClassError(caughtError, "Session sign-out failed."));
       setIsSigningOutAllSessions(false);
@@ -2413,7 +2557,7 @@ export function TeacherClassManager({
         currentPassword: currentAccountPassword,
         uid: user.uid
       });
-      router.push("/auth");
+      router.push("/auth?mode=signin");
     } catch (caughtError) {
       setError(formatClassError(caughtError, "Account deletion failed."));
     } finally {
@@ -3539,6 +3683,15 @@ export function TeacherClassManager({
     router.push(buildTeacherTabHref(tab, activeClassQuery));
   }
 
+  function navigateTeacherSubtab(tab: TeacherTab, subtab: TeacherSecondarySubtab) {
+    setActiveTab(tab);
+    applyTeacherSubtab(tab, subtab);
+    setIsSecondarySidebarOpen(true);
+    setIsSidebarDrawerOpen(false);
+    setIsClassSwitcherOpen(false);
+    router.push(buildTeacherSubtabHref(tab, subtab, activeClassQuery));
+  }
+
   function openOverviewRoster(studentName?: string, studentId?: string, studentEmail?: string) {
     const row = studentName || studentId || studentEmail ? findOverviewRosterRow(studentName, studentId, studentEmail) : null;
 
@@ -3722,18 +3875,21 @@ export function TeacherClassManager({
   const aiTutorSecondaryItems = aiTutorSections.map((section) => ({
     ...section,
     active: activeAiTutorSection === section.id,
-    onClick: () => setActiveAiTutorSection(section.id)
+    href: buildTeacherSubtabHref("knowledge", section.id, activeClassQuery),
+    onClick: () => navigateTeacherSubtab("knowledge", section.id)
   }));
   const sourceSecondaryItems = sourceSections.map((section) => ({
     ...section,
     active: activeSourceSection === section.id,
-    onClick: () => setActiveSourceSection(section.id)
+    href: buildTeacherSubtabHref("sources", section.id, activeClassQuery),
+    onClick: () => navigateTeacherSubtab("sources", section.id)
   }));
   const settingsSecondaryItems = settingsPanes.map((settingsPane) => ({
+    href: buildTeacherSubtabHref("settings", settingsPane.id, activeClassQuery),
     icon: settingsPane.icon,
     label: settingsPane.label,
     active: activeSettingsPane === settingsPane.id,
-    onClick: () => setActiveSettingsPane(settingsPane.id)
+    onClick: () => navigateTeacherSubtab("settings", settingsPane.id)
   }));
   const isStudentProfileRoute = Boolean(studentProfileRoute);
   const secondarySidebarContent =
@@ -3794,12 +3950,16 @@ export function TeacherClassManager({
           items: conversationSecondaryItems.map((item) => ({
             ...item,
             active: item.id !== "students" && conversationFilter === item.id,
+            href:
+              item.id !== "students"
+                ? buildTeacherSubtabHref("conversations", item.id as ConversationFilter, activeClassQuery)
+                : buildTeacherTabHref("roster", activeClassQuery),
             onClick: () => {
               if (item.id === "students") {
                 navigateTeacherTab("roster");
                 return;
               }
-              setConversationFilter(item.id as ConversationFilter);
+              navigateTeacherSubtab("conversations", item.id as ConversationFilter);
             }
           })),
           title: "Conversations"
@@ -7583,6 +7743,10 @@ export function TeacherClassManager({
           </section>
         </div>
       ) : null}
+
+      {selectedClass ? (
+        <TeacherAssistantWidget classId={activeClassId} className={selectedClass.name} />
+      ) : null}
     </>
   );
 }
@@ -8702,6 +8866,7 @@ function TeacherSecondarySidebar({
   items: Array<{
     active?: boolean;
     count?: number;
+    href?: Route;
     icon: ReactNode;
     label: string;
     onClick: () => void;
@@ -8722,20 +8887,50 @@ function TeacherSecondarySidebar({
       </div>
       <nav className="secondary-nav" aria-label={`${title} sections`}>
         {items.map((item) => (
-          <button
-            aria-current={item.active ? "page" : undefined}
-            className="secondary-nav-row"
-            key={item.label}
-            type="button"
-            onClick={item.onClick}
-          >
-            <span aria-hidden="true">{item.icon}</span>
-            <span>{item.label}</span>
-            {typeof item.count === "number" ? <em>{item.count}</em> : null}
-          </button>
+          <SecondaryNavRow item={item} key={item.label} />
         ))}
       </nav>
     </aside>
+  );
+}
+
+function SecondaryNavRow({
+  item
+}: {
+  item: {
+    active?: boolean;
+    count?: number;
+    href?: Route;
+    icon: ReactNode;
+    label: string;
+    onClick: () => void;
+  };
+}) {
+  const content = (
+    <>
+      <span aria-hidden="true">{item.icon}</span>
+      <span>{item.label}</span>
+      {typeof item.count === "number" ? <em>{item.count}</em> : null}
+    </>
+  );
+
+  if (item.href) {
+    return (
+      <Link aria-current={item.active ? "page" : undefined} className="secondary-nav-row" href={item.href} onClick={item.onClick}>
+        {content}
+      </Link>
+    );
+  }
+
+  return (
+    <button
+      aria-current={item.active ? "page" : undefined}
+      className="secondary-nav-row"
+      type="button"
+      onClick={item.onClick}
+    >
+      {content}
+    </button>
   );
 }
 
@@ -10392,6 +10587,7 @@ async function copyTextToClipboard(text: string) {
 
 function buildClassInviteUrl(classCode: string) {
   const inviteUrl = new URL("/auth", window.location.origin);
+  inviteUrl.searchParams.set("mode", "signup");
   inviteUrl.searchParams.set("role", "student");
   inviteUrl.searchParams.set("classId", classCode);
 

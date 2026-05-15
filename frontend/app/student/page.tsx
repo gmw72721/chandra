@@ -1574,12 +1574,12 @@ export function StudentWorkspace() {
 
   async function handleSignOut() {
     await signOutCurrentUser();
-    router.push("/auth");
+    router.push("/auth?mode=signin");
   }
 
   async function handleSignOutAllSessions() {
     await signOutAllSessions();
-    router.push("/auth");
+    router.push("/auth?mode=signin");
   }
 
   async function handleDeleteAccount() {
@@ -1595,7 +1595,7 @@ export function StudentWorkspace() {
         currentPassword: deleteAccountPassword,
         uid: user.uid
       });
-      router.push("/auth");
+      router.push("/auth?mode=signin");
     } catch (caughtError) {
       setAccountSettingsError(caughtError instanceof Error ? caughtError.message : "Account deletion failed.");
     } finally {

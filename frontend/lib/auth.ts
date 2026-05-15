@@ -1,13 +1,20 @@
 "use client";
 
 import {
+  AuthCredential,
   EmailAuthProvider,
+  GoogleAuthProvider,
   User,
   createUserWithEmailAndPassword,
+  isSignInWithEmailLink,
+  linkWithCredential,
   onAuthStateChanged,
   reauthenticateWithCredential,
+  sendSignInLinkToEmail,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
+  signInWithEmailLink,
+  signInWithPopup,
   signOut,
   updateEmail,
   updatePassword,
@@ -31,6 +38,7 @@ import {
 import { auth, db, isFirebaseConfigured } from "./firebase";
 
 export type AccountRole = "student" | "teacher";
+export type AuthProviderKey = "google";
 
 export type UserProfile = {
   uid: string;
@@ -45,7 +53,49 @@ export type UserProfile = {
   createdAt?: unknown;
 };
 
+export type PendingProviderCredential = {
+  credential: AuthCredential;
+  email: string;
+  provider: AuthProviderKey;
+  providerLabel: string;
+};
+
+export class ProviderAccountLinkingRequiredError extends Error {
+  pendingCredential: PendingProviderCredential;
+
+  constructor(pendingCredential: PendingProviderCredential) {
+    super(
+      `An email/password account already exists for ${pendingCredential.email}. Enter that account password to link ${pendingCredential.providerLabel}.`
+    );
+    this.name = "ProviderAccountLinkingRequiredError";
+    this.pendingCredential = pendingCredential;
+  }
+}
+
 const presenceHeartbeatMs = 30000;
+const magicLinkEmailStorageKey = "chandra.pendingMagicLinkEmail";
+
+const providerDefinitions = {
+  google: {
+    label: "Google",
+    createProvider: () => {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      return provider;
+    },
+    credentialFromError: (error: unknown) =>
+      GoogleAuthProvider.credentialFromError(
+        error as Parameters<typeof GoogleAuthProvider.credentialFromError>[0]
+      )
+  }
+} satisfies Record<
+  AuthProviderKey,
+  {
+    credentialFromError: (error: unknown) => AuthCredential | null;
+    createProvider: () => GoogleAuthProvider;
+    label: string;
+  }
+>;
 
 export function subscribeToAuth(callback: (user: User | null) => void, onError?: (error: Error) => void) {
   if (!auth) {
@@ -235,6 +285,137 @@ export async function signInWithEmail(emailOrUsername: string, password: string)
   } catch {
     throw new Error("Invalid username/email or password.");
   }
+}
+
+export async function signInWithProviderAuth(provider: AuthProviderKey) {
+  assertFirebaseReady();
+  const definition = providerDefinitions[provider];
+
+  try {
+    const credential = await signInWithPopup(auth!, definition.createProvider());
+    await assertUserHasProviderEmail(credential.user, definition.label);
+    return credential;
+  } catch (caughtError) {
+    if (getAuthErrorCode(caughtError) !== "auth/account-exists-with-different-credential") {
+      throw normalizeProviderAuthError(caughtError, definition.label);
+    }
+
+    const pendingCredential = definition.credentialFromError(caughtError);
+    const email = getAuthErrorEmail(caughtError);
+
+    if (!pendingCredential) {
+      throw new Error(
+        `${definition.label} sign-in found an existing account, but Firebase did not return the provider credential needed to link it. Try again.`
+      );
+    }
+
+    if (!email) {
+      throw new Error(
+        `${definition.label} sign-in found an existing account, but Firebase did not return the account email needed to link it.`
+      );
+    }
+
+    throw new ProviderAccountLinkingRequiredError({
+      credential: pendingCredential,
+      email,
+      provider,
+      providerLabel: definition.label
+    });
+  }
+}
+
+export async function linkProviderToEmailPasswordAccount({
+  email,
+  password,
+  pendingCredential
+}: {
+  email: string;
+  password: string;
+  pendingCredential: PendingProviderCredential;
+}) {
+  assertFirebaseReady();
+  const cleanEmail = email.trim().toLowerCase();
+
+  if (!cleanEmail || !password) {
+    throw new Error("Enter the password for your existing email/password account.");
+  }
+
+  let emailCredential: Awaited<ReturnType<typeof signInWithEmailAndPassword>>;
+
+  try {
+    emailCredential = await signInWithEmailAndPassword(auth!, cleanEmail, password);
+  } catch {
+    throw new Error("Invalid password for the existing email/password account.");
+  }
+
+  try {
+    return await linkWithCredential(emailCredential.user, pendingCredential.credential);
+  } catch (caughtError) {
+    throw normalizeProviderAuthError(caughtError, pendingCredential.providerLabel);
+  }
+}
+
+export function isEmailMagicLink(url: string) {
+  if (!auth) {
+    return false;
+  }
+
+  return isSignInWithEmailLink(auth, url);
+}
+
+export function getPendingMagicLinkEmail() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  return window.localStorage.getItem(magicLinkEmailStorageKey) ?? "";
+}
+
+export async function sendEmailMagicLink(email: string) {
+  assertFirebaseReady();
+  const cleanEmail = email.trim().toLowerCase();
+
+  if (!cleanEmail || !cleanEmail.includes("@")) {
+    throw new Error("Enter the email address where Firebase should send the magic link.");
+  }
+
+  const url = typeof window === "undefined" ? "/auth" : `${window.location.origin}/auth`;
+
+  try {
+    await sendSignInLinkToEmail(auth!, cleanEmail, {
+      handleCodeInApp: true,
+      url
+    });
+  } catch (caughtError) {
+    throw normalizeEmailLinkAuthError(caughtError);
+  }
+
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(magicLinkEmailStorageKey, cleanEmail);
+  }
+
+  return "Check your email for a Chandra sign-in link. Open it in this browser to finish signing in.";
+}
+
+export async function completeEmailMagicLinkSignIn(url: string, email?: string) {
+  assertFirebaseReady();
+
+  if (!isSignInWithEmailLink(auth!, url)) {
+    throw new Error("This is not a valid Firebase email sign-in link.");
+  }
+
+  const cleanEmail = (email || getPendingMagicLinkEmail()).trim().toLowerCase();
+
+  if (!cleanEmail) {
+    throw new Error("Enter the email address you used for this magic link to finish signing in.");
+  }
+
+  const credential = await signInWithEmailLink(auth!, cleanEmail, url);
+  if (typeof window !== "undefined") {
+    window.localStorage.removeItem(magicLinkEmailStorageKey);
+  }
+  await assertUserHasProviderEmail(credential.user, "Email link");
+  return credential;
 }
 
 export async function requestPasswordReset(emailOrUsername: string) {
@@ -495,6 +676,113 @@ function assertFirebaseReady() {
   if (!isFirebaseConfigured || !auth || !db) {
     throw new Error("Firebase is not configured. Add NEXT_PUBLIC_FIREBASE_* values to .env.local.");
   }
+}
+
+async function assertUserHasProviderEmail(user: User, providerLabel: string) {
+  if (user.email) {
+    return;
+  }
+
+  await signOut(auth!);
+  throw new Error(
+    `${providerLabel} did not return an email address for this account. Chandra accounts require an email address.`
+  );
+}
+
+function getAuthErrorCode(error: unknown) {
+  if (!isRecord(error) || typeof error.code !== "string") {
+    return "";
+  }
+
+  return error.code;
+}
+
+function getAuthErrorEmail(error: unknown) {
+  if (!isRecord(error)) {
+    return "";
+  }
+
+  const customData = error.customData;
+
+  if (!isRecord(customData) || typeof customData.email !== "string") {
+    return "";
+  }
+
+  return customData.email.trim().toLowerCase();
+}
+
+function normalizeProviderAuthError(error: unknown, providerLabel: string) {
+  const code = getAuthErrorCode(error);
+
+  if (code === "auth/argument-error" || code === "auth/invalid-oauth-provider") {
+    return new Error(
+      `${providerLabel} sign-in is not configured correctly in Firebase Authentication. Enable the ${providerLabel} provider, add this app domain to Firebase authorized domains, and verify the provider client ID/secret settings.`
+    );
+  }
+
+  if (code === "auth/operation-not-allowed") {
+    return new Error(`Enable ${providerLabel} sign-in in Firebase Authentication before using this button.`);
+  }
+
+  if (code === "auth/unauthorized-domain") {
+    return new Error(
+      `Add this domain to Firebase Authentication authorized domains before using ${providerLabel} sign-in.`
+    );
+  }
+
+  if (code === "auth/network-request-failed") {
+    return new Error(`Network error while opening ${providerLabel} sign-in. Check your connection and try again.`);
+  }
+
+  if (code === "auth/popup-closed-by-user") {
+    return new Error(`${providerLabel} sign-in was canceled.`);
+  }
+
+  if (code === "auth/cancelled-popup-request") {
+    return new Error(`Another ${providerLabel} sign-in popup is already in progress.`);
+  }
+
+  if (code === "auth/popup-blocked") {
+    return new Error(`Your browser blocked the ${providerLabel} sign-in popup.`);
+  }
+
+  if (code === "auth/credential-already-in-use" || code === "auth/provider-already-linked") {
+    return new Error(`${providerLabel} is already linked to another Chandra account.`);
+  }
+
+  if (error instanceof Error) {
+    return error;
+  }
+
+  return new Error(`${providerLabel} sign-in failed.`);
+}
+
+function normalizeEmailLinkAuthError(error: unknown) {
+  const code = getAuthErrorCode(error);
+
+  if (code === "auth/argument-error") {
+    return new Error(
+      "Email magic-link sign-in is not configured correctly. Enable Email link sign-in in Firebase Authentication and add this app domain to authorized domains."
+    );
+  }
+
+  if (code === "auth/operation-not-allowed") {
+    return new Error("Enable Email link sign-in in Firebase Authentication before sending magic links.");
+  }
+
+  if (code === "auth/unauthorized-continue-uri" || code === "auth/unauthorized-domain") {
+    return new Error("Add this app domain to Firebase Authentication authorized domains before sending magic links.");
+  }
+
+  if (error instanceof Error) {
+    return error;
+  }
+
+  return new Error("Magic-link sign-in failed.");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 export function normalizeAccountUsername(value: unknown, fallbackEmail = "") {

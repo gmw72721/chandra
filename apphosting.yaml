@@ -199,6 +199,32 @@ env:
     value: us
     availability:
       - RUNTIME
+
+  - variable: TEACHER_ASSISTANT_PROVIDER
+    value: agent-runtime-adk
+    availability:
+      - RUNTIME
+  - variable: TEACHER_ASSISTANT_MODEL
+    value: gemini-3-flash-preview
+    availability:
+      - RUNTIME
+  - variable: GEMINI_AGENT_RUNTIME_RESOURCE
+    value: projects/64470650849/locations/us-central1/reasoningEngines/3778903267166126080
+    availability:
+      - RUNTIME
+  - variable: GEMINI_AGENT_LOCATION
+    value: us-central1
+    availability:
+      - RUNTIME
+  - variable: CHANDRA_ASSISTANT_TOOL_BASE_URL
+    value: https://chandra-frontend--chandra-f6e13.us-central1.hosted.app
+    availability:
+      - RUNTIME
+  - variable: CHANDRA_ASSISTANT_TOOL_SHARED_SECRET
+    secret: CHANDRA_ASSISTANT_TOOL_SHARED_SECRET
+    availability:
+      - RUNTIME
+
   - variable: VERTEX_EMBEDDING_MODEL
     value: gemini-embedding-2
     availability:

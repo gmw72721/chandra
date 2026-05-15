@@ -149,7 +149,7 @@ export default function HomePage() {
       <section className="cta-band" id="pricing" data-motion-reveal="section">
         <h2>Give students support without giving away the work.</h2>
         <div>
-          <Link className="landing-primary-button" href="/auth">
+          <Link className="landing-primary-button" href="/auth?mode=signup">
             Create account
           </Link>
           <Link className="landing-secondary-button" href="/teacher">

@@ -15,13 +15,13 @@ export function AuthNav({ showCreateAccount = false }: AuthNavProps) {
 
   async function handleSignOut() {
     await signOutCurrentUser();
-    router.push("/auth");
+    router.push("/auth?mode=signin");
   }
 
   if (!firebaseReady) {
     return (
       <div className="nav-actions">
-        <Link href="/auth">Set up auth</Link>
+        <Link href="/auth?mode=signup">Set up auth</Link>
       </div>
     );
   }
@@ -33,8 +33,8 @@ export function AuthNav({ showCreateAccount = false }: AuthNavProps) {
   if (!user) {
     return (
       <div className="nav-actions">
-        <Link href="/auth">Sign in</Link>
-        {showCreateAccount ? <Link href="/auth">Create account</Link> : null}
+        <Link href="/auth?mode=signin">Sign in</Link>
+        {showCreateAccount ? <Link href="/auth?mode=signup">Create account</Link> : null}
       </div>
     );
   }

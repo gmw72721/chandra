@@ -36,7 +36,7 @@ export function RequireAuth({
       <section className="auth-state-panel">
         <h1>Create an account or sign in to continue.</h1>
         {sessionError ? <p className="form-error">{sessionError}</p> : null}
-        <Link className="primary-button" href={`/auth?role=${allowedRoles[0] ?? "student"}`}>
+        <Link className="primary-button" href={`/auth?mode=signin&role=${allowedRoles[0] ?? "student"}`}>
           Go to sign in
         </Link>
       </section>

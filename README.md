@@ -42,6 +42,7 @@ Requirements:
 - Node.js 20+
 - Python 3.11+
 - Firebase project with Auth, Firestore fallback/presence, and Storage
+- Firebase Authentication providers enabled for Email/Password, Email link, and Google.
 - Cloud SQL/Postgres database with `migrations/001_pdf_ocr_metadata.sql` and `migrations/002_core_app_tables.sql` applied
 - OpenRouter API key
 - Gemini API key

@@ -1,7 +1,12 @@
 "use client";
 
 import { getApps, initializeApp } from "firebase/app";
-import { browserLocalPersistence, getAuth, initializeAuth } from "firebase/auth";
+import {
+  browserLocalPersistence,
+  browserPopupRedirectResolver,
+  getAuth,
+  initializeAuth
+} from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 import { firebaseConfig, isFirebaseConfigured } from "./firebase-config";
@@ -15,7 +20,10 @@ function getClientAuth() {
   }
 
   try {
-    return initializeAuth(app, { persistence: browserLocalPersistence });
+    return initializeAuth(app, {
+      persistence: browserLocalPersistence,
+      popupRedirectResolver: browserPopupRedirectResolver
+    });
   } catch {
     return getAuth(app);
   }

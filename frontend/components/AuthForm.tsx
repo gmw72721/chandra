@@ -4,11 +4,20 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ProviderAccountLinkingRequiredError,
+  completeEmailMagicLinkSignIn,
   createRoleProfile,
+  getPendingMagicLinkEmail,
+  isEmailMagicLink,
+  linkProviderToEmailPasswordAccount,
   requestPasswordReset,
+  sendEmailMagicLink,
   signInWithEmail,
+  signInWithProviderAuth,
   signUpWithRole,
-  type AccountRole
+  type AccountRole,
+  type AuthProviderKey,
+  type PendingProviderCredential
 } from "@/lib/auth";
 import { CLASS_CODE_LENGTH, formatClassCodeInput } from "@/lib/class-code";
 import { useAuth } from "./AuthProvider";
@@ -20,17 +29,25 @@ const pendingProfileStorageKey = "chandra.pendingProfile";
 type PendingProfile = {
   classId?: string;
   displayName: string;
-  email: string;
+  email?: string;
   role: AccountRole;
   username?: string;
 };
+
+const providerOptions: Array<{ key: AuthProviderKey; label: string }> = [
+  { key: "google", label: "Google" }
+];
+
+function parseAuthMode(value: string | null): AuthMode {
+  return value === "signin" || value === "reset" ? value : "signup";
+}
 
 export function AuthForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const requestedRole = searchParams.get("role") === "teacher" ? "teacher" : "student";
   const requestedClassId = formatClassCodeInput(searchParams.get("classId") ?? "");
-  const [mode, setMode] = useState<AuthMode>(searchParams.get("mode") === "reset" ? "reset" : "signup");
+  const [mode, setMode] = useState<AuthMode>(() => parseAuthMode(searchParams.get("mode")));
   const [role, setRole] = useState<AccountRole>(requestedRole);
   const [classId, setClassId] = useState(requestedClassId);
   const [displayName, setDisplayName] = useState("");
@@ -40,6 +57,16 @@ export function AuthForm() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [emailLinkUrl] = useState(() => {
+    if (typeof window === "undefined") {
+      return "";
+    }
+
+    return isEmailMagicLink(window.location.href) ? window.location.href : "";
+  });
+  const [linkingRequest, setLinkingRequest] = useState<PendingProviderCredential | null>(null);
+  const [linkingPassword, setLinkingPassword] = useState("");
+  const hasCheckedEmailLinkRef = useRef(false);
   const isRepairingProfileRef = useRef(false);
   const { firebaseReady, isLoading, profile, profileError, sessionError, user } = useAuth();
 
@@ -49,13 +76,39 @@ export function AuthForm() {
   );
 
   useEffect(() => {
+    if (!firebaseReady || !emailLinkUrl || hasCheckedEmailLinkRef.current) {
+      return;
+    }
+
+    hasCheckedEmailLinkRef.current = true;
+    const pendingEmail = getPendingMagicLinkEmail();
+
+    if (!pendingEmail) {
+      queueMicrotask(() => {
+        setMode("signin");
+        setNotice("Enter the email address you used for this magic link, then complete sign-in.");
+      });
+      return;
+    }
+
+    completeEmailMagicLinkSignIn(emailLinkUrl, pendingEmail)
+      .then(() => {
+        router.replace("/auth");
+      })
+      .catch((caughtError) => {
+        setError(caughtError instanceof Error ? caughtError.message : "Magic-link sign-in failed.");
+      });
+  }, [emailLinkUrl, firebaseReady, router]);
+
+  useEffect(() => {
     if (!user || profile || isLoading || isRepairingProfileRef.current) {
       return;
     }
 
     const pendingProfile = readPendingProfile();
+    const userEmail = String(user.email ?? "").trim().toLowerCase();
 
-    if (!pendingProfile || pendingProfile.email !== user.email) {
+    if (!pendingProfile || (pendingProfile.email && pendingProfile.email !== userEmail)) {
       return;
     }
 
@@ -64,7 +117,7 @@ export function AuthForm() {
       classId: pendingProfile.classId,
       displayName: pendingProfile.displayName,
       role: pendingProfile.role,
-      username: pendingProfile.username || pendingProfile.email,
+      username: pendingProfile.username || userEmail,
       user
     })
       .then((nextProfile) => {
@@ -87,13 +140,7 @@ export function AuthForm() {
 
     try {
       if (mode === "signup") {
-        savePendingProfile({
-          classId: role === "student" ? classId.trim() : "",
-          displayName: displayName.trim(),
-          email: email.trim().toLowerCase(),
-          role,
-          username: username.trim().toLowerCase()
-        });
+        savePendingProfile(buildPendingProfile());
         await signUpWithRole({
           displayName: displayName.trim(),
           email: email.trim(),
@@ -105,8 +152,10 @@ export function AuthForm() {
         window.localStorage.removeItem(pendingProfileStorageKey);
         router.push(role === "teacher" ? "/teacher" : "/student");
       } else if (mode === "signin") {
+        clearPendingProfile();
         await signInWithEmail(email.trim(), password);
       } else {
+        clearPendingProfile();
         const message = await requestPasswordReset(email.trim());
         setNotice(message);
       }
@@ -121,6 +170,100 @@ export function AuthForm() {
     setMode(nextMode);
     setError("");
     setNotice("");
+  }
+
+  async function submitProviderSignIn(provider: AuthProviderKey) {
+    setError("");
+    setNotice("");
+    setIsSubmitting(true);
+
+    try {
+      if (mode === "signup") {
+        savePendingProfile(buildPendingProfile());
+      } else {
+        clearPendingProfile();
+      }
+
+      const credential = await signInWithProviderAuth(provider);
+
+      if (mode === "signup") {
+        updatePendingProfileFromProvider(credential.user);
+      }
+    } catch (caughtError) {
+      if (caughtError instanceof ProviderAccountLinkingRequiredError) {
+        setLinkingRequest(caughtError.pendingCredential);
+        setLinkingPassword("");
+        setNotice("");
+        return;
+      }
+
+      setError(caughtError instanceof Error ? caughtError.message : "Provider sign-in failed.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function submitMagicLink() {
+    setError("");
+    setNotice("");
+    setIsSubmitting(true);
+
+    try {
+      if (emailLinkUrl) {
+        await completeEmailMagicLinkSignIn(emailLinkUrl, email.trim());
+        router.replace("/auth");
+        return;
+      }
+
+      if (mode === "signup") {
+        savePendingProfile(buildPendingProfile());
+      } else {
+        clearPendingProfile();
+      }
+
+      const message = await sendEmailMagicLink(email.trim());
+      setNotice(message);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Magic-link sign-in failed.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function submitProviderLink(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!linkingRequest) {
+      return;
+    }
+
+    setError("");
+    setNotice("");
+    setIsSubmitting(true);
+
+    try {
+      await linkProviderToEmailPasswordAccount({
+        email: linkingRequest.email,
+        password: linkingPassword,
+        pendingCredential: linkingRequest
+      });
+      setLinkingRequest(null);
+      setLinkingPassword("");
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Account linking failed.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  function buildPendingProfile(): PendingProfile {
+    return {
+      classId: role === "student" ? classId.trim() : "",
+      displayName: displayName.trim(),
+      email: email.trim().toLowerCase() || undefined,
+      role,
+      username: username.trim().toLowerCase()
+    };
   }
 
   if (!firebaseReady) {
@@ -139,6 +282,57 @@ export function AuthForm() {
     return (
       <section className="auth-card">
         <h1>Checking your session.</h1>
+      </section>
+    );
+  }
+
+  if (linkingRequest) {
+    return (
+      <section className="auth-card">
+        <h1>Link {linkingRequest.providerLabel}.</h1>
+        <p>
+          An email/password account already exists for {linkingRequest.email}. Enter that
+          account password to link {linkingRequest.providerLabel} to the same Chandra account.
+        </p>
+
+        <form className="auth-form" onSubmit={submitProviderLink}>
+          <label className="field-label" htmlFor="link-email">
+            Existing account
+          </label>
+          <input id="link-email" value={linkingRequest.email} readOnly />
+
+          <label className="field-label" htmlFor="link-password">
+            Existing password
+          </label>
+          <input
+            id="link-password"
+            required
+            autoComplete="current-password"
+            type="password"
+            value={linkingPassword}
+            onChange={(event) => setLinkingPassword(event.target.value)}
+            placeholder="Your existing password"
+          />
+
+          {error ? <p className="form-error">{error}</p> : null}
+
+          <button className="primary-button" disabled={isSubmitting} type="submit">
+            {isSubmitting ? "Linking" : `Link ${linkingRequest.providerLabel}`}
+          </button>
+
+          <button
+            className="auth-secondary-button"
+            disabled={isSubmitting}
+            type="button"
+            onClick={() => {
+              setLinkingRequest(null);
+              setLinkingPassword("");
+              setError("");
+            }}
+          >
+            Use another sign-in method
+          </button>
+        </form>
       </section>
     );
   }
@@ -264,7 +458,33 @@ export function AuthForm() {
         </button>
       </div>
 
+      {mode !== "reset" ? (
+        <div className="auth-method-group" aria-label="Google authentication">
+          {providerOptions.map((provider) => (
+            <button
+              className={`auth-provider-button ${provider.key}`}
+              disabled={isSubmitting}
+              key={provider.key}
+              type="button"
+              onClick={() => submitProviderSignIn(provider.key)}
+            >
+              <ProviderIcon provider={provider.key} />
+              <span>{mode === "signup" ? "Sign up" : "Sign in"} with {provider.label}</span>
+            </button>
+          ))}
+          <div className="auth-divider">
+            <span>or use email</span>
+          </div>
+        </div>
+      ) : null}
+
       <form className="auth-form" onSubmit={submitAuth}>
+        {mode !== "reset" ? (
+          <p className="auth-form-heading">
+            {mode === "signup" ? "Create an account with email and password" : "Sign in with email and password"}
+          </p>
+        ) : null}
+
         {mode === "signup" ? (
           <>
             <label className="field-label" htmlFor="role">
@@ -351,6 +571,24 @@ export function AuthForm() {
           </>
         ) : null}
 
+        {mode !== "reset" ? (
+          <div className="auth-magic-link-panel">
+            <p>Prefer not to use a password?</p>
+            <button
+              className="auth-secondary-button"
+              disabled={isSubmitting}
+              type="button"
+              onClick={submitMagicLink}
+            >
+              {emailLinkUrl
+                ? "Complete email-link sign-in"
+                : mode === "signup"
+                  ? "Sign up with email link"
+                  : "Sign in with email link"}
+            </button>
+          </div>
+        ) : null}
+
         {mode === "signin" ? (
           <div className="auth-inline-action">
             <span>Forgot your password?</span>
@@ -411,4 +649,61 @@ function savePendingProfile(profile: PendingProfile) {
   }
 
   window.localStorage.setItem(pendingProfileStorageKey, JSON.stringify(profile));
+}
+
+function updatePendingProfileFromProvider(user: { displayName: string | null; email: string | null }) {
+  const pendingProfile = readPendingProfile();
+
+  if (!pendingProfile) {
+    return;
+  }
+
+  const providerEmail = String(user.email ?? "").trim().toLowerCase();
+  const providerName = String(user.displayName ?? "").trim();
+
+  savePendingProfile({
+    ...pendingProfile,
+    displayName: pendingProfile.displayName || providerName,
+    email: pendingProfile.email || providerEmail || undefined,
+    username: pendingProfile.username || normalizeUsernameFromProvider(providerEmail, providerName)
+  });
+}
+
+function normalizeUsernameFromProvider(email: string, displayName: string) {
+  if (email) {
+    return email;
+  }
+
+  return displayName.trim().toLowerCase().replace(/[^a-z0-9._%+-]+/g, ".");
+}
+
+function clearPendingProfile() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.removeItem(pendingProfileStorageKey);
+}
+
+function ProviderIcon({ provider }: { provider: AuthProviderKey }) {
+  return (
+    <svg className="auth-provider-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M21.6 12.23c0-.74-.07-1.45-.19-2.14H12v4.05h5.38a4.6 4.6 0 0 1-2 3.02v2.51h3.24c1.9-1.75 2.98-4.32 2.98-7.44Z"
+        fill="#4285F4"
+      />
+      <path
+        d="M12 22c2.7 0 4.97-.9 6.62-2.43l-3.24-2.51c-.9.6-2.04.95-3.38.95-2.6 0-4.82-1.76-5.61-4.13H3.05v2.6A10 10 0 0 0 12 22Z"
+        fill="#34A853"
+      />
+      <path
+        d="M6.39 13.88A6.01 6.01 0 0 1 6.07 12c0-.65.11-1.28.32-1.88v-2.6H3.05A10 10 0 0 0 2 12c0 1.61.39 3.14 1.05 4.48l3.34-2.6Z"
+        fill="#FBBC05"
+      />
+      <path
+        d="M12 5.99c1.47 0 2.79.51 3.83 1.5l2.86-2.86C16.96 3.01 14.7 2 12 2a10 10 0 0 0-8.95 5.52l3.34 2.6C7.18 7.75 9.4 5.99 12 5.99Z"
+        fill="#EA4335"
+      />
+    </svg>
+  );
 }
