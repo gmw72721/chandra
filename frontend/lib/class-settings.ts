@@ -164,10 +164,20 @@ export type MathNotation = (typeof mathNotationOptions)[number];
 export const exampleFrequencyOptions = ["rarely", "whenHelpful", "often"] as const;
 export type ExampleFrequency = (typeof exampleFrequencyOptions)[number];
 
+export const tutorVoiceOptions = [
+  "calmClear",
+  "friendlyUpbeat",
+  "directConcise",
+  "formalAcademic",
+  "gentlePatient"
+] as const;
+export type TutorVoice = (typeof tutorVoiceOptions)[number];
+
 export type ResponseFormatSettings = {
   oneStepAtATime: boolean;
   endWithCheckQuestion: boolean;
   simpleWording: boolean;
+  tutorVoice: TutorVoice;
   exampleFrequency: ExampleFrequency;
   mathNotation: MathNotation;
 };
@@ -280,6 +290,7 @@ export const defaultResponseFormatSettings: ResponseFormatSettings = {
   oneStepAtATime: true,
   endWithCheckQuestion: true,
   simpleWording: false,
+  tutorVoice: "calmClear",
   exampleFrequency: "whenHelpful",
   mathNotation: "balanced"
 };
@@ -647,6 +658,7 @@ export function normalizeResponseFormatSettings(value: unknown): ResponseFormatS
   const exampleFrequency = exampleFrequencyOptions.includes(source.exampleFrequency as ExampleFrequency)
     ? (source.exampleFrequency as ExampleFrequency)
     : defaultResponseFormatSettings.exampleFrequency;
+  const tutorVoice = normalizeTutorVoice(source.tutorVoice ?? source.chandraVoice ?? source.toneStyle);
   const simpleWording = typeof source.simpleWording === "boolean"
     ? source.simpleWording
     : source.readingLevel === "simple";
@@ -655,9 +667,38 @@ export function normalizeResponseFormatSettings(value: unknown): ResponseFormatS
     oneStepAtATime: booleanWithDefault(source.oneStepAtATime, true),
     endWithCheckQuestion: booleanWithDefault(source.endWithCheckQuestion, true),
     simpleWording,
+    tutorVoice,
     exampleFrequency,
     mathNotation
   };
+}
+
+export function normalizeTutorVoice(value: unknown): TutorVoice {
+  if (tutorVoiceOptions.includes(value as TutorVoice)) {
+    return value as TutorVoice;
+  }
+
+  if (value === "calm-clear" || value === "Calm and clear") {
+    return "calmClear";
+  }
+
+  if (value === "friendly-upbeat" || value === "Friendly and upbeat") {
+    return "friendlyUpbeat";
+  }
+
+  if (value === "direct-concise" || value === "Direct and concise") {
+    return "directConcise";
+  }
+
+  if (value === "formal-academic" || value === "Formal and academic") {
+    return "formalAcademic";
+  }
+
+  if (value === "gentle-patient" || value === "Gentle and patient") {
+    return "gentlePatient";
+  }
+
+  return defaultResponseFormatSettings.tutorVoice;
 }
 
 export function normalizeOpeningMessage(value: unknown, classDefaults?: ClassTutorDefaultsInput) {

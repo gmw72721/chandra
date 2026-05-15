@@ -30,13 +30,13 @@ from backend.langfuse_observability import (
 )
 from backend.langfuse_prompts import compile_langfuse_text_prompt, compile_langfuse_text_prompt_with_metadata
 from backend.agent.knowledge import (
+    MAX_ACTIVE_PROBLEM_CHARS,
     build_llm_knowledge_context_package,
+    compact_text,
     infer_pdf_page_used_as,
     knowledge_items_from_state,
     knowledge_reason_for_pdf_page,
     knowledge_ui_color_token,
-    student_upload_problem_text_from_state,
-    student_provided_problem_text_from_state,
 )
 from backend.agent.state import PdfRagState
 from backend.agent.tools import (
@@ -83,6 +83,7 @@ PROBLEM_CONTEXT_RELATIONS = {"same_problem", "different_problem", "unknown"}
 PROBLEM_CONTEXT_SOURCE_TYPES = {"assignment_question", "pdf", "uploaded_image", "conversation_extracted", "unknown"}
 PROBLEM_CONTEXT_CONFIDENCE = {"low", "medium", "high"}
 STRUCTURED_SECTION_ORDER = [
+    ("mainChat", ""),
     ("problem", "Problem"),
     ("answer", ""),
     ("hint", "Hint"),
@@ -91,10 +92,10 @@ STRUCTURED_SECTION_ORDER = [
     ("example", "Example"),
     ("checkWork", "Check your work"),
     ("sourceNote", "Source"),
-    ("nextStep", "Next step"),
 ]
 FINAL_JSON_MAIN_TEXT_KEY = "mainText"
 FINAL_JSON_SECTION_KEYS = {
+    "mainChat",
     "problem",
     "answer",
     "hint",
@@ -103,7 +104,6 @@ FINAL_JSON_SECTION_KEYS = {
     "example",
     "checkWork",
     "sourceNote",
-    "nextStep",
 }
 OPTIONAL_STRUCTURED_SECTION_LABELS = (
     "hint",
@@ -119,9 +119,6 @@ OPTIONAL_STRUCTURED_SECTION_LABELS = (
     "check work",
     "source note",
     "source",
-    "next step",
-    "your next step",
-    "question",
 )
 STRUCTURED_LABEL_TO_KEY = {
     "problem": "problem",
@@ -137,9 +134,6 @@ STRUCTURED_LABEL_TO_KEY = {
     "check work": "checkWork",
     "source note": "sourceNote",
     "source": "sourceNote",
-    "next step": "nextStep",
-    "your next step": "nextStep",
-    "question": "nextStep",
 }
 TUTOR_STUDENT_INTENTS = {
     "vague_help",
@@ -153,6 +147,22 @@ TUTOR_STUDENT_INTENTS = {
 }
 ANSWER_SEEKING_RISKS = {"low", "medium", "high"}
 CURRENT_STEP_STATUSES = {"not_started", "in_progress", "completed", "unclear"}
+ACTIVE_PROBLEM_DECISION_SOURCES = {
+    "pasted_text",
+    "student_upload",
+    "retrieved_pdf",
+    "existing_context",
+    "none",
+}
+ACTIVE_PROBLEM_DECISION_RELATIONS = {
+    "same_problem",
+    "same_problem_new_part",
+    "same_problem_student_moved_ahead",
+    "new_problem",
+    "not_a_problem",
+    "unclear",
+}
+PROBLEM_STATUSES = {"not_started", "in_progress", "completed", "unclear"}
 HELP_LIMIT_DEFAULTS = {
     0: "ask_for_attempt_only",
     1: "light_hint",
@@ -276,18 +286,27 @@ def build_pdf_rag_graph(
 
     async def primary_tutor_turn(state: PdfRagState) -> dict[str, Any]:
         heuristic = build_retrieval_decision(state)
-        response = await call_primary_tutor_model(client, state, heuristic)
-        decision = parse_primary_tutor_response(response, heuristic)
+        primary_messages = build_primary_tutor_messages(state, heuristic)
+        await maybe_adjust_ai_usage_reservation(
+            state,
+            estimated_tokens=estimate_primary_tutor_request_tokens(state, primary_messages),
+        )
+        response = await call_primary_tutor_model(client, state, heuristic, messages=primary_messages)
+        decision = parse_primary_tutor_response(
+            response,
+            heuristic,
+            preserve_confusion_choices_on_search=should_force_debug_confusion_choices(state),
+        )
         decision = enforce_ambiguous_student_upload_clarification(decision, state)
         decision = enforce_selected_upload_problem_response(decision, state)
         decision = enforce_initial_source_lookup_search(decision, state)
-        decision = enforce_referenced_problem_dependency_search(decision, state)
         decision = suppress_repeated_failed_search_decision(decision, state)
         decision = enforce_debug_retrieval_options(decision, state)
         decision = enforce_student_upload_direct_inspection(decision, state)
         decision = clamp_decision_to_help_limits(decision, state)
         decision = enforce_terminal_upload_problem_selection(decision, state)
-        answer = str(decision.get("student_response") or "").strip() if not decision.get("needs_search") else ""
+        primary_student_response = str(decision.get("student_response") or "").strip()
+        answer = primary_student_response if not decision.get("needs_search") else ""
         return {
             "answer": answer,
             "failed_searches_skipped": decision.get("failed_searches_skipped") or [],
@@ -295,6 +314,8 @@ def build_pdf_rag_graph(
             "problem_understanding_state": state_after_tutor_plan(state, decision.get("tutorPlan")),
             "retrieval_decision": decision,
             "retrieval_reason": decision.get("retrieval_reason") or "",
+            "primary_student_response": primary_student_response,
+            "primary_structured_output": decision.get("structuredOutput") if isinstance(decision.get("structuredOutput"), dict) else {},
             "stage_history": append_stage(state, "primary_tutor_turn"),
             "structured_output_override": decision.get("structuredOutput") if not decision.get("needs_search") else None,
             "tutor_plan": decision.get("tutorPlan") or {},
@@ -370,10 +391,12 @@ def build_pdf_rag_graph(
             max_tokens=state.get("max_tokens"),
             reasoning_effort=final_reasoning_effort,
         )
-        answer = response.get("content") or ""
+        context_grounded_response = response.get("content") or ""
+        answer = answer_with_context_grounded_continuation(state, context_grounded_response)
 
         return {
             "answer": answer,
+            "context_grounded_response": context_grounded_response,
             "finish_reason": response.get("finish_reason") or "",
             "stage_history": append_stage(state, "context_grounded_answer"),
             "token_usage": add_token_usage(state.get("token_usage"), response.get("usage")),
@@ -600,7 +623,7 @@ def route_after_metadata_context(state: PdfRagState) -> str:
 
 
 def forced_confusion_choice_response(state: PdfRagState) -> bool:
-    if not normalize_debug_options(state.get("debug_options")).get("forceConfusionChoices"):
+    if not should_force_debug_confusion_choices(state):
         return False
 
     structured_output = (state.get("retrieval_decision") or {}).get("structuredOutput")
@@ -619,145 +642,45 @@ def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) 
     memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
     active_metadata = active_metadata_record_from_memory(memory)
     latest_message = latest_student_message_content(state.get("messages", []))
-    compact_history = compact_recent_chat_history(state.get("messages", []), limit=8)
-    understanding_state = current_problem_understanding_state(state, memory=memory, active_record=active_metadata)
-    payload = {
-        "active_metadata": active_metadata,
-        "answer_policy": normalize_answer_policy_state(state.get("answer_policy")),
-        "chat_history": compact_history,
-        "debug_options": normalize_debug_options(state.get("debug_options")),
-        "failed_searches": memory.get("failed_searches", [])[:8],
-        "heuristic": heuristic,
-        "latest_student_message": latest_message,
-        "selected_upload_problem_numbers": selected_upload_problem_numbers(state),
-        "problem_understanding_state": understanding_state,
-        "source_usage": state.get("source_usage") or {},
-    }
-    system = (
-        "You are Chandra's primary tutor turn. This is the main tutor call: inspect the latest student message, recent chat, active memory, teacher policy, and any attached student image/file parts; then either answer now or request class-material retrieval. Return only JSON. "
-        "Return valid JSON only. If any string contains LaTeX commands, escape each backslash as `\\\\`, or use plain text in this decision response. "
-        "Use the student message, recent chat, active OCR metadata, failed searches, teacher policy, and attached upload parts. "
-        "Treat the provided heuristic as the default plan; override it only when the payload gives stronger evidence. "
-        "If the active metadata is enough for a hint, clarification, answer-shopping refusal, or simple next nudge, answer now. "
-        "Search only when exact PostgreSQL OCR metadata is needed. Do not search just to give a basic hint. "
-        "If a student-uploaded image or file is attached, inspect it only when the latest request is about class work, homework, notes, a worksheet, a problem, a diagram, a reading, or another academic task for this class. "
-        "Do not describe, rate, react to, compliment, identify, or discuss unrelated uploaded photos or personal images such as pets, people, rooms, food, memes, or scenery. For those, briefly redirect back to the course without mentioning image details. "
-        "Do not defer basic class-relevant image/file understanding to a later call, and do not say you cannot see an academic upload when an image_url or file part is present. "
-        "For a bare number, problem/exercise/question locator, page locator, source title, or request to find/read/quote/show a source item, "
-        "set needs_search true unless active_metadata already contains the exact requested item. Do not answer with a request for the page image, "
-        "worksheet title, textbook title, or pasted text before searching available class OCR metadata. "
-        "For source-text lookup, search the exact task/page first and stop at lookup; do not request method/example pages unless the student asks for help solving. "
-        "Allowed retrieval_reason values are: student_requested_problem, needed_supporting_page, needed_example_page, "
-        "student_changed_problem, previous_search_failed. For requested problems, do not request examples. "
-        "Build searches from the student's exact words plus locator/source terms such as assignment, worksheet, problem, exercise, question, prompt, page, section, and title. "
-        "Use one search per distinct need, at most three total, and only include needs that would actually help this student: exact task/source lookup, method/concept support, and worked/similar example. "
-        "Run complementary needs together by returning searches as an array; do not create trivial variants of the same search. "
-        "For find-similar-example requests such as `show me an example`, `give me an example`, `is there a similar example`, or `worked example`, set needs_search true and retrieval_reason to needed_example_page unless a clearly different example is already present in active_metadata. Do not answer these requests with a worked-example refusal; search class OCR metadata for a similar example first. "
-        "For find-similar-example requests, build search_query from topic/method words, distinctive symbols, class source type, and section/chapter context rather than only the assigned problem number. "
-        "Use terms such as worked example, example, textbook reading, lecture notes, method, and the concept name; avoid problem/page locators like `problem 2.14` unless you are only identifying the surrounding section. "
-        "Also produce a tutorPlan. The tutorPlan is internal planning for progressive disclosure. If a later context-grounded answer call runs after retrieval, it must obey this plan rather than re-planning. "
-        "Decide studentIntent from: vague_help, specific_question, showed_work, unclear_attempt, asks_for_next_step, asks_for_solution, asks_for_explanation, verification. "
-        "Decide nextHelpDepth from 1, 2, 3, 4 using problem_understanding_state, current message, previous hints, attempts, repeated stuck signals, teacher policy, shown work, active context, and answer-shopping risk. "
-        "Teacher help limits by understanding level are ceilings, not targets. You may choose lighter support, but your nextHelpDepth must not exceed the max depth allowed by answer_policy.helpLimitsByUnderstandingLevel for the current/effective understanding level. "
-        "Help-limit max depths: ask_for_attempt_only/conceptual_orientation/guiding_question/light_hint -> 1; targeted_hint_next_action -> 2; one_worked_step/check_work_explain_gaps -> 3; full_explanation_allowed -> 4. "
-        "If a level is capped at ask_for_attempt_only, ask for the student's attempt or exact stuck point and keep help conceptual. "
-        "Decide stateUpdates.understandingLevel conservatively from evidence in the student's latest work, not from turn count, number of hints, repeated stuck signals, or by incrementing one level at a time. "
-        "Preserve the previous understanding level for the same problem unless the latest student message clearly proves a different level. "
-        "Do not lower the understanding level for the same active problem unless the student explicitly retracts prior work or shows new work that directly contradicts the previous evidence; ordinary confusion, asking for another hint, or saying a hint was unhelpful is not evidence of lower understanding. "
-        "Increase the level only when the student's own message supplies enough evidence: inspectable work, a valid strategy, a justified step, a corrected misconception, or a nearly complete solution. "
-        "Do not increase understandingLevel merely because Chandra gave another hint, used a stronger help depth, retrieved a source, or explained more clearly. "
-        "The level may jump by more than 1 in a single update when the student's message shows stronger understanding. "
-        "Understanding rubric: 0 = problem loaded, no student understanding observed yet; 1 = needs first nudge or little/no useful work shown; 2 = understands setup but is missing the core idea; 3 = understands the core idea but needs execution help; 4 = solution-ready, mostly needs verification or minor cleanup. "
-        "Use level 0 only for source lookup or a freshly loaded problem before tutoring starts; once the student asks for help, shows work, asks for explanation, asks for a next step, or seeks verification on the active problem, use at least level 1. "
-        "Examples: `help me` with no work -> level 1; identifying relevant objects or definitions but missing the key idea -> level 2; a coherent proof attempt with one conceptual flaw -> level 2; right strategy with algebra or notation mistakes -> level 3; basically correct with minor typos or cleanup -> level 4. "
-        "Allowed jumps include 0->2, 0->3, 0->4, 1->3, and 1->4. Do not require 0->1->2->3->4 across multiple turns. "
-        "Specific calibration: in a rank proof, if the student correctly proves rank(KL) <= rank(K), understands rank/image reasoning, but incorrectly claims im(KL) is contained in im(L), set understandingLevel to 2, not 1. "
-        "Track the active problem and the current mathematical step explicitly. A currentStep is the mathematical move currently being understood or completed; a currentSubstep is a smaller question inside that same move. "
-        "Do not advance currentStep to a later problem step until the student has completed it or shown understanding. If the student asks for the next step while currentStepStatus is not completed, stay on currentStep and make currentSubstep smaller. "
-        "For example, do not move from computing L(2e1 - 3e2) to computing L^2(2e1 - 3e2) until the first expression is understood; instead split L(2e1 - 3e2) = 2L(e1) - 3L(e2) into pieces such as 2L(e1), -3L(e2), then combining terms. "
-        "Repeated stuck signals include requests for the next step, confusion, complaints that the previous hint was unhelpful, repetitive, too vague, or did not add more, repeated wrong answers, empty replies, or tiny unclear answers. On repeated stuck signals, do not repeat lastHintSummary; scaffold a smaller currentSubstep inside the same currentStep. "
-        "If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, acknowledge the gap internally and plan one new concrete distinction, prerequisite idea, or narrower sub-question rather than restating the same broad method. "
-        "If the student gives a tiny or unclear answer like `2?`, classify it as unclear_attempt, explain only the expected answer form or type without revealing the value they should get, and ask one smaller sub-question for the active currentStep. "
-        "If the student asks `is this right?`, `am I right?`, or asks for validation, internally evaluate the work but do not give a direct correctness verdict unless teacher policy explicitly allows answer checking. "
-        "Avoid student-facing correctness labels such as `correct`, `incorrect`, `right`, `wrong`, `yes`, `no`, `that's the answer`, `your first part is right`, or `the mistake is`. Use learning-process language instead: name the useful idea, point to the step to inspect, ask what would justify it, or ask a diagnostic question. "
-        "You own tutor state updates in this first step: set stateUpdates.understandingLevel, stateUpdates.lastHelpDepth, stateUpdates.answerSeekingRisk, stateUpdates.currentStep, stateUpdates.currentStepStatus, and concise lastHintSummary/lastStudentAttemptSummary when applicable. "
-        "State update wording must explain the evidence for the understanding level, not teach the academic concept. Do not write definitions such as `image means...` or real-world analogies in conceptsUnderstood, knownConfusions, lastHintSummary, lastStudentAttemptSummary, or any reason-like field. "
-        "Use short level-evidence phrases instead, such as `connected image containment to rank`, `asked how the concept applies but has not shown work`, `needs to justify the target space`, or `used the main idea but needs notation cleanup`. "
-        "If the student showed work, update attemptsCount, conceptsUnderstood, knownConfusions, and lastStudentAttemptSummary. If this is a stuck/help signal, update hintsGiven or repeatedStuckSignals as appropriate. "
-        "Depth 1 means one light hint and one targeted question; no full route, no multiple methods, no proof skeleton, no worked algebra. "
-        "Depth 2 means a guided hint with one clear next action, still not the whole solution. "
-        "Depth 3 means one worked step only, then stop and ask the student to continue. "
-        "Depth 4 is a full explanation and is allowed only when teacher policy permits and the student explicitly asks for it or full-teaching mode is clearly enabled. "
-        "First vague help with no work is usually depth 1. Repeated stuck after a light hint may become depth 2. Shown work gets targeted feedback, usually depth 2 or 3. Direct answer-seeking without effort lowers depth. "
-        "If lastHintSummary overlaps with your planned hint, reframe or slightly escalate instead of repeating it. Retrieved context grounds the response but must not increase help depth by itself. "
-        "Chandra uncertainty choice flow: this is an LLM judgment about Chandra's uncertainty, not triggered by student confusion keywords. "
-        "If debug_options.forceConfusionChoices is true, this is a teacher-preview debug run: force the Chandra uncertainty choice flow for the latest turn unless retrieval is required first. "
-        "In that debug case, Chandra must cooperate with the debug mode and be uncertain: do not answer the academic question normally; return needs_search false when retrieval is not needed, set student_response to the same brief context-specific uncertainty line used in structuredOutput.confusionPrompt, and include 2 to 6 context-specific confusionChoices generated from the current problem, history, and plausible support paths. "
-        "If debug_options.forceRetrieval is true, this is a teacher-preview debug run: force retrieval for the latest turn. Set needs_search true, can_answer_now false, include at least one searches entry with a non-empty query built from the latest student message and active context, and use retrieval_reason needed_supporting_page unless a more specific allowed retrieval_reason is clearly required. "
-        "If debug_options.forceNoRetrieval is true and debug_options.forceRetrieval is not true, this is a teacher-preview debug run: do not search for the latest turn. Set needs_search false, leave searches empty, answer only from visible chat, active metadata, and provided context, and explicitly name uncertainty when a source lookup would normally be needed. "
-        "Even when forced, first interpret and acknowledge the latest student message using the full available context: active problem, prior assistant answer/nextStep, currentStep/currentSubstep, student attempts, and known confusions. "
-        "If the student asks a follow-up such as `how would that work?`, the prompt and choices must stay about explaining that referenced step, not reset to broad problem parts or unrelated work paths. "
-        "Each confusionChoice should be a different useful way Chandra could answer the student's latest question, such as explaining the concept, setting up the equation, unpacking notation, connecting it to the previous hint, or checking the student's work when work exists. "
-        "Use it only when the latest student turn needs tutoring help, available context does not identify one best next support path, "
-        "active problem/current step/current substep/history/known confusions are insufficient or conflicting, and any single normal response would likely guess at the student's need. "
-        "Do not trigger it just because the student says they are lost, confused, stuck, or do not understand; those are evidence only. "
-        "Prefer a normal helpful nudge or one focused question whenever Chandra can infer a useful next move. "
-        "Do not trigger it when currentStep and currentSubstep identify a clear smaller move, the student showed inspectable work, the student asks a clear concept question, the student asks for source lookup/problem text/page location, the student greets or checks in casually, the student is answer-shopping, or retrieval is needed first. "
-        "When triggered, structuredOutput must include a brief non-blaming, context-specific confusionPrompt that names Chandra's uncertainty for the current problem and asks the student to pick or choose one direction, plus 2 to 6 context-specific, meaningfully different confusionChoices generated by the primary tutor turn. "
-        "Choose the number of options that best fits the actual ambiguity; do not pad the list to reach the maximum. "
-        "The confusionPrompt is only the line above the options; it must not list, summarize, or describe every button choice. Do not reuse a canned generic prompt like `I'm not sure which part would help most yet`; write the prompt for the actual uncertainty Chandra has on this turn. "
-        "Each choice must have id, a descriptive label of 4 to 10 words that names the support path, and message that reads like a student-sendable message. Choices must obey help-depth and academic-integrity limits and must not promise final answers, full solutions, answer keys, submission-ready wording, or bypassing teacher policy. "
-        "Return ordered valid JSON only. Physical JSON key order matters because fields stream to the student in the order you generate them. Put student-facing streamable fields before or alongside decision metadata, so the UI can render visible content while you finish the decision. "
-        "Use mainText for the unlabeled answer bubble. Use sections only for non-empty visible sections that add distinct value; omit every unused section key entirely. Never repeat the same text in mainText and sections. If sections.problem contains the problem statement, mainText must not restate, summarize, prefix, or quote that same problem. sectionOrder must include mainText when mainText is non-empty, and only include non-empty section keys in the exact render order you choose. "
-        "If sections.problem is present, emit the top-level sections object before mainText, put sections.problem as the first key inside sections, put problem first in sectionOrder, and emit any non-duplicative mainText only after sections. "
-        "Treat sections.problem as an extraction-only field: it may contain only the academic exercise/question/task statement. Do not append hint, answer, explanation, source/location note, lookup status, offer to help, attempt request, or next-step language inside sections.problem. If you want to give a hint or next action, put it in sections.hint or sections.nextStep only when the turn actually asks for tutoring help; for a pure source/problem lookup, omit hint and nextStep. "
-        "JSON schema: {\"mainText\": string, \"sections\": {\"problem\"?: string, \"answer\"?: string, \"hint\"?: string, \"explanation\"?: string, \"formula\"?: string, \"example\"?: string, \"checkWork\"?: string, \"sourceNote\"?: string, \"nextStep\"?: string}, \"sectionOrder\": string[], \"metadata\": object, \"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, "
-        "\"search_query\": string, \"searches\": [{\"query\": string, \"retrieval_reason\": string, \"top_k\": number}], \"help_level\": string, \"student_response\": string, \"memory_used\": boolean, "
-        "\"tutorPlan\": {\"activeProblemId\": string, \"studentIntent\": string, \"needsRetrieval\": boolean, \"retrievalReason\": string, \"currentUnderstandingLevel\": number, \"nextHelpDepth\": number, \"answerSeekingRisk\": \"low|medium|high\", \"currentStep\": string, \"currentSubstep\": string, \"currentStepStatus\": \"not_started|in_progress|completed|unclear\", \"currentStepCompleted\": boolean, \"responseStrategy\": string, \"shouldAskQuestion\": boolean, \"shouldGiveWorkedStep\": boolean, \"shouldAvoidFullSolution\": boolean, \"stateUpdates\": object}, "
-        "\"structuredOutput\": {\"sections\": object, \"sectionOrder\": array, \"confusionPrompt\": string, \"confusionChoices\": [{\"id\": string, \"label\": string, \"message\": string}], \"metadata\": object}}. "
-        "Allowed section keys are answer, problem, hint, explanation, formula, example, checkWork, sourceNote, nextStep. "
-        "Use sections sparingly instead of following a fixed template: include only the sections that help this turn, choose "
-        "their order in sectionOrder, and put each idea in the section where it belongs. Decide the order by what the student "
-        "needs first: task text/context, then the direct answer, then supporting rule/concept/example/check, with nextStep last. "
-        "Do not duplicate any section text in mainText, especially problem statements. When problem is the first student-facing section, emit sections.problem first in the JSON stream; do not emit mainText first and rely on sectionOrder to fix it later. "
-        "For substantive tutoring replies, shape sections according to tutorPlan.nextHelpDepth, not a fixed template. "
-        "Depth 1 uses one short answer or Hint plus one question, especially for vague stuck messages like `I am lost`; do not include redundant Hint and nextStep. "
-        "Depth 2 may use Hint and one nextStep. Depth 3 may use one worked step in answer or explanation plus a nextStep. Depth 4 may use explanation/check sections when policy allows. "
-        "Orientation names the task type without repeating the hint; hint gives one key idea tied to the student's task; nextStep asks for one small, checkable action. "
-        "Do not repeat the same advice across answer, hint, explanation, and nextStep. If answer already gives the key clue, equation, theorem, or method, omit hint. If hint already gives the action, omit nextStep or make nextStep a meaningfully different request such as showing the student's attempt. "
-        "For broad concept explanations or topic overviews, usually answer in plain prose without hint. Do not add hint just to restate a definition, fact list, or summary already in the main reply. "
-        "If the only possible hint would repeat the main answer with different wording, omit it entirely. A reply with no labeled sections is better than a duplicated main answer plus hint. "
-        "For a bare stuck/start follow-up after the problem statement was already shown, keep structuredOutput short: at most one "
-        "brief answer sentence plus one conceptual hint, or one request for the student's attempted step. Do not include both hint "
-        "and nextStep unless nextStep only asks the student to show work. "
-        "For repeated stuck follow-ups, the nextStep is allowed to be a smaller sub-question inside the same currentStep; do not use it to advance to a later mathematical step. If prior help already named a broad method, narrow the hint to the specific missing object, definition, target space, assumption, comparison, representation, or notation choice rather than naming the method again. "
-        "Before using the problem section, classify the candidate text: use problem only for the exact academic exercise, question, "
-        "or task statement from the student, active metadata, or retrieved source. Never put `You said...`, lookup/checking status, "
-        "clarifying questions, requests for a page/title/textbook, source notes, offers, hints, answers, explanations, attempt requests, or next steps in problem; put those "
-        "in answer, hint, nextStep, or sourceNote only when they are appropriate for the student's intent, or leave structuredOutput empty if a plain response is enough. "
-        "Before returning, audit sections.problem sentence by sentence: every sentence must be part of the original exercise/task wording. If any sentence starts like `Hint:`, `Try`, `To start`, `I found`, `This is on`, `If you want`, `Please send`, or `Your next step`, it is not problem text and must not appear in sections.problem. "
-        "If structuredOutput.sections.problem is present, also set structuredOutput.metadata.problemNumber when visible and "
-        "structuredOutput.metadata.problemSummary to a short noun phrase of at most 12 words describing the task without solving it. "
-        "When needs_search is true, do not ask the student to send, upload, type, paste, or share a page image, screenshot, "
-        "photo, textbook name, homework title, worksheet title, exact source, or problem text in student_response or structuredOutput; the search is already checking "
-        "available class OCR metadata. For requested problem/source lookups, if you include an interim student_response, use "
-        "a short search-status sentence such as `I'm checking the class materials for that problem.` and do not include a nextStep. Leave structuredOutput "
-        "empty unless it contains actual task text already provided by the student or active metadata. If the search is for a bare numbered problem, do not ask for the page/title/text while the lookup runs. "
-        "When needs_search is true, keep visible output minimal while retrieval runs. Prefer one short mainText or student_response status sentence. "
-        "Leave sections empty unless they contain actual task text already provided by the student or active metadata. Do not stream or output hint, formula, example, explanation, checkWork, sourceNote, or nextStep sections just to fill the schema while search is pending. "
-        "Do not invent source facts before retrieval, and do not put retrieval status, page lookup, or source lookup progress in problem or nextStep. "
-        "If the latest student turn includes uploaded homework attachments and the request is class-relevant, inspect the attached image/PDF parts in this primary call and use them as Knowledge context; also request class-material retrieval when the student asks for a specific source item, a numbered problem/page, or class PDFs could help locate, compare, or support the answer. Do not say you cannot see the upload. "
-        "Special case: when the latest student turn selects a problem from the upload, for example `Help me with problem 2.14 from this upload.`, inspect the uploaded image/PDF/OCR in this primary call. If that problem is visible or present in the upload, set needs_search false, leave searches empty, and put the exact full visible task statement word-for-word in structuredOutput.sections.problem with structuredOutput.metadata.problemNumber before giving any hint. Do not summarize, shorten, paraphrase, infer, or replace the problem with a phrase like `prove the rank inequalities`; copy the complete exercise text, including subparts, equations, references to earlier exercises, and constraints that are visible in the upload. Search class OCR/PDF metadata only if the selected problem is not found in the uploaded image/PDF/OCR. "
-        "If the upload or selected page visibly contains multiple problems/exercises/questions and there is no active problem or clear referenced item, ask which problem on the page the student wants to focus on; do not ask why they provided the page. "
-        "When visible choices are problem/exercise/question numbers, including ranges like `2.14 through 2.23`, the buttons must be in JSON: return structuredOutput.confusionPrompt plus structuredOutput.confusionChoices for each visible problem number and set structuredOutput.metadata.choiceDisplay to `problem_selection`; do not put the choice request only in nextStep or only in prose. "
-        "For problem_selection, inspect the attached upload closely and enumerate all visible problem/exercise/question numbers in structuredOutput.confusionChoices. This is required: each visible number gets one JSON choice object. Do not return generic location choices like `Problem near the top`, `Problem in the middle`, or `Problem near the bottom` when the upload shows numbered problems; use those only when the visible problems truly have no readable numbers. "
-        "The student-facing structuredOutput.confusionPrompt and answer may be a natural short sentence or two, such as saying the page has several exercises and asking which one to start with, but they must not list the problem numbers. Put the actual visible exercise numbers only inside JSON choices: structuredOutput.confusionChoices must contain one object per visible number, label should be just the number such as `2.14`, and message should be student-sendable such as `Help me with problem 2.14 from this upload.` Do not put the numbers only in prose, and do not use generic choices such as top/middle/bottom when visible problem numbers are available. "
-        "Use ordinary Chandra uncertainty choices only for non-problem-selection ambiguity when retrieval is not required first. "
-        "If the attachment or request is not class-relevant, do not inspect or describe the upload; redirect to the class instead. "
-        "Set needs_search according to the whole context: uploaded files, active Knowledge, and available class OCR/PDF search should all be considered before deciding. A context-grounded answer call should only be needed after retrieval, active selected source context, or if this primary call cannot produce a student_response. "
-        "When needs_search is false, structuredOutput is the complete student-facing reply. "
-        "For follow-ups that depend on active_metadata or prior selected source context, set memory_used true."
+    compact_history = compact_recent_chat_history(
+        state.get("messages", []),
+        limit=None,
+        exclude_latest_student=True,
+        max_chars=360,
     )
+    understanding_state = current_problem_understanding_state(state, memory=memory, active_record=active_metadata)
+    payload: dict[str, Any] = {
+        "heuristic": sparse_primary_heuristic_for_prompt(heuristic),
+        "latest_student_message": latest_message,
+    }
+    if active_metadata:
+        payload["active_metadata"] = compact_primary_active_metadata(active_metadata)
+    if state.get("answer_policy"):
+        payload["answer_policy"] = normalize_answer_policy_state(state.get("answer_policy"))
+    if compact_history:
+        payload["chat_history"] = compact_history
+    debug_options = sparse_debug_options_for_prompt(state.get("debug_options"))
+    if debug_options:
+        payload["debug_options"] = debug_options
+    failed_searches = memory.get("failed_searches", [])[:8]
+    if failed_searches:
+        payload["failed_searches"] = failed_searches
+    selected_numbers = selected_upload_problem_numbers(state)
+    if selected_numbers:
+        payload["selected_upload_problem_numbers"] = selected_numbers
+    sparse_understanding = sparse_problem_understanding_state_for_prompt(understanding_state)
+    if sparse_understanding:
+        payload["problem_understanding_state"] = sparse_understanding
+    active_problem_decision = sparse_active_problem_decision_for_prompt(active_problem_decision_from_state(state))
+    if active_problem_decision:
+        payload["active_problem_decision"] = active_problem_decision
+    source_usage = state.get("source_usage") if isinstance(state.get("source_usage"), dict) else {}
+    if source_usage:
+        payload["source_usage"] = source_usage
+    behavior_title = normalize_behavior_title_state(state.get("behavior_title"))
+    if behavior_title:
+        payload["tutor_mode"] = behavior_title
+    system = build_primary_tutor_system_prompt(state)
     compiled_prompt = compile_langfuse_text_prompt_with_metadata(
         PRIMARY_TUTOR_TURN_LANGFUSE_PROMPT_NAME,
         fallback=system,
@@ -769,10 +692,13 @@ def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) 
         system = (
             f"{system}\n\n"
             "Teacher debug override: debug_options.forceConfusionChoices is true. "
-            "Unless retrieval is required first, Chandra must cooperate with the debug mode and be uncertain on this turn. "
-            "Do not answer the academic question normally. Return needs_search false, set student_response to the same brief context-specific uncertainty line used in structuredOutput.confusionPrompt, "
-            "and include structuredOutput.confusionPrompt plus 2 to 6 context-specific structuredOutput.confusionChoices. "
-            "This override intentionally ignores the normal uncertainty gating rules for currentStep, student work, concept questions, and inferred best next moves."
+            "This is a hard same-call output requirement for the primary tutor call. "
+            "Do not answer the academic question normally. Do not retrieve, and do not use a bare locator echo. "
+            "Return needs_search false, searches [], search_query \"\", and can_answer_now true. "
+            "Set student_response to the same brief context-specific uncertainty line used in structuredOutput.confusionPrompt. "
+            "Include structuredOutput.confusionPrompt plus 2 to 6 context-specific structuredOutput.confusionChoices in this same JSON response. "
+            "Each choice must be generated from the current context, with label as a short title, optional description explaining how the tutor can help, and message as the exact editable student-sendable draft. "
+            "This override intentionally ignores normal uncertainty gating, retrieval gating, currentStep, student work, concept questions, and inferred best next moves."
         )
     debug_options = normalize_debug_options(state.get("debug_options"))
     if debug_options.get("forceRetrieval"):
@@ -795,6 +721,254 @@ def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) 
         {"role": "system", "content": system},
         {"role": "user", "content": user_content},
     ]
+
+
+def build_primary_tutor_system_prompt(state: PdfRagState) -> str:
+    behavior_title = normalize_behavior_title_state(state.get("behavior_title"))
+    behavior_instructions = str(state.get("behavior_instructions") or "").strip()
+    model_settings = normalize_model_settings_state(state.get("model_settings"))
+    response_format = normalize_response_format_state(state.get("response_format"))
+    system_parts = [
+        (
+            "You are Chandra's primary tutor turn. Inspect latest_student_message, earlier chat, compact metadata, teacher policy, tutor state, and any attached class-work files; then answer now or request class-material retrieval. Return valid JSON only, escaping LaTeX backslashes as `\\\\` when needed. "
+            "latest_student_message is the current turn; chat_history contains only earlier turns. Missing optional payload fields mean no relevant prior state, debug override, failed search, active problem, or source policy is known. active_metadata is metadata only, not full source wording; if exact source wording is needed and not visible in uploads/chat, request retrieval. Treat heuristic as the default plan and override it only with stronger payload evidence."
+        ),
+        (
+            "Retrieval: search only when exact class-material/OCR/source metadata is needed, not for a basic hint. For a bare number, problem/exercise/question/page locator, source title, or request to find/read/quote/show a source item, set needs_search true unless active_metadata identifies the exact item. If the active problem references another exercise and the student asks to start, use, apply, or get method support from that referenced exercise, treat it as support for the active problem rather than pure source lookup: use retrieval_reason needed_supporting_page and search method/source-context terms unless the student explicitly asks to quote, read, show, locate, or restate the referenced exercise text. For source lookup, search the requested task/page first and do not invent source facts or ask for a page/title/problem text while retrieval can check class metadata. Allowed retrieval_reason values: student_requested_problem, needed_supporting_page, needed_example_page, student_changed_problem, previous_search_failed. Use up to three distinct searches; for similar-example requests, use needed_example_page and search topic/method/example terms rather than only the assigned problem number."
+        ),
+        (
+            "Planning: produce activeProblemDecision and tutorPlan. activeProblemDecision decides whether pasted text or an upload is an actual academic problem; if so, copy the exact visible task text. tutorPlan is the internal progressive-disclosure plan for later calls. Decide studentIntent from vague_help, specific_question, showed_work, unclear_attempt, asks_for_next_step, asks_for_solution, asks_for_explanation, verification. You own tutor state updates in this first step: set stateUpdates.understandingLevel, lastHelpDepth, answerSeekingRisk, currentStep, currentStepStatus, and concise lastHintSummary/lastStudentAttemptSummary when applicable. State-update wording must be evidence about the student's level, not concept teaching or analogies; do not increment hintsGiven here because the backend counts rendered hints."
+        ),
+        f"Tutor Mode: {behavior_title}. Tutor Mode controls what kind of tutoring Chandra does; it does not control voice, warmth, formality, or response length. {tutor_behavior_instruction_for_state(behavior_title)} Do not let Tutor Mode override Help Rules, source-use rules, academic integrity, or answer-safety policy.",
+        *([f"Hidden tutor instructions from teacher: {behavior_instructions}"] if behavior_instructions else []),
+        (
+            "Understanding: use level 0 for source lookup or a freshly loaded problem before tutoring starts; 1 = little/no useful work; 2 = setup understood but core idea missing or work shows the main idea with one conceptual flaw; 3 = core idea understood but execution help needed; 4 = solution-ready/minor cleanup. Preserve the previous level unless the student's latest message proves a change; do not raise it because Chandra gave more help. Use problem_understanding_state.lastHintSummary when present to avoid repeating prior hints."
+        ),
+        (
+            "Help policy: help limits are ceilings. Depth 1 = light hint/question only. Depth 2 = targeted next action. Depth 3 = one worked step then stop. Depth 4 = full explanation only if policy allows and the student asks. If the student seeks a final answer without effort, avoid answer leakage; give a safer nudge, prerequisite question, non-identical example, or request for their attempt."
+        ),
+        f"Chandra voice: {tutor_voice_instruction_for_state(response_format['tutorVoice'])} Voice controls wording and tone only. It never changes tutoring mode, help depth, source-use rules, academic integrity, retrieval, or answer-safety behavior.",
+        f"Response verbosity: {verbosity_instruction_for_state(model_settings['verbose'])} Verbosity controls detail inside the allowed tutoring move only; it never permits extra solution steps, final answers, or policy bypasses.",
+        *response_format_instruction_lines_for_state(response_format),
+        (
+            "Current step and stuck behavior: track active problem, visibleParts/currentPart/completedParts, and currentStep. currentStep is a guideline for the mathematical move being understood, not a cage. Completing one part does not complete a multi-part problem; move to the next part only when the current part is completed or the student clearly moves ahead. Do not advance currentStep merely because the student asks for the next step. If the student repeats stuck/next-step signals, gives a tiny unclear answer like `2?`, or says a prior hint was unhelpful/repetitive/too vague, do not repeat the last hint; stay on the same currentStep unless completed and make the next help narrower, more concrete, or diagnostic inside that step."
+        ),
+        (
+            "Checking work: avoid direct correctness labels such as correct, incorrect, right, wrong, yes, no, or that's the answer unless policy allows direct checking. Instead point to evidence, ask what justifies a step, or identify the step to inspect."
+            " When the student asks Chandra to check/review their work, inspect the visible attempt or ask for the attempted step; do not search class materials just because the request says `check my work`. Search only if the student explicitly asks to compare their work against a source, rubric, answer key, textbook page, class note, or other class material."
+        ),
+        (
+            "Uncertainty choices: use ordinary Chandra uncertainty choices only when the latest tutoring turn has real ambiguity, retrieval is not needed, and one normal response would likely guess at the student's need. Do not trigger them just because the student says they are lost/confused/stuck; prefer a normal nudge or focused question when a useful next move is inferable. When choices are used, return a brief context-specific confusionPrompt plus 2 to 6 meaningfully different choices. Each choice should have label as a short title, optional description as how Chandra can help, and message as the exact editable student-sendable draft to place in the chat box; do not write tutor-voice text in message, and do not promise final answers, full solutions, or policy bypasses."
+        ),
+        (
+            "Structured output: Use structuredOutput.sections for student-visible content. Include only useful non-empty sections. Allowed section keys: mainChat, problem, answer, hint, explanation, formula, example, checkWork, sourceNote. Put each idea in one place; do not duplicate text across sections. For stuck/help/hint requests, put the tutoring nudge in sections.hint and omit sections.mainChat unless it adds necessary non-hint context or a distinct action request; never paraphrase the hint or write filler like `I can give you a hint` in mainChat. sections.problem must contain only the exact academic task statement, never hints, lookup status, source notes, or next actions. For pure source/problem lookup, omit hint; if problem is present, set metadata.problemNumber when visible and metadata.problemSummary to a short non-solving noun phrase. If needs_search is true, keep visible output to one short natural mainChat/status sentence about checking the relevant class material, and do not invent source facts. Never use a bare locator echo like `problem 2.18` as mainChat or student_response."
+            " For requested problem lookup, an acceptable status sentence is: I'm checking the class materials for that problem."
+        ),
+        (
+            "Streaming order matters: emit structuredOutput.sections in the exact student-visible order. sectionOrder must match that order. Put problem first when it should render first. Emit sections before legacy content/message fields. JSON schema: {\"content\": string, \"sections\": object, \"sectionOrder\": string[], \"metadata\": object, \"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, \"search_query\": string, \"searches\": [{\"query\": string, \"retrieval_reason\": string, \"top_k\": number}], \"help_level\": string, \"student_response\": string, \"memory_used\": boolean, \"activeProblemDecision\": object, \"tutorPlan\": object, \"structuredOutput\": {\"sections\": object, \"sectionOrder\": array, \"confusionPrompt\": string, \"confusionChoices\": [{\"id\": string, \"label\": string, \"description\": string, \"message\": string}], \"metadata\": object}}."
+        ),
+        (
+            "Set needs_search according to the whole context: uploads, active metadata, and available class PDF/OCR search. A context-grounded answer call should only be needed after retrieval, active selected source context, or if this primary call cannot produce a student_response. When needs_search is false, structuredOutput is the complete student-facing reply. For follow-ups that depend on active_metadata or prior selected source context, set memory_used true."
+        ),
+    ]
+    if has_student_upload_for_latest_turn(state):
+        system_parts.append(
+            "Attachment rules: inspect attached class-work image/PDF/file parts in this primary call and do not say you cannot see an academic upload. If attachments are unrelated to class work, do not describe them; briefly redirect to the course. For uploads with multiple visible numbered problems and no clear selected problem, ask which problem to focus on without asking why the page was uploaded; return problem_selection choices with one choice per visible problem number, label as just the number, and message like `Help me with problem 2.14 from this upload.` If the latest turn selects a visible upload problem, set needs_search false and copy the exact full visible task statement word-for-word into structuredOutput.sections.problem; search class metadata only if the selected problem is not found in the upload."
+        )
+    return "\n\n".join(system_parts)
+
+
+PRIMARY_METADATA_PROMPT_KEYS = {
+    "class_id",
+    "doc_id",
+    "material_id",
+    "materialId",
+    "material_type",
+    "materialType",
+    "page_end",
+    "pageEnd",
+    "page_start",
+    "pageStart",
+    "printed_page_end",
+    "printedPageEnd",
+    "printed_page_start",
+    "printedPageStart",
+    "problem_numbers",
+    "problemNumbers",
+    "retrieval_mode",
+    "retrievalMode",
+    "section",
+    "source_id",
+    "sourceId",
+    "source_type",
+    "sourceType",
+    "title",
+}
+
+
+def compact_primary_active_metadata(active_metadata: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in PRIMARY_METADATA_PROMPT_KEYS:
+        if key not in active_metadata:
+            continue
+        value = active_metadata.get(key)
+        if value in (None, "", [], {}):
+            continue
+        compact[key] = value
+    return compact
+
+
+def sparse_debug_options_for_prompt(value: Any) -> dict[str, bool]:
+    return {
+        key: True
+        for key, enabled in normalize_debug_options(value).items()
+        if enabled
+    }
+
+
+def sparse_primary_heuristic_for_prompt(heuristic: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in (
+        "active_material_id",
+        "active_page",
+        "active_problem_numbers",
+        "decision_source",
+        "failed_searches_skipped",
+        "memory_used",
+        "needs_search",
+        "note",
+        "query",
+        "retrieval_reason",
+        "search_query",
+        "top_k",
+    ):
+        value = heuristic.get(key)
+        if value in (None, "", [], {}):
+            continue
+        if key in {"memory_used", "needs_search"} and value is False:
+            continue
+        compact[key] = value
+
+    tutor_plan = sparse_tutor_plan_for_prompt(heuristic.get("tutorPlan") if isinstance(heuristic.get("tutorPlan"), dict) else {})
+    if tutor_plan:
+        compact["tutorPlan"] = tutor_plan
+    return compact
+
+
+def sparse_tutor_plan_for_prompt(tutor_plan: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in (
+        "activeProblemId",
+        "studentIntent",
+        "needsRetrieval",
+        "retrievalReason",
+        "currentUnderstandingLevel",
+        "nextHelpDepth",
+        "answerSeekingRisk",
+        "currentStep",
+        "currentStepStatus",
+        "currentStepCompleted",
+        "visibleParts",
+        "currentPart",
+        "completedParts",
+        "problemStatus",
+        "responseStrategy",
+        "shouldAskQuestion",
+        "shouldGiveWorkedStep",
+        "shouldAvoidFullSolution",
+        "stateUpdates",
+    ):
+        value = tutor_plan.get(key)
+        if value in (None, "", [], {}):
+            continue
+        if key == "activeProblemId" and value == "unknown":
+            continue
+        if key in {"needsRetrieval", "currentStepCompleted", "shouldAskQuestion", "shouldGiveWorkedStep", "shouldAvoidFullSolution"} and value is False:
+            continue
+        if key == "currentUnderstandingLevel" and value == 0:
+            continue
+        if key == "nextHelpDepth" and value == 1:
+            continue
+        if key == "answerSeekingRisk" and value == "low":
+            continue
+        if key == "currentStepStatus" and value == "not_started":
+            continue
+        if key == "problemStatus" and value == "not_started":
+            continue
+        if key == "responseStrategy" and value == "Use progressive disclosure and keep the student doing the next small piece.":
+            continue
+        compact[key] = value
+    return compact
+
+
+def sparse_problem_understanding_state_for_prompt(understanding_state: dict[str, Any]) -> dict[str, Any]:
+    active_problem_id = str(understanding_state.get("activeProblemId") or "").strip()
+    has_active_problem = bool(active_problem_id and active_problem_id != "unknown")
+    compact: dict[str, Any] = {}
+
+    if has_active_problem:
+        compact["activeProblemId"] = active_problem_id
+
+    understanding_level = clamp_int(understanding_state.get("understandingLevel"), minimum=0, maximum=4, default=0)
+    if has_active_problem or understanding_level:
+        compact["understandingLevel"] = understanding_level
+
+    for key in ("attemptsCount", "hintsGiven", "repeatedStuckSignals"):
+        count = clamp_int(understanding_state.get(key), minimum=0, maximum=999, default=0)
+        if count:
+            compact[key] = count
+
+    last_help_depth = clamp_int(understanding_state.get("lastHelpDepth"), minimum=1, maximum=4, default=1)
+    if last_help_depth != 1:
+        compact["lastHelpDepth"] = last_help_depth
+
+    answer_risk = normalize_answer_seeking_risk(understanding_state.get("answerSeekingRisk"))
+    if answer_risk != "low":
+        compact["answerSeekingRisk"] = answer_risk
+
+    for key in (
+        "conceptsUnderstood",
+        "knownConfusions",
+        "completedSteps",
+        "visibleParts",
+        "completedParts",
+    ):
+        values = compact_string_list(understanding_state.get(key), limit=12 if key in {"conceptsUnderstood", "knownConfusions", "completedSteps"} else 24)
+        if values:
+            compact[key] = values
+
+    for key in ("currentStep", "currentPart", "lastHintSummary", "lastStudentAttemptSummary"):
+        text = str(understanding_state.get(key) or "").strip()
+        if text:
+            compact[key] = text
+
+    current_step_status = normalize_current_step_status(understanding_state.get("currentStepStatus"))
+    if current_step_status != "not_started":
+        compact["currentStepStatus"] = current_step_status
+
+    problem_status = normalize_problem_status(understanding_state.get("problemStatus"))
+    if problem_status != "in_progress":
+        compact["problemStatus"] = problem_status
+
+    return compact
+
+
+def sparse_active_problem_decision_for_prompt(decision: dict[str, Any]) -> dict[str, Any]:
+    if not decision.get("isActualProblem"):
+        return {}
+
+    compact = {
+        "isActualProblem": True,
+        "problemText": decision.get("problemText") or "",
+        "problemSource": decision.get("problemSource") or "none",
+        "relationToPreviousProblem": decision.get("relationToPreviousProblem") or "unclear",
+        "confidence": decision.get("confidence") or "low",
+    }
+    for key in ("reason", "visibleParts", "currentPart", "completedParts"):
+        value = decision.get(key)
+        if value not in (None, "", [], {}):
+            compact[key] = value
+    return compact
 
 
 def primary_tutor_user_content(payload: dict[str, Any], state: PdfRagState) -> str | list[dict[str, Any]]:
@@ -827,9 +1001,83 @@ def normalize_debug_options(value: Any) -> dict[str, bool]:
     }
 
 
-def parse_primary_tutor_response(response: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+def normalize_behavior_title_state(value: Any) -> str:
+    if value in {"Socratic", "Check my work", "Exam review", "Reading helper"}:
+        return str(value)
+    return "Guided problem solving"
+
+
+def tutor_behavior_instruction_for_state(behavior_title: str) -> str:
+    if behavior_title == "Socratic":
+        return "Lead with focused questions before explanation, unless the student asks for a concept explanation."
+    if behavior_title == "Check my work":
+        return "Inspect shown work first and point to the step to justify, tighten, or revise."
+    if behavior_title == "Exam review":
+        return "Stay practice-oriented, emphasizing recognition, common traps, and strategy checks."
+    if behavior_title == "Reading helper":
+        return "Help interpret assigned text, examples, diagrams, definitions, and source language."
+    return "Guide the next reasoning move without taking over."
+
+
+def normalize_model_settings_state(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    verbose = source.get("verbose")
+    return {
+        "verbose": verbose if verbose in {"brief", "standard", "detailed", "veryDetailed"} else "standard",
+    }
+
+
+def normalize_response_format_state(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    tutor_voice = source.get("tutorVoice")
+    return {
+        "simpleWording": source.get("simpleWording") if isinstance(source.get("simpleWording"), bool) else False,
+        "tutorVoice": tutor_voice
+        if tutor_voice in {"calmClear", "friendlyUpbeat", "directConcise", "formalAcademic", "gentlePatient"}
+        else "calmClear",
+    }
+
+
+def tutor_voice_instruction_for_state(tutor_voice: str) -> str:
+    if tutor_voice == "friendlyUpbeat":
+        return "Sound conversational and positive, while still avoiding flattery, excessive cheer, and filler praise."
+    if tutor_voice == "directConcise":
+        return "Be brief, straightforward, and low on small talk, while still sounding kind and classroom-safe."
+    if tutor_voice == "formalAcademic":
+        return "Use polished, precise classroom language with less casual phrasing."
+    if tutor_voice == "gentlePatient":
+        return "Use softer wording, normalize confusion briefly, and offer steady reassurance without long motivational speeches."
+    return "Chandra sounds calm, friendly, observant, and plainspoken: warm without being gushy, direct without being cold, and encouraging without empty praise."
+
+
+def verbosity_instruction_for_state(verbose: str) -> str:
+    if verbose == "brief":
+        return "Short: prefer one compact sentence, hint, or question when possible."
+    if verbose == "detailed":
+        return "Detailed: use more explanation and context within the allowed help level, but still no forbidden solution chains or final answers."
+    if verbose == "veryDetailed":
+        return "Very detailed: add context only where policy allows, and never use detail to reveal extra solution steps or final answers."
+    return "Balanced: brief orientation plus one useful hint, check, or next question."
+
+
+def response_format_instruction_lines_for_state(response_format: dict[str, Any]) -> list[str]:
+    return (
+        ["Response wording: use shorter sentences and define specialized terms briefly."]
+        if response_format.get("simpleWording")
+        else []
+    )
+
+
+def parse_primary_tutor_response(
+    response: dict[str, Any],
+    fallback: dict[str, Any],
+    *,
+    preserve_confusion_choices_on_search: bool = False,
+) -> dict[str, Any]:
     content = str(response.get("content") or "").strip()
     parsed = parse_json_object_from_text(content)
+    if parsed:
+        parsed = unwrap_nested_model_json_payload(parsed)
 
     if not parsed:
         tool_calls = [
@@ -873,16 +1121,6 @@ def parse_primary_tutor_response(response: dict[str, Any], fallback: dict[str, A
             parsed = dict(fallback)
 
     searches = normalize_decision_searches(parsed, fallback)
-    if should_force_example_search(parsed, fallback):
-        parsed = {
-            **parsed,
-            "can_answer_now": False,
-            "needs_search": True,
-            "retrieval_reason": "needed_example_page",
-            "search_query": fallback.get("query") or parsed.get("search_query") or parsed.get("query") or "",
-            "student_response": "",
-        }
-        searches = normalize_decision_searches(parsed, fallback)
     needs_search = bool(parsed.get("needs_search")) and bool(searches)
     first_search = searches[0] if needs_search else {}
     query = str(first_search.get("query") or "").strip()
@@ -898,6 +1136,20 @@ def parse_primary_tutor_response(response: dict[str, Any], fallback: dict[str, A
         needs_search=needs_search,
         retrieval_reason=retrieval_reason,
     )
+    active_problem_decision = normalize_active_problem_decision(
+        parsed.get("activeProblemDecision")
+        or parsed.get("active_problem_decision")
+        or tutor_plan.get("activeProblemDecision")
+    )
+    if active_problem_decision.get("isActualProblem") and active_problem_decision.get("problemText"):
+        active_problem_id = stable_problem_id(str(active_problem_decision.get("problemText") or ""))
+        tutor_plan = {
+            **tutor_plan,
+            "activeProblemId": active_problem_id,
+            "activeProblemDecision": active_problem_decision,
+        }
+    else:
+        tutor_plan = {**tutor_plan, "activeProblemDecision": active_problem_decision}
 
     structured_output = normalize_backend_structured_output(
         parsed.get("structuredOutput") or parsed.get("structured_output")
@@ -909,18 +1161,38 @@ def parse_primary_tutor_response(response: dict[str, Any], fallback: dict[str, A
         retrieval_reason = ""
         decision_source = "student_message"
     if needs_search:
-        had_confusion_choices = bool((structured_output or {}).get("confusionChoices"))
-        structured_output = suppress_retrieval_status_next_step(structured_output)
-        structured_output = strip_confusion_choice_output(structured_output)
-        if had_confusion_choices:
-            structured_output = None
-    student_response = str(parsed.get("student_response") or "").strip()
+        if preserve_confusion_choices_on_search and structured_output_has_confusion_choices(structured_output):
+            parsed = {**parsed, "can_answer_now": True, "needs_search": False}
+            tutor_plan = {**tutor_plan, "needsRetrieval": False, "retrievalReason": ""}
+            needs_search = False
+            first_search = {}
+            query = ""
+            retrieval_reason = ""
+            decision_source = "student_message"
+        else:
+            had_confusion_choices = bool((structured_output or {}).get("confusionChoices"))
+            structured_output = strip_confusion_choice_output(structured_output)
+            if had_confusion_choices:
+                structured_output = None
+            structured_output = normalize_retrieval_pending_structured_output(
+                structured_output,
+                retrieval_reason=retrieval_reason,
+            )
+    student_response = jsonish_visible_text(str(parsed.get("student_response") or "").strip()) or str(parsed.get("student_response") or "").strip()
     if not student_response:
-        student_response = coerce_structured_section_text(parsed.get("mainText") or parsed.get("main_text"))
+        parsed_sections = parsed.get("sections") if isinstance(parsed.get("sections"), dict) else {}
+        student_response = coerce_structured_section_text(
+            parsed_sections.get("mainChat")
+            or parsed_sections.get("answer")
+            or parsed.get("mainText")
+            or parsed.get("main_text")
+        )
     if structured_output and structured_output.get("confusionChoices"):
         student_response = normalize_confusion_choice_student_response(structured_output)
     if structured_output and not student_response:
         student_response = structured_output_to_text(structured_output)
+    if needs_search and looks_like_source_lookup_echo(student_response):
+        student_response = ""
     if needs_search and asks_for_pasted_problem_or_source(student_response):
         student_response = ""
     if needs_search and not student_response:
@@ -944,21 +1216,81 @@ def parse_primary_tutor_response(response: dict[str, Any], fallback: dict[str, A
         "structuredOutput": structured_output,
         "student_response": student_response,
         "tutorPlan": tutor_plan,
+        "activeProblemDecision": active_problem_decision,
         "top_k": max(1, min(top_k, MAX_RETRIEVED_WINDOWS)),
     }
 
 
-def should_force_example_search(parsed: dict[str, Any], fallback: dict[str, Any]) -> bool:
-    if fallback.get("retrieval_reason") != "needed_example_page" or not fallback.get("needs_search"):
-        return False
+def normalize_active_problem_decision(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    problem_text = compact_text(raw.get("problemText") or raw.get("problem_text"), limit=MAX_ACTIVE_PROBLEM_CHARS)
+    source = str(raw.get("problemSource") or raw.get("problem_source") or "none").strip()
+    if source not in ACTIVE_PROBLEM_DECISION_SOURCES:
+        source = "none"
+    relation = str(raw.get("relationToPreviousProblem") or raw.get("relation_to_previous_problem") or "unclear").strip()
+    if relation not in ACTIVE_PROBLEM_DECISION_RELATIONS:
+        relation = "unclear"
+    confidence = str(raw.get("confidence") or "low").strip().lower()
+    if confidence not in PROBLEM_CONTEXT_CONFIDENCE:
+        confidence = "low"
+    visible_parts = compact_string_list(raw.get("visibleParts") or raw.get("visible_parts"), limit=24)
+    completed_parts = compact_string_list(raw.get("completedParts") or raw.get("completed_parts"), limit=24)
+    current_part = str(raw.get("currentPart") or raw.get("current_part") or "").strip()[:80]
+    reason = str(raw.get("reason") or "").strip()[:240]
+    is_actual = bool(raw.get("isActualProblem") or raw.get("is_actual_problem")) and bool(problem_text)
 
-    if parsed.get("needs_search"):
-        return False
+    if relation == "not_a_problem" or source == "none":
+        is_actual = False
+    if not is_actual:
+        problem_text = ""
 
-    # A find-example follow-up needs class OCR retrieval even when active problem
-    # metadata is already available; otherwise the tutor may refuse instead of
-    # looking for a different source example.
-    return bool(fallback.get("query"))
+    return {
+        "isActualProblem": is_actual,
+        "problemText": problem_text,
+        "problemSource": source,
+        "relationToPreviousProblem": relation,
+        "confidence": confidence,
+        "reason": reason,
+        "visibleParts": visible_parts,
+        "currentPart": current_part,
+        "completedParts": completed_parts,
+    }
+
+
+def active_problem_decision_from_state(state: PdfRagState) -> dict[str, Any]:
+    decision = state.get("retrieval_decision") if isinstance(state.get("retrieval_decision"), dict) else {}
+    tutor_plan = state.get("tutor_plan") if isinstance(state.get("tutor_plan"), dict) else {}
+    return normalize_active_problem_decision(
+        decision.get("activeProblemDecision")
+        or tutor_plan.get("activeProblemDecision")
+        or decision.get("active_problem_decision")
+        or tutor_plan.get("active_problem_decision")
+    )
+
+
+def problem_context_from_active_problem_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    if not decision.get("isActualProblem") or not decision.get("problemText"):
+        return {}
+
+    relation = str(decision.get("relationToPreviousProblem") or "unclear")
+    problem_context_relation = "same_problem" if relation.startswith("same_problem") else "different_problem"
+    source_map = {
+        "pasted_text": "conversation_extracted",
+        "student_upload": "uploaded_image",
+        "retrieved_pdf": "pdf",
+        "existing_context": "unknown",
+    }
+    return {
+        "relation": problem_context_relation,
+        "problem": decision.get("problemText"),
+        "source_type": source_map.get(str(decision.get("problemSource") or ""), "unknown"),
+        "confidence": decision.get("confidence") or "low",
+        "visible_parts": decision.get("visibleParts") or [],
+        "current_part": decision.get("currentPart") or "",
+        "completed_parts": decision.get("completedParts") or [],
+        "relation_to_previous_problem": relation,
+        "llm_reason": decision.get("reason") or "",
+    }
 
 
 def latest_message_content_from_query_or_record(query: str, active_record: dict[str, Any] | None) -> str:
@@ -997,9 +1329,13 @@ def default_tutor_plan_for_message(
         "nextHelpDepth": depth,
         "answerSeekingRisk": risk,
         "currentStep": "",
-        "currentSubstep": "",
         "currentStepStatus": "not_started",
         "currentStepCompleted": False,
+        "visibleParts": [],
+        "currentPart": "",
+        "completedParts": [],
+        "problemStatus": "not_started",
+        "activeProblemDecision": normalize_active_problem_decision({}),
         "responseStrategy": "Use progressive disclosure and keep the student doing the next small piece.",
         "shouldAskQuestion": depth <= 2,
         "shouldGiveWorkedStep": depth >= 3,
@@ -1084,9 +1420,13 @@ def normalize_tutor_plan(
         "nextHelpDepth": next_depth,
         "answerSeekingRisk": risk,
         "currentStep": str(raw.get("currentStep") or raw.get("current_step") or fallback_plan.get("currentStep") or "").strip()[:300],
-        "currentSubstep": str(raw.get("currentSubstep") or raw.get("current_substep") or fallback_plan.get("currentSubstep") or "").strip()[:300],
         "currentStepStatus": current_step_status,
         "currentStepCompleted": bool(raw.get("currentStepCompleted", raw.get("current_step_completed", current_step_status == "completed"))),
+        "visibleParts": compact_string_list(raw.get("visibleParts") or raw.get("visible_parts") or fallback_plan.get("visibleParts"), limit=24),
+        "currentPart": str(raw.get("currentPart") or raw.get("current_part") or fallback_plan.get("currentPart") or "").strip()[:80],
+        "completedParts": compact_string_list(raw.get("completedParts") or raw.get("completed_parts") or fallback_plan.get("completedParts"), limit=24),
+        "problemStatus": normalize_problem_status(raw.get("problemStatus") or raw.get("problem_status") or fallback_plan.get("problemStatus")),
+        "activeProblemDecision": normalize_active_problem_decision(raw.get("activeProblemDecision") or raw.get("active_problem_decision") or fallback_plan.get("activeProblemDecision")),
         "responseStrategy": str(raw.get("responseStrategy") or raw.get("response_strategy") or fallback_plan.get("responseStrategy") or "").strip(),
         "shouldAskQuestion": bool(raw.get("shouldAskQuestion", raw.get("should_ask_question", next_depth <= 2))),
         "shouldGiveWorkedStep": bool(raw.get("shouldGiveWorkedStep", raw.get("should_give_worked_step", next_depth >= 3))),
@@ -1249,22 +1589,27 @@ def normalize_backend_structured_output(value: Any) -> dict[str, Any] | None:
         text = coerce_structured_section_text(sections_value.get(key))
         if text:
             sections[key] = text
+    normalize_main_chat_section(sections)
+    merge_legacy_action_section_into_main_chat(sections, sections_value)
 
     if not sections:
         if not confusion_choices or not confusion_prompt:
             return None
-        sections["answer"] = confusion_prompt
+        sections["mainChat"] = confusion_prompt
 
     if confusion_choices and confusion_prompt:
-        choice_prompt = preferred_confusion_choice_prompt(sections.get("answer"), confusion_prompt)
-        sections = {"answer": choice_prompt}
+        choice_prompt = preferred_confusion_choice_prompt(sections.get("mainChat") or sections.get("answer"), confusion_prompt)
+        sections = {"mainChat": choice_prompt}
 
     repair_misplaced_problem_section(sections)
+    remove_workflow_status_sections(sections)
     suppress_duplicated_structured_sections(sections)
+    if not sections:
+        return None
 
     raw_order = value.get("sectionOrder") or value.get("section_order") or sections_value.get("sectionOrder")
     order = [str(item) for item in raw_order] if isinstance(raw_order, list) else []
-    section_order = normalized_structured_section_order(order, sections, include_answer_first=False)
+    section_order = normalized_structured_section_order(normalized_section_order_aliases(order), sections, include_answer_first=False)
     problem = str(sections.get("problem") or "")
     problem_metadata = structured_problem_metadata(metadata, problem)
 
@@ -1284,6 +1629,42 @@ def normalize_backend_structured_output(value: Any) -> dict[str, Any] | None:
     }
 
 
+def normalize_retrieval_pending_structured_output(
+    structured_output: dict[str, Any] | None,
+    *,
+    retrieval_reason: str,
+) -> dict[str, Any] | None:
+    if not structured_output:
+        return structured_output
+
+    sections = structured_output.get("sections")
+    if not isinstance(sections, dict):
+        return structured_output
+
+    next_sections = dict(sections)
+    replacement = fallback_quick_retrieval_response(retrieval_reason)
+    for key in ("mainChat", "answer"):
+        text = str(next_sections.get(key) or "").strip()
+        if text and looks_like_source_lookup_echo(text):
+            next_sections["mainChat"] = replacement
+            next_sections.pop("answer", None)
+            break
+
+    if next_sections == sections:
+        return structured_output
+
+    order = normalized_structured_section_order(
+        structured_output.get("sectionOrder") if isinstance(structured_output.get("sectionOrder"), list) else [],
+        next_sections,
+        include_answer_first=False,
+    )
+    return {
+        **structured_output,
+        "sections": next_sections,
+        **({"sectionOrder": order} if order else {}),
+    }
+
+
 def structured_output_from_ordered_json_payload(
     value: Any,
     *,
@@ -1292,23 +1673,34 @@ def structured_output_from_ordered_json_payload(
     if not isinstance(value, dict):
         return None
 
+    value = unwrap_nested_model_json_payload(value)
     main_text = coerce_structured_section_text(value.get("mainText") or value.get("main_text"))
+    main_text = jsonish_visible_text(main_text) or main_text
     raw_sections = value.get("sections") if isinstance(value.get("sections"), dict) else {}
     sections: dict[str, str] = {}
     for key in FINAL_JSON_SECTION_KEYS:
         text = coerce_structured_section_text(raw_sections.get(key))
+        text = jsonish_visible_text(text) or text
         if text:
             sections[key] = text
+    if main_text and not sections.get("mainChat"):
+        sections["mainChat"] = main_text
+    normalize_main_chat_section(sections)
+    merge_legacy_action_section_into_main_chat(sections, raw_sections)
 
     if not sections:
         return None
 
     metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
     repair_misplaced_problem_section(sections)
+    remove_workflow_status_sections(sections)
     suppress_duplicated_structured_sections(sections)
+    improve_problem_lookup_main_chat(sections)
+    if not sections:
+        return None
     raw_order = value.get("sectionOrder") or value.get("section_order")
     requested_order = [str(item) for item in raw_order] if isinstance(raw_order, list) else []
-    section_order = ordered_json_structured_section_order(requested_order, sections, has_main_text=bool(main_text))
+    section_order = ordered_json_structured_section_order(requested_order, sections, has_main_text=bool(main_text and sections.get("mainChat")))
     problem = str(sections.get("problem") or "")
     problem_metadata = structured_problem_metadata(metadata, problem)
 
@@ -1325,24 +1717,55 @@ def structured_output_from_ordered_json_payload(
     }
 
 
+def normalize_main_chat_section(sections: dict[str, str]) -> None:
+    legacy_answer = str(sections.get("answer") or "").strip()
+    if legacy_answer and not sections.get("mainChat"):
+        sections["mainChat"] = legacy_answer
+        sections.pop("answer", None)
+    elif legacy_answer and sections.get("mainChat"):
+        sections.pop("answer", None)
+
+
+def merge_legacy_action_section_into_main_chat(sections: dict[str, str], raw_sections: dict[str, Any]) -> None:
+    legacy_key = "".join(["next", "Step"])
+    action = coerce_structured_section_text(raw_sections.get(legacy_key))
+    if not action or looks_like_retrieval_status_text(action) or asks_for_pasted_problem_or_source(action):
+        return
+
+    main_chat = str(sections.get("mainChat") or "").strip()
+    if main_chat and is_repeated_section_content(main_chat, action):
+        return
+
+    sections["mainChat"] = "\n\n".join(part for part in [main_chat, action] if part)
+
+
 def ordered_json_structured_section_order(raw_order: list[str], sections: dict[str, str], *, has_main_text: bool = False) -> list[str]:
     order: list[str] = []
-    for raw_key in raw_order:
+    for raw_key in normalized_section_order_aliases(raw_order):
         if raw_key == FINAL_JSON_MAIN_TEXT_KEY:
-            if has_main_text and FINAL_JSON_MAIN_TEXT_KEY not in order:
-                order.append(FINAL_JSON_MAIN_TEXT_KEY)
+            if has_main_text and "mainChat" not in order:
+                order.append("mainChat")
             continue
         if raw_key in FINAL_JSON_SECTION_KEYS and raw_key in sections and raw_key not in order:
             order.append(raw_key)
 
-    if has_main_text and FINAL_JSON_MAIN_TEXT_KEY not in order:
-        order.insert(0, FINAL_JSON_MAIN_TEXT_KEY)
+    if has_main_text and sections.get("mainChat") and "mainChat" not in order:
+        order.insert(0, "mainChat")
 
     for key, _label in STRUCTURED_SECTION_ORDER:
         if key in sections and key not in order:
             order.append(key)
 
     return order
+
+
+def normalized_section_order_aliases(raw_order: list[str]) -> list[str]:
+    aliases = {
+        FINAL_JSON_MAIN_TEXT_KEY: "mainChat",
+        "main_text": "mainChat",
+        "answer": "mainChat",
+    }
+    return [aliases.get(str(key), str(key)) for key in raw_order]
 
 
 def visible_text_from_ordered_json_output(answer: str) -> str:
@@ -1358,10 +1781,44 @@ def visible_text_from_ordered_json_output(answer: str) -> str:
     return structured_output_to_text(structured or {}) if structured else ""
 
 
+def answer_with_context_grounded_continuation(state: PdfRagState, context_grounded_response: str) -> str:
+    context_text = str(context_grounded_response or "").strip()
+    primary_text = str(state.get("primary_student_response") or "").strip()
+    visible_context_text = full_visible_text_from_ordered_json_output(context_text) or context_text
+    visible_primary_text = full_visible_text_from_ordered_json_output(primary_text) or primary_text
+
+    if not visible_primary_text or looks_like_retrieval_status_text(visible_primary_text):
+        return context_text
+
+    if not visible_context_text or same_normalized_text(visible_primary_text, visible_context_text):
+        return primary_text
+
+    return "\n\n".join([visible_primary_text, visible_context_text])
+
+
+def same_normalized_text(first: str, second: str) -> bool:
+    return normalize_search_query(first) == normalize_search_query(second)
+
+
+def full_visible_text_from_ordered_json_output(answer: str) -> str:
+    parsed = parse_json_object_from_text(answer)
+    if not parsed:
+        return ""
+
+    main_text = coerce_structured_section_text(parsed.get("mainText") or parsed.get("main_text"))
+    structured = structured_output_from_ordered_json_payload(parsed)
+    section_text = structured_output_to_text(structured or {}) if structured else ""
+    if not main_text or same_normalized_text(main_text, section_text):
+        return section_text or main_text
+    if not section_text:
+        return main_text
+    return "\n\n".join([main_text, section_text])
+
+
 def normalize_confusion_choice_student_response(structured_output: dict[str, Any]) -> str:
     prompt = coerce_structured_section_text(structured_output.get("confusionPrompt"))
     sections = structured_output.get("sections")
-    answer = coerce_structured_section_text(sections.get("answer")) if isinstance(sections, dict) else ""
+    answer = coerce_structured_section_text(sections.get("mainChat") or sections.get("answer")) if isinstance(sections, dict) else ""
     return answer or prompt
 
 
@@ -1386,6 +1843,7 @@ def normalize_confusion_choices(value: Any, max_count: int = CONFUSION_CHOICE_MA
             continue
 
         label = coerce_structured_section_text(item.get("label"))[:CONFUSION_CHOICE_LABEL_MAX_LENGTH]
+        description = coerce_structured_section_text(item.get("description"))[:180]
         message = coerce_structured_section_text(item.get("message") or item.get("value") or item.get("content"))[
             :CONFUSION_CHOICE_MESSAGE_MAX_LENGTH
         ]
@@ -1393,9 +1851,19 @@ def normalize_confusion_choices(value: Any, max_count: int = CONFUSION_CHOICE_MA
             continue
 
         choice_id = coerce_structured_section_text(item.get("id"))[:CONFUSION_CHOICE_LABEL_MAX_LENGTH] or f"choice-{len(choices) + 1}"
-        choices.append({"id": choice_id, "label": label, "message": message})
+        choices.append({"id": choice_id, "label": label, **({"description": description} if description else {}), "message": message})
 
     return choices if CONFUSION_CHOICE_MIN_COUNT <= len(choices) <= max_count else None
+
+
+def should_force_debug_confusion_choices(state: PdfRagState) -> bool:
+    return normalize_debug_options(state.get("debug_options")).get("forceConfusionChoices") is True
+
+
+def structured_output_has_confusion_choices(structured_output: Any) -> bool:
+    if not isinstance(structured_output, dict):
+        return False
+    return bool(normalize_confusion_choices(structured_output.get("confusionChoices")))
 
 
 def strip_confusion_choice_output(structured_output: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1475,13 +1943,54 @@ def repair_misplaced_problem_section(sections: dict[str, str]) -> None:
     if not problem or looks_like_academic_problem_section(problem):
         return
 
-    answer = str(sections.get("answer") or "").strip()
-    if not answer:
-        sections["answer"] = problem
-    elif normalize_search_query(answer) != normalize_search_query(problem):
-        sections["answer"] = f"{answer}\n\n{problem}"
+    main_chat = str(sections.get("mainChat") or sections.get("answer") or "").strip()
+    if not main_chat:
+        sections["mainChat"] = problem
+    elif normalize_search_query(main_chat) != normalize_search_query(problem):
+        sections["mainChat"] = f"{main_chat}\n\n{problem}"
+    sections.pop("answer", None)
 
     sections.pop("problem", None)
+
+
+def improve_problem_lookup_main_chat(sections: dict[str, str]) -> None:
+    problem = str(sections.get("problem") or "").strip()
+    if not problem:
+        return
+
+    for key in ("mainChat", "answer"):
+        text = str(sections.get(key) or "").strip()
+        if text and looks_like_source_lookup_echo(text):
+            sections.pop(key, None)
+
+
+def context_note_for_found_problem(state: PdfRagState, sources: list[dict[str, Any]] | None = None) -> str:
+    candidate_sources = sources or state.get("sources") or []
+    if not candidate_sources and state.get("page_assets"):
+        candidate_sources = sources_from_page_assets(state.get("page_assets") or [])
+    if not candidate_sources and state.get("retrieved_pages"):
+        candidate_sources = sources_from_pages(state.get("retrieved_pages") or [], limit=1)
+    source = (candidate_sources or [None])[0] if candidate_sources else None
+    title = str((source or {}).get("title") or "").strip()
+    page = nonnegative_int((source or {}).get("printedPageNumber") or (source or {}).get("printedPageStart"))
+    if title and page:
+        return f"I found the matching item in {title} on printed page {page}."
+    if title:
+        return f"I found the matching item in {title}."
+    if page:
+        return f"I found the matching item on printed page {page}."
+
+    decision = state.get("retrieval_decision") if isinstance(state.get("retrieval_decision"), dict) else {}
+    if decision.get("retrieval_reason") in {"student_requested_problem", "student_changed_problem"}:
+        return "I found the matching problem in the class materials."
+    return ""
+
+
+def remove_workflow_status_sections(sections: dict[str, str]) -> None:
+    for key in list(sections.keys()):
+        text = str(sections.get(key) or "")
+        if looks_like_retrieval_status_text(text):
+            sections.pop(key, None)
 
 
 def looks_like_academic_problem_section(text: str) -> bool:
@@ -1511,58 +2020,28 @@ def looks_like_academic_problem_section(text: str) -> bool:
     return word_count >= 4 and has_task_verb and (has_problem_marker or has_math_signal or starts_with_task)
 
 
-def suppress_retrieval_status_next_step(structured_output: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not structured_output:
-        return structured_output
+def looks_like_source_lookup_echo(text: str) -> bool:
+    normalized = normalize_search_query(text)
+    if not normalized:
+        return False
 
-    sections = structured_output.get("sections")
-    if not isinstance(sections, dict):
-        return structured_output
-
-    next_step = str(sections.get("nextStep") or "").strip()
-    if not next_step or not (looks_like_retrieval_status_text(next_step) or asks_for_pasted_problem_or_source(next_step)):
-        return structured_output
-
-    next_sections = dict(sections)
-    next_sections.pop("nextStep", None)
-    raw_order = structured_output.get("sectionOrder")
-    next_order = [key for key in raw_order if key != "nextStep"] if isinstance(raw_order, list) else []
-
-    return {
-        **structured_output,
-        "sections": next_sections,
-        **({"sectionOrder": next_order} if isinstance(raw_order, list) else {}),
-    }
+    locator_number = r"\d{1,3}(?:\s+\d{1,3})?[a-z]?"
+    if re.fullmatch(rf"(?:problem|exercise|question|ex)\s+{locator_number}", normalized):
+        return True
+    if re.fullmatch(locator_number, normalized):
+        return True
+    if re.fullmatch(r"(?:page|p)\s+\d{1,4}", normalized):
+        return True
+    return False
 
 
 def suppress_duplicated_structured_sections(sections: dict[str, str]) -> None:
     hint = str(sections.get("hint") or "").strip()
-    if hint and section_repeats_earlier_content(hint, [sections.get("answer"), sections.get("explanation")]):
+    if hint and section_repeats_earlier_content(hint, [sections.get("mainChat"), sections.get("answer"), sections.get("explanation")]):
         sections.pop("hint", None)
-
-    next_step = str(sections.get("nextStep") or "").strip()
-    if not next_step:
-        return
-
-    if looks_like_retrieval_status_text(next_step) or section_repeats_earlier_content(
-        next_step,
-        [sections.get("answer"), sections.get("hint"), sections.get("explanation"), sections.get("checkWork")],
-    ):
-        sections.pop("nextStep", None)
 
 
 def suppress_duplicate_problem_answer(answer: str, structured_output: dict[str, Any] | None) -> str:
-    if not isinstance(structured_output, dict):
-        return answer
-
-    sections = structured_output.get("sections")
-    if not isinstance(sections, dict):
-        return answer
-
-    problem = str(sections.get("problem") or "").strip()
-    if problem and answer_duplicates_problem_section(answer, problem):
-        return ""
-
     return answer
 
 
@@ -1771,117 +2250,9 @@ def suppress_repeated_failed_search_decision(decision: dict[str, Any], state: Pd
     }
 
 
-def enforce_referenced_problem_dependency_search(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
-    if decision.get("needs_search"):
-        return decision
-
-    source_usage = state.get("source_usage")
-    if isinstance(source_usage, dict) and source_usage.get("useClassMaterialsFirst") is False:
-        return decision
-
-    memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
-    active_record = active_metadata_record_from_memory(memory)
-    latest_message = latest_student_message_content(state.get("messages", []))
-    missing_numbers = referenced_problem_numbers_needed_for_followup(latest_message, active_record, memory)
-
-    if not missing_numbers:
-        return decision
-
-    query = referenced_problem_dependency_search_query(active_record, missing_numbers)
-    return {
-        **decision,
-        "can_answer_now": False,
-        "decision_source": "search_required",
-        "memory_used": True,
-        "needs_search": True,
-        "note": "Active problem references another exercise; fetching the referenced exercise before answering.",
-        "query": query,
-        "retrieval_reason": "needed_supporting_page",
-        "search_query": query,
-        "student_response": "I'm checking the referenced exercise in the class materials.",
-        "structuredOutput": None,
-        "top_k": min(MAX_RETRIEVED_WINDOWS, max(1, len(missing_numbers) + 1)),
-    }
-
-
-def referenced_problem_numbers_needed_for_followup(
-    message: str,
-    active_record: dict[str, Any] | None,
-    memory: dict[str, Any],
-) -> list[str]:
-    if not active_record:
-        return []
-
-    if not asks_for_help_with_active_problem(message):
-        return []
-
-    if student_changed_problem(message, active_record):
-        return []
-
-    active_numbers = {str(number).upper() for number in active_record.get("problem_numbers") or []}
-    if not active_numbers:
-        return []
-
-    active_text = str(active_record.get("ocr_text") or active_record.get("chunk_text") or "")
-    if not content_has_requested_problem_number(active_text, active_numbers):
-        return []
-
-    referenced_numbers = {
-        number.upper()
-        for number in problem_numbers_from_text(active_text)
-        if number.upper() not in active_numbers
-    }
-
-    missing_numbers = [
-        number
-        for number in sorted(referenced_numbers, key=problem_number_sort_key)
-        if not retrieval_memory_has_explicit_problem_number(memory, number)
-    ]
-    return missing_numbers
-
-
-def asks_for_help_with_active_problem(message: str) -> bool:
-    normalized = normalize_search_query(message)
-    if not normalized:
-        return False
-
-    return bool(
-        simple_hint_or_next_step_intent(message)
-        or re.search(
-            r"\b(?:this|that|it|same problem|work through|walk through|start|begin|explain|yes|yeah|yep|sure|please)\b",
-            normalized,
-        )
-    )
-
-
-def retrieval_memory_has_explicit_problem_number(memory: dict[str, Any], problem_number: str) -> bool:
-    target = problem_number.upper()
-    records = [
-        memory.get("active_metadata"),
-        *(memory.get("retrieved_metadata") or []),
-    ]
-
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        record_numbers = {str(number).upper() for number in record.get("problem_numbers") or []}
-        if target in record_numbers:
-            return True
-
-    return False
-
-
 def problem_number_sort_key(problem_number: str) -> tuple[int, ...]:
     parts = re.findall(r"\d+", problem_number)
     return tuple(int(part) for part in parts) or (0,)
-
-
-def referenced_problem_dependency_search_query(active_record: dict[str, Any] | None, problem_numbers: list[str]) -> str:
-    title = str((active_record or {}).get("title") or "").strip()
-    material_hint = f" {title}" if title else ""
-    number_text = " ".join(problem_numbers)
-    return f"find exact referenced exercise problem {number_text}{material_hint}".strip()
-
 
 def enforce_ambiguous_student_upload_clarification(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
     if structured_output_is_problem_selection(decision.get("structuredOutput")):
@@ -1919,7 +2290,6 @@ def enforce_ambiguous_student_upload_clarification(decision: dict[str, Any], sta
         "nextHelpDepth": 1,
         "answerSeekingRisk": "low",
         "currentStep": "Identify which uploaded exercise the student wants help with.",
-        "currentSubstep": "Ask for the problem number or visible position on the uploaded page.",
         "currentStepStatus": "unclear",
         "currentStepCompleted": False,
         "responseStrategy": "Ask a focused clarification before searching class materials.",
@@ -2219,6 +2589,9 @@ def enforce_initial_source_lookup_search(decision: dict[str, Any], state: PdfRag
     if decision.get("needs_search"):
         return decision
 
+    if should_force_debug_confusion_choices(state) and structured_output_has_confusion_choices(decision.get("structuredOutput")):
+        return decision
+
     if selected_upload_problem_numbers(state):
         return decision
 
@@ -2399,6 +2772,44 @@ def parse_json_object_from_text(text: str) -> dict[str, Any] | None:
         return None
 
 
+def unwrap_nested_model_json_payload(value: dict[str, Any]) -> dict[str, Any]:
+    nested = parse_json_object_from_text(str(value.get("content") or ""))
+    if not nested:
+        nested = parse_json_object_from_text(str(value.get("message") or ""))
+    if not nested:
+        return value
+
+    nested = unwrap_nested_model_json_payload(nested)
+    outer = {
+        key: item
+        for key, item in value.items()
+        if key not in {"content", "message", "sections", "sectionOrder", "section_order", "metadata"}
+    }
+    return {**nested, **outer}
+
+
+def jsonish_visible_text(text: str, *, depth: int = 0) -> str:
+    if depth > 2:
+        return ""
+
+    parsed = parse_json_object_from_text(text)
+    if not parsed:
+        return ""
+
+    parsed = unwrap_nested_model_json_payload(parsed)
+    sections = parsed.get("sections") if isinstance(parsed.get("sections"), dict) else {}
+    for key in ("mainChat", "answer", FINAL_JSON_MAIN_TEXT_KEY, "main_text", "student_response", "content", "message"):
+        candidate = sections.get(key) if key in {"mainChat", "answer"} else parsed.get(key)
+        candidate_text = coerce_structured_section_text(candidate)
+        if not candidate_text:
+            continue
+        nested_text = jsonish_visible_text(candidate_text, depth=depth + 1)
+        return nested_text or candidate_text
+
+    problem = coerce_structured_section_text(sections.get("problem"))
+    return problem
+
+
 def escape_invalid_json_backslashes(candidate: str) -> str:
     return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", candidate)
 
@@ -2406,12 +2817,13 @@ def escape_invalid_json_backslashes(candidate: str) -> str:
 class FinalAnswerJsonSectionScanner:
     """Incrementally scans final-answer JSON and emits string deltas for known visible fields."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, excluded_sections: set[str] | None = None) -> None:
         self.stack: list[dict[str, Any]] = []
         self.in_string = False
         self.string_is_key = False
         self.key_buffer: list[str] = []
         self.target_section = ""
+        self.excluded_sections = excluded_sections or set()
         self.escape = False
         self.unicode_escape = ""
 
@@ -2520,7 +2932,8 @@ class FinalAnswerJsonSectionScanner:
         context = self.stack[-1] if self.stack else {}
         self.string_is_key = bool(context.get("type") == "object" and context.get("expecting_key", True))
         if not self.string_is_key:
-            self.target_section = target_section_for_json_path(self._current_value_path())
+            target_section = target_section_for_json_path(self._current_value_path())
+            self.target_section = "" if target_section in self.excluded_sections else target_section
 
     def _current_value_path(self) -> list[str]:
         if not self.stack:
@@ -2568,9 +2981,25 @@ def stream_section_event_for_call(event: dict[str, str], call: str) -> dict[str,
     return {**event, "call": call}
 
 
-def compact_recent_chat_history(messages: list[dict[str, Any]], *, limit: int) -> list[dict[str, str]]:
+def compact_recent_chat_history(
+    messages: list[dict[str, Any]],
+    *,
+    limit: int | None,
+    exclude_latest_student: bool = False,
+    max_chars: int = 700,
+) -> list[dict[str, str]]:
     compacted: list[dict[str, str]] = []
-    for message in messages[-limit:]:
+    latest_student_index = -1
+    if exclude_latest_student:
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].get("role") in {"user", "student"}:
+                latest_student_index = index
+                break
+
+    source_messages = messages[-limit:] if limit is not None else messages
+    for index, message in enumerate(source_messages, start=len(messages) - len(source_messages)):
+        if index == latest_student_index:
+            continue
         role = str(message.get("role") or "")
         if role == "system":
             continue
@@ -2582,8 +3011,8 @@ def compact_recent_chat_history(messages: list[dict[str, Any]], *, limit: int) -
         else:
             text = ""
         text = re.sub(r"\s+", " ", text).strip()
-        if len(text) > 700:
-            text = text[:700].rsplit(" ", 1)[0].strip()
+        if len(text) > max_chars:
+            text = text[:max_chars].rsplit(" ", 1)[0].strip()
         compacted.append({"role": role, "content": text})
     return compacted
 
@@ -2630,6 +3059,9 @@ def can_answer_from_chat_retrieval_memory(message: str, active_record: dict[str,
 def retrieval_reason_for_message(message: str, memory: dict[str, Any]) -> str:
     active_record = active_metadata_record_from_memory(memory)
 
+    if active_record and referenced_exercise_support_intent(message, active_record):
+        return "needed_supporting_page"
+
     if active_record and student_changed_problem(message, active_record):
         return "student_changed_problem"
 
@@ -2649,6 +3081,48 @@ def retrieval_reason_for_message(message: str, memory: dict[str, Any]) -> str:
         return "student_requested_problem"
 
     return "needed_supporting_page"
+
+
+def referenced_exercise_support_intent(message: str, active_record: dict[str, Any] | None) -> bool:
+    if not active_record:
+        return False
+
+    message_numbers = {number.upper() for number in problem_numbers_from_text(message)}
+    referenced_numbers = set(active_record_referenced_problem_numbers(active_record))
+    if not message_numbers.intersection(referenced_numbers):
+        return False
+
+    normalized = normalize_search_query(message)
+    if explicit_exact_source_lookup_intent(normalized):
+        return False
+
+    return bool(
+        re.search(
+            r"\b(?:start|begin|help|support|use|using|apply|work through|walk through|solve|method|setup|"
+            r"first|next|transformation|basis|matrix|column|class material|class materials|source|context)\b",
+            normalized,
+        )
+    )
+
+
+def active_record_referenced_problem_numbers(active_record: dict[str, Any]) -> list[str]:
+    active_numbers = {str(number).upper() for number in active_record.get("problem_numbers") or []}
+    active_text = str(active_record.get("ocr_text") or active_record.get("chunk_text") or "")
+    return [
+        number.upper()
+        for number in sorted(problem_numbers_from_text(active_text), key=problem_number_sort_key)
+        if number.upper() not in active_numbers
+    ]
+
+
+def explicit_exact_source_lookup_intent(normalized_message: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:find|where|locate|which page|what page|pull up|quote|read|copy|restate|show me)\b",
+            normalized_message,
+        )
+        or re.search(r"\bwhat does\b.+\b(?:say|state)\b", normalized_message)
+    )
 
 
 def focused_ocr_search_query(message: str, memory: dict[str, Any]) -> str:
@@ -2786,6 +3260,10 @@ def active_problem_id_for_state(state: PdfRagState, *, active_record: dict[str, 
     if isinstance(context, dict) and context.get("problem_id"):
         return str(context.get("problem_id"))
 
+    active_decision = active_problem_decision_from_state(state)
+    if active_decision.get("isActualProblem") and active_decision.get("problemText"):
+        return stable_problem_id(str(active_decision.get("problemText") or ""))
+
     if active_record:
         return active_problem_id_from_record(active_record)
 
@@ -2794,8 +3272,7 @@ def active_problem_id_for_state(state: PdfRagState, *, active_record: dict[str, 
     if memory_record:
         return active_problem_id_from_record(memory_record)
 
-    latest_problem = problem_text_fallback_from_messages(state.get("messages", []))
-    return stable_problem_id(latest_problem) if latest_problem else "unknown"
+    return "unknown"
 
 
 def normalize_problem_understanding_state(
@@ -2817,9 +3294,12 @@ def normalize_problem_understanding_state(
         "repeatedStuckSignals": clamp_int(value.get("repeatedStuckSignals") or value.get("repeated_stuck_signals"), minimum=0, maximum=999, default=0),
         "answerSeekingRisk": normalize_answer_seeking_risk(value.get("answerSeekingRisk") or value.get("answer_seeking_risk")),
         **({"currentStep": str(value.get("currentStep") or value.get("current_step")).strip()[:300]} if str(value.get("currentStep") or value.get("current_step") or "").strip() else {}),
-        **({"currentSubstep": str(value.get("currentSubstep") or value.get("current_substep")).strip()[:300]} if str(value.get("currentSubstep") or value.get("current_substep") or "").strip() else {}),
         "currentStepStatus": normalize_current_step_status(value.get("currentStepStatus") or value.get("current_step_status")),
         "completedSteps": compact_string_list(value.get("completedSteps") or value.get("completed_steps"), limit=12),
+        "visibleParts": compact_string_list(value.get("visibleParts") or value.get("visible_parts"), limit=24),
+        **({"currentPart": str(value.get("currentPart") or value.get("current_part")).strip()[:80]} if str(value.get("currentPart") or value.get("current_part") or "").strip() else {}),
+        "completedParts": compact_string_list(value.get("completedParts") or value.get("completed_parts"), limit=24),
+        "problemStatus": normalize_problem_status(value.get("problemStatus") or value.get("problem_status")),
         **({"lastHintSummary": str(value.get("lastHintSummary") or value.get("last_hint_summary")).strip()[:300]} if str(value.get("lastHintSummary") or value.get("last_hint_summary") or "").strip() else {}),
         **({"lastStudentAttemptSummary": str(value.get("lastStudentAttemptSummary") or value.get("last_student_attempt_summary")).strip()[:300]} if str(value.get("lastStudentAttemptSummary") or value.get("last_student_attempt_summary") or "").strip() else {}),
         "updatedAt": str(value.get("updatedAt") or value.get("updated_at") or now),
@@ -2846,12 +3326,18 @@ def normalize_problem_understanding_state_updates(value: dict[str, Any]) -> dict
         "answer_seeking_risk": "answerSeekingRisk",
         "currentStep": "currentStep",
         "current_step": "currentStep",
-        "currentSubstep": "currentSubstep",
-        "current_substep": "currentSubstep",
         "currentStepStatus": "currentStepStatus",
         "current_step_status": "currentStepStatus",
         "completedSteps": "completedSteps",
         "completed_steps": "completedSteps",
+        "visibleParts": "visibleParts",
+        "visible_parts": "visibleParts",
+        "currentPart": "currentPart",
+        "current_part": "currentPart",
+        "completedParts": "completedParts",
+        "completed_parts": "completedParts",
+        "problemStatus": "problemStatus",
+        "problem_status": "problemStatus",
         "lastHintSummary": "lastHintSummary",
         "last_hint_summary": "lastHintSummary",
         "lastStudentAttemptSummary": "lastStudentAttemptSummary",
@@ -2874,8 +3360,10 @@ def normalize_problem_understanding_state_updates(value: dict[str, Any]) -> dict
             updates[normalized_key] = normalize_answer_seeking_risk(raw)
         elif normalized_key == "currentStepStatus":
             updates[normalized_key] = normalize_current_step_status(raw)
-        elif normalized_key == "completedSteps":
-            updates[normalized_key] = compact_string_list(raw, limit=12)
+        elif normalized_key == "problemStatus":
+            updates[normalized_key] = normalize_problem_status(raw)
+        elif normalized_key in {"completedSteps", "visibleParts", "completedParts"}:
+            updates[normalized_key] = compact_string_list(raw, limit=24 if normalized_key != "completedSteps" else 12)
         else:
             text = str(raw or "").strip()
             if text:
@@ -2904,12 +3392,16 @@ def state_after_tutor_plan(state: PdfRagState, tutor_plan: Any) -> dict[str, Any
     next_state["answerSeekingRisk"] = risk
     if "currentStep" not in updates and str(plan.get("currentStep") or "").strip():
         next_state["currentStep"] = str(plan.get("currentStep") or "").strip()[:300]
-    if "currentSubstep" not in updates and str(plan.get("currentSubstep") or "").strip():
-        next_state["currentSubstep"] = str(plan.get("currentSubstep") or "").strip()[:300]
     if "currentStepStatus" not in updates and str(plan.get("currentStepStatus") or "").strip():
         next_state["currentStepStatus"] = normalize_current_step_status(plan.get("currentStepStatus"))
-    if "hintsGiven" not in updates and depth in {1, 2, 3} and not source_lookup_only:
-        next_state["hintsGiven"] = max(int(next_state.get("hintsGiven") or 0), int(current.get("hintsGiven") or 0) + 1)
+    if "visibleParts" not in updates and plan.get("visibleParts"):
+        next_state["visibleParts"] = compact_string_list(plan.get("visibleParts"), limit=24)
+    if "currentPart" not in updates and str(plan.get("currentPart") or "").strip():
+        next_state["currentPart"] = str(plan.get("currentPart") or "").strip()[:80]
+    if "completedParts" not in updates and plan.get("completedParts"):
+        next_state["completedParts"] = compact_string_list(plan.get("completedParts"), limit=24)
+    if "problemStatus" not in updates and str(plan.get("problemStatus") or "").strip():
+        next_state["problemStatus"] = normalize_problem_status(plan.get("problemStatus"))
     if "attemptsCount" not in updates and intent == "showed_work":
         next_state["attemptsCount"] = max(int(next_state.get("attemptsCount") or 0), int(current.get("attemptsCount") or 0) + 1)
     if "repeatedStuckSignals" not in updates and intent in {"vague_help", "asks_for_next_step", "unclear_attempt"} and int(current.get("hintsGiven") or 0) > 0:
@@ -3025,6 +3517,16 @@ def sync_problem_understanding_state_to_active_context(
         state=state,
         active_problem_id=active_problem_id,
     )
+    understanding = state["problem_understanding_state"]
+    for context_key, state_key in (
+        ("visible_parts", "visibleParts"),
+        ("current_part", "currentPart"),
+        ("completed_parts", "completedParts"),
+        ("problem_status", "problemStatus"),
+    ):
+        value = (active_problem_context or {}).get(context_key)
+        if value and not understanding.get(state_key):
+            understanding[state_key] = value
 
 
 def should_suppress_problem_understanding_for_response(
@@ -3084,6 +3586,13 @@ def normalize_current_step_status(value: Any) -> str:
     if status == "complete":
         status = "completed"
     return status if status in CURRENT_STEP_STATUSES else "not_started"
+
+
+def normalize_problem_status(value: Any) -> str:
+    status = str(value or "in_progress").strip().lower().replace("-", "_").replace(" ", "_")
+    if status == "complete":
+        status = "completed"
+    return status if status in PROBLEM_STATUSES else "in_progress"
 
 
 def new_search_tool_calls(
@@ -3562,7 +4071,8 @@ def build_router_messages(state: PdfRagState) -> list[dict[str, Any]]:
         "questions that do not need PDF context. If unsure whether class PDF OCR metadata could materially help, call "
         "search_pdf_pages with a focused query and retrieval_reason. For find-similar-example requests, use "
         "retrieval_reason needed_example_page and search topic/method/example terms instead of only the assigned "
-        "problem number."
+        "problem number. When a referenced exercise is being used to support the active problem, use needed_supporting_page "
+        "with method/source-context terms unless the student explicitly asks to quote, read, show, locate, or restate that exercise."
     )
     system_prompt = compile_langfuse_text_prompt(
         ROUTER_LANGFUSE_PROMPT_NAME,
@@ -3591,6 +4101,11 @@ def should_force_exact_problem_search(state: PdfRagState) -> bool:
 
     latest_message = latest_student_message_content(state.get("messages", []))
     if not latest_message:
+        return False
+
+    memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
+    active_record = active_metadata_record_from_memory(memory)
+    if referenced_exercise_support_intent(latest_message, active_record):
         return False
 
     return looks_like_concrete_math_problem(latest_message) or looks_like_numbered_task_locator(latest_message)
@@ -3765,6 +4280,17 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
     has_selected_pages = bool(state.get("page_assets") or state.get("retrieved_pages"))
     has_student_attachment_files = bool(state.get("student_attachment_files"))
     decision = state.get("retrieval_decision") or {}
+    primary_visible_context = {
+        "student_response": state.get("primary_student_response") or decision.get("student_response") or "",
+        "structuredOutput": state.get("primary_structured_output") or decision.get("structuredOutput") or {},
+        "tutorPlan": state.get("tutor_plan") or decision.get("tutorPlan") or {},
+        "retrievalDecision": {
+            "needs_search": decision.get("needs_search"),
+            "retrieval_reason": decision.get("retrieval_reason"),
+            "search_query": decision.get("search_query"),
+            "searches": decision.get("searches") or [],
+        },
+    }
     instruction_lines = [
         (
             "Use the clean Knowledge context package, selected OCR metadata, and any selected PDF file parts attached to this call. The PDFs are relevant source files for the selected Knowledge items, not permission to use unrelated course material."
@@ -3781,29 +4307,31 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
         "If the uploaded image/PDF or selected page contains multiple problems/exercises/questions and no single active problem can be identified, ask which problem on the page the student wants to focus on. Do not ask why they provided the page.",
         f"Primary tutor turn trace for internal use only: {compact_json_dumps(decision)}",
         f"TutorPlan for internal use only: {compact_json_dumps(state.get('tutor_plan') or decision.get('tutorPlan') or {})}",
+        "Continuation contract: the primary_tutor_turn may already have shown a student-facing response. Use the provided primary response context as prior visible conversation, not as a draft to rewrite. If it already gave orientation, a hint, or a next action, continue from it and add only the class-material grounding, exact source wording, or citation detail still needed. Do not restart, contradict, or replace that visible response.",
         f"Current problem understanding state for internal use only: {compact_json_dumps(state.get('problem_understanding_state') or current_problem_understanding_state(state))}",
         "Tutor planning contract: obey TutorPlan.nextHelpDepth in the student-facing response. The primary tutor turn already decided understandingLevel, lastHelpDepth, summaries, and help depth; do not revise those fields.",
         *help_limit_instruction_lines(answer_policy),
-        "Current-step contract: obey TutorPlan.currentStep/currentSubstep and the current problem understanding state. Do not advance to a later mathematical step until currentStepStatus is completed or the student has shown understanding. If the student asks for the next step but the current step is incomplete, make the currentSubstep smaller inside the same currentStep.",
-        "Repeated-stuck contract: if repeatedStuckSignals is positive, the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, the student gives a tiny unclear answer like `2?`, or TutorPlan.studentIntent is unclear_attempt/asks_for_next_step while the current step is incomplete, do not repeat the previous hint wording. Explain only the expected answer form or type if needed, add one new concrete distinction or prerequisite idea, then ask one smaller sub-question inside the active currentStep without revealing the value the student should get.",
+        "Current-step contract: obey TutorPlan.currentStep and the current problem understanding state as a guideline. Do not advance to a later mathematical step merely because the student asks for the next step. Do advance when the student completed the current step, shows work from a later step, selects a later part, or otherwise proves they moved ahead.",
+        "Repeated-stuck contract: if repeatedStuckSignals is positive, the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, the student gives a tiny unclear answer like `2?`, or TutorPlan.studentIntent is unclear_attempt/asks_for_next_step while the current step is incomplete, do not repeat the previous hint wording. Take a step back, explain only the expected answer form or type if needed, add one new concrete distinction or prerequisite idea, or a narrower sub-question, then ask one smaller question inside the active currentStep without revealing the value the student should get. Repeated stuck behavior means one new concrete distinction, prerequisite idea, or narrower sub-question.",
         "Validation contract: when the student asks whether their work is right, internally evaluate it but do not give a direct correctness verdict unless teacher policy explicitly allows answer checking. Avoid `correct`, `incorrect`, `right`, `wrong`, `yes`, `no`, `that's the answer`, `your first part is right`, and `the mistake is` as student-facing verdicts. Use neutral process language such as `You're using a relevant idea`, `This is a useful direction`, `One place to tighten is`, `Check this part carefully`, `Can you justify this step?`, or `What would make this implication valid?`.",
         "Depth 1 response: one conceptual nudge and one question; no full route, no multiple methods, no proof skeleton, no worked algebra unless extremely small.",
         "Depth 2 response: a guided hint, possibly naming the relevant object or theorem, with one clear next action; still leave the main work to the student.",
         "Depth 3 response: one worked step only, why it is valid, then stop and ask the student to continue.",
         "Depth 4 response: full explanation only if teacher policy allows and the student explicitly asked for it or an allowed full-teaching mode is active.",
-        "Knowledge source-use contract: each Knowledge item separates what the source is (`kind`) from how Chandra used it (`usedAs`). Use `usedAs`, not file type alone, to decide whether it is the active problem, problem source, supporting context, theorem/definition/example reference, or student attempt.",
+        "Knowledge source-use contract: each Knowledge item separates what the source is (`kind`) from how Chandra used it (`usedAs`). Use `usedAs`, not file type alone, to decide whether it is the active problem, problem source, supporting context, theorem/definition/example reference, or student attempt. Do not describe retrieved class OCR, selected PDF pages, or Knowledge items from class materials as something the student shared, uploaded, pasted, or provided; use those student-attribution words only for actual latest-turn student attachments, pasted text, or visible student work.",
         "Source lookup contract: when the latest student message is only a problem/exercise/question/page number or asks to find, read, quote, show, identify, locate, or restate a source item, your job is extraction, not tutoring. First locate the exact visible item in the selected page asset or OCR metadata, then return that item without solving it.",
         "When selected page assets or OCR metadata are present, never ask the student for a page image, textbook title, homework title, or pasted problem before using those selected records. Ask for more source detail only after you have checked the selected records and they do not contain the requested item.",
-        "Problem extraction procedure: match requested printed page, PDF page, problem number, exercise number, question number, or exact quoted words; copy the visible block beginning at that marker; stop before the next same-level numbered item, heading, or unrelated problem. Prefer the attached page/PDF if it conflicts with OCR; use OCR only when the visible asset is unreadable.",
-        "For exact problem/exercise/question/prompt lookup, put only the extracted task statement in `Problem:` and leave hints, attempts, method steps, offers, and nextStep empty unless the student separately asks for solving help.",
+            "Problem extraction procedure: match requested printed page, PDF page, problem number, exercise number, question number, or exact quoted words; copy the visible block beginning at that marker; stop before the next same-level numbered item, heading, or unrelated problem. Prefer the attached page/PDF if it conflicts with OCR; use OCR only when the visible asset is unreadable.",
+            "For exact problem/exercise/question/prompt lookup, keep the extracted task statement clear in `Problem:`. Include a short useful sections.mainChat before the problem when it adds context, such as confirming the item found or naming the source/page. When the item came from retrieved class materials, phrase that context as `I found Problem N in the class materials` or name the source/page; never say `the page you shared`, `your upload`, or similar student-attribution wording unless the student actually supplied that page or file in the latest turn. Never use a bare locator echo like `problem 2.18` as mainChat or answer; mainChat should add information beyond the student's locator. Do not solve it and do not add hints, attempts, method steps, or generic offers unless the student separately asks for solving help.",
         "Specific problem/page/passage wording requests are source lookup: quote the visible text exactly when allowed, without solving it or asking for an attempt first.",
-        "Selected OCR metadata and attached selected PDFs are the source of truth for this call. Do not request or infer raw storage paths, chunk IDs, or Firebase/GCS locations.",
+        "Selected PostgreSQL OCR metadata and attached selected PDFs are the source of truth for this call. Do not request or infer raw storage paths, chunk IDs, or Firebase/GCS locations.",
         "If the student supplied only a problem/page/item number and selected page assets or OCR metadata are present, use those selected class records first; do not ask for the page image, textbook title, or homework title before using the selected metadata.",
         "If the student is following up after a problem statement was already shown and asks for help, says they are lost/confused/stuck, asks for a hint, or asks what to try, do not restate the problem statement or include a `Problem:` section again.",
         "If the student wants help on an exact graded-looking task and has not shown work, ask what they tried or where they are stuck.",
-        "For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short: at most one brief orientation sentence plus one conceptual hint or one request for the student's attempted step.",
+        "For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short and prefer a single Hint. Add mainChat only for necessary non-hint context or a distinct request for the student's attempted step.",
         "Before an attempt, do not provide task-specific next steps, intermediate values, thesis claims, code, solution structure, or submission-ready wording unless the student explicitly wants concept explanation or source lookup.",
         "For first help on an exact task with no shown attempt, keep the hint conceptual: ask about the relevant objects, definitions, constraints, evidence, or relationship to compare. Do not name the specific method, structure, or first executable move.",
+        "Depth 1 uses one short answer or Hint plus one question, especially for vague stuck messages like `I am lost` or explicit hint requests. If Hint gives the key clue or action, do not restate or paraphrase it in mainChat; omit mainChat when it would only announce or repeat the hint.",
         "Follow-ups like `I still need help`, `yes`, `tell me more`, `that hint is too vague`, `that hint is not adding more`, or `explain like I am 5` are not attempts. Keep the help conceptual or use a clearly different similar example.",
         "Do not give a full solution, final answer, or a chain of multiple intermediate steps for the student's exact task before they show work.",
         "This context-grounded answer call cannot search again. If selected page assets and OCR metadata are insufficient or mismatched, say what exact source, page, problem, or pasted text is needed.",
@@ -3817,21 +4345,30 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
         f"{final_example_boundary_instruction(answer_policy)}",
         "When students show work or ask for validation, internally evaluate it, but support inspection rather than giving a correctness verdict. Point to the specific step to justify or tighten without saying whether the final answer is correct or wrong.",
         "When help is allowed, ask the student to complete one small piece; do not provide the result or a chain of several moves.",
-        "If the primary tutor turn already supplied Chandra uncertainty choices in structured output, preserve them. Do not invent choices in the context-grounded answer step, and never use choices when retrieval should happen first. The choice flow is not triggered by student confusion keywords; it is only for Chandra's own uncertainty about which support path is best.",
+        *(
+            [
+                "Teacher debug override: debug_options.forceConfusionChoices is true. In this same context-grounded JSON response, include a brief confusionPrompt plus 2 to 6 context-specific confusionChoices. The choices must be generated from the grounded context, with label as a short title, optional description explaining how the tutor can help, and message as the exact editable student-sendable draft."
+            ]
+            if should_force_debug_confusion_choices(state)
+            else [
+                "If the primary tutor turn already supplied Chandra uncertainty choices in structured output, preserve them. Do not invent choices in the context-grounded answer step, and never use choices when retrieval should happen first. The choice flow is not triggered by student confusion keywords; it is only for Chandra's own uncertainty about which support path is best."
+            ]
+        ),
+        "Final-section status-text ban: final visible answer fields and sections must not contain workflow or progress text such as `checking class materials`, `looking up`, `searching`, `locating`, `please wait`, `send me the page`, `send me the textbook`, or similar procedural retrieval status. If a procedural note was needed, it belonged to an interim progress event only. `Problem:` is only the academic task statement, `Hint:` is only a tutoring nudge, and a next action is only a useful student action, never retrieval status.",
         f"{final_unclear_source_instruction(source_usage)}",
         "Use printed_page_start as the document page number when available. page_start and page_end are source PDF page indexes.",
         "For task-location answers, use a concise shape like `That item is Problem/Question N in Section X, on printed page P of Title.`",
-        "For exercise/question/task lookup by number, exercise, page, or title, first decide whether you have the exact academic exercise/question/task statement. Only then put that statement in a separate `Problem:` section and quote the full visible problem statement exactly. For bare numbered requests like `2.24`, inspect the attached page asset and OCR metadata yourself; if the page lists unlabeled numbered items such as `2.24. Find ...`, extract the matching numbered block until the next problem/item starts. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. When returning the problem, only return the problem directly in that section; do not include `You said...`, lookup/checking status, requests for a page/title/textbook, location/source context, offers, hints, answers, explanations, next steps, attempt requests, or commentary inside `Problem:`. Put any brief location note, offer, clarification, or attempt request outside `Problem:` in the main answer or final direct question. Do not repeat the same problem text again in the unlabeled main reply.",
-        "For exact source lookup, choose exactly one outcome before writing JSON. FOUND outcome: if you can identify the requested exercise/question/task statement, put that statement only in sections.problem, include problem first in sectionOrder, and do not write any `couldn't find`, `not on this page`, `not enough context`, `please send/paste`, missing-source language, hint, next-step request, or tutoring guidance in mainText, sections.answer, sections.hint, sections.sourceNote, or sections.nextStep. NOT_FOUND outcome: if the selected sources are insufficient or mismatched, do not include sections.problem at all; explain the missing source briefly in mainText or sections.sourceNote and ask for the needed source only if appropriate. These outcomes are mutually exclusive.",
+        "For exercise/question/task lookup by number, exercise, page, or title, first decide whether you have the exact academic exercise/question/task statement. Only then put that statement in a separate `Problem:` section and quote the full visible problem statement exactly. For bare numbered requests like `2.24`, inspect the attached page asset and OCR metadata yourself; if the page lists unlabeled numbered items such as `2.24. Find ...`, extract the matching numbered block until the next problem/item starts. Here `Problem:` means the academic exercise/question/task the student is working on, not an error or issue. Do not include `You said...`, lookup/checking status, requests for a page/title/textbook, source context, offers, hints, answers, explanations, next steps, attempt requests, or commentary inside `Problem:`. Put any brief relevant context or location note outside `Problem:` in sections.mainChat only when it adds information not already in the task statement. Never repeat the same problem text again in mainChat, and never start mainChat with `Problem:` when sections.problem is present.",
+        "For exact source lookup, choose exactly one outcome before writing JSON. FOUND outcome: if you can identify the requested exercise/question/task statement, put that statement only in sections.problem, include problem in sectionOrder where it should render, optionally include one short relevant contextual/location note in sections.mainChat before sections.problem, and do not write any `couldn't find`, `not on this page`, `not enough context`, `please send/paste`, missing-source language, duplicate problem wording, `Problem: ...` label, hint, next-action request, or tutoring guidance, or false student-attribution language such as `the page you shared`, `your upload`, `you provided`, or `you pasted` in sections.mainChat, sections.answer, sections.hint, or sections.sourceNote unless the latest student turn actually included that attachment or pasted text. If no non-duplicative note is useful, omit mainChat and answer. NOT_FOUND outcome: if the selected sources are insufficient or mismatched, do not include sections.problem at all; explain the missing source briefly in sections.mainChat or sections.sourceNote and ask for the needed source only if appropriate. These outcomes are mutually exclusive.",
         "Do not restate long task text the student already supplied unless needed for clarity.",
         (
             "Final output format: return only valid JSON, with no markdown fence and no text outside JSON. "
-            "Use this schema exactly, but order top-level JSON keys to match the render order because fields stream as you generate them: {\"mainText\": string, \"sections\": {\"problem\"?: string, \"answer\"?: string, \"hint\"?: string, \"explanation\"?: string, \"formula\"?: string, \"example\"?: string, \"checkWork\"?: string, \"sourceNote\"?: string, \"nextStep\"?: string}, \"sectionOrder\": string[], \"metadata\": {\"hintLevel\"?: string, \"studentActionNeeded\"?: string, \"mode\"?: string, \"problemNumber\"?: string, \"problemSummary\"?: string, \"problemContext\"?: {\"relation\"?: string, \"problem\"?: string, \"expected_answer\"?: string, \"source_type\"?: string, \"source_document_id\"?: string, \"source_page\"?: string, \"confidence\"?: string}, \"referencedSources\"?: [{\"doc_id\"?: string, \"page\"?: string, \"reason\"?: string}]}}. "
-            "Put the unlabeled answer bubble text in mainText. Put optional labeled content only in sections. "
-            "Treat sections.problem as extraction-only: every sentence inside it must be part of the original academic exercise/question/task text. Never append hint, answer, explanation, source/location note, offer, attempt request, or next-step wording to sections.problem. "
-            "Do not duplicate content across fields: if sections.problem contains the exercise/question/task statement, mainText must be empty or contain only a brief non-duplicative location/transition note. Never write `Problem: ...` in mainText when sections.problem is present. "
-            "sectionOrder must include mainText when mainText is non-empty, and only include section keys that have non-empty content. "
-            "Choose sectionOrder intentionally based on what this student needs first, not a fixed template; generate JSON keys in the same order you want the UI to render. If problem is first in sectionOrder, emit the top-level sections object before mainText, put problem as the first key inside sections, and emit any mainText only after sections. "
+            "Use this schema exactly, but order top-level JSON keys to match the render order because fields stream as you generate them: {\"sections\": {\"mainChat\"?: string, \"problem\"?: string, \"answer\"?: string, \"hint\"?: string, \"explanation\"?: string, \"formula\"?: string, \"example\"?: string, \"checkWork\"?: string, \"sourceNote\"?: string}, \"sectionOrder\": string[], \"metadata\": {\"hintLevel\"?: string, \"studentActionNeeded\"?: string, \"mode\"?: string, \"problemNumber\"?: string, \"problemSummary\"?: string, \"problemContext\"?: {\"relation\"?: string, \"problem\"?: string, \"expected_answer\"?: string, \"source_type\"?: string, \"source_document_id\"?: string, \"source_page\"?: string, \"confidence\"?: string}, \"referencedSources\"?: [{\"doc_id\"?: string, \"page\"?: string, \"reason\"?: string}]}}. emit the top-level sections object before any top-level content/message/mainText. "
+            "Put the normal unlabeled chat bubble text in sections.mainChat. The top-level content/message field is legacy fallback/logging only and is not the student-visible source of truth when sections exist. Put optional labeled content only in sections. "
+            "Treat sections.problem as extraction-only: every sentence inside it must be part of the original academic exercise/question/task text. Never append hint, answer, explanation, source/location note, offer, attempt request, or action wording to sections.problem. "
+            "Do not duplicate content across fields: if sections.problem contains the exercise/question/task statement, sections.mainChat and sections.answer must be empty or contain only a brief non-duplicative location/transition note. Never write `Problem: ...` in mainChat or answer when sections.problem is present. If mainChat is present, it must add useful context beyond the locator or problem statement; never set mainChat to a bare echo like `problem 2.18`. If the only possible mainChat/answer content is the same exercise wording with a `Problem:` prefix, leave it empty. "
+            "sectionOrder must include only section keys that have non-empty content. "
+            "Choose sectionOrder intentionally based on what this student needs first, not a fixed template; generate JSON keys in the same order you want the UI to render. If problem is first in sectionOrder, put problem as the first key inside sections. If a short lookup context note should appear above the found problem, emit sections.mainChat first and put it before problem in sectionOrder. "
             "Escape JSON backslashes in LaTeX, for example write \\\\operatorname inside JSON strings."
         ),
         (
@@ -3839,16 +4376,16 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
             "a fixed template, and include only sections that add value. Decide the order by why the student needs each part: task text/context first, "
             "then the direct reply, then supporting rule, concept, example, or work check, with the immediate action last. Put each idea in its natural section: problem text in `Problem:`, "
             "formulas or symbolic rules in `Formula:`, conceptual reasoning in `Why this works:`, similar-but-different practice in `Example:`, "
-            "source/context notes in `sourceNote`, and neutral review of shown student work in `Check your work:`. Use optional sections only when they add new value; never output sections just because the schema supports them. For guided tutoring replies, include a brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when each part has a different job. Orientation names the kind of task or thinking move without repeating the hint; `Hint:` gives one key idea tied to the exact student task; `nextStep` asks for one small, checkable student action. If the student says the previous hint was unhelpful, repetitive, too vague, or did not add more, do not restate it; make the next help narrower by naming the specific missing object, definition, target space, assumption, comparison, representation, or notation choice. If the main answer already gives the key clue, equation, theorem, or method, omit `Hint:`. If `Hint:` already gives the action, omit `nextStep` or make it a meaningfully different request such as showing the student's attempt. For broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`; if `Hint:` would restate a definition, fact list, or summary already in the main reply, omit it entirely. Before using `Problem:`, classify the candidate text and use that section only for the found or student-supplied academic exercise/question/task statement, "
-            "not for an issue/error, status update, clarification, or source lookup progress. If you use `Problem:`, put only the problem statement there, place `problem` first in sectionOrder, and generate sections.problem before mainText in the JSON stream; never put `You said...`, offers, hints, answers, explanations, next steps, "
-            "attempt requests, requests for source details, source context, or commentary inside that section, and never repeat the same problem statement in mainText or sections.answer. Before returning, audit `Problem:` sentence by sentence: if text starts like `Hint:`, `Try`, `To start`, `I found`, `This is on`, `If you want`, `Please send`, or `Your next step`, it is not problem text and must be moved out or omitted. For pure lookup/location requests, omit `Hint:` and `nextStep` entirely after returning the found problem. For bare stuck follow-ups, do not use both `Hint:` and `nextStep` unless `nextStep` only asks the student to show work; otherwise prefer one short `Hint:` and leave `nextStep` empty. Use `Hint:` for one short nudge or leading question, usually one sentence, "
+            "source/context notes in `sourceNote`, and neutral review of shown student work in `Check your work:`. Use optional sections only when they add new value; never output sections just because the schema supports them. For guided tutoring replies, keep the tutoring nudge in `Hint:`. Add mainChat only when a brief non-hint orientation, source/context note, or concrete immediate action is necessary and distinct. Orientation names the kind of task or thinking move without repeating the hint or announcing that a hint is coming; `Hint:` gives one key idea tied to the exact student task; mainChat asks for one small, checkable student action only when needed. If the student says the previous hint was unhelpful, repetitive, too vague, or did not add more, do not restate it; make the next help narrower by naming the specific missing object, definition, target space, assumption, comparison, representation, or notation choice. If mainChat already gives the key clue, equation, theorem, or method, omit `Hint:`. If `Hint:` gives the key clue or action, do not restate or paraphrase it in mainChat, and never write filler like `I can give you a hint` when a `Hint:` section is present. For broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`; if `Hint:` would restate a definition, fact list, or summary already in mainChat, omit it entirely. Before using `Problem:`, classify the candidate text and use that section only for the found or student-supplied academic exercise/question/task statement, "
+            "not for an issue/error, status update, clarification, or source lookup progress. If you use `Problem:`, put only the problem statement there, place `problem` first in sectionOrder unless a short relevant lookup note should render above it, and generate fields in the same order the UI should show them; never put `You said...`, offers, hints, answers, explanations, next steps, "
+            "attempt requests, requests for source details, source context, or commentary inside that section, and never repeat the same problem statement in mainChat or sections.answer. Before returning, audit `Problem:` sentence by sentence: if text starts like `Hint:`, `Try`, `To start`, `I found`, `This is on`, `If you want`, `Please send`, or an action label, it is not problem text and must be moved out or omitted. For pure lookup/location requests, omit `Hint:` entirely after returning the found problem. For bare stuck follow-ups, prefer one short `Hint:` alone; add mainChat only for a distinct action request, and do not repeat an action already included in `Hint:`. Use `Hint:` for one short nudge or leading question, usually one sentence, "
             "not definitions, citations, offers, or multiple ideas. Use `Why this works:` for concept reasoning, but do not include "
             "offers, attempt requests, or workflow prompts; put those in the final direct question/next action. Keep the final direct question/next action to a concrete request or action, not a hint-style leading question. Use `Formula:` only for formulas, equations, symbolic rules, or a very short rule name; never include explanatory prose, source/page notes, examples, filled-in task values, hints, or why/when commentary in `Formula:`. If there is a special-case formula, include only the symbolic special-case line in `Formula:` and explain the condition elsewhere. Use `Example:` only for a similar "
             "different problem, and `Check your work:` only when responding to a student attempt; keep it neutral, with prompts like `One place to tighten is...`, not verdict labels. Before returning, audit that no `Hint:` text is inside the next action, no prose is inside `Formula:`, and no offers are inside `Why this works:`. Do not write `Answer:`, `Question:`, "
-            "`Next step:`, `Your next step:`, `Source:`, or `Sources:`; end with one unlabeled direct question when helpful."
+            "an action label, `Source:`, or `Sources:`; end with one unlabeled direct question when helpful."
         ),
         "For simple greetings or check-ins, reply naturally in one short chat message and ask what course problem or concept the student wants to work on.",
-        "Use optional labeled sections freely when they improve scanability or learning; 1-2 is often enough, and 3-4 is fine when the reply naturally has multiple useful parts.",
+        "Use optional labeled sections only when they clearly improve scanability or learning; simple replies should usually be natural prose with no labels. Do not reorganize content into Problem, Hint, Formula, Example, Check your work, Source, or Your next step just because the schema supports those fields.",
         "Use `$...$` or `$$...$$`; do not use `\\(...\\)`, `\\[...\\]`, or plain bracketed math.",
         "Do not use unrelated OCR metadata, whole-course OCR, raw storage paths, chunk IDs, Firebase/GCS paths, or outside knowledge.",
         (
@@ -3886,6 +4423,10 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
         {
             "type": "text",
             "text": compiled_instruction_bullets,
+        },
+        {
+            "type": "text",
+            "text": f"Primary tutor response context already shown or planned:\n{compact_json_dumps(primary_visible_context)}",
         }
     ]
 
@@ -4828,80 +5369,7 @@ def answer_or_page_fallback(state: PdfRagState) -> str:
     if problem_lookup_fallback:
         return problem_lookup_fallback
 
-    if answer:
-        fallback = page_asset_lookup_request_fallback(state, answer)
-        if fallback:
-            return fallback
-        return answer
-
-    return strongest_page_location_fallback(state)
-
-
-def strongest_page_location_fallback(state: PdfRagState) -> str:
-    assets = state.get("page_assets", [])
-    top_asset = max(assets, key=lambda asset: float(asset.get("score") or 0.0), default=None)
-    sources = sources_from_page_assets([top_asset], limit=1) if top_asset else []
-    sources = sources or sources_from_pages(
-        state.get("retrieved_pages", []),
-        limit=1,
-    )
-    if not sources:
-        return ""
-
-    source_labels = [
-        f"{source.get('title') or 'Untitled PDF'} page {source.get('pageNumber')}"
-        for source in sources
-        if source.get("pageNumber")
-    ]
-    if not source_labels:
-        return ""
-
-    return (
-        "I found the strongest matching PDF page for this question: "
-        f"{'; '.join(source_labels)}. Start there; it was the top-ranked match."
-    )
-
-
-def final_response_without_page_assets(state: PdfRagState, decision: dict[str, Any]) -> str:
-    page_fallback = strongest_page_location_fallback(state)
-    if page_fallback:
-        return page_fallback
-
-    retrieval_reason = str(decision.get("retrieval_reason") or state.get("retrieval_reason") or "")
-    if retrieval_reason == "needed_example_page":
-        return (
-            "I could not find a relevant class example in the materials I searched. "
-            "Send the topic, section, or source page you want to use, and I can help from there."
-        )
-
-    if retrieval_reason == "needed_supporting_page":
-        return (
-            "I could not find the supporting class page in the materials I searched. "
-            "Send the page, section, or pasted text, and I can help from there."
-        )
-
-    return (
-        "I could not find that exact problem in the class materials I searched. "
-        "Send the worksheet/page or paste the problem text, and I can help from there."
-    )
-
-
-def page_asset_lookup_request_fallback(state: PdfRagState, answer: str) -> str:
-    if not asks_for_pasted_problem_or_source(answer):
-        return ""
-
-    decision = state.get("retrieval_decision") or {}
-    if decision.get("retrieval_reason") not in {"student_requested_problem", "student_changed_problem"}:
-        return ""
-
-    assets = state.get("page_assets") or []
-    if not assets:
-        return ""
-
-    if any(answer_references_asset(answer, asset) for asset in assets):
-        return ""
-
-    return strongest_page_location_fallback(state)
+    return answer
 
 
 def normalize_answer_against_selected_pages(state: PdfRagState, answer: str) -> str:
@@ -5365,9 +5833,10 @@ async def call_primary_tutor_model(
     state: PdfRagState,
     heuristic: dict[str, Any],
     on_content_delta: Any | None = None,
+    messages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     model = state.get("model") or DEFAULT_OPENROUTER_MODEL
-    messages = build_primary_tutor_messages(state, heuristic)
+    messages = messages or build_primary_tutor_messages(state, heuristic)
     max_tokens = primary_tutor_max_tokens(state)
     response = await traced_openrouter_chat_streaming(
         client,
@@ -5410,6 +5879,10 @@ async def run_pdf_rag_agent(
     reasoning_effort: str | None = None,
     answer_policy: dict[str, Any] | None = None,
     ai_usage_reservation: dict[str, Any] | None = None,
+    behavior_instructions: str | None = None,
+    behavior_title: str | None = None,
+    model_settings: dict[str, Any] | None = None,
+    response_format: dict[str, Any] | None = None,
     source_usage: dict[str, Any] | None = None,
     debug_options: dict[str, Any] | None = None,
     student_profile_context: dict[str, Any] | None = None,
@@ -5445,6 +5918,10 @@ async def run_pdf_rag_agent(
         "reasoning_effort": reasoning_effort,
         "answer_policy": answer_policy,
         "ai_usage_reservation": ai_usage_reservation or {},
+        "behavior_instructions": behavior_instructions or "",
+        "behavior_title": behavior_title or "",
+        "model_settings": model_settings or {},
+        "response_format": response_format or {},
         "source_usage": source_usage,
         "debug_options": normalize_debug_options(debug_options),
         "student_profile_context": student_profile_context or {},
@@ -5466,6 +5943,9 @@ async def run_pdf_rag_agent(
         "structured_output_override": {},
         "tutor_plan": {},
         "problem_understanding_state": {},
+        "primary_student_response": "",
+        "primary_structured_output": {},
+        "context_grounded_response": "",
         "token_usage": empty_token_usage(),
         "token_usage_by_call": [],
     }
@@ -5505,6 +5985,10 @@ async def run_pdf_rag_agent_stream(
     reasoning_effort: str | None = None,
     answer_policy: dict[str, Any] | None = None,
     ai_usage_reservation: dict[str, Any] | None = None,
+    behavior_instructions: str | None = None,
+    behavior_title: str | None = None,
+    model_settings: dict[str, Any] | None = None,
+    response_format: dict[str, Any] | None = None,
     source_usage: dict[str, Any] | None = None,
     debug_options: dict[str, Any] | None = None,
     student_profile_context: dict[str, Any] | None = None,
@@ -5542,6 +6026,10 @@ async def run_pdf_rag_agent_stream(
         "reasoning_effort": reasoning_effort,
         "answer_policy": answer_policy,
         "ai_usage_reservation": ai_usage_reservation or {},
+        "behavior_instructions": behavior_instructions or "",
+        "behavior_title": behavior_title or "",
+        "model_settings": model_settings or {},
+        "response_format": response_format or {},
         "source_usage": source_usage,
         "debug_options": normalize_debug_options(debug_options),
         "student_profile_context": student_profile_context or {},
@@ -5572,7 +6060,14 @@ async def run_pdf_rag_agent_stream(
         state["chat_retrieval_memory"] = await asyncio.to_thread(read_chat_retrieval_memory, snapshot_side_effect_value(state))
         state["stage_history"] = append_stage(state, "load_chat_retrieval_memory")
         heuristic = build_retrieval_decision(state)
-        primary_scanner = FinalAnswerJsonSectionScanner()
+        primary_messages = build_primary_tutor_messages(state, heuristic)
+        await maybe_adjust_ai_usage_reservation(
+            state,
+            estimated_tokens=estimate_primary_tutor_request_tokens(state, primary_messages),
+        )
+        primary_scanner = FinalAnswerJsonSectionScanner(
+            excluded_sections=streaming_excluded_sections_for_state(state)
+        )
         pending_primary_section_events: list[dict[str, str]] = []
 
         def capture_primary_delta(delta: str) -> None:
@@ -5582,22 +6077,29 @@ async def run_pdf_rag_agent_stream(
             )
 
         primary_response_task = asyncio.create_task(
-            call_primary_tutor_model(client, state, heuristic, on_content_delta=capture_primary_delta)
+            call_primary_tutor_model(
+                client,
+                state,
+                heuristic,
+                on_content_delta=capture_primary_delta,
+                messages=primary_messages,
+            )
         )
-        while not primary_response_task.done() or pending_primary_section_events:
-            while pending_primary_section_events:
-                yield pending_primary_section_events.pop(0)
-            if not primary_response_task.done():
-                await asyncio.sleep(0.01)
+        while not primary_response_task.done():
+            await asyncio.sleep(0.01)
         response = await primary_response_task
         for section_event in primary_scanner.close():
-            yield stream_section_event_for_call(section_event, "primary_tutor_turn")
-        decision = parse_primary_tutor_response(response, heuristic)
+            pending_primary_section_events.append(stream_section_event_for_call(section_event, "primary_tutor_turn"))
+        decision = parse_primary_tutor_response(
+            response,
+            heuristic,
+            preserve_confusion_choices_on_search=should_force_debug_confusion_choices(state),
+        )
         decision = enforce_ambiguous_student_upload_clarification(decision, state)
         decision = enforce_selected_upload_problem_response(decision, state)
         decision = enforce_initial_source_lookup_search(decision, state)
-        decision = enforce_referenced_problem_dependency_search(decision, state)
         decision = suppress_repeated_failed_search_decision(decision, state)
+        decision = enforce_debug_retrieval_options(decision, state)
         decision = clamp_decision_to_help_limits(decision, state)
         decision = enforce_student_upload_direct_inspection(decision, state)
         decision = enforce_terminal_upload_problem_selection(decision, state)
@@ -5606,6 +6108,8 @@ async def run_pdf_rag_agent_stream(
         state["problem_understanding_state"] = state_after_tutor_plan(state, state.get("tutor_plan"))
         state["retrieval_reason"] = decision.get("retrieval_reason") or ""
         state["failed_searches_skipped"] = decision.get("failed_searches_skipped") or []
+        state["primary_student_response"] = str(decision.get("student_response") or "").strip()
+        state["primary_structured_output"] = decision.get("structuredOutput") if isinstance(decision.get("structuredOutput"), dict) else {}
         state["answer"] = str(decision.get("student_response") or "").strip() if not decision.get("needs_search") else ""
         if decision.get("structuredOutput") and not decision.get("needs_search"):
             state["structured_output_override"] = decision.get("structuredOutput")
@@ -5621,6 +6125,10 @@ async def run_pdf_rag_agent_stream(
             reasoning_effort=ROUTER_REASONING_EFFORT,
         )
         state["tool_calls"] = retrieval_decision_tool_calls(decision)
+
+        if not decision.get("needs_search"):
+            while pending_primary_section_events:
+                yield pending_primary_section_events.pop(0)
 
         if state["tool_calls"]:
             immediate_response = str(decision.get("student_response") or "").strip()
@@ -5703,7 +6211,7 @@ async def run_pdf_rag_agent_stream(
             )
         ):
             pass
-        elif state.get("page_assets") or state.get("student_attachment_files"):
+        elif state.get("tool_call_count") or state.get("page_assets") or state.get("student_attachment_files"):
             final_messages = await asyncio.to_thread(build_context_grounded_answer_messages, state)
             await maybe_adjust_ai_usage_reservation(state, final_messages)
             state["input_token_breakdown"] = build_input_token_breakdown(state, final_messages)
@@ -5714,7 +6222,12 @@ async def run_pdf_rag_agent_stream(
             }
             final_model = state.get("model") or DEFAULT_OPENROUTER_MODEL
             final_reasoning_effort = ROUTER_REASONING_EFFORT
-            scanner = FinalAnswerJsonSectionScanner()
+            scanner = FinalAnswerJsonSectionScanner(
+                excluded_sections=streaming_excluded_sections_for_state(
+                    state,
+                    base_sections={"mainChat", "answer", FINAL_JSON_MAIN_TEXT_KEY},
+                )
+            )
             pending_section_events: list[dict[str, str]] = []
 
             def capture_final_delta(delta: str) -> None:
@@ -5746,7 +6259,8 @@ async def run_pdf_rag_agent_stream(
             response = await response_task
             for section_event in scanner.close():
                 yield stream_section_event_for_call(section_event, "context_grounded_answer")
-            state["answer"] = response.get("content") or ""
+            state["context_grounded_response"] = response.get("content") or ""
+            state["answer"] = answer_with_context_grounded_continuation(state, state["context_grounded_response"])
             state["finish_reason"] = response.get("finish_reason") or ""
             state["stage_history"] = append_stage(state, "context_grounded_answer")
             state["token_usage"] = add_token_usage(state.get("token_usage"), response.get("usage"))
@@ -5759,13 +6273,7 @@ async def run_pdf_rag_agent_stream(
                 reasoning_effort=final_reasoning_effort,
             )
         else:
-            state["answer"] = (
-                final_response_without_page_assets(state, decision)
-                if state.get("tool_call_count")
-                else str(decision.get("student_response") or state.get("answer") or "").strip()
-            )
-            if not state["answer"]:
-                state["answer"] = "Tell me what part you tried or where you got stuck, and I’ll give you a small nudge."
+            state["answer"] = str(decision.get("student_response") or state.get("answer") or "").strip()
 
         preliminary_sources = sources_for_answer(state, state.get("answer") or "")
         problem_context = parse_problem_context_from_answer(state.get("answer") or "", state, preliminary_sources)
@@ -5791,7 +6299,8 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
     visible_raw_answer = visible_text_from_ordered_json_output(raw_answer) or raw_answer
     preliminary_sources = sources_for_answer(state, raw_answer)
     problem_context = parse_problem_context_from_answer(raw_answer, state, preliminary_sources)
-    student_provided_problem_text = student_provided_problem_text_from_state(state)
+    active_problem_decision = active_problem_decision_from_state(state)
+    decision_problem_context = problem_context_from_active_problem_decision(active_problem_decision)
     initial_structured_output = (
         state.get("structured_output_override")
         if isinstance(state.get("structured_output_override"), dict)
@@ -5802,20 +6311,10 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
         ((initial_structured_output.get("sections") or {}).get("problem") if isinstance(initial_structured_output, dict) else "")
         or ""
     )
-    if student_provided_problem_text and not problem_context.get("problem"):
+    if decision_problem_context:
         problem_context = {
-            "relation": "different_problem",
-            "problem": student_provided_problem_text,
-            "source_type": "conversation_extracted",
-            "confidence": "medium",
-        }
-    upload_problem_text = student_upload_problem_text_from_state(state)
-    if upload_problem_text and not problem_context.get("problem"):
-        problem_context = {
-            "relation": "different_problem",
-            "problem": upload_problem_text,
-            "source_type": "pdf",
-            "confidence": "medium",
+            **decision_problem_context,
+            **{key: value for key, value in problem_context.items() if key in {"expected_answer", "source_document_id", "source_page", "source_chunk_id"} and value},
         }
     if visible_problem_text and not problem_context.get("problem"):
         problem_context = {
@@ -5857,7 +6356,8 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
         else json_structured_output or structured_tutor_output_from_answer(answer, state, sources)
     )
     structured_output = suppress_structured_problem_section_for_followup(structured_output, state)
-    structured_output = suppress_depth_one_over_scaffolding(structured_output, state)
+    if parse_json_object_from_text(raw_answer) and structured_output:
+        answer = structured_output_to_text(structured_output)
     answer = suppress_duplicate_problem_answer(answer, structured_output)
     gate = answer_leak_gate(
         answer=answer,
@@ -5917,11 +6417,12 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
         answer = coerce_structured_section_text((structured_output.get("sections") or {}).get("answer")) or answer
 
     active_problem_text = str(((structured_output.get("sections") or {}).get("problem") if isinstance(structured_output, dict) else "") or "")
+    finalize_understanding_after_rendered_response(state, structured_output, answer)
     state["knowledge_items"] = knowledge_items_from_state(
         state,
         active_problem_text=active_problem_text
         or str((active_problem_context or {}).get("problem_text") or "")
-        or student_provided_problem_text,
+        or str(active_problem_decision.get("problemText") or ""),
         previous_items=state.get("knowledge_items") or (state.get("chat_retrieval_memory") or {}).get("knowledge_items", []),
     )
     persist_final_tutor_memory(state)
@@ -5930,6 +6431,7 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
         "content": answer,
         "langGraphTrace": {
             "activeMaterialId": (state.get("retrieval_decision") or {}).get("active_material_id"),
+            "activeProblemDecision": active_problem_decision,
             "activePage": (state.get("retrieval_decision") or {}).get("active_page"),
             "activeProblemNumbers": (state.get("retrieval_decision") or {}).get("active_problem_numbers") or [],
             "decisionSource": (state.get("retrieval_decision") or {}).get("decision_source"),
@@ -5998,32 +6500,15 @@ def suppress_structured_problem_section_for_followup(
     return updated
 
 
-def suppress_depth_one_over_scaffolding(
-    structured_output: dict[str, Any],
+def streaming_excluded_sections_for_state(
     state: PdfRagState,
-) -> dict[str, Any]:
-    tutor_plan = state.get("tutor_plan") if isinstance(state.get("tutor_plan"), dict) else {}
-    if clamp_int(tutor_plan.get("nextHelpDepth"), minimum=1, maximum=4, default=2) != 1:
-        return structured_output
-
-    sections = structured_output.get("sections")
-    if not isinstance(sections, dict) or not sections.get("hint") or not sections.get("nextStep"):
-        return structured_output
-
-    next_step = str(sections.get("nextStep") or "")
-    if asks_for_student_attempt_only(next_step):
-        return structured_output
-
-    next_sections = dict(sections)
-    next_sections.pop("nextStep", None)
-    raw_order = structured_output.get("sectionOrder")
-    next_order = [key for key in raw_order if key != "nextStep"] if isinstance(raw_order, list) else []
-
-    return {
-        **structured_output,
-        "sections": next_sections,
-        **({"sectionOrder": next_order} if isinstance(raw_order, list) else {}),
-    }
+    *,
+    base_sections: set[str] | None = None,
+) -> set[str]:
+    excluded = set(base_sections or set())
+    if should_suppress_problem_section_for_followup(state):
+        excluded.add("problem")
+    return excluded
 
 
 def asks_for_student_attempt_only(text: str) -> bool:
@@ -6353,6 +6838,125 @@ def persist_final_tutor_memory(state: PdfRagState) -> None:
     )
 
 
+def finalize_understanding_after_rendered_response(
+    state: PdfRagState,
+    structured_output: dict[str, Any],
+    answer: str,
+) -> None:
+    understanding = state.get("problem_understanding_state")
+    if state.get("problem_understanding_state_suppressed") or not isinstance(understanding, dict):
+        return
+
+    active_problem_id = str(understanding.get("activeProblemId") or active_problem_id_for_state(state)).strip()
+    if not active_problem_id or active_problem_id.lower() in {"unknown", "none", "null", "n/a"}:
+        return
+
+    previous = previous_problem_understanding_state(state, active_problem_id)
+    rendered_hint = rendered_response_contains_tutoring_help(structured_output, answer, state)
+    previous_hints = clamp_int(previous.get("hintsGiven"), minimum=0, maximum=999, default=0)
+    current_hints = clamp_int(understanding.get("hintsGiven"), minimum=0, maximum=999, default=previous_hints)
+    last_hint_summary = str(understanding.get("lastHintSummary") or "").strip()
+    repeated_hint = bool(last_hint_summary) and hint_summary_repeats(last_hint_summary, previous)
+
+    if rendered_hint and not repeated_hint:
+        understanding["hintsGiven"] = max(current_hints, previous_hints + 1)
+    elif not rendered_hint or repeated_hint:
+        understanding["hintsGiven"] = min(current_hints, previous_hints)
+
+    decision = active_problem_decision_from_state(state)
+    if decision.get("isActualProblem"):
+        if decision.get("visibleParts") and not understanding.get("visibleParts"):
+            understanding["visibleParts"] = decision.get("visibleParts")
+        if decision.get("currentPart") and not understanding.get("currentPart"):
+            understanding["currentPart"] = decision.get("currentPart")
+        if decision.get("completedParts"):
+            understanding["completedParts"] = compact_string_list(
+                [*(understanding.get("completedParts") if isinstance(understanding.get("completedParts"), list) else []), *list(decision.get("completedParts") or [])],
+                limit=24,
+            )
+        understanding["problemStatus"] = infer_understanding_problem_status(understanding)
+
+    understanding["updatedAt"] = utc_timestamp()
+    state["problem_understanding_state"] = understanding
+
+
+def previous_problem_understanding_state(state: PdfRagState, active_problem_id: str) -> dict[str, Any]:
+    memory = normalize_chat_retrieval_memory(state.get("chat_retrieval_memory"))
+    states = memory.get("problem_understanding_states") if isinstance(memory.get("problem_understanding_states"), dict) else {}
+    previous = states.get(active_problem_id) if isinstance(states, dict) else {}
+    return previous if isinstance(previous, dict) else {}
+
+
+def rendered_response_contains_tutoring_help(structured_output: dict[str, Any], answer: str, state: PdfRagState) -> bool:
+    if tutor_plan_is_source_lookup_only(state.get("tutor_plan") if isinstance(state.get("tutor_plan"), dict) else {}):
+        return False
+    if structured_output_is_problem_selection(structured_output):
+        return False
+
+    sections = structured_output.get("sections") if isinstance(structured_output, dict) else {}
+    if isinstance(sections, dict):
+        if coerce_structured_section_text(sections.get("hint")):
+            return True
+        if coerce_structured_section_text(sections.get("checkWork")):
+            return True
+        if coerce_structured_section_text(sections.get("example")):
+            return True
+
+    return False
+
+
+def hint_summary_repeats(summary: str, previous_state: dict[str, Any]) -> bool:
+    previous_summary = str(previous_state.get("lastHintSummary") or "").strip()
+    if not summary or not previous_summary:
+        return False
+
+    summary_terms = significant_hint_terms(summary)
+    previous_terms = significant_hint_terms(previous_summary)
+    if not summary_terms or not previous_terms:
+        return normalize_search_query(summary) == normalize_search_query(previous_summary)
+    if min(len(summary_terms), len(previous_terms)) < 3:
+        return normalize_search_query(summary) == normalize_search_query(previous_summary)
+
+    overlap = len(summary_terms.intersection(previous_terms))
+    return overlap / max(1, min(len(summary_terms), len(previous_terms))) >= 0.75
+
+
+def significant_hint_terms(value: str) -> set[str]:
+    stop_words = {
+        "the",
+        "and",
+        "that",
+        "this",
+        "with",
+        "from",
+        "student",
+        "asked",
+        "hint",
+        "focus",
+        "focused",
+        "use",
+        "used",
+        "try",
+        "next",
+    }
+    return {
+        token
+        for token in normalize_search_query(value).split()
+        if len(token) >= 4 and token not in stop_words
+    }
+
+
+def infer_understanding_problem_status(understanding: dict[str, Any]) -> str:
+    visible_parts = compact_string_list(understanding.get("visibleParts"), limit=24)
+    completed_parts = set(compact_string_list(understanding.get("completedParts"), limit=24))
+    current_part = str(understanding.get("currentPart") or "").strip()
+    if visible_parts and completed_parts and set(visible_parts).issubset(completed_parts):
+        return "completed"
+    if current_part or completed_parts or str(understanding.get("currentStep") or "").strip():
+        return "in_progress"
+    return normalize_problem_status(understanding.get("problemStatus"))
+
+
 def update_active_problem_context(problem_context: dict[str, Any], state: PdfRagState) -> dict[str, Any] | None:
     existing_context = read_active_problem_context(state)
     next_context = next_active_problem_context(problem_context, existing_context, state)
@@ -6388,6 +6992,16 @@ def next_active_problem_context(
         refreshed = dict(existing_context)
         if problem and not refreshed.get("problem_text"):
             refreshed["problem_text"] = problem
+        merge_problem_part_context(refreshed, parsed_context)
+        refreshed["last_confirmed_message_id"] = latest_student_message_id(state)
+        refreshed["updated_at"] = utc_timestamp()
+        return refreshed
+
+    if relation in {"same_problem_new_part", "same_problem_student_moved_ahead"} and existing_context:
+        refreshed = dict(existing_context)
+        if problem and not refreshed.get("problem_text"):
+            refreshed["problem_text"] = problem
+        merge_problem_part_context(refreshed, parsed_context)
         refreshed["last_confirmed_message_id"] = latest_student_message_id(state)
         refreshed["updated_at"] = utc_timestamp()
         return refreshed
@@ -6422,11 +7036,52 @@ def build_active_problem_context(parsed_context: dict[str, Any], state: PdfRagSt
         "source_document_id": parsed_context.get("source_document_id"),
         "source_page": parsed_context.get("source_page"),
         "source_chunk_id": parsed_context.get("source_chunk_id"),
+        "visible_parts": compact_string_list(parsed_context.get("visible_parts"), limit=24),
+        "current_part": str(parsed_context.get("current_part") or "").strip()[:80],
+        "completed_parts": compact_string_list(parsed_context.get("completed_parts"), limit=24),
+        "problem_status": infer_active_problem_status(parsed_context),
+        "relation_to_previous_problem": parsed_context.get("relation_to_previous_problem"),
+        "llm_reason": parsed_context.get("llm_reason"),
         "active_since_message_id": message_id,
         "last_confirmed_message_id": message_id,
         "created_at": now,
         "updated_at": now,
     }
+
+
+def merge_problem_part_context(context: dict[str, Any], parsed_context: dict[str, Any]) -> None:
+    visible_parts = compact_string_list(
+        [*(context.get("visible_parts") if isinstance(context.get("visible_parts"), list) else []), *compact_string_list(parsed_context.get("visible_parts"), limit=24)],
+        limit=24,
+    )
+    completed_parts = compact_string_list(
+        [*(context.get("completed_parts") if isinstance(context.get("completed_parts"), list) else []), *compact_string_list(parsed_context.get("completed_parts"), limit=24)],
+        limit=24,
+    )
+    current_part = str(parsed_context.get("current_part") or context.get("current_part") or "").strip()[:80]
+
+    if visible_parts:
+        context["visible_parts"] = visible_parts
+    if completed_parts:
+        context["completed_parts"] = completed_parts
+    if current_part:
+        context["current_part"] = current_part
+    context["problem_status"] = infer_active_problem_status({**context, **parsed_context})
+    if parsed_context.get("relation_to_previous_problem"):
+        context["relation_to_previous_problem"] = parsed_context.get("relation_to_previous_problem")
+    if parsed_context.get("llm_reason"):
+        context["llm_reason"] = parsed_context.get("llm_reason")
+
+
+def infer_active_problem_status(context: dict[str, Any]) -> str:
+    visible_parts = compact_string_list(context.get("visible_parts"), limit=24)
+    completed_parts = set(compact_string_list(context.get("completed_parts"), limit=24))
+    current_part = str(context.get("current_part") or "").strip()
+    if visible_parts and completed_parts and set(visible_parts).issubset(completed_parts):
+        return "completed"
+    if current_part or completed_parts:
+        return "in_progress"
+    return "not_started"
 
 
 def stable_problem_id(problem_text: str) -> str:
@@ -6923,32 +7578,6 @@ def message_content_text(content: Any) -> str:
     return ""
 
 
-def problem_text_fallback_from_latest_message(message: str) -> str:
-    text = str(message or "").strip()
-    if not text or is_short_greeting_answer(text):
-        return ""
-
-    if looks_like_concrete_math_problem(text) or looks_like_numbered_task_locator(text):
-        return text
-
-    if len(text.split()) >= 5 and re.search(r"\b(?:problem|question|exercise|solve|prove|find|compute|write|essay)\b", text, flags=re.IGNORECASE):
-        return text
-
-    return ""
-
-
-def problem_text_fallback_from_messages(messages: list[dict[str, Any]]) -> str:
-    for message in reversed(messages):
-        if message.get("role") not in {"user", "student"}:
-            continue
-
-        candidate = problem_text_fallback_from_latest_message(message_content_text(message.get("content")))
-        if candidate:
-            return candidate
-
-    return ""
-
-
 def answer_leak_reasons_for_text(
     text: str,
     *,
@@ -7072,9 +7701,6 @@ def safe_replacement_section(
 
     if section_name == "checkWork":
         return "Check the first step where you changed the expression or chose a method, then tell me what you got."
-
-    if section_name == "nextStep":
-        return "What have you tried so far, and which part feels confusing?"
 
     return "Show me your attempt first, and I can help with the next small step."
 
@@ -7548,7 +8174,12 @@ def normalize_input_token_breakdown(value: Any) -> list[dict[str, Any]]:
     return sections
 
 
-async def maybe_adjust_ai_usage_reservation(state: PdfRagState, final_messages: list[dict[str, Any]]) -> None:
+async def maybe_adjust_ai_usage_reservation(
+    state: PdfRagState,
+    final_messages: list[dict[str, Any]] | None = None,
+    *,
+    estimated_tokens: int | None = None,
+) -> None:
     reservation = state.get("ai_usage_reservation")
 
     if not isinstance(reservation, dict):
@@ -7559,7 +8190,11 @@ async def maybe_adjust_ai_usage_reservation(state: PdfRagState, final_messages: 
     if not reservation_id:
         return
 
-    estimated_tokens = estimate_pdf_rag_request_tokens(state, final_messages)
+    if estimated_tokens is None:
+        if final_messages is None:
+            return
+        estimated_tokens = estimate_pdf_rag_request_tokens(state, final_messages)
+
     current_estimate = nonnegative_int(reservation.get("estimatedTokens") or reservation.get("estimated_tokens"))
 
     if estimated_tokens <= current_estimate:
@@ -7646,6 +8281,13 @@ def estimate_pdf_rag_request_tokens(state: PdfRagState, final_messages: list[dic
     max_output_tokens = nonnegative_int(state.get("max_tokens")) or 1000
 
     return max(1, actual_so_far + final_input_tokens + max_output_tokens)
+
+
+def estimate_primary_tutor_request_tokens(state: PdfRagState, primary_messages: list[dict[str, Any]]) -> int:
+    primary_input_tokens = estimate_provider_messages_tokens(primary_messages)
+    max_output_tokens = primary_tutor_max_tokens(state)
+
+    return max(1, primary_input_tokens + max_output_tokens)
 
 
 def estimate_provider_messages_tokens(messages: list[dict[str, Any]]) -> int:
@@ -7808,7 +8450,21 @@ def structured_tutor_output_from_answer(
     )
     if json_structured_output:
         metadata = json_structured_output.get("metadata") if isinstance(json_structured_output.get("metadata"), dict) else {}
-        problem = str((json_structured_output.get("sections") or {}).get("problem") or "")
+        sections = json_structured_output.get("sections") if isinstance(json_structured_output.get("sections"), dict) else {}
+        problem = str(sections.get("problem") or "")
+        if problem and not str(sections.get("mainChat") or "").strip():
+            context_note = context_note_for_found_problem(state, sources)
+            if context_note:
+                sections = {"mainChat": context_note, **sections}
+                json_structured_output = {
+                    **json_structured_output,
+                    "sections": sections,
+                    "sectionOrder": normalized_structured_section_order(
+                        ["mainChat", "problem", *(json_structured_output.get("sectionOrder") or [])],
+                        sections,
+                        include_answer_first=False,
+                    ),
+                }
         return {
             **json_structured_output,
             "metadata": {
@@ -7823,13 +8479,6 @@ def structured_tutor_output_from_answer(
     paste_request = asks_for_pasted_problem_or_source(answer_text)
     next_question = extract_final_next_step(answer_text)
     structured_answer = answer_text
-
-    if next_question:
-        candidate_answer = remove_final_next_step(answer_text, next_question) or answer_text
-        if is_short_greeting_answer(candidate_answer):
-            next_question = ""
-        else:
-            structured_answer = candidate_answer
 
     hint = extract_labeled_section(structured_answer, ["hint", "small hint"])
     problem = extract_labeled_section(structured_answer, ["problem"])
@@ -7854,11 +8503,11 @@ def structured_tutor_output_from_answer(
         problem, problem_followup = split_problem_section_followup(problem)
         if problem_followup and not section_answer:
             section_answer = problem_followup
-    has_optional_sections = any([problem, hint, explanation, formula, example, check_work, next_question])
+    has_optional_sections = any([problem, hint, explanation, formula, example, check_work])
     if not section_answer and not has_optional_sections:
         section_answer = structured_answer
     sections: dict[str, str] = {
-        "answer": section_answer,
+        "mainChat": section_answer,
     }
 
     if problem:
@@ -7879,12 +8528,14 @@ def structured_tutor_output_from_answer(
     if check_work:
         sections["checkWork"] = check_work
 
-    if next_question:
-        sections["nextStep"] = next_question
-
     suppress_duplicated_structured_sections(sections)
+    improve_problem_lookup_main_chat(sections)
+    if problem and not str(sections.get("mainChat") or "").strip():
+        context_note = context_note_for_found_problem(state, sources)
+        if context_note:
+            sections["mainChat"] = context_note
     section_order = normalized_structured_section_order(
-        parsed_section_order,
+        ["mainChat", *parsed_section_order] if sections.get("mainChat") and problem else parsed_section_order,
         sections,
         include_answer_first=bool(section_answer),
     )
@@ -8224,21 +8875,23 @@ def normalized_structured_section_order(
     include_answer_first: bool,
 ) -> list[str]:
     fallback_order = [section_name for section_name, _ in STRUCTURED_SECTION_ORDER]
+    parsed_order = normalized_section_order_aliases(parsed_order)
     candidate_keys = [
-        *(["answer"] if include_answer_first and sections.get("answer") else []),
+        *(["mainChat"] if include_answer_first and sections.get("mainChat") else []),
         *parsed_order,
         *fallback_order,
     ]
-    leading_keys = [
-        section_name
-        for section_name in ("problem", "answer")
-        if sections.get(section_name)
-    ]
-    trailing_keys = [
-        section_name
-        for section_name in ("nextStep",)
-        if sections.get(section_name)
-    ]
+    if (
+        sections.get("problem")
+        and sections.get("mainChat")
+        and "mainChat" in parsed_order
+        and "problem" in parsed_order
+        and parsed_order.index("mainChat") < parsed_order.index("problem")
+    ):
+        preferred_leading_order = ("mainChat", "problem")
+    else:
+        preferred_leading_order = ("problem", "mainChat")
+    leading_keys = [section_name for section_name in preferred_leading_order if sections.get(section_name)]
     section_order: list[str] = []
 
     for section_key in leading_keys:
@@ -8247,13 +8900,9 @@ def normalized_structured_section_order(
         section_order.append(section_key)
 
     for section_key in candidate_keys:
-        if section_key in section_order or section_key in trailing_keys or not sections.get(section_key):
+        if section_key in section_order or not sections.get(section_key):
             continue
         section_order.append(section_key)
-
-    for section_key in trailing_keys:
-        if section_key not in section_order:
-            section_order.append(section_key)
 
     return section_order
 

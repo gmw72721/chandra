@@ -42,6 +42,40 @@ test("tutor prompt builders keep local safety fallback text", () => {
   assert.match(chatRouteSource, /Do not reveal the full solution, final answer, final artifact/);
 });
 
+test("tutor prompt separates voice and verbosity from tutoring behavior policy", () => {
+  const promptSource = readFileSync(join(repoRoot, "frontend/lib/prompts.ts"), "utf8");
+  const seedSource = readFileSync(join(repoRoot, "scripts/seed-langfuse-prompts.mjs"), "utf8");
+
+  assert.match(promptSource, /Chandra voice:/);
+  assert.match(promptSource, /Chandra sounds calm, friendly, observant, and plainspoken/);
+  assert.match(promptSource, /Voice controls wording and tone only/);
+  assert.match(promptSource, /never changes tutoring mode, help depth, source-use rules, academic integrity, or answer-safety behavior/);
+  assert.match(promptSource, /Calm and clear/);
+  assert.match(promptSource, /Friendly and upbeat/);
+  assert.match(promptSource, /Direct and concise/);
+  assert.match(promptSource, /Formal and academic/);
+  assert.match(promptSource, /Gentle and patient/);
+  assert.match(promptSource, /Response verbosity:/);
+  assert.match(promptSource, /Short: one compact sentence/);
+  assert.match(promptSource, /Balanced: brief orientation plus one useful hint, check, or next question/);
+  assert.match(promptSource, /Detailed: more explanation and context within the allowed help level/);
+  assert.match(promptSource, /never permits extra solution steps, final answers, or policy bypasses/);
+  assert.match(seedSource, /{{tutor_voice_instructions}}/);
+  assert.match(seedSource, /{{response_verbosity_instructions}}/);
+});
+
+test("tutor mode prompt guidance remains behavior-only and expanded", () => {
+  const promptSource = readFileSync(join(repoRoot, "frontend/lib/prompts.ts"), "utf8");
+
+  assert.match(promptSource, /Tutor behavior mode: Guided problem solving/);
+  assert.match(promptSource, /Tutor behavior mode: Socratic/);
+  assert.match(promptSource, /Tutor behavior mode: Check my work/);
+  assert.match(promptSource, /Tutor behavior mode: Exam review/);
+  assert.match(promptSource, /Tutor behavior mode: Reading helper/);
+  assert.match(promptSource, /Tutor Mode controls what kind of tutoring Chandra does; it does not control voice, warmth, formality, or response length/);
+  assert.match(promptSource, /Do not let this mode override Help Rules, source-use rules, academic integrity, or answer-safety policy/);
+});
+
 test("Langfuse prompt templates use double-curly variables", () => {
   const promptSource = readFileSync(join(repoRoot, "frontend/lib/prompts.ts"), "utf8");
   const profileSource = readFileSync(join(repoRoot, "frontend/lib/student-learning-profiles-server.ts"), "utf8");

@@ -394,11 +394,28 @@ CREATE TABLE IF NOT EXISTS ai_usage_anchors (
   class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
   student_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   anchor_at TIMESTAMPTZ NOT NULL,
+  day_anchor_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  week_anchor_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (class_id, student_id)
 );
+
+ALTER TABLE ai_usage_anchors
+  ADD COLUMN IF NOT EXISTS day_anchor_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS week_anchor_at TIMESTAMPTZ;
+
+UPDATE ai_usage_anchors
+SET day_anchor_at = COALESCE(day_anchor_at, anchor_at),
+  week_anchor_at = COALESCE(week_anchor_at, anchor_at)
+WHERE day_anchor_at IS NULL OR week_anchor_at IS NULL;
+
+ALTER TABLE ai_usage_anchors
+  ALTER COLUMN day_anchor_at SET NOT NULL,
+  ALTER COLUMN day_anchor_at SET DEFAULT now(),
+  ALTER COLUMN week_anchor_at SET NOT NULL,
+  ALTER COLUMN week_anchor_at SET DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS ai_usage_buckets (
   id TEXT PRIMARY KEY,

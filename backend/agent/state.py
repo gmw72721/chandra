@@ -13,6 +13,9 @@ class PdfRagState(TypedDict):
     retrieved_pages: list[dict[str, Any]]
     page_assets: list[dict[str, Any]]
     answer: str
+    primary_student_response: NotRequired[str]
+    primary_structured_output: NotRequired[dict[str, Any]]
+    context_grounded_response: NotRequired[str]
     finish_reason: NotRequired[str]
     tool_call_count: int
     stage_history: NotRequired[list[str]]
@@ -23,6 +26,10 @@ class PdfRagState(TypedDict):
     reasoning_effort: NotRequired[str]
     answer_policy: NotRequired[dict[str, Any]]
     ai_usage_reservation: NotRequired[dict[str, Any]]
+    behavior_instructions: NotRequired[str]
+    behavior_title: NotRequired[str]
+    model_settings: NotRequired[dict[str, Any]]
+    response_format: NotRequired[dict[str, Any]]
     source_usage: NotRequired[dict[str, Any]]
     debug_options: NotRequired[dict[str, Any]]
     student_profile_context: NotRequired[dict[str, Any]]

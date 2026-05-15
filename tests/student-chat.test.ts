@@ -16,6 +16,7 @@ import { normalizeTutorResponse } from "../frontend/lib/tutor-response.ts";
 import { buildUnderstandingState, safeUnderstandingReasons } from "../frontend/lib/understanding-state.ts";
 
 const repoRoot = process.cwd();
+const legacyActionSectionKey = ["next", "Step"].join("");
 
 test("student saved classId is used automatically", () => {
   assert.equal(
@@ -477,7 +478,7 @@ test("student chat response normalization preserves structured output", () => {
     structuredOutput: {
       sections: {
         answer: "Use substitution first.",
-        nextStep: "What expression should u equal?"
+        [legacyActionSectionKey]: "What expression should u equal?"
       },
       metadata: {
         hintLevel: "guided_step",
@@ -490,11 +491,10 @@ test("student chat response normalization preserves structured output", () => {
 
   assert.equal(response.message, "Use substitution first. What expression should u equal?");
   assert.equal(response.content, "Use substitution first. What expression should u equal?");
-  assert.deepEqual(response.structuredOutput, {
-    sections: {
-      answer: "Use substitution first.",
-      nextStep: "What expression should u equal?"
-    },
+	  assert.deepEqual(response.structuredOutput, {
+	    sections: {
+	      mainChat: "Use substitution first.\n\nWhat expression should u equal?"
+	    },
     metadata: {
       hintLevel: "guided_step",
       mode: "guided_problem_solving",
@@ -515,7 +515,12 @@ test("student chat response normalization preserves valid confusion choices", ()
       },
       confusionPrompt: "I see a few possible starting points for this rank problem. Pick one and I'll focus there.",
       confusionChoices: [
-        { id: "notation", label: "Notation", message: "Help me understand the notation." },
+        {
+          description: "Chandra can connect each symbol to its role in the problem.",
+          id: "notation",
+          label: "Notation",
+          message: "Help me understand the notation."
+        },
         { id: "first-step", label: "First step", message: "Help me choose the first step." },
         { id: "check-work", label: "Check my work", message: "Check my algebra so far." },
         { id: "smaller-hint", label: "Smaller hint", message: "Give me a smaller hint." }
@@ -534,7 +539,12 @@ test("student chat response normalization preserves valid confusion choices", ()
     "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
   );
   assert.deepEqual(response.structuredOutput?.confusionChoices, [
-    { id: "notation", label: "Notation", message: "Help me understand the notation." },
+    {
+      description: "Chandra can connect each symbol to its role in the problem.",
+      id: "notation",
+      label: "Notation",
+      message: "Help me understand the notation."
+    },
     { id: "first-step", label: "First step", message: "Help me choose the first step." },
     { id: "check-work", label: "Check my work", message: "Check my algebra so far." },
     { id: "smaller-hint", label: "Smaller hint", message: "Give me a smaller hint." }
@@ -571,13 +581,13 @@ test("student chat response normalization preserves full problem selection choic
   });
 
   assert.equal(response.structuredOutput?.metadata.choiceDisplay, "problem_selection");
-  assert.deepEqual(response.structuredOutput?.sections, {
-    answer: "This page has several exercises. Which one do you want help with?"
-  });
+	  assert.deepEqual(response.structuredOutput?.sections, {
+	    mainChat: "This page has several exercises. Which one do you want help with?"
+	  });
   assert.deepEqual(response.structuredOutput?.confusionChoices, choices);
 });
 
-test("student chat response normalization makes confusion choice prompt authoritative", () => {
+test("student chat response normalization preserves sections with confusion choices", () => {
   const response = normalizeTutorResponse({
     content: "I can help with Problem 2.14, but I need to know which part you want to start with.",
     retrievalConfidence: "low",
@@ -585,7 +595,7 @@ test("student chat response normalization makes confusion choice prompt authorit
     structuredOutput: {
       sections: {
         answer: "I can help with Problem 2.14, but I need to know which part you want to start with.",
-        nextStep: "Choose one: the setup from Exercise 2.13, part (i), or part (ii)."
+        [legacyActionSectionKey]: "Choose one: the setup from Exercise 2.13, part (i), or part (ii)."
       },
       confusionPrompt:
         "I see a few possible starting points for this rank problem. Pick one and I'll focus there.",
@@ -609,9 +619,11 @@ test("student chat response normalization makes confusion choice prompt authorit
     }
   });
 
-  assert.deepEqual(response.structuredOutput?.sections, {
-    answer: "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
-  });
+	  assert.deepEqual(response.structuredOutput?.sections, {
+	    mainChat:
+	      "I can help with Problem 2.14, but I need to know which part you want to start with.\n\n" +
+	      "Choose one: the setup from Exercise 2.13, part (i), or part (ii)."
+	  });
 });
 
 test("student chat response normalization drops invalid confusion choice payloads", () => {
@@ -642,13 +654,13 @@ test("student chat response normalization drops invalid confusion choice payload
 
 test("student chat response normalization unwraps object-shaped section text", () => {
   const response = normalizeTutorResponse({
-    content: "I'm checking the exact problem 2.16 now.",
+    content: "Use the exact wording from the selected page.",
     retrievalConfidence: "low",
     sources: [],
     structuredOutput: {
       sections: {
-        answer: { text: "I'm checking the exact problem 2.16 now." },
-        nextStep: "{'text': 'Send the page or a photo.'}"
+        answer: { text: "Use the exact wording from the selected page." },
+        [legacyActionSectionKey]: "{'text': 'Send the page or a photo.'}"
       },
       metadata: {
         hintLevel: "guided_step",
@@ -659,9 +671,9 @@ test("student chat response normalization unwraps object-shaped section text", (
     } as never
   });
 
-  assert.deepEqual(response.structuredOutput?.sections, {
-    answer: "I'm checking the exact problem 2.16 now."
-  });
+	  assert.deepEqual(response.structuredOutput?.sections, {
+	    mainChat: "Use the exact wording from the selected page."
+	  });
 });
 
 test("student chat response normalization preserves problem section", () => {
@@ -684,12 +696,12 @@ test("student chat response normalization preserves problem section", () => {
   });
 
   assert.deepEqual(response.structuredOutput?.sections, {
-    answer: "If you want, I can help you start.",
+    mainChat: "If you want, I can help you start.",
     problem: "Exercise 2.14: prove the two rank inequalities."
   });
 });
 
-test("student chat response normalization removes problem text duplicated in main content", () => {
+test("student chat response normalization preserves problem text duplicated in main content", () => {
   const problem =
     "2.14. Given the setup of Exercise 2.13, prove the following inequalities: (i) rank(KL) <= min(rank(L), rank(K)).";
   const response = normalizeTutorResponse({
@@ -710,12 +722,12 @@ test("student chat response normalization removes problem text duplicated in mai
     }
   });
 
-  assert.equal(response.content, "");
-  assert.equal(response.message, "");
-  assert.deepEqual(response.structuredOutput?.sections, { answer: "", problem });
+  assert.equal(response.content, `Problem: ${problem}`);
+  assert.equal(response.message, `Problem: ${problem}`);
+  assert.deepEqual(response.structuredOutput?.sections, { problem });
 });
 
-test("student chat response normalization moves status text out of problem section", () => {
+test("student chat response normalization removes status text from problem section", () => {
   const response = normalizeTutorResponse({
     content: "You said: 2.20",
     retrievalConfidence: "low",
@@ -736,11 +748,11 @@ test("student chat response normalization moves status text out of problem secti
     }
   });
 
-  assert.equal(response.structuredOutput?.sections.problem, undefined);
-  assert.match(response.structuredOutput?.sections.answer ?? "", /You said: 2\.20/);
+	  assert.equal(response.structuredOutput?.sections.problem, undefined);
+	  assert.equal(response.structuredOutput?.sections.mainChat, "You said: 2.20");
 });
 
-test("student assistant renderer shows problem before answer even when section order says otherwise", () => {
+test("student assistant renderer can show source lookup context note before problem", () => {
   const blocks = assistantMessageBlocks({
     content: "If you want, I can help you start.",
     createdAt: new Date().toISOString(),
@@ -763,13 +775,13 @@ test("student assistant renderer shows problem before answer even when section o
 
   assert.deepEqual(blocks, [
     {
+      content: "If you want, I can help you start.",
+      kind: "answer"
+    },
+    {
       content: "Exercise 2.16: prove the quotient isomorphism.",
       kind: "problem",
       label: "Problem"
-    },
-    {
-      content: "If you want, I can help you start.",
-      kind: "answer"
     }
   ]);
 });
@@ -781,12 +793,11 @@ test("student assistant renderer repairs unhelpful section order", () => {
     id: "assistant-order-repair",
     role: "assistant",
     structuredOutput: {
-      sectionOrder: ["hint", "nextStep", "answer", "formula"],
+      sectionOrder: ["hint", "answer", "formula"],
       sections: {
-        answer: "Let's work it step by step.",
+        answer: "Let's work it step by step.\n\nSend the first transformation from Exercise 2.3.",
         formula: "Matrix columns are transformed basis vectors.",
-        hint: "Apply the transformation to the first basis vector.",
-        nextStep: "Send the first transformation from Exercise 2.3."
+        hint: "Apply the transformation to the first basis vector."
       },
       metadata: {
         hintLevel: "guided_step",
@@ -799,7 +810,7 @@ test("student assistant renderer repairs unhelpful section order", () => {
 
   assert.deepEqual(
     blocks.map((block) => block.kind),
-    ["answer", "hint", "formula", "next-step"]
+    ["answer", "hint", "formula"]
   );
 });
 
@@ -818,11 +829,10 @@ test("student chat response normalization converts old flat structured output", 
     } as never
   });
 
-  assert.deepEqual(response.structuredOutput, {
-    sections: {
-      answer: "Use substitution first.",
-      nextStep: "What expression should u equal?"
-    },
+	  assert.deepEqual(response.structuredOutput, {
+	    sections: {
+	      mainChat: "Use substitution first.\n\nWhat expression should u equal?"
+	    },
     metadata: {
       hintLevel: "guided_step",
       mode: "guided_problem_solving",
@@ -832,16 +842,16 @@ test("student chat response normalization converts old flat structured output", 
   });
 });
 
-test("student chat response normalization preserves empty structured answer", () => {
+test("student chat response normalization folds legacy action into empty structured answer", () => {
   const response = normalizeTutorResponse({
-    content: "Hint: Use the vector-space operations.\n\nYour next step: What is the addition operation?",
+    content: "Hint: Use the vector-space operations.\n\nWhat is the addition operation?",
     retrievalConfidence: "low",
     sources: [],
     structuredOutput: {
       sections: {
         answer: "",
         hint: "Use the vector-space operations.",
-        nextStep: "What is the addition operation?"
+        [legacyActionSectionKey]: "What is the addition operation?"
       },
       metadata: {
         hintLevel: "guided_step",
@@ -852,14 +862,13 @@ test("student chat response normalization preserves empty structured answer", ()
     }
   });
 
-  assert.deepEqual(response.structuredOutput?.sections, {
-    answer: "",
-    hint: "Use the vector-space operations.",
-    nextStep: "What is the addition operation?"
-  });
+	  assert.deepEqual(response.structuredOutput?.sections, {
+	    mainChat: "What is the addition operation?",
+	    hint: "Use the vector-space operations.",
+	  });
 });
 
-test("student chat response normalization removes duplicated next step", () => {
+test("student chat response normalization folds duplicated legacy action into answer", () => {
   const response = normalizeTutorResponse({
     content: "I can take another look. What would you like me to focus on?",
     retrievalConfidence: "low",
@@ -867,7 +876,7 @@ test("student chat response normalization removes duplicated next step", () => {
     structuredOutput: {
       sections: {
         answer: "I can take another look. What would you like me to focus on?",
-        nextStep: "I can take another look. What would you like me to focus on?"
+        [legacyActionSectionKey]: "I can take another look. What would you like me to focus on?"
       },
       metadata: {
         hintLevel: "guided_step",
@@ -878,12 +887,12 @@ test("student chat response normalization removes duplicated next step", () => {
     }
   });
 
-  assert.deepEqual(response.structuredOutput?.sections, {
-    answer: "I can take another look. What would you like me to focus on?"
-  });
+	  assert.deepEqual(response.structuredOutput?.sections, {
+	    mainChat: "I can take another look. What would you like me to focus on?"
+	  });
 });
 
-test("student chat response normalization avoids duplicate hint and next-step wording", () => {
+test("student chat response normalization folds duplicate legacy action wording into answer", () => {
   const response = normalizeTutorResponse({
     content: "You are connecting the prompt to the rule that applies here.",
     retrievalConfidence: "low",
@@ -892,7 +901,7 @@ test("student chat response normalization avoids duplicate hint and next-step wo
       sections: {
         answer: "You are connecting the prompt to the rule that applies here.",
         hint: "Focus on the condition in the prompt that tells you which rule applies.",
-        nextStep: "Focus on the condition in the prompt that tells you which rule applies."
+        [legacyActionSectionKey]: "Focus on the condition in the prompt that tells you which rule applies."
       },
       metadata: {
         hintLevel: "small_hint",
@@ -903,13 +912,13 @@ test("student chat response normalization avoids duplicate hint and next-step wo
     }
   });
 
-  assert.deepEqual(response.structuredOutput?.sections, {
-    answer: "You are connecting the prompt to the rule that applies here.",
-    hint: "Focus on the condition in the prompt that tells you which rule applies."
-  });
+	  assert.deepEqual(response.structuredOutput?.sections, {
+	    mainChat: "You are connecting the prompt to the rule that applies here.",
+	    hint: "Focus on the condition in the prompt that tells you which rule applies."
+	  });
 });
 
-test("student chat response normalization removes a hint repeated by the orientation", () => {
+test("student chat response normalization folds legacy action while preserving hint", () => {
   const response = normalizeTutorResponse({
     content: "You are identifying the condition in the prompt that tells you which rule applies.",
     retrievalConfidence: "low",
@@ -918,7 +927,7 @@ test("student chat response normalization removes a hint repeated by the orienta
       sections: {
         answer: "You are identifying the condition in the prompt that tells you which rule applies.",
         hint: "Identify the condition in the prompt that tells you which rule applies.",
-        nextStep: "Write down the one condition you found."
+        [legacyActionSectionKey]: "Write down the one condition you found."
       },
       metadata: {
         hintLevel: "small_hint",
@@ -929,13 +938,14 @@ test("student chat response normalization removes a hint repeated by the orienta
     }
   });
 
-  assert.deepEqual(response.structuredOutput?.sections, {
-    answer: "You are identifying the condition in the prompt that tells you which rule applies.",
-    nextStep: "Write down the one condition you found."
-  });
+	  assert.deepEqual(response.structuredOutput?.sections, {
+	    mainChat:
+	      "You are identifying the condition in the prompt that tells you which rule applies.\n\n" +
+	      "Write down the one condition you found."
+	  });
 });
 
-test("student assistant renderer suppresses duplicate structured sections", () => {
+test("student assistant renderer renders folded action as answer content", () => {
   const blocks = assistantMessageBlocks({
     content: "I can take another look. What would you like me to focus on?",
     createdAt: new Date().toISOString(),
@@ -943,8 +953,9 @@ test("student assistant renderer suppresses duplicate structured sections", () =
     role: "assistant",
     structuredOutput: {
       sections: {
-        answer: "I can take another look. What would you like me to focus on?",
-        nextStep: "Your next step: I can take another look. What would you like me to focus on?"
+        answer:
+          "I can take another look. What would you like me to focus on?\n\n" +
+          "I can take another look. What would you like me to focus on?"
       },
       metadata: {
         hintLevel: "guided_step",
@@ -955,15 +966,17 @@ test("student assistant renderer suppresses duplicate structured sections", () =
     }
   });
 
-  assert.deepEqual(blocks, [
-    {
-      content: "I can take another look. What would you like me to focus on?",
-      kind: "answer"
-    }
-  ]);
+	  assert.deepEqual(blocks, [
+	    {
+	      content:
+	        "I can take another look. What would you like me to focus on?\n\n" +
+	        "I can take another look. What would you like me to focus on?",
+	      kind: "answer"
+	    }
+	  ]);
 });
 
-test("student chat source lookup does not render a next step section", () => {
+test("student chat source lookup folds optional follow-up into answer", () => {
   const response = normalizeTutorResponse({
     content: "I found it: resume, printed page 1 in your notes.",
     retrievalConfidence: "high",
@@ -971,7 +984,7 @@ test("student chat source lookup does not render a next step section", () => {
     structuredOutput: {
       sections: {
         answer: "I found it: resume, printed page 1 in your notes.",
-        nextStep: "If you want, I can also pull out a specific section from page 1."
+        [legacyActionSectionKey]: "If you want, I can also pull out a specific section from page 1."
       },
       metadata: {
         hintLevel: "none",
@@ -982,8 +995,10 @@ test("student chat source lookup does not render a next step section", () => {
     }
   });
 
-  assert.deepEqual(response.structuredOutput?.sections, {
-    answer: "I found it: resume, printed page 1 in your notes."
+	  assert.deepEqual(response.structuredOutput?.sections, {
+	    mainChat:
+	      "I found it: resume, printed page 1 in your notes.\n\n" +
+	      "If you want, I can also pull out a specific section from page 1."
   });
 
   const blocks = assistantMessageBlocks({
@@ -993,8 +1008,9 @@ test("student chat source lookup does not render a next step section", () => {
     role: "assistant",
     structuredOutput: {
       sections: {
-        answer: "I found it: resume, printed page 1 in your notes.",
-        nextStep: "If you want, I can also pull out a specific section from page 1."
+        answer:
+          "I found it: resume, printed page 1 in your notes.\n\n" +
+          "If you want, I can also pull out a specific section from page 1."
       },
       metadata: {
         hintLevel: "none",
@@ -1005,15 +1021,17 @@ test("student chat source lookup does not render a next step section", () => {
     }
   });
 
-  assert.deepEqual(blocks, [
-    {
-      content: "I found it: resume, printed page 1 in your notes.",
-      kind: "answer"
-    }
-  ]);
+	  assert.deepEqual(blocks, [
+	    {
+	      content:
+	        "I found it: resume, printed page 1 in your notes.\n\n" +
+	        "If you want, I can also pull out a specific section from page 1.",
+	      kind: "answer"
+	    }
+	  ]);
 });
 
-test("student chat keeps source context out of problem section", () => {
+test("student chat preserves source context in problem section", () => {
   const response = normalizeTutorResponse({
     content: "Problem:\n2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
     retrievalConfidence: "high",
@@ -1034,11 +1052,11 @@ test("student chat keeps source context out of problem section", () => {
     }
   });
 
-  assert.equal(
-    response.structuredOutput?.sections.problem,
-    "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations."
-  );
-  assert.equal(response.structuredOutput?.sections.answer, "That's the exact Exercise 2.18 on printed page 80.");
+	  assert.equal(
+	    response.structuredOutput?.sections.problem,
+	    "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations."
+	  );
+	  assert.equal(response.structuredOutput?.sections.mainChat, "That's the exact Exercise 2.18 on printed page 80");
 });
 
 test("student chat keeps quick lookup messages when final answer arrives", () => {
@@ -1049,29 +1067,32 @@ test("student chat keeps quick lookup messages when final answer arrives", () =>
   assert.doesNotMatch(studentSource, /current\.filter\(\(message\) => message\.id !== quickResponseMessageId\)/);
 });
 
-test("student chat appends final assistant response after quick response", () => {
+test("student chat appends grounded continuation after primary visible response", () => {
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
 
   assert.match(studentSource, /let quickResponseMessageId = `quick-\$\{studentMessage\.id\}`/);
-  assert.match(studentSource, /const streamingAssistantMessageId = quickResponseMessageId/);
-  assert.match(studentSource, /upsertFinalAssistantMessage\(removeChatMessageById\(current, streamingAssistantMessageId\), assistantMessage\)/);
+  assert.match(studentSource, /const primaryStreamingAssistantMessageId = quickResponseMessageId/);
+  assert.match(studentSource, /const contextStreamingAssistantMessageId = `grounded-\$\{studentMessage\.id\}`/);
+  assert.match(studentSource, /primaryAssistantVisible/);
+  assert.match(studentSource, /finalHasContextGroundedAnswer/);
+  assert.match(studentSource, /upsertFinalAssistantMessagePreservingStreamedContent/);
+  assert.doesNotMatch(studentSource, /upsertFinalAssistantMessage\(removeChatMessageById/);
   assert.doesNotMatch(studentSource, /hasSameVisibleAssistantAnswer/);
   assert.doesNotMatch(studentSource, /quickResponseIndex/);
 });
 
-test("student chat streams provisional sections and replaces them with final response", () => {
+test("student chat streams provisional sections and enriches them with final metadata", () => {
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
 
   assert.match(studentSource, /type: "section_start"/);
   assert.match(studentSource, /type: "section_delta"/);
   assert.match(studentSource, /type: "section_done"/);
-  assert.match(studentSource, /function progressForSectionStreamEvent/);
-  assert.match(studentSource, /current\?\.searches\.length/);
-  assert.match(studentSource, /event\.call === "context_grounded_answer" \? "Checking class materials\." : "Starting the answer\."/);
-  assert.doesNotMatch(studentSource, /Writing the answer\./);
+  assert.match(studentSource, /setChatProgress\(null\)/);
+  assert.doesNotMatch(studentSource, /progressForSectionStreamEvent/);
+  assert.doesNotMatch(studentSource, /Chandra is generating the answer/);
   assert.match(studentSource, /function upsertStreamedAssistantSection/);
   assert.match(studentSource, /role: "assistant"/);
-  assert.match(studentSource, /content: section === "mainText" \? nextText : currentContent/);
+  assert.match(studentSource, /section === "mainText" \|\| section === "mainChat" \? nextText : currentContent/);
   assert.match(studentSource, /\[structuredSection\]: nextText/);
   assert.match(studentSource, /"problem"/);
   assert.match(studentSource, /"hint"/);
@@ -1084,7 +1105,13 @@ test("student chat streams provisional sections and replaces them with final res
   assert.match(studentSource, /event\.type !== "section_done"/);
   assert.match(studentSource, /\.\.\.\(event\.type === "section_done" \? \{ \[section\]: true \} : \{\}\)/);
   assert.match(studentSource, /studentActionNeeded: "try_next_step"/);
-  assert.match(studentSource, /removeChatMessageById\(current, streamingAssistantMessageId\)/);
+  assert.match(studentSource, /function mergeFinalStructuredOutputPreservingStreamedSections/);
+  assert.match(studentSource, /function enrichStreamedAssistantMessage/);
+  assert.match(studentSource, /streamedMessage\.content\.trim\(\) \? streamedMessage\.content : finalMessage\.content/);
+  assert.match(studentSource, /finalSectionKeys\.has\(section\)/);
+  assert.match(studentSource, /\.\.\.finalAuthoritativeStreamedSections,\s*\n\s*\.\.\.finalSections/);
+  assert.doesNotMatch(studentSource, /\.\.\.finalSections,\s*\n\s*\.\.\.streamedSections/);
+  assert.doesNotMatch(studentSource, /removeChatMessageById\(current, primaryStreamingAssistantMessageId\)/);
 });
 
 test("student chat renders active streaming sections with caret and plain text", () => {
@@ -1102,7 +1129,7 @@ test("student chat renders active streaming sections with caret and plain text",
   assert.match(styles, /@keyframes streaming-caret-blink/);
 });
 
-test("student chat response normalization repairs split decimal example next step", () => {
+test("student chat response normalization repairs split decimal example legacy action", () => {
   const response = normalizeTutorResponse({
     content:
       "Would you like to try Example 2.4\n1 together, starting with how to build the first column of the transition matrix?",
@@ -1111,7 +1138,7 @@ test("student chat response normalization repairs split decimal example next ste
     structuredOutput: {
       sections: {
         answer: "Would you like to try Example 2.4",
-        nextStep: "1 together, starting with how to build the first column of the transition matrix?"
+        [legacyActionSectionKey]: "1 together, starting with how to build the first column of the transition matrix?"
       },
       metadata: {
         hintLevel: "guided_step",
@@ -1122,9 +1149,10 @@ test("student chat response normalization repairs split decimal example next ste
     }
   });
 
-  assert.deepEqual(response.structuredOutput?.sections, {
-    answer: "Would you like to try Example 2.4.1 together, starting with how to build the first column of the transition matrix?"
-  });
+	  assert.deepEqual(response.structuredOutput?.sections, {
+	    mainChat:
+	      "Would you like to try Example 2.4.1 together, starting with how to build the first column of the transition matrix?"
+	  });
 });
 
 test("student assistant renderer falls back for old messages without structured output", () => {
@@ -1132,10 +1160,10 @@ test("student assistant renderer falls back for old messages without structured 
   const messageFormatSource = readFileSync(join(repoRoot, "frontend/lib/chat-message-format.ts"), "utf8");
 
   assert.match(source, /assistantMessageBlocks\(message\)/);
-  assert.match(messageFormatSource, /return message\.structuredOutput \? message\.content \|\| message\.structuredOutput\.sections\.answer : message\.content/);
+	  assert.match(messageFormatSource, /message\.structuredOutput\.sections\.mainChat \|\| message\.structuredOutput\.sections\.answer \|\| ""/);
   assert.match(source, /messageBlocks\.map/);
   assert.match(messageFormatSource, /assistantStructuredSections\(message: ChatMessage\)/);
-  assert.match(messageFormatSource, /Your next step/);
+  assert.doesNotMatch(messageFormatSource, new RegExp(["next", "Step"].join("")));
   assert.match(source, /message\.structuredOutput\?\.confusionChoices/);
 });
 
@@ -1483,6 +1511,78 @@ test("chat context memory dedupes the same saved problem across trace variants",
   assert.equal(context.savedProblems?.[0]?.pageNumber, 98);
 });
 
+test("chat context memory does not duplicate active problem as a source", () => {
+  const context = buildChatContextMemory([
+    {
+      createdAt: "2026-05-12T08:21:00.000Z",
+      id: "assistant-1",
+      role: "assistant",
+      content: "Problem:\n2.18. Assuming the polynomial bases [1,x,x2], find the matrix representations.",
+      structuredOutput: {
+        sections: {
+          problem: "2.18. Assuming the polynomial bases [1,x,x2], find the matrix representations."
+        },
+        metadata: { problemNumber: "2.18" }
+      },
+      sources: [{ materialType: "reading", pageNumber: 98, title: "ACME VOL 1", problemNumber: "2.18" }]
+    },
+    {
+      createdAt: "2026-05-12T08:22:00.000Z",
+      id: "assistant-2",
+      role: "assistant",
+      content: "Hint: focus on what each transformation does to the basis.",
+      langGraphTrace: {
+        knowledgeItems: [
+          {
+            chatId: "conversation-1",
+            content: "2.18. Assuming the polynomial bases [1,x,x2], find the matrix representations.",
+            createdAt: "2026-05-12T08:22:00.000Z",
+            id: "knowledge-active-problem",
+            kind: "problem",
+            problemId: "2.18",
+            reason: "Student asked for help on the active problem.",
+            sourceName: "Active problem",
+            updatedAt: "2026-05-12T08:22:00.000Z",
+            usedAs: "active_problem"
+          },
+          {
+            chatId: "conversation-1",
+            createdAt: "2026-05-12T08:22:00.000Z",
+            id: "knowledge-problem-page",
+            kind: "pdf_page",
+            ocrText: "2.18. Assuming the polynomial bases [1,x,x2], find the matrix representations.",
+            page: 98,
+            pdfId: "acme",
+            problemId: "2.18",
+            reason: "Student asked: problem 2.18",
+            sourceId: "acme",
+            sourceName: "ACME VOL 1",
+            updatedAt: "2026-05-12T08:22:00.000Z",
+            usedAs: "problem_source"
+          }
+        ],
+        searchQueries: [],
+        selectedPages: [],
+        stages: [],
+        toolCallCount: 0
+      }
+    }
+  ]);
+
+  assert.equal(context.savedProblems?.length, 1);
+  assert.equal(context.savedProblems?.[0]?.problemNumber, "2.18");
+  assert.deepEqual(context.sourcesUsed, [
+    {
+      id: "acme",
+      sourceName: "ACME VOL 1",
+      sourceType: "class_material",
+      pageNumber: 98,
+      problemNumber: "2.18",
+      label: "p. 98 · Problem 2.18"
+    }
+  ]);
+});
+
 test("chat context memory includes pdf knowledge items as sources used", () => {
   const context = buildChatContextMemory([
     {
@@ -1647,6 +1747,7 @@ test("student chat route schema accepts structured output with confusion choices
   const source = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
 
   assert.match(source, /const tutorConfusionChoiceSchema = z\.object/);
+  assert.match(source, /description: z\.string\(\)\.min\(1\)\.max\(180\)\.optional\(\)/);
   assert.match(source, /confusionPrompt: z\.string\(\)\.max\(240\)\.optional\(\)/);
   assert.match(source, /const tutorConfusionChoicesSchema = z\.array\(tutorConfusionChoiceSchema\)\.min\(2\)\.max\(80\)/);
   assert.match(source, /choiceDisplay: z\.enum\(\["problem_selection"\]\)\.optional\(\)/);
@@ -1662,8 +1763,11 @@ test("student chat tolerates partial structured output in message history", () =
   assert.match(source, /normalizeStructuredTutorOutput\(event\.structuredOutput, message\)/);
 });
 
-test("student UI renders confusion choice buttons and sends the selected message", () => {
+test("student UI renders confusion choice buttons and drafts the selected message", () => {
   const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const backendSource = readFileSync(join(repoRoot, "backend/agent/graph.py"), "utf8");
+  const backendStateSource = readFileSync(join(repoRoot, "backend/agent/state.py"), "utf8");
   const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
 
   assert.match(source, /function TutorConfusionChoices/);
@@ -1673,8 +1777,10 @@ test("student UI renders confusion choice buttons and sends the selected message
   assert.match(source, /assistant-confusion-choice-description/);
   assert.match(source, /isProblemSelection/);
   assert.match(source, /onChoiceSelect\(choice\.message\)/);
-  assert.match(source, /void sendStudentMessage\(choiceMessage\)/);
-  assert.match(source, /aria-label=\{`Send: \$\{choice\.message\}`\}/);
+  assert.match(source, /function loadChoiceMessageIntoComposer/);
+  assert.match(source, /setDraft\(choiceMessage\)/);
+  assert.doesNotMatch(source, /void sendStudentMessage\(choiceMessage\)/);
+  assert.match(source, /aria-label=\{`Use: \$\{choice\.message\}`\}/);
   assert.match(styles, /\.assistant-confusion-choice-grid\s*\{\s*display: grid;/);
   assert.match(styles, /grid-template-columns: minmax\(0, 1fr\);/);
   assert.match(styles, /\.assistant-confusion-choice-panel\.problem-selection \.assistant-confusion-choice-grid\s*\{\s*display: flex;/);
@@ -1717,6 +1823,38 @@ test("teacher debug mode exposes tutor behavior controls in the composer", () =>
   assert.match(routeSource, /forcedTutorDebugAiUsageStatus/);
   assert.doesNotMatch(routeSource, /debug-setup/);
   assert.doesNotMatch(routeSource, /What part should Chandra focus on\?/);
+});
+
+test("teacher preview sidebar exposes compact AI tutor settings", () => {
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
+  const backendSource = readFileSync(join(repoRoot, "backend/agent/graph.py"), "utf8");
+  const backendStateSource = readFileSync(join(repoRoot, "backend/agent/state.py"), "utf8");
+  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+
+  assert.match(source, /isTeacherPreview && profile\?\.role === "teacher"/);
+  assert.match(source, /AI tutor settings/);
+  assert.match(source, /function TeacherPreviewTutorSettingsPanel/);
+  assert.match(source, /teacherPreviewTutorSettings:/);
+  assert.match(source, /Changes affect new replies now\. Save to make them class defaults\./);
+  assert.match(source, /Preview applies immediately to this chat\./);
+  assert.match(source, /Save to class/);
+  assert.match(source, /name="behaviorTitle"/);
+  assert.match(source, /name="responseFormat\.tutorVoice"/);
+  assert.match(source, /name="modelSettings\.verbose"/);
+  assert.match(source, /name="answerPolicy\.doNotGiveFinalAnswers"/);
+  assert.match(source, /name="behaviorInstructions"/);
+  assert.match(source, /apiUrl\(`\/api\/classes\/\$\{encodeURIComponent\(activeCourseId\)\}\/settings`\)/);
+  assert.match(routeSource, /teacherPreviewTutorSettingsSchema/);
+  assert.match(routeSource, /scope\.role === "teacher" \? data\.teacherPreviewTutorSettings/);
+  assert.match(routeSource, /behaviorTitle: classBehaviorTitle/);
+  assert.match(routeSource, /responseFormat: classResponseFormat/);
+  assert.match(backendStateSource, /behavior_title: NotRequired\[str\]/);
+  assert.match(backendSource, /f"Tutor Mode: \{behavior_title\}/);
+  assert.match(backendSource, /tutor_voice_instruction_for_state/);
+  assert.match(styles, /\.teacher-preview-settings-panel\s*\{/);
+  assert.match(styles, /max-height: min\(52vh, 470px\)/);
+  assert.match(styles, /data-sidebar-collapsed="true"\] \.teacher-preview-settings-panel/);
 });
 
 test("streamed backend setup failures map to setup incomplete errors", () => {
@@ -2038,12 +2176,12 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(promptSource, /never output sections just because the schema supports them/);
   assert.match(promptSource, /vague stuck messages like `I am lost`/);
   assert.match(promptSource, /one short orientation or nudge plus one clear question/);
-  assert.match(promptSource, /if the main answer already gives the key clue, equation, theorem, or method, omit Hint/);
-  assert.match(promptSource, /If Hint already gives the action, omit the next step/);
+  assert.match(promptSource, /if mainChat already gives the key clue, equation, theorem, or method, omit Hint/);
+  assert.match(promptSource, /If Hint already gives the action, do not repeat it in mainChat/);
   assert.match(promptSource, /previous hint was unhelpful, repetitive, too vague, or did not add more/);
   assert.match(promptSource, /specific missing object, definition, target space, assumption, comparison, representation, or notation choice/);
   assert.match(promptSource, /broad concept explanations or topic overviews, usually answer in plain prose without Hint/);
-  assert.match(promptSource, /duplicated main answer plus Hint/);
+  assert.match(promptSource, /duplicated mainChat plus Hint/);
   assert.match(promptSource, /specific problem, page, or passage, treat it as source lookup/);
   assert.match(promptSource, /For problem-statement lookup, first identify the exact academic exercise\/question\/task statement/);
   assert.match(routeSource, /Before using `Problem:`/);
@@ -2053,7 +2191,7 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(promptSource, /clearly different similar example/);
   assert.match(promptSource, /Do not complete the student's exact task/);
   assert.match(promptSource, /complete one small piece/);
-  assert.match(promptSource, /brief orientation, one targeted hint, one concrete next step/);
+  assert.match(promptSource, /brief orientation, one targeted hint, one concrete immediate action/);
   assert.match(routeSource, /relationships, family conflict, emotional support, unrelated coding/);
   assert.match(routeSource, /Briefly redirect those to course material/);
   assert.match(routeSource, /unrelated uploaded photos or personal images such as pets/);
@@ -2074,19 +2212,19 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8"), /Looking for a method or rule/);
   assert.match(readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8"), /Looking for a similar example/);
   assert.match(routeSource, /Default to one clean answer plus useful optional sections/);
-  assert.match(routeSource, /Choose the student-facing order of the answer and sections/);
+  assert.match(routeSource, /Choose the student-facing order of the sections/);
   assert.match(routeSource, /Use `Hint:` when the student is stuck or asks how to start/);
   assert.match(routeSource, /use optional sections only when they add new value/);
   assert.match(routeSource, /never output sections just because the schema supports them/);
   assert.match(routeSource, /vague stuck messages like `I am lost`/);
-  assert.match(routeSource, /main answer already gives the key clue, equation, theorem, or method, omit `Hint:`/);
-  assert.match(routeSource, /If `Hint:` already gives the action, omit `nextStep`/);
+  assert.match(routeSource, /mainChat already gives the key clue, equation, theorem, or method, omit `Hint:`/);
+  assert.match(routeSource, /If `Hint:` already gives the action, do not repeat it in mainChat/);
   assert.match(routeSource, /previous hint was unhelpful, repetitive, too vague, or did not add more/);
   assert.match(routeSource, /make this hint narrower instead of repeating it/);
   assert.match(routeSource, /broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`/);
-  assert.match(routeSource, /duplicated main answer plus `Hint:`/);
+  assert.match(routeSource, /duplicated mainChat plus `Hint:`/);
   assert.match(routeSource, /use at most one nudge plus one question/);
-  assert.match(routeSource, /prefer one concise reply or one short `Hint:` and leave `nextStep` empty/);
+  assert.match(routeSource, /Put the student's most immediate action or an offer\/request for their work at the end of `mainChat`/);
   assert.match(routeSource, /Use `Check your work:` only when the student shows work/);
   assert.match(routeSource, /Keep it neutral and process-focused/);
   assert.match(routeSource, /1-2 is often enough, and 3-4 is fine/);
@@ -2099,10 +2237,10 @@ test("pdf tool prompt uses textbook readings for solving help", () => {
   assert.match(graphSource, /primary tutor turn/);
   assert.match(graphSource, /bare stuck\/start follow-up/);
   assert.match(graphSource, /Depth 1 uses one short answer or Hint plus one question, especially for vague stuck messages like `I am lost`/);
-  assert.match(graphSource, /answer already gives the key clue, equation, theorem, or method, omit hint/);
-  assert.match(graphSource, /If hint already gives the action, omit nextStep/);
+  assert.match(graphSource, /mainChat already gives the key clue, equation, theorem, or method, omit hint/);
+  assert.match(graphSource, /If hint already gives the action, do not repeat it in mainChat/);
   assert.match(graphSource, /previous hint was unhelpful, repetitive, too vague, or did not add more/);
-  assert.match(graphSource, /one new concrete distinction, prerequisite idea, or narrower sub-question/);
+  assert.match(graphSource, /one new concrete distinction or prerequisite idea, or a narrower sub-question/);
   assert.match(graphSource, /never output sections just because the schema supports them/);
   assert.match(graphSource, /PostgreSQL OCR metadata/);
   assert.match(graphSource, /bare numbered references like `problem 2\.14`/);

@@ -56,7 +56,9 @@ export type AiUsageReservationRecord = {
 export type AiUsageAnchorRecord = {
   anchorAt: string;
   classId: string;
+  dayAnchorAt: string;
   studentId: string;
+  weekAnchorAt: string;
 };
 
 type TokenBucketRow = {
@@ -113,7 +115,9 @@ type AllowanceRow = {
 type AnchorRow = {
   anchor_at: Date | string;
   class_id: string;
+  day_anchor_at: Date | string | null;
   student_id: string;
+  week_anchor_at: Date | string | null;
 };
 
 export class PostgresAiUsageLimitDataError extends Error {
@@ -220,17 +224,25 @@ export async function reserveAiUsagePostgres(input: {
 export async function ensureAiUsageAnchorPostgres(input: {
   anchorAt: string;
   classId: string;
+  dayAnchorAt?: string;
   studentId: string;
+  weekAnchorAt?: string;
 }, client?: PostgresQueryClient) {
   await runPostgresQuery(
     client,
     `INSERT INTO ai_usage_anchors (
-      class_id, student_id, anchor_at
+      class_id, student_id, anchor_at, day_anchor_at, week_anchor_at
     ) VALUES (
-      $1, $2, $3
+      $1, $2, $3, $4, $5
     )
     ON CONFLICT (class_id, student_id) DO NOTHING`,
-    [input.classId, input.studentId, input.anchorAt]
+    [
+      input.classId,
+      input.studentId,
+      input.anchorAt,
+      input.dayAnchorAt ?? input.anchorAt,
+      input.weekAnchorAt ?? input.anchorAt
+    ]
   );
 
   const anchor = await getAiUsageAnchorPostgres({
@@ -242,7 +254,42 @@ export async function ensureAiUsageAnchorPostgres(input: {
     return {
       anchorAt: input.anchorAt,
       classId: input.classId,
-      studentId: input.studentId
+      dayAnchorAt: input.dayAnchorAt ?? input.anchorAt,
+      studentId: input.studentId,
+      weekAnchorAt: input.weekAnchorAt ?? input.anchorAt
+    };
+  }
+
+  return anchor;
+}
+
+export async function updateAiUsageAnchorPostgres(input: {
+  classId: string;
+  dayAnchorAt: string;
+  studentId: string;
+  weekAnchorAt: string;
+}, client?: PostgresQueryClient) {
+  await runPostgresQuery(
+    client,
+    `UPDATE ai_usage_anchors
+    SET day_anchor_at = $3,
+      week_anchor_at = $4
+    WHERE class_id = $1 AND student_id = $2`,
+    [input.classId, input.studentId, input.dayAnchorAt, input.weekAnchorAt]
+  );
+
+  const anchor = await getAiUsageAnchorPostgres({
+    classId: input.classId,
+    studentId: input.studentId
+  }, client);
+
+  if (!anchor) {
+    return {
+      anchorAt: input.dayAnchorAt,
+      classId: input.classId,
+      dayAnchorAt: input.dayAnchorAt,
+      studentId: input.studentId,
+      weekAnchorAt: input.weekAnchorAt
     };
   }
 
@@ -255,7 +302,7 @@ export async function getAiUsageAnchorPostgres(input: {
 }, client?: PostgresQueryClient) {
   const result = await runPostgresQuery<AnchorRow>(
     client,
-    `SELECT class_id, student_id, anchor_at
+    `SELECT class_id, student_id, anchor_at, day_anchor_at, week_anchor_at
     FROM ai_usage_anchors
     WHERE class_id = $1 AND student_id = $2`,
     [input.classId, input.studentId]
@@ -594,10 +641,18 @@ function rowToReservation(row: ReservationRow): AiUsageReservationRecord {
 
 function rowToAnchor(row: AnchorRow): AiUsageAnchorRecord {
   const anchorAt = row.anchor_at instanceof Date ? row.anchor_at.toISOString() : String(row.anchor_at);
+  const dayAnchorAt = row.day_anchor_at instanceof Date
+    ? row.day_anchor_at.toISOString()
+    : String(row.day_anchor_at ?? anchorAt);
+  const weekAnchorAt = row.week_anchor_at instanceof Date
+    ? row.week_anchor_at.toISOString()
+    : String(row.week_anchor_at ?? anchorAt);
 
   return {
     anchorAt,
     classId: row.class_id,
-    studentId: row.student_id
+    dayAnchorAt,
+    studentId: row.student_id,
+    weekAnchorAt
   };
 }

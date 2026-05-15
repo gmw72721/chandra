@@ -193,7 +193,7 @@ function contextSourcesFromTutorSources(message: ChatMessage): NonNullable<ChatC
 
 function contextSourcesFromKnowledgeItems(message: ChatMessage): NonNullable<ChatContextMemory["sourcesUsed"]> {
   return (message.langGraphTrace?.knowledgeItems ?? [])
-    .filter((item) => item.kind === "pdf_page" || item.kind === "student_upload" || item.kind === "problem")
+    .filter((item) => item.kind === "pdf_page" || item.kind === "student_upload" || isStudentProvidedProblemSource(item))
     .map((item) => ({
       id: item.sourceId || item.pdfId || item.id,
       sourceName: item.sourceName,
@@ -210,12 +210,16 @@ function contextSourcesFromKnowledgeItems(message: ChatMessage): NonNullable<Cha
     }));
 }
 
+function isStudentProvidedProblemSource(item: NonNullable<NonNullable<ChatMessage["langGraphTrace"]>["knowledgeItems"]>[number]) {
+  return item.kind === "problem" && item.usedAs === "active_problem" && item.sourceName === "Pasted problem";
+}
+
 function knowledgeItemContextSourceType(item: NonNullable<NonNullable<ChatMessage["langGraphTrace"]>["knowledgeItems"]>[number]) {
   if (item.kind === "student_upload") {
     return "student_upload" as const;
   }
 
-  if (item.kind === "problem" && item.usedAs === "active_problem" && item.sourceName === "Pasted problem") {
+  if (isStudentProvidedProblemSource(item)) {
     return "pasted_problem" as const;
   }
 
@@ -423,12 +427,12 @@ function contextProblemDedupeKey(problem: NonNullable<ChatContextMemory["savedPr
     return "";
   }
 
-  if (sourceName && (problemNumber || pageNumber)) {
-    return ["source-problem", sourceName, problemNumber, pageNumber].join("|");
+  if (problemNumber) {
+    return ["problem-number", problemNumber].join("|");
   }
 
-  if (problemNumber && text) {
-    return ["number-text", problemNumber, text].join("|");
+  if (sourceName && (problemNumber || pageNumber)) {
+    return ["source-problem", sourceName, problemNumber, pageNumber].join("|");
   }
 
   return ["fallback", sourceName, problemNumber, pageNumber, text || label].join("|");
@@ -472,9 +476,9 @@ function dedupeContextSources(sources: NonNullable<ChatContextMemory["sourcesUse
         id: existing.id || source.id,
         sourceName: existing.sourceName || source.sourceName,
         sourceType: existing.sourceType || source.sourceType,
-        fileType: existing.fileType || source.fileType,
         pageNumber: existing.pageNumber ?? source.pageNumber,
         problemNumber: existing.problemNumber || source.problemNumber,
+        ...((existing.fileType || source.fileType) ? { fileType: existing.fileType || source.fileType } : {}),
         label: formatContextSource({
           sourceName: existing.sourceName || source.sourceName,
           sourceType: existing.sourceType || source.sourceType,

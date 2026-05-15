@@ -76,12 +76,6 @@ PDF_THEOREM_RE = re.compile(r"\btheorem|lemma|proposition|corollary\b")
 PDF_DEFINITION_RE = re.compile(r"\bdefinition|defined\s+as|terminology\b")
 PDF_PROBLEM_RE = re.compile(r"\bexact_problem|student_requested_problem|problem\s+\d")
 PROBLEM_NUMBER_RE = re.compile(r"\b(?:problem|exercise|question|ex\.?|q)\s*#?\s*(\d{1,3}(?:\.\d{1,3})?[a-z]?)\b", re.I)
-PASTED_PROBLEM_MARKER_RE = re.compile(r"\b(?:problem|exercise|question|homework|worksheet|assignment|prompt)\b", re.I)
-PASTED_PROBLEM_TASK_RE = re.compile(
-    r"\b(?:prove|show|solve|find|compute|calculate|determine|evaluate|simplify|graph|write|explain|derive|sketch|verify)\b",
-    re.I,
-)
-MATH_MARKER_RE = re.compile(r"(?:\$|\\\(|\\\[|<=|>=|->|[A-Za-z]\([^)]*\)|\b[a-zA-Z]\s*[=<>]\s*[-\w])")
 ATTEMPT_MARKER_RE = re.compile(
     r"\b(?:i\s+(?:tried|used|got|think|started|wrote|did)|my\s+work|here(?:'s| is)\s+my|is\s+this\s+(?:right|correct)|check\s+my)\b",
     re.I,
@@ -142,86 +136,11 @@ def latest_student_message(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
-def latest_student_visible_message(messages: list[dict[str, Any]]) -> str:
-    latest = latest_student_message(messages)
-    if "\n\nStudent uploaded homework attachments for this message:" in latest:
-        latest = latest.split("\n\nStudent uploaded homework attachments for this message:", 1)[0]
-    return compact_text(latest, limit=4000)
-
-
 def problem_request_reason(messages: list[dict[str, Any]]) -> str:
     latest = latest_student_message(messages)
     if latest:
         return f"Student asked: {compact_text(latest, limit=160)}"
     return "Student asked for help in this chat."
-
-
-def student_provided_problem_text_from_state(state: dict[str, Any]) -> str:
-    latest = latest_student_visible_message(state.get("messages", []))
-    if looks_like_pasted_problem(latest):
-        return compact_text(latest, limit=MAX_ACTIVE_PROBLEM_CHARS)
-    return ""
-
-
-def student_upload_problem_text_from_state(state: dict[str, Any]) -> str:
-    candidate = student_upload_problem_candidate(state.get("student_attachment_files", []) or [])
-    return str(candidate.get("text") or "")
-
-
-def student_upload_problem_candidate(student_uploads: list[Any]) -> dict[str, str]:
-    for upload in student_uploads:
-        if not isinstance(upload, dict):
-            continue
-
-        text = compact_text(
-            upload.get("ocrText")
-            or upload.get("ocr_text")
-            or upload.get("extractedText")
-            or upload.get("extracted_text"),
-            limit=MAX_ACTIVE_PROBLEM_CHARS,
-        )
-        if not looks_like_uploaded_problem_text(text):
-            continue
-
-        return {
-            "id": str(upload.get("id") or upload.get("attachmentId") or upload.get("attachment_id") or "").strip(),
-            "sourceName": compact_text(upload.get("fileName") or upload.get("file_name") or "Student upload", limit=180),
-            "text": text,
-        }
-
-    return {}
-
-
-def looks_like_pasted_problem(text: str) -> bool:
-    normalized = compact_text(text, limit=5000)
-    if len(normalized) < 45:
-        return False
-    if "Student message mode: Show my work." in normalized:
-        return False
-    if ATTEMPT_MARKER_RE.search(normalized):
-        return False
-
-    has_problem_marker = bool(PASTED_PROBLEM_MARKER_RE.search(normalized) or PROBLEM_NUMBER_RE.search(normalized))
-    has_task_verb = bool(PASTED_PROBLEM_TASK_RE.search(normalized))
-    has_math = bool(MATH_MARKER_RE.search(normalized))
-    sentence_like = normalized.count(".") + normalized.count("?") + normalized.count("\n") >= 1
-
-    return has_task_verb and sentence_like and (has_problem_marker or has_math or len(normalized) >= 120)
-
-
-def looks_like_uploaded_problem_text(text: str) -> bool:
-    normalized = compact_text(text, limit=5000)
-    if len(normalized) < 12:
-        return False
-    if ATTEMPT_MARKER_RE.search(normalized):
-        return False
-
-    has_problem_marker = bool(PASTED_PROBLEM_MARKER_RE.search(normalized) or PROBLEM_NUMBER_RE.search(normalized))
-    has_task_verb = bool(PASTED_PROBLEM_TASK_RE.search(normalized))
-    has_math = bool(MATH_MARKER_RE.search(normalized))
-    sentence_like = normalized.count(".") + normalized.count("?") + normalized.count("\n") >= 1
-
-    return has_task_verb and (has_problem_marker or has_math or sentence_like)
 
 
 def first_problem_number_from_text(text: str) -> str | None:
@@ -345,7 +264,7 @@ def pdf_page_knowledge_item(page: dict[str, Any], state: dict[str, Any], *, reas
     return item
 
 
-def student_upload_knowledge_item(
+def student_upload_source_knowledge_item(
     upload: dict[str, Any],
     state: dict[str, Any],
     *,
@@ -403,13 +322,9 @@ def infer_student_upload_used_as(upload: dict[str, Any], state: dict[str, Any], 
 
     latest = latest_student_message(state.get("messages", []))
     haystack = " ".join([latest, text, summary]).lower()
-    if re.search(r"\bhere(?:'s| is)\s+my\s+(?:problem|exercise|question|prompt|assignment|homework)\b", latest, re.I):
-        return "problem_source"
     if ATTEMPT_MARKER_RE.search(haystack) or "student message mode: show my work" in haystack:
         return "student_attempt"
-    if looks_like_pasted_problem(text) or PASTED_PROBLEM_MARKER_RE.search(haystack):
-        return "problem_source"
-    return "problem_source"
+    return "supporting_context"
 
 
 def student_upload_reason(used_as: KnowledgeUse) -> str:
@@ -460,7 +375,7 @@ def merge_knowledge_items(*groups: list[KnowledgeItem]) -> list[KnowledgeItem]:
             normalized = normalize_knowledge_item(item)
             if not normalized:
                 continue
-            key = knowledge_dedupe_key(normalized)
+            key = str(normalized.get("id") or "") or knowledge_dedupe_key(normalized)
             if key in seen:
                 continue
             seen.add(key)
@@ -539,36 +454,43 @@ def knowledge_items_from_state(
     page_assets = state.get("used_page_assets") or state.get("page_assets", []) or []
     student_uploads = state.get("student_attachment_files", []) or []
     primary_page = first_page_asset_from_pages(page_assets)
-    student_provided_problem_text = student_provided_problem_text_from_state(state)
-    upload_problem = student_upload_problem_candidate(student_uploads)
-    upload_problem_text = str(upload_problem.get("text") or "")
-    resolved_active_problem_text = active_problem_text or student_provided_problem_text or upload_problem_text
+    resolved_active_problem_text = active_problem_text
 
     if resolved_active_problem_text:
+        previous_active = matching_previous_active_problem(
+            previous,
+            problem_text=resolved_active_problem_text,
+            problem_id=first_problem_id(primary_page or {}) or first_problem_number_from_text(resolved_active_problem_text),
+        )
         active_source_name = source_name or str((primary_page or {}).get("title") or "")
-        if not active_source_name and student_provided_problem_text:
-            active_source_name = "Pasted problem"
-        if not active_source_name and upload_problem_text:
-            active_source_name = str(upload_problem.get("sourceName") or "Student upload")
+        if not active_source_name and previous_active:
+            active_source_name = str(previous_active.get("sourceName") or "")
+        if not active_source_name and active_problem_text and not primary_page:
+            active_source_name = "Active problem"
+        source_id = str((primary_page or {}).get("doc_id") or "") or str((previous_active or {}).get("sourceId") or "")
+        page = first_positive_int(
+            (primary_page or {}).get("printed_page_start"),
+            (primary_page or {}).get("page_start"),
+        ) or first_positive_int((previous_active or {}).get("page"))
+        problem_id = (
+            first_problem_id(primary_page or {})
+            or first_problem_number_from_text(resolved_active_problem_text)
+            or str((previous_active or {}).get("problemId") or "")
+            or None
+        )
         active = active_problem_knowledge_item(
             problem_text=resolved_active_problem_text,
             state=state,
-            reason=(
-                "Student pasted a problem statement."
-                if student_provided_problem_text and not active_problem_text
-                else "Student uploaded a problem statement."
-                if upload_problem_text and not active_problem_text
-                else None
-            ),
+            reason=None,
             source_name=active_source_name or "Active problem",
-            source_id=str((primary_page or {}).get("doc_id") or upload_problem.get("id") or ""),
-            page=first_positive_int(
-                (primary_page or {}).get("printed_page_start"),
-                (primary_page or {}).get("page_start"),
-            ),
-            problem_id=first_problem_id(primary_page or {}) or first_problem_number_from_text(resolved_active_problem_text),
+            source_id=source_id,
+            page=page,
+            problem_id=problem_id,
         )
         if active:
+            if previous_active and not primary_page and not source_name:
+                active["id"] = previous_active["id"]
+                active["createdAt"] = previous_active.get("createdAt", active["createdAt"])
             items.append(active)
 
     for page in page_assets:
@@ -580,11 +502,38 @@ def knowledge_items_from_state(
     linked_problem_id = first_problem_id(primary_page or {}) or first_problem_number_from_text(resolved_active_problem_text)
     for upload in student_uploads:
         if isinstance(upload, dict):
-            item = student_upload_knowledge_item(upload, state, linked_problem_id=linked_problem_id)
+            item = student_upload_source_knowledge_item(upload, state, linked_problem_id=linked_problem_id)
             if item:
                 items.append(item)
 
     return merge_knowledge_items(items, previous)
+
+
+def matching_previous_active_problem(
+    previous: list[KnowledgeItem],
+    *,
+    problem_text: str,
+    problem_id: str | None = None,
+) -> KnowledgeItem | None:
+    normalized_problem_id = str(problem_id or "").strip().lower()
+    normalized_text = comparable_problem_text(problem_text)
+
+    for item in previous:
+        if item.get("kind") != "problem" or item.get("usedAs") != "active_problem":
+            continue
+
+        item_problem_id = str(item.get("problemId") or "").strip().lower()
+        if normalized_problem_id and item_problem_id == normalized_problem_id:
+            return item
+
+        if normalized_text and comparable_problem_text(item.get("content") or "") == normalized_text:
+            return item
+
+    return None
+
+
+def comparable_problem_text(text: Any) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip().lower()[:500]
 
 
 def first_page_asset(state: dict[str, Any]) -> dict[str, Any] | None:

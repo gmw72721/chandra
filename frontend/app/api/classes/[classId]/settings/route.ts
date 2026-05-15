@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { normalizeClassModelSettings } from "@/lib/class-settings";
+import { normalizeClassModelSettings, normalizeResponseFormatSettings } from "@/lib/class-settings";
 import { updateClassSettings } from "@/lib/data/classes";
 import { tryPostgresData } from "@/lib/data/server";
 import { adminDb } from "@/lib/firebase-admin";
@@ -16,9 +16,11 @@ export async function PATCH(
     await authorizeClassAccess(request, classId, "manageClassSettings");
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const modelSettings = objectOrUndefined(body.modelSettings);
+    const responseFormat = objectOrUndefined(body.responseFormat);
     const firestoreUpdates = {
       ...body,
       ...(modelSettings ? { modelSettings: normalizeClassModelSettings(modelSettings) } : {}),
+      ...(responseFormat ? { responseFormat: normalizeResponseFormatSettings(responseFormat) } : {}),
       updatedAt: new Date()
     };
 
@@ -36,7 +38,7 @@ export async function PATCH(
         openingMessage: stringOrUndefined(body.openingMessage),
         privacySettings: objectOrUndefined(body.privacySettings),
         refusalStyle: stringOrUndefined(body.refusalStyle),
-        responseFormat: objectOrUndefined(body.responseFormat),
+        responseFormat: responseFormat ? normalizeResponseFormatSettings(responseFormat) : undefined,
         section: stringOrUndefined(body.section),
         sourceDefaults: objectOrUndefined(body.sourceDefaults),
         sourceUsage: objectOrUndefined(body.sourceUsage),

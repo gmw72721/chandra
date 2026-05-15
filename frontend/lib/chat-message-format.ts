@@ -12,6 +12,7 @@ export type AssistantMessageBlock =
 
 type MessageSource = NonNullable<ChatMessage["sources"]>[number];
 const defaultSectionOrder: TutorStructuredSectionKey[] = [
+  "mainChat",
   "problem",
   "answer",
   "hint",
@@ -19,12 +20,13 @@ const defaultSectionOrder: TutorStructuredSectionKey[] = [
   "formula",
   "example",
   "checkWork",
-  "sourceNote",
-  "nextStep"
+  "sourceNote"
 ];
 
 export function assistantMessageAnswerContent(message: ChatMessage) {
-  return message.structuredOutput ? message.content || message.structuredOutput.sections.answer : message.content;
+  return message.structuredOutput
+    ? message.structuredOutput.sections.mainChat || message.structuredOutput.sections.answer || ""
+    : message.content;
 }
 
 export function assistantMessageBlocks(message: ChatMessage): AssistantMessageBlock[] {
@@ -34,21 +36,15 @@ export function assistantMessageBlocks(message: ChatMessage): AssistantMessageBl
 
   const sections = message.structuredOutput.sections;
   const sectionMap: Record<TutorStructuredSectionKey, AssistantMessageBlock | undefined> = {
-    answer: message.content || sections.answer ? { content: message.content || sections.answer, kind: "answer" } : undefined,
+    mainChat: sections.mainChat ? { content: sections.mainChat, kind: "answer" } : undefined,
+    answer: sections.answer ? { content: sections.answer, kind: "answer" } : undefined,
     problem: sections.problem ? { content: sections.problem, kind: "problem", label: "Problem" } : undefined,
     hint: sections.hint ? { content: sections.hint, kind: "hint", label: "Hint" } : undefined,
     explanation: sections.explanation ? { content: sections.explanation, kind: "explanation", label: "Why this works" } : undefined,
     formula: sections.formula ? { content: sections.formula, kind: "formula", label: "Formula" } : undefined,
     example: sections.example ? { content: sections.example, kind: "example", label: "Similar example" } : undefined,
     checkWork: sections.checkWork ? { content: sections.checkWork, kind: "check-work", label: "Check your work" } : undefined,
-    sourceNote:
-      !message.sources?.length && !isGenericSourceNote(sections.sourceNote)
-        ? { content: sections.sourceNote ?? "", kind: "source-note", label: "Source" }
-        : undefined,
-    nextStep:
-      sections.nextStep && !shouldSuppressRenderedNextStep(message)
-        ? { content: sections.nextStep, kind: "next-step", label: "Your next step" }
-        : undefined
+    sourceNote: sections.sourceNote ? { content: sections.sourceNote, kind: "source-note", label: "Source" } : undefined
   };
   const effectiveOrder = orderedTutorSectionKeys(message);
   const seen = new Set<TutorStructuredSectionKey>();
@@ -61,25 +57,7 @@ export function assistantMessageBlocks(message: ChatMessage): AssistantMessageBl
     return Boolean(sectionMap[key]);
   });
 
-  const blocks = orderedKeys.map((key) => sectionMap[key]).filter((block): block is AssistantMessageBlock => Boolean(block));
-  const seenContent: string[] = [];
-
-  return blocks.filter((block) => {
-    const normalizedContent = normalizeComparableBlockText(block.content);
-
-    if (
-      normalizedContent &&
-      seenContent.some(
-        (content) =>
-          content === normalizedContent || (normalizedContent.length >= 24 && content.endsWith(normalizedContent))
-      )
-    ) {
-      return false;
-    }
-
-    seenContent.push(normalizedContent);
-    return true;
-  });
+  return orderedKeys.map((key) => sectionMap[key]).filter((block): block is AssistantMessageBlock => Boolean(block));
 }
 
 export function assistantStructuredSections(message: ChatMessage): AssistantStructuredSection[] {
@@ -99,28 +77,36 @@ function orderedTutorSectionKeys(message: ChatMessage): TutorStructuredSectionKe
   const orderedKeys = requestedOrder.filter((key) => presentKeys.has(key));
   const remainingKeys = defaultSectionOrder.filter((key) => presentKeys.has(key) && !orderedKeys.includes(key));
   const candidateOrder = [...orderedKeys, ...remainingKeys];
+  const sourceLookupNoteKey = presentKeys.has("mainChat") ? "mainChat" : presentKeys.has("answer") ? "answer" : undefined;
   const leadKeys: TutorStructuredSectionKey[] = [];
+  const shouldKeepSourceLookupNoteFirst =
+    message.structuredOutput?.metadata.mode === "source_lookup" &&
+    Boolean(sourceLookupNoteKey) &&
+    presentKeys.has("problem") &&
+    requestedOrder.indexOf(sourceLookupNoteKey as TutorStructuredSectionKey) !== -1 &&
+    requestedOrder.indexOf("problem") !== -1 &&
+    requestedOrder.indexOf(sourceLookupNoteKey as TutorStructuredSectionKey) < requestedOrder.indexOf("problem");
+
+  if (shouldKeepSourceLookupNoteFirst) {
+    return [
+      ...candidateOrder,
+      ...defaultSectionOrder.filter((key) => presentKeys.has(key) && !candidateOrder.includes(key))
+    ];
+  }
 
   if (presentKeys.has("problem")) {
     leadKeys.push("problem");
   }
 
-  if (presentKeys.has("answer")) {
+  if (presentKeys.has("mainChat")) {
+    leadKeys.push("mainChat");
+  } else if (presentKeys.has("answer")) {
     leadKeys.push("answer");
-  }
-
-  const trailingKeys: TutorStructuredSectionKey[] = [];
-  if (presentKeys.has("sourceNote")) {
-    trailingKeys.push("sourceNote");
-  }
-  if (presentKeys.has("nextStep")) {
-    trailingKeys.push("nextStep");
   }
 
   return [
     ...leadKeys,
-    ...candidateOrder.filter((key) => !leadKeys.includes(key) && !trailingKeys.includes(key)),
-    ...trailingKeys
+    ...candidateOrder.filter((key) => !leadKeys.includes(key))
   ];
 }
 
@@ -255,23 +241,6 @@ export function normalizeMarkdownMath(content: string) {
     .replace(/\\\(/g, "$")
     .replace(/\\\)/g, "$")
     .replace(/^\[\s*(\\(?:int|frac|sqrt|sum|lim|prod)[\s\S]*?)\s*\]$/gm, "$$$$\n$1\n$$$$");
-}
-
-function isGenericSourceNote(note: string | undefined) {
-  return !note || /^based on the selected class material\.?$/i.test(note.trim());
-}
-
-function shouldSuppressRenderedNextStep(message: ChatMessage) {
-  return message.structuredOutput?.metadata.mode === "source_lookup" || Boolean(message.structuredOutput?.sections.problem);
-}
-
-function normalizeComparableBlockText(value: string) {
-  return value
-    .replace(/^(?:\*\*)?(?:answer|your next step|next step)(?:\*\*)?\s*:\s*/i, "")
-    .replace(/\s+/g, " ")
-    .replace(/[.!?]+$/g, "")
-    .trim()
-    .toLowerCase();
 }
 
 function formatSourceLabel(source: MessageSource) {

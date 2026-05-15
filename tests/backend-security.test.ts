@@ -175,6 +175,7 @@ test("Firestore class settings rules accept the current teacher settings schema"
   assert.match(rules, /"quoteSourcePassages"/);
   assert.match(rules, /sourceUsage\.quoteSourcePassages is bool/);
   assert.match(rules, /modelSettings\.verbose in \["brief", "standard", "detailed", "veryDetailed"\]/);
+  assert.match(rules, /responseFormat\.tutorVoice in \["calmClear", "friendlyUpbeat", "directConcise", "formalAcademic", "gentlePatient"\]/);
   assert.match(rules, /responseFormat\.simpleWording is bool/);
   assert.match(rules, /responseFormat\.exampleFrequency in \["rarely", "whenHelpful", "often"\]/);
   assert.match(rules, /validAiTokenLimits\(modelSettings\.tokenLimits\)/);

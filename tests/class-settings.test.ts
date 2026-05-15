@@ -32,6 +32,18 @@ test("normalizeAnswerPolicySettings safely handles partial and malformed help li
   assert.equal(normalized.helpLimitsByUnderstandingLevel[4], "check_work_explain_gaps");
 });
 
+test("response format settings default invalid tutor voice safely", () => {
+  assert.equal(classSettings.normalizeResponseFormatSettings(null).tutorVoice, "calmClear");
+  assert.equal(classSettings.normalizeResponseFormatSettings({ tutorVoice: "directConcise" }).tutorVoice, "directConcise");
+  assert.equal(classSettings.normalizeResponseFormatSettings({ tutorVoice: "not-real" }).tutorVoice, "calmClear");
+});
+
+test("class model settings keep balanced verbosity as the default", () => {
+  assert.equal(classSettings.normalizeClassModelSettings(null).verbose, "standard");
+  assert.equal(classSettings.normalizeClassModelSettings({ verbose: "not-real" }).verbose, "standard");
+  assert.equal(classSettings.normalizeClassModelSettings({ verbose: "medium" }).verbose, "standard");
+});
+
 test("class access roles and TA permissions normalize conservatively", () => {
   assert.ok(classSettings.classAccessRoleOptions.includes("ta"));
 
@@ -68,6 +80,51 @@ test("teacher settings form submits help limits with answer policy", () => {
   assert.match(source, /answerPolicy\.helpLimitsByUnderstandingLevel\.\$\{level\}/);
   assert.match(source, /name=\{`answerPolicy\.helpLimitsByUnderstandingLevel\.\$\{level\}`\}/);
   assert.match(source, /updateTeacherClassSettings\(\{\s*answerPolicy,/s);
+});
+
+test("Help Rules tab is organized into four policy sections", () => {
+  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+
+  assert.match(managerSource, /<h2 id="ai-tutor-answer-policy-title">Help Rules<\/h2>/);
+  assert.match(managerSource, /<h3 id="ai-tutor-answer-boundaries-title">Answer Boundaries<\/h3>/);
+  assert.match(managerSource, /<h3 id="ai-tutor-student-effort-title">Student Effort<\/h3>/);
+  assert.match(managerSource, /<h3 id="ai-tutor-worked-examples-title">Worked Examples<\/h3>/);
+  assert.match(managerSource, /<h3 id="ai-tutor-help-limits-card-title">Help Limits by Understanding Level<\/h3>/);
+});
+
+test("AI Tutor settings use access, four tutoring tabs, and advanced", () => {
+  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+
+  assert.match(
+    managerSource,
+    /id: "access", label: "Access"[\s\S]*id: "tutorMode", label: "Tutor Mode"[\s\S]*id: "voiceDetail", label: "Voice & Detail"[\s\S]*id: "helpRules", label: "Help Rules"[\s\S]*id: "classInstructions", label: "Class Instructions"[\s\S]*id: "model", label: "Advanced"/
+  );
+  assert.doesNotMatch(managerSource, /label: "Teaching Style"/);
+  assert.doesNotMatch(managerSource, /Default assignment context/);
+});
+
+test("teacher settings exposes Chandra voice in Voice & Detail and persists it", () => {
+  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const routeSource = readFileSync(join(repoRoot, "frontend/app/api/classes/[classId]/settings/route.ts"), "utf8");
+
+  assert.match(managerSource, /<h3 id="ai-tutor-behavior-card-title">Tutor Mode<\/h3>/);
+  assert.match(managerSource, /<h2 id="ai-tutor-voice-detail-title">Voice & Detail<\/h2>/);
+  assert.match(managerSource, /Chandra Voice/);
+  assert.match(managerSource, /Controls tone and conversational style only/);
+  assert.match(managerSource, /name="responseFormat\.tutorVoice"/);
+  assert.match(routeSource, /normalizeResponseFormatSettings/);
+});
+
+test("teacher settings expands Tutor Mode descriptions separately from voice", () => {
+  const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+
+  assert.match(managerSource, /tutorModeDescriptions/);
+  assert.match(managerSource, /Guide the next reasoning move without taking over/);
+  assert.match(managerSource, /Lead with focused questions before explanation/);
+  assert.match(managerSource, /Inspect shown work and point to what to revise/);
+  assert.match(managerSource, /Practice, recall, common traps, and strategy checks/);
+  assert.match(managerSource, /Interpret assigned text, examples, diagrams, and source language/);
+  assert.match(managerSource, /Voice and verbosity only change how that tutoring is worded/);
 });
 
 test("class model settings derive token caps from student message caps", () => {

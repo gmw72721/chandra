@@ -19,7 +19,21 @@ import {
   type TeacherClassAppearance,
   type TeacherClassThemeColor
 } from "@/lib/class-theme";
-import { normalizeOpeningMessage } from "@/lib/class-settings";
+import {
+  defaultBehaviorInstructions,
+  type AnswerPolicySettings,
+  type ClassModelSettings,
+  type ResponseFormatSettings,
+  type TutorBehavior,
+  normalizeAnswerPolicySettings,
+  normalizeClassModelSettings,
+  normalizeOpeningMessage,
+  normalizeResponseFormatSettings,
+  normalizeTutorBehavior,
+  tutorBehaviorOptions,
+  tutorVoiceOptions,
+  verboseOptions
+} from "@/lib/class-settings";
 import {
   type AssistantMessageBlock,
   assistantMessageBlocks,
@@ -66,6 +80,7 @@ type ChatProgressSearch = {
 
 const streamedSectionKeys = [
   "mainText",
+  "mainChat",
   "problem",
   "answer",
   "hint",
@@ -73,8 +88,7 @@ const streamedSectionKeys = [
   "formula",
   "example",
   "checkWork",
-  "sourceNote",
-  "nextStep"
+  "sourceNote"
 ] as const;
 type StreamedSectionKey = (typeof streamedSectionKeys)[number];
 type StructuredStreamedSectionKey = Exclude<StreamedSectionKey, "mainText">;
@@ -195,6 +209,14 @@ type TutorDebugOptions = {
   showSelectedSources: boolean;
 };
 
+type TeacherPreviewTutorSettings = {
+  answerPolicy: AnswerPolicySettings;
+  behaviorInstructions: string;
+  behaviorTitle: TutorBehavior;
+  modelSettings: ClassModelSettings;
+  responseFormat: ResponseFormatSettings;
+};
+
 const defaultTutorDebugOptions: TutorDebugOptions = {
   forceAiUsageBlocked: false,
   forceAiUsageNearLimit: false,
@@ -292,6 +314,11 @@ export function StudentWorkspace() {
   const [isTeacherDebugMode, setIsTeacherDebugMode] = useState(false);
   const [isTutorDebugPanelOpen, setIsTutorDebugPanelOpen] = useState(false);
   const [tutorDebugOptions, setTutorDebugOptions] = useState<TutorDebugOptions>(defaultTutorDebugOptions);
+  const [isTeacherTutorSettingsOpen, setIsTeacherTutorSettingsOpen] = useState(false);
+  const [teacherPreviewTutorSettings, setTeacherPreviewTutorSettings] = useState<TeacherPreviewTutorSettings | null>(null);
+  const [isSavingTeacherTutorSettings, setIsSavingTeacherTutorSettings] = useState(false);
+  const [teacherTutorSettingsError, setTeacherTutorSettingsError] = useState("");
+  const [teacherTutorSettingsMessage, setTeacherTutorSettingsMessage] = useState("");
   const isTeacherPreview = pathname.startsWith("/teacher/student-view");
   const queryClassId = searchParams.get("classId");
   const activeCourseId = isTeacherPreview ? queryClassId ?? "" : profile?.classId ?? "";
@@ -482,6 +509,10 @@ export function StudentWorkspace() {
   const accountLastSignInAt = user?.metadata.lastSignInTime ?? "";
   const debugAiUsageStatus = isTeacherPreview && isTeacherDebugMode ? forcedTutorDebugAiUsageStatus(tutorDebugOptions) : null;
   const displayedAiUsageStatus = debugAiUsageStatus ?? aiUsageStatus;
+  const effectiveTeacherPreviewTutorSettings = useMemo(
+    () => teacherPreviewTutorSettings ?? buildTeacherPreviewTutorSettings(savedClass),
+    [savedClass, teacherPreviewTutorSettings]
+  );
   const showUsageHeader = !isTeacherPreview || (isTeacherDebugMode && Boolean(debugAiUsageStatus));
   const usageSummary = useMemo(() => usageSummaryFromStatus(displayedAiUsageStatus), [displayedAiUsageStatus]);
   const tutoringTimeHeaderText = displayedAiUsageStatus
@@ -637,13 +668,21 @@ export function StudentWorkspace() {
     if (!isTeacherPreview) {
       setIsTeacherDebugMode(false);
       setIsTutorDebugPanelOpen(false);
+      setIsTeacherTutorSettingsOpen(false);
+      setTeacherPreviewTutorSettings(null);
+      setTeacherTutorSettingsError("");
+      setTeacherTutorSettingsMessage("");
       return;
     }
 
     setIsTeacherDebugMode(false);
     setIsTutorDebugPanelOpen(false);
+    setIsTeacherTutorSettingsOpen(false);
+    setTeacherPreviewTutorSettings(null);
+    setTeacherTutorSettingsError("");
+    setTeacherTutorSettingsMessage("");
     setTutorDebugOptions(readStoredTutorDebugOptions());
-  }, [isTeacherPreview]);
+  }, [activeCourseId, isTeacherPreview]);
 
   useEffect(() => {
     if (!isTeacherPreview) {
@@ -1188,8 +1227,11 @@ export function StudentWorkspace() {
     });
     let pendingFeedbackPrompt: FeedbackModalState | null = null;
     let quickResponseMessageId = `quick-${studentMessage.id}`;
-    const streamingAssistantMessageId = quickResponseMessageId;
+    const primaryStreamingAssistantMessageId = quickResponseMessageId;
+    const contextStreamingAssistantMessageId = `grounded-${studentMessage.id}`;
     let contextGroundedStreamStarted = false;
+    let contextGroundedMessageId = primaryStreamingAssistantMessageId;
+    let primaryAssistantVisible = false;
 
     try {
       const token = await user.getIdToken();
@@ -1216,7 +1258,11 @@ export function StudentWorkspace() {
                 }
               : undefined,
           messages: nextMessages,
-          stream: true
+          stream: true,
+          teacherPreviewTutorSettings:
+            isTeacherPreview && profile?.role === "teacher"
+              ? effectiveTeacherPreviewTutorSettings
+              : undefined
         })
       });
 
@@ -1238,21 +1284,31 @@ export function StudentWorkspace() {
         }
 
         if (event.type === "section_start" || event.type === "section_delta" || event.type === "section_done") {
-          setChatProgress((current) => progressForSectionStreamEvent(current, event));
+          setChatProgress(null);
           if (event.call === "context_grounded_answer" && !contextGroundedStreamStarted) {
             contextGroundedStreamStarted = true;
-            setMessages((current) => removeChatMessageById(current, streamingAssistantMessageId));
+            contextGroundedMessageId = primaryAssistantVisible
+              ? contextStreamingAssistantMessageId
+              : primaryStreamingAssistantMessageId;
           }
+          if (event.call !== "context_grounded_answer") {
+            primaryAssistantVisible = true;
+          }
+          const streamedMessageId =
+            event.call === "context_grounded_answer"
+              ? contextGroundedMessageId
+              : primaryStreamingAssistantMessageId;
           setMessages((current) =>
             upsertStreamedAssistantSection({
               event,
-              messageId: streamingAssistantMessageId,
+              messageId: streamedMessageId,
               messages: current
             })
           );
         }
 
         if (event.type === "quick_response") {
+          primaryAssistantVisible = true;
           setChatProgress((current) => ({
             message: "Checking class materials.",
             searches: current?.searches ?? []
@@ -1343,8 +1399,19 @@ export function StudentWorkspace() {
         structuredOutput: data.structuredOutput
       };
 
+      const finalHasContextGroundedAnswer = data.langGraphTrace?.stages?.includes("context_grounded_answer") ?? false;
+      const finalStreamedMessageId =
+        finalHasContextGroundedAnswer && primaryAssistantVisible && !contextGroundedStreamStarted
+          ? ""
+          : contextGroundedStreamStarted
+            ? contextGroundedMessageId
+            : primaryStreamingAssistantMessageId;
       setMessages((current) =>
-        upsertFinalAssistantMessage(removeChatMessageById(current, streamingAssistantMessageId), assistantMessage)
+        upsertFinalAssistantMessagePreservingStreamedContent({
+          finalMessage: assistantMessage,
+          messages: current,
+          streamedMessageId: finalStreamedMessageId
+        })
       );
       pendingFeedbackPrompt = buildFeedbackPromptCandidate({
         assistantMessage,
@@ -1556,6 +1623,90 @@ export function StudentWorkspace() {
     });
   }
 
+  function loadChoiceMessageIntoComposer(choiceMessage: string) {
+    setDraft(choiceMessage);
+    requestAnimationFrame(() => {
+      resizeStudentComposerTextarea(draftTextareaRef.current);
+      draftTextareaRef.current?.focus();
+    });
+  }
+
+  function updateTeacherPreviewTutorSettings(formData: FormData) {
+    if (!isTeacherPreview || profile?.role !== "teacher") {
+      return;
+    }
+
+    const currentSettings = teacherPreviewTutorSettings ?? buildTeacherPreviewTutorSettings(savedClass);
+    const currentAnswerPolicy = currentSettings.answerPolicy;
+    const currentModelSettings = currentSettings.modelSettings;
+    const currentResponseFormat = currentSettings.responseFormat;
+    const nextAnswerPolicy = normalizeAnswerPolicySettings({
+      ...currentAnswerPolicy,
+      allowWorkedExamples: formData.has("answerPolicy.allowWorkedExamples"),
+      askGuidingQuestionBeforeExplaining: formData.has("answerPolicy.askGuidingQuestionBeforeExplaining"),
+      doNotGiveFinalAnswers: formData.has("answerPolicy.doNotGiveFinalAnswers"),
+      requireStudentAttemptFirst: formData.has("answerPolicy.requireStudentAttemptFirst")
+    });
+    const nextModelSettings = normalizeClassModelSettings({
+      ...currentModelSettings,
+      verbose: String(formData.get("modelSettings.verbose") ?? currentModelSettings.verbose)
+    });
+    const nextResponseFormat = normalizeResponseFormatSettings({
+      ...currentResponseFormat,
+      simpleWording: formData.has("responseFormat.simpleWording"),
+      tutorVoice: String(formData.get("responseFormat.tutorVoice") ?? currentResponseFormat.tutorVoice)
+    });
+
+    setTeacherPreviewTutorSettings({
+      answerPolicy: nextAnswerPolicy,
+      behaviorInstructions: String(formData.get("behaviorInstructions") ?? ""),
+      behaviorTitle: normalizeTutorBehavior(formData.get("behaviorTitle")),
+      modelSettings: nextModelSettings,
+      responseFormat: nextResponseFormat
+    });
+    setTeacherTutorSettingsMessage("");
+  }
+
+  async function saveTeacherPreviewTutorSettings() {
+    if (!user || !activeCourseId || !isTeacherPreview || profile?.role !== "teacher" || isSavingTeacherTutorSettings) {
+      return;
+    }
+
+    const settingsToSave = teacherPreviewTutorSettings ?? buildTeacherPreviewTutorSettings(savedClass);
+    setIsSavingTeacherTutorSettings(true);
+    setTeacherTutorSettingsError("");
+    setTeacherTutorSettingsMessage("");
+
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch(apiUrl(`/api/classes/${encodeURIComponent(activeCourseId)}/settings`), {
+        body: JSON.stringify({
+          answerPolicy: settingsToSave.answerPolicy,
+          behaviorInstructions: settingsToSave.behaviorInstructions,
+          behaviorTitle: settingsToSave.behaviorTitle,
+          modelSettings: settingsToSave.modelSettings,
+          responseFormat: settingsToSave.responseFormat
+        }),
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        method: "PATCH"
+      });
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || "AI tutor settings could not be saved.");
+      }
+
+      setTeacherTutorSettingsMessage("Saved to class.");
+    } catch (caughtError) {
+      setTeacherTutorSettingsError(caughtError instanceof Error ? caughtError.message : "AI tutor settings could not be saved.");
+    } finally {
+      setIsSavingTeacherTutorSettings(false);
+    }
+  }
+
   return (
     <RequireAuth role={isTeacherPreview ? ["student", "teacher"] : "student"}>
       <section
@@ -1698,6 +1849,48 @@ export function StudentWorkspace() {
           </div>
 
           <div className="student-sidebar-footer">
+            {isTeacherPreview && profile?.role === "teacher" ? (
+              <div className="teacher-preview-tutor-settings">
+                <button
+                  className="teacher-preview-settings-toggle"
+                  type="button"
+                  aria-expanded={isTeacherTutorSettingsOpen}
+                  aria-controls="teacher-preview-tutor-settings-panel"
+                  onClick={() => {
+                    if (isSidebarCollapsed) {
+                      setIsSidebarCollapsed(false);
+                      setIsTeacherTutorSettingsOpen(true);
+                      return;
+                    }
+
+                    setIsTeacherTutorSettingsOpen((isOpen) => !isOpen);
+                  }}
+                >
+                  <span className="teacher-preview-settings-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <path d="M5 5.5h14v10H8l-3 3v-13Z" />
+                      <path d="M9 9h6M9 12h4" />
+                    </svg>
+                  </span>
+                  <span className="teacher-preview-settings-copy">
+                    <strong>AI tutor settings</strong>
+                    <small>Preview this chat</small>
+                  </span>
+                </button>
+                {isTeacherTutorSettingsOpen ? (
+                  <TeacherPreviewTutorSettingsPanel
+                    error={teacherTutorSettingsError}
+                    isSaving={isSavingTeacherTutorSettings}
+                    message={teacherTutorSettingsMessage}
+                    settings={effectiveTeacherPreviewTutorSettings}
+                    onClose={() => setIsTeacherTutorSettingsOpen(false)}
+                    onPreviewChange={updateTeacherPreviewTutorSettings}
+                    onSave={() => void saveTeacherPreviewTutorSettings()}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+
             <section className="student-account-card" aria-label="Signed in account">
               <span className="student-avatar" aria-hidden="true">
                 {getInitials(accountName, accountEmail)}
@@ -1943,7 +2136,7 @@ export function StudentWorkspace() {
                   isSending={isSending}
                   message={message}
                   key={message.id}
-                  onChoiceSelect={(choiceMessage) => void sendStudentMessage(choiceMessage)}
+                  onChoiceSelect={loadChoiceMessageIntoComposer}
                 />
               ))}
               {isSending && chatProgress ? <ChatProgressMessage progress={chatProgress} /> : null}
@@ -2503,12 +2696,12 @@ function streamingPlaceholderBlockForSection(
   streamingState: StreamingAssistantState
 ): AssistantMessageBlock | undefined {
   const content = streamingSectionText(message, section);
-  if (section === "mainText") {
+  if (section === "mainText" || section === "mainChat") {
     return { content, kind: "answer" };
   }
 
   if (section === "answer") {
-    const hasMainTextBlock = streamingState.sectionOrder.includes("mainText") || Boolean(message.content);
+    const hasMainTextBlock = streamingState.sectionOrder.includes("mainText") || streamingState.sectionOrder.includes("mainChat") || Boolean(message.content);
     return hasMainTextBlock
       ? { content, kind: "section-answer", label: "Answer" }
       : { content, kind: "answer" };
@@ -2521,7 +2714,7 @@ function streamingPlaceholderBlockForSection(
     explanation: { kind: "explanation", label: "Why this works" },
     formula: { kind: "formula", label: "Formula" },
     hint: { kind: "hint", label: "Hint" },
-    nextStep: { kind: "next-step", label: "Your next step" },
+    mainChat: { kind: "section-answer", label: "Answer" },
     problem: { kind: "problem", label: "Problem" },
     sourceNote: { kind: "source-note", label: "Source" }
   };
@@ -2538,7 +2731,10 @@ function streamingSectionText(message: ChatMessage, section: StreamedSectionKey)
 
 function streamedSectionKeyFromBlock(kind: string, streamingState?: StreamingAssistantState): StreamedSectionKey | undefined {
   if (kind === "answer") {
-    return streamingState?.activeSections.mainText || streamingState?.completedSections.mainText ? "mainText" : "answer";
+    if (streamingState?.activeSections.mainText || streamingState?.completedSections.mainText) {
+      return "mainText";
+    }
+    return streamingState?.activeSections.mainChat || streamingState?.completedSections.mainChat ? "mainChat" : "answer";
   }
 
   const blockToSection: Record<string, StructuredStreamedSectionKey> = {
@@ -2546,10 +2742,9 @@ function streamedSectionKeyFromBlock(kind: string, streamingState?: StreamingAss
     example: "example",
     explanation: "explanation",
     formula: "formula",
+    "section-answer": "mainChat",
     hint: "hint",
-    "next-step": "nextStep",
     problem: "problem",
-    "section-answer": "answer",
     "source-note": "sourceNote"
   };
   return blockToSection[kind];
@@ -2576,15 +2771,15 @@ function TutorConfusionChoices({
       <div className="assistant-confusion-choice-grid" aria-label="Choose what Chandra should focus on">
         {choices.map((choice) => (
           <button
-            aria-label={`Send: ${choice.message}`}
+            aria-label={`Use: ${choice.message}`}
             disabled={disabled}
             key={choice.id}
             type="button"
             onClick={() => onChoiceSelect(choice.message)}
           >
             <span className="assistant-confusion-choice-label">{choice.label}</span>
-            {!isProblemSelection && !sameDisplayedText(choice.label, choice.message) ? (
-              <span className="assistant-confusion-choice-description">{choice.message}</span>
+            {!isProblemSelection && !sameDisplayedText(choice.label, choice.description ?? choice.message) ? (
+              <span className="assistant-confusion-choice-description">{choice.description ?? choice.message}</span>
             ) : null}
           </button>
         ))}
@@ -2700,6 +2895,7 @@ function formatSourcePageRange(pages: number[]) {
 
 function formatSourceWhat(source: TutorSource, pages: number[], knowledgeItem?: KnowledgeItem) {
   const sourceType = readableSourceType(source.materialType || knowledgeItem?.kind || "class material");
+  const usageText = readableKnowledgeUsage(source.usedAs || knowledgeItem?.usedAs);
   const pageText = formatSourcePageRange(pages.length ? pages : source.pageNumber ? [source.pageNumber] : []).replace(
     /^ · /,
     ""
@@ -2712,9 +2908,31 @@ function formatSourceWhat(source: TutorSource, pages: number[], knowledgeItem?: 
         ? `Problem ${knowledgeItem.problemId}`
         : "";
 
-  return [source.title || knowledgeItem?.sourceName || "Class material", sourceType, pageText, problemText]
+  return [source.title || knowledgeItem?.sourceName || "Class material", usageText || sourceType, pageText, problemText]
     .filter(Boolean)
     .join(" · ");
+}
+
+function readableKnowledgeUsage(value?: string) {
+  if (value === "active_problem" || value === "problem_source") {
+    return "Problem source";
+  }
+  if (value === "example_reference") {
+    return "Example reference";
+  }
+  if (value === "theorem_reference") {
+    return "Theorem reference";
+  }
+  if (value === "definition_reference") {
+    return "Definition reference";
+  }
+  if (value === "student_attempt") {
+    return "Student work";
+  }
+  if (value === "supporting_context") {
+    return "Supporting context";
+  }
+  return "";
 }
 
 function readableSourceType(value: string) {
@@ -3072,6 +3290,186 @@ function readStoredTutorDebugOptions(): TutorDebugOptions {
   } catch {
     return defaultTutorDebugOptions;
   }
+}
+
+function buildTeacherPreviewTutorSettings(classSettings: TeacherClass | null): TeacherPreviewTutorSettings {
+  return {
+    answerPolicy: normalizeAnswerPolicySettings(classSettings?.answerPolicy),
+    behaviorInstructions: classSettings?.behaviorInstructions ?? defaultBehaviorInstructions,
+    behaviorTitle: normalizeTutorBehavior(classSettings?.behaviorTitle),
+    modelSettings: normalizeClassModelSettings(classSettings?.modelSettings),
+    responseFormat: normalizeResponseFormatSettings(classSettings?.responseFormat)
+  };
+}
+
+function TeacherPreviewTutorSettingsPanel({
+  error,
+  isSaving,
+  message,
+  settings,
+  onClose,
+  onPreviewChange,
+  onSave
+}: {
+  error: string;
+  isSaving: boolean;
+  message: string;
+  settings: TeacherPreviewTutorSettings;
+  onClose: () => void;
+  onPreviewChange: (formData: FormData) => void;
+  onSave: () => void;
+}) {
+  function previewChanged(event: FormEvent<HTMLFormElement>) {
+    onPreviewChange(new FormData(event.currentTarget));
+  }
+
+  return (
+    <form
+      className="teacher-preview-settings-panel"
+      id="teacher-preview-tutor-settings-panel"
+      aria-label="Teacher AI tutor settings"
+      onChange={previewChanged}
+      onInput={previewChanged}
+    >
+      <div className="teacher-preview-settings-panel-heading">
+        <div>
+          <h2>AI tutor settings</h2>
+          <p>Changes affect new replies now. Save to make them class defaults.</p>
+        </div>
+        <button type="button" aria-label="Close AI tutor settings" onClick={onClose}>
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="m6 6 12 12M18 6 6 18" />
+          </svg>
+        </button>
+      </div>
+
+      <label className="teacher-preview-settings-field">
+        <span>Tutor mode</span>
+        <select name="behaviorTitle" value={settings.behaviorTitle} onChange={() => {}}>
+          {tutorBehaviorOptions.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="teacher-preview-settings-field">
+        <span>Chandra voice</span>
+        <select name="responseFormat.tutorVoice" value={settings.responseFormat.tutorVoice} onChange={() => {}}>
+          {tutorVoiceOptions.map((voice) => (
+            <option key={voice} value={voice}>
+              {formatStudentTutorVoiceLabel(voice)}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="teacher-preview-settings-field">
+        <span>Response detail</span>
+        <select name="modelSettings.verbose" value={settings.modelSettings.verbose} onChange={() => {}}>
+          {verboseOptions.map((verbose) => (
+            <option key={verbose} value={verbose}>
+              {formatStudentVerboseLabel(verbose)}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <div className="teacher-preview-settings-checks" aria-label="Help rules">
+        <CompactTutorSettingCheckbox
+          checked={settings.answerPolicy.doNotGiveFinalAnswers}
+          name="answerPolicy.doNotGiveFinalAnswers"
+          title="No final answers"
+        />
+        <CompactTutorSettingCheckbox
+          checked={settings.answerPolicy.requireStudentAttemptFirst}
+          name="answerPolicy.requireStudentAttemptFirst"
+          title="Require attempt"
+        />
+        <CompactTutorSettingCheckbox
+          checked={settings.answerPolicy.askGuidingQuestionBeforeExplaining}
+          name="answerPolicy.askGuidingQuestionBeforeExplaining"
+          title="Guide with questions"
+        />
+        <CompactTutorSettingCheckbox
+          checked={settings.answerPolicy.allowWorkedExamples}
+          name="answerPolicy.allowWorkedExamples"
+          title="Worked examples"
+        />
+        <CompactTutorSettingCheckbox
+          checked={settings.responseFormat.simpleWording}
+          name="responseFormat.simpleWording"
+          title="Simpler wording"
+        />
+      </div>
+
+      <label className="teacher-preview-settings-field">
+        <span>Hidden tutor instructions</span>
+        <textarea name="behaviorInstructions" rows={4} value={settings.behaviorInstructions} onChange={() => {}} />
+      </label>
+
+      {error ? <p className="teacher-preview-settings-error">{error}</p> : null}
+      {message ? <p className="teacher-preview-settings-message">{message}</p> : null}
+      <p className="teacher-preview-settings-note">Preview applies immediately to this chat.</p>
+      <button className="teacher-preview-settings-save" disabled={isSaving} type="button" onClick={onSave}>
+        {isSaving ? "Saving" : "Save to class"}
+      </button>
+    </form>
+  );
+}
+
+function CompactTutorSettingCheckbox({
+  checked,
+  name,
+  title
+}: {
+  checked: boolean;
+  name: string;
+  title: string;
+}) {
+  return (
+    <label>
+      <input checked={checked} name={name} type="checkbox" onChange={() => {}} />
+      <span>{title}</span>
+    </label>
+  );
+}
+
+function formatStudentTutorVoiceLabel(value: string) {
+  if (value === "friendlyUpbeat") {
+    return "Friendly and upbeat";
+  }
+
+  if (value === "directConcise") {
+    return "Direct and concise";
+  }
+
+  if (value === "formalAcademic") {
+    return "Formal and academic";
+  }
+
+  if (value === "gentlePatient") {
+    return "Gentle and patient";
+  }
+
+  return "Calm and clear";
+}
+
+function formatStudentVerboseLabel(value: string) {
+  if (value === "brief") {
+    return "Short";
+  }
+
+  if (value === "detailed") {
+    return "Detailed";
+  }
+
+  if (value === "veryDetailed") {
+    return "Very detailed";
+  }
+
+  return "Balanced";
 }
 
 function formatInteger(value: unknown) {
@@ -3779,14 +4177,13 @@ function chatProgressDisplay(progress: ChatProgress) {
   const hasMaterialSignal = /\b(search|checking|looking|locating|retriev|source|page|pdf|class material|materials)\b/.test(
     normalizedMessage
   );
-  const isSearching = progress.searches.length > 0 || hasMaterialSignal;
+  const searchRows = progress.searches.map((search) => ({
+    key: normalizeSearchQuery(`${search.retrievalReason ?? ""} ${search.query}`) || search.description,
+    label: studentSearchPurposeLabel(search.retrievalReason, search.query, search.description)
+  }));
+  const isSearching = hasMaterialSignal;
 
   if (isSearching) {
-    const searchRows = progress.searches.map((search) => ({
-      key: normalizeSearchQuery(`${search.retrievalReason ?? ""} ${search.query}`) || search.description,
-      label: studentSearchPurposeLabel(search.retrievalReason, search.query, search.description)
-    }));
-
     return {
       isSearching: true,
       main: "Chandra is checking class materials",
@@ -3798,8 +4195,8 @@ function chatProgressDisplay(progress: ChatProgress) {
   return {
     isSearching: false,
     main: "Chandra is thinking",
-    searchRows: [],
-    secondary: "Reading your question..."
+    searchRows,
+    secondary: searchRows.length ? "Using the material it found..." : "Reading your question..."
   };
 }
 
@@ -4635,20 +5032,6 @@ function upsertChatMessage(messages: ChatMessage[], message: ChatMessage) {
   return messages.map((currentMessage, index) => (index === existingIndex ? message : currentMessage));
 }
 
-function progressForSectionStreamEvent(
-  current: ChatProgress | null,
-  event: Extract<ChatStreamEvent, { type: "section_delta" | "section_done" | "section_start" }>
-): ChatProgress {
-  if (current?.searches.length) {
-    return current;
-  }
-
-  return {
-    message: event.call === "context_grounded_answer" ? "Checking class materials." : "Starting the answer.",
-    searches: current?.searches ?? []
-  };
-}
-
 function removeChatMessageById(messages: ChatMessage[], messageId: string) {
   return messages.filter((message) => message.id !== messageId);
 }
@@ -4669,7 +5052,7 @@ function upsertStreamedAssistantSection({
 
   const existing = messages.find((message) => message.id === messageId) as StreamingChatMessage | undefined;
   const existingStructuredOutput = existing?.structuredOutput;
-  const existingSections = existingStructuredOutput?.sections ?? { answer: "" };
+  const existingSections = existingStructuredOutput?.sections ?? {};
   const existingStreamingState = existing?.streamingState ?? {
     activeSections: {},
     completedSections: {},
@@ -4683,7 +5066,8 @@ function upsertStreamedAssistantSection({
   );
   const currentContent = existing?.content ?? "";
   const structuredSection = section === "mainText" ? undefined : section;
-  const currentSectionText = section === "mainText" ? currentContent : structuredSectionText(existingSections, structuredSection);
+  const currentSectionText =
+    section === "mainText" || section === "mainChat" ? currentContent : structuredSectionText(existingSections, structuredSection);
   const nextText =
     event.type === "section_delta" ? `${currentSectionText}${event.delta}` : currentSectionText;
   const activeSections = {
@@ -4697,7 +5081,7 @@ function upsertStreamedAssistantSection({
   const nextMessage: StreamingChatMessage = {
     id: messageId,
     role: "assistant",
-    content: section === "mainText" ? nextText : currentContent,
+    content: section === "mainText" || section === "mainChat" ? nextText : currentContent,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     debugInfo: existing?.debugInfo,
     langGraphTrace: existing?.langGraphTrace,
@@ -4748,6 +5132,109 @@ function upsertFinalAssistantMessage(messages: ChatMessage[], message: ChatMessa
   }
 
   return [...messages, message];
+}
+
+function upsertFinalAssistantMessagePreservingStreamedContent({
+  finalMessage,
+  messages,
+  streamedMessageId
+}: {
+  finalMessage: ChatMessage;
+  messages: ChatMessage[];
+  streamedMessageId: string;
+}) {
+  const streamedIndex = messages.findIndex((message) => message.id === streamedMessageId);
+
+  if (streamedIndex === -1) {
+    return upsertFinalAssistantMessage(messages, finalMessage);
+  }
+
+  const streamedMessage = messages[streamedIndex] as StreamingChatMessage;
+  const enrichedMessage = enrichStreamedAssistantMessage(streamedMessage, finalMessage);
+
+  return messages
+    .filter((message, index) => index === streamedIndex || message.id !== finalMessage.id)
+    .map((message) => (message.id === streamedMessageId ? enrichedMessage : message));
+}
+
+function enrichStreamedAssistantMessage(streamedMessage: StreamingChatMessage, finalMessage: ChatMessage): ChatMessage {
+  const preservedStructuredOutput = mergeFinalStructuredOutputPreservingStreamedSections(
+    streamedMessage.structuredOutput,
+    finalMessage.structuredOutput,
+    streamedMessage.streamingState
+  );
+  const preservedContent = streamedMessage.content.trim() ? streamedMessage.content : finalMessage.content;
+  const { streamingState: _streamingState, ...baseMessage } = streamedMessage;
+
+  return {
+    ...baseMessage,
+    id: finalMessage.id,
+    content: preservedContent,
+    debugInfo: finalMessage.debugInfo,
+    langGraphTrace: finalMessage.langGraphTrace,
+    retrievalConfidence: finalMessage.retrievalConfidence,
+    sources: finalMessage.sources ?? streamedMessage.sources ?? [],
+    structuredOutput: preservedStructuredOutput
+  };
+}
+
+function mergeFinalStructuredOutputPreservingStreamedSections(
+  streamedStructuredOutput: ChatMessage["structuredOutput"],
+  finalStructuredOutput: ChatMessage["structuredOutput"],
+  streamingState?: StreamingAssistantState
+): ChatMessage["structuredOutput"] {
+  if (!streamedStructuredOutput) {
+    return finalStructuredOutput;
+  }
+
+  if (!finalStructuredOutput) {
+    return streamedStructuredOutput;
+  }
+
+  const streamedSections = nonEmptyStructuredSections(streamedStructuredOutput.sections ?? {});
+  const finalSections = finalStructuredOutput?.sections ?? {};
+  const finalSectionKeys = new Set(Object.keys(finalSections));
+  const finalAuthoritativeStreamedSections = Object.fromEntries(
+    Object.entries(streamedSections).filter(([section]) => finalSectionKeys.has(section))
+  );
+  const mergedSections = {
+    ...finalAuthoritativeStreamedSections,
+    ...finalSections
+  };
+  const streamedOrder = (streamingState?.sectionOrder ?? streamedStructuredOutput.sectionOrder ?? []).filter(
+    (section): section is StructuredStreamedSectionKey => section !== "mainText" && finalSectionKeys.has(section)
+  );
+
+  return {
+    ...streamedStructuredOutput,
+    ...finalStructuredOutput,
+    sections: mergedSections,
+    sectionOrder: mergeStructuredSectionOrder(streamedOrder, finalStructuredOutput?.sectionOrder),
+    metadata: {
+      ...(streamedStructuredOutput.metadata ?? finalStructuredOutput?.metadata),
+      ...(finalStructuredOutput?.metadata ?? {})
+    }
+  };
+}
+
+function mergeStructuredSectionOrder(
+  streamedOrder: StructuredStreamedSectionKey[],
+  finalOrder?: StructuredStreamedSectionKey[]
+) {
+  const finalSectionOrder = Array.isArray(finalOrder) ? finalOrder : [];
+  const mergedOrder = [...finalSectionOrder];
+
+  for (const section of streamedOrder) {
+    if (!mergedOrder.includes(section)) {
+      mergedOrder.push(section);
+    }
+  }
+
+  return mergedOrder;
+}
+
+function nonEmptyStructuredSections(sections: NonNullable<ChatMessage["structuredOutput"]>["sections"]) {
+  return Object.fromEntries(Object.entries(sections).filter(([, value]) => String(value ?? "").trim()));
 }
 
 async function fetchStudentAiUsageStatus({

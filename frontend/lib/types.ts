@@ -268,7 +268,8 @@ export type RetrievalHit = {
 export type RetrievalConfidence = "high" | "medium" | "low";
 
 export type TutorStructuredSections = {
-  answer: string;
+  mainChat?: string;
+  answer?: string;
   problem?: string;
   hint?: string;
   explanation?: string;
@@ -276,10 +277,10 @@ export type TutorStructuredSections = {
   example?: string;
   checkWork?: string;
   sourceNote?: string;
-  nextStep?: string;
 };
 
 export type TutorStructuredSectionKey =
+  | "mainChat"
   | "answer"
   | "problem"
   | "hint"
@@ -287,8 +288,7 @@ export type TutorStructuredSectionKey =
   | "formula"
   | "example"
   | "checkWork"
-  | "sourceNote"
-  | "nextStep";
+  | "sourceNote";
 
 export type TutorStructuredMetadata = {
   hintLevel: "none" | "small_hint" | "guided_step" | "worked_example" | "refusal";
@@ -325,6 +325,7 @@ export type TutorStructuredOutput = {
 };
 
 export type TutorConfusionChoice = {
+  description?: string;
   id: string;
   label: string;
   message: string;
@@ -502,6 +503,17 @@ export type TeacherConversationReviewSummary = {
 };
 
 export type TutorTrace = {
+  activeProblemDecision?: {
+    completedParts?: string[];
+    confidence?: string;
+    currentPart?: string;
+    isActualProblem?: boolean;
+    problemSource?: string;
+    problemText?: string;
+    reason?: string;
+    relationToPreviousProblem?: string;
+    visibleParts?: string[];
+  };
   activeMaterialId?: string;
   activePage?: number;
   activeProblemNumbers?: string[];
@@ -549,13 +561,16 @@ export type TutorProblemUnderstandingState = {
   reasons?: string[];
   conceptsUnderstood?: string[];
   completedSteps?: string[];
+  completedParts?: string[];
+  currentPart?: string;
   currentStep?: string;
   currentStepStatus?: string;
-  currentSubstep?: string;
   knownConfusions?: string[];
   lastHintSummary?: string;
   lastStudentAttemptSummary?: string;
+  problemStatus?: string;
   updatedAt?: unknown;
+  visibleParts?: string[];
 };
 
 export type TutorApiResponse = {

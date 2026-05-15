@@ -22,6 +22,7 @@ export const tutorModes = [
   "off_topic_redirect"
 ] as const;
 const tutorStructuredSectionKeys = [
+  "mainChat",
   "answer",
   "problem",
   "hint",
@@ -29,15 +30,14 @@ const tutorStructuredSectionKeys = [
   "formula",
   "example",
   "checkWork",
-  "sourceNote",
-  "nextStep"
+  "sourceNote"
 ] as const;
 
 export function normalizeTutorResponse(payload: Partial<TutorApiResponse>): TutorApiResponse {
   const rawMessage = String(payload.message ?? payload.content ?? "");
   const retrievalConfidence = normalizeRetrievalConfidence(payload.retrievalConfidence);
   const structuredOutput = normalizeStructuredTutorOutput(payload.structuredOutput, rawMessage);
-  const message = suppressDuplicateProblemMessage(rawMessage, structuredOutput);
+  const message = rawMessage;
 
   return {
     assistantMessageId: payload.assistantMessageId,
@@ -51,31 +51,6 @@ export function normalizeTutorResponse(payload: Partial<TutorApiResponse>): Tuto
   };
 }
 
-function suppressDuplicateProblemMessage(message: string, structuredOutput: TutorStructuredOutput | undefined) {
-  const problem = structuredOutput?.sections.problem;
-  if (!problem) {
-    return message;
-  }
-
-  if (answerDuplicatesProblemSection(message, problem)) {
-    return "";
-  }
-
-  return message;
-}
-
-function answerDuplicatesProblemSection(answer: string, problem: string) {
-  const normalizedAnswer = normalizeProblemDuplicateText(answer);
-  const normalizedProblem = normalizeProblemDuplicateText(problem);
-  return Boolean(
-    normalizedAnswer &&
-      normalizedProblem &&
-      (normalizedAnswer === normalizedProblem ||
-        (normalizedProblem.length >= 24 &&
-          (normalizedAnswer.endsWith(normalizedProblem) || normalizedAnswer.includes(normalizedProblem))))
-  );
-}
-
 export function normalizeStructuredTutorOutput(
   value: unknown,
   fallbackAnswer = ""
@@ -87,45 +62,47 @@ export function normalizeStructuredTutorOutput(
   const record = value as Record<string, unknown>;
   const sectionsRecord = isRecord(record.sections) ? record.sections : record;
   const metadataRecord = isRecord(record.metadata) ? record.metadata : record;
+  const explicitMainChat = optionalStringValue(sectionsRecord.mainChat ?? record.mainChat);
   const explicitSectionAnswer = optionalStringValue(sectionsRecord.answer);
   const explicitLegacyAnswer = optionalStringValue(record.answer);
-  let rawAnswer = normalizeWrappedReferenceNumbers(explicitSectionAnswer ?? explicitLegacyAnswer ?? fallbackAnswer);
-  const splitProblem = splitProblemSectionFollowup(stringValue(sectionsRecord.problem));
-  const problem = looksLikeAcademicProblemSection(splitProblem.problem) ? splitProblem.problem : "";
-  const misplacedProblemAnswer = splitProblem.problem && !problem ? splitProblem.problem : "";
-  if (problem && answerDuplicatesProblemSection(rawAnswer, problem)) {
-    rawAnswer = "";
-  }
-  const rawHint = stringValue(sectionsRecord.hint);
-  const explanation = stringValue(sectionsRecord.explanation);
-  const formula = stringValue(sectionsRecord.formula);
-  const example = stringValue(sectionsRecord.example);
-  const checkWork = stringValue(sectionsRecord.checkWork);
-  const sourceNote = stringValue(sectionsRecord.sourceNote);
-  const rawNextStep = normalizeWrappedReferenceNumbers(
-    stringValue(sectionsRecord.nextStep) || stringValue(record.nextQuestion)
+  const hasExplicitStructuredSection = tutorStructuredSectionKeys.some((key) => Boolean(optionalStringValue(sectionsRecord[key])));
+  const baseAnswer = explicitMainChat ?? explicitSectionAnswer ?? explicitLegacyAnswer ?? (hasExplicitStructuredSection ? "" : fallbackAnswer);
+  const rawLegacyAction = stringValue(sectionsRecord[["next", "Step"].join("")]) || stringValue(record.nextQuestion);
+  const sanitizedBaseAnswer = looksLikeWorkflowStatusText(baseAnswer) ? "" : baseAnswer;
+  const rawHint = finalSectionValue("hint", sectionsRecord.hint);
+  const legacyAction =
+    !looksLikeWorkflowStatusText(rawLegacyAction) &&
+    !sectionRepeatsEarlierContent(rawLegacyAction, [sanitizedBaseAnswer, rawHint])
+      ? rawLegacyAction
+      : "";
+  const rawProblem = stringValue(sectionsRecord.problem);
+  const splitProblem = splitProblemSectionFollowup(rawProblem);
+  const problem = finalSectionValue("problem", splitProblem.problem);
+  const misplacedProblemStatus = problem ? "" : statusLineFromProblemSection(rawProblem);
+  const mainChatCandidate = normalizeWrappedReferenceNumbers(
+    [sanitizedBaseAnswer || misplacedProblemStatus, splitProblem.followup, legacyAction].filter(Boolean).join("\n\n")
   );
-  const repaired = repairSplitReferenceNextStep(rawAnswer, rawNextStep);
-  const answer = repaired.answer || splitProblem.followup || misplacedProblemAnswer;
-  const { hint, nextStep } = repairHintLabeledNextStep(rawHint, repaired.nextStep);
+  const mainChat = problem && duplicatesProblemSection(mainChatCandidate, problem) ? "" : mainChatCandidate;
+  const hint = rawHint && sectionRepeatsEarlierContent(rawHint, [mainChat]) ? "" : rawHint;
+  const explanation = finalSectionValue("explanation", sectionsRecord.explanation);
+  const formula = finalSectionValue("formula", sectionsRecord.formula);
+  const example = finalSectionValue("example", sectionsRecord.example);
+  const checkWork = finalSectionValue("checkWork", sectionsRecord.checkWork);
+  const sourceNote = finalSectionValue("sourceNote", sectionsRecord.sourceNote);
   const mode = includesString(tutorModes, metadataRecord.mode) ? metadataRecord.mode : "guided_problem_solving";
   const choiceDisplay = metadataRecord.choiceDisplay === "problem_selection" ? "problem_selection" : undefined;
-  const dedupedSections = suppressDuplicatedTutorSections(
-    {
-      answer,
-      ...(problem ? { problem } : {}),
-      ...(hint ? { hint } : {}),
-      ...(explanation ? { explanation } : {}),
-      ...(formula ? { formula } : {}),
-      ...(example ? { example } : {}),
-      ...(checkWork ? { checkWork } : {}),
-      ...(sourceNote ? { sourceNote } : {}),
-      ...(nextStep ? { nextStep } : {})
-    },
-    mode
-  );
+  const sections = {
+    ...(mainChat ? { mainChat } : {}),
+    ...(problem ? { problem } : {}),
+    ...(hint ? { hint } : {}),
+    ...(explanation ? { explanation } : {}),
+    ...(formula ? { formula } : {}),
+    ...(example ? { example } : {}),
+    ...(checkWork ? { checkWork } : {}),
+    ...(sourceNote ? { sourceNote } : {})
+  };
   const sectionOrder = normalizeSectionOrder(record.sectionOrder ?? sectionsRecord.sectionOrder).filter(
-    (key) => key in dedupedSections
+    (key) => key in sections
   );
   let confusionPrompt = stringValue(record.confusionPrompt ?? record.confusion_prompt).slice(0, 240);
   const confusionChoices = normalizeConfusionChoices(record.confusionChoices ?? record.confusion_choices, {
@@ -134,15 +111,9 @@ export function normalizeStructuredTutorOutput(
   if (choiceDisplay === "problem_selection" && confusionChoices && !confusionPrompt) {
     confusionPrompt = "Pick the problem you want help with.";
   }
-  const finalSections =
-    confusionPrompt && confusionChoices
-      ? { answer: preferredConfusionChoicePrompt(dedupedSections.answer, confusionPrompt) }
-      : dedupedSections;
-  const finalSectionOrder = confusionChoices ? [] : sectionOrder;
-
   return {
-    sections: finalSections,
-    ...(finalSectionOrder.length ? { sectionOrder: finalSectionOrder } : {}),
+    sections,
+    ...(sectionOrder.length ? { sectionOrder } : {}),
     ...(confusionPrompt ? { confusionPrompt } : {}),
     ...(confusionChoices ? { confusionChoices } : {}),
     metadata: {
@@ -156,13 +127,6 @@ export function normalizeStructuredTutorOutput(
       mode
     }
   };
-}
-
-function preferredConfusionChoicePrompt(answer: string | undefined, confusionPrompt: string): string {
-  if (answer && /\b(?:not sure|unclear|unsure|pick one|choose one)\b/i.test(answer)) {
-    return answer;
-  }
-  return confusionPrompt;
 }
 
 function normalizeConfusionChoices(
@@ -180,72 +144,18 @@ function normalizeConfusionChoices(
     }
 
     const label = stringValue(item.label).slice(0, 80);
+    const description = stringValue(item.description).slice(0, 180);
     const message = stringValue(item.message ?? item.value ?? item.content).slice(0, 240);
     if (!label || !message) {
       continue;
     }
 
     const id = stringValue(item.id).slice(0, 80) || `choice-${choices.length + 1}`;
-    choices.push({ id, label, message });
+    choices.push({ ...(description ? { description } : {}), id, label, message });
   }
 
   const maxCount = options.maxCount ?? 6;
   return choices.length >= 2 && choices.length <= maxCount ? choices : undefined;
-}
-
-function splitProblemSectionFollowup(problem: string) {
-  const followupPattern = [
-    String.raw`(?:That(?:'|\u2019)s|This is|It(?:'|\u2019)s)\s+(?:the\s+)?(?:exact\s+)?(?:problem|exercise|question)\b.+\b(?:page|printed\s+page|source|textbook|worksheet)\b.+`,
-    String.raw`(?:You can find|I found)\s+.+\b(?:page|printed\s+page|source|textbook|worksheet)\b.+`,
-    String.raw`If you (?:want|can),?\s+.+`,
-    String.raw`I can help you\s+.+`,
-    String.raw`Want to\s+.+`,
-    String.raw`Send me\s+.+`,
-    String.raw`Show me\s+.+`,
-    String.raw`What have you\s+.+`,
-    String.raw`Where do you\s+.+`
-  ].join("|");
-  const match = problem.match(new RegExp(String.raw`\s+(${followupPattern})$`, "i"));
-
-  if (!match) {
-    return { problem, followup: "" };
-  }
-
-  return {
-    problem: problem.slice(0, match.index).trim(),
-    followup: match[1].trim()
-  };
-}
-
-function looksLikeAcademicProblemSection(text: string) {
-  const normalized = normalizeComparableSectionText(text);
-  if (!normalized) {
-    return false;
-  }
-
-  if (
-    looksLikeRetrievalStatusText(text) ||
-    asksForPastedProblemOrSource(text) ||
-    /\b(you said|which problem|what problem|page or textbook|textbook name|class materials?|checking|looking|locating|searching)\b/i.test(
-      normalized
-    )
-  ) {
-    return false;
-  }
-
-  const taskPattern =
-    "assume|calculate|compute|consider|define|describe|determine|evaluate|explain|find|for|given|if|let|prove|recall|show|solve|suppose|use|verify|what|when|where|which|why|write";
-  const taskRegex = new RegExp(`\\b(?:${taskPattern})\\b`, "i");
-  const startsWithTaskRegex = new RegExp(`^\\s*(?:${taskPattern})\\b`, "i");
-  const hasTaskVerb = taskRegex.test(text);
-  const startsWithTask = startsWithTaskRegex.test(text);
-  const hasProblemMarker =
-    /\b(?:problem|exercise|question|ex\.?)\s*\d/i.test(text) ||
-    /(?<![\d.])\d{1,3}\s*\.\s*\d{1,3}[a-z]?(?!\s*\.\s*\d)/i.test(text);
-  const hasMathSignal = /(\\|=|<|>|\^|_|∫|√|\$|\bmatrix\b|\boperator\b|\bfunction\b)/i.test(text);
-  const wordCount = text.match(/[A-Za-z0-9]+/g)?.length ?? 0;
-
-  return wordCount >= 4 && hasTaskVerb && (hasProblemMarker || hasMathSignal || startsWithTask);
 }
 
 function normalizeSectionOrder(value: unknown) {
@@ -253,9 +163,16 @@ function normalizeSectionOrder(value: unknown) {
     return [];
   }
 
-  return value.filter((item): item is (typeof tutorStructuredSectionKeys)[number] =>
-    includesString(tutorStructuredSectionKeys, item)
-  );
+  return value
+    .map((item) => sectionOrderAlias(item))
+    .filter((item): item is (typeof tutorStructuredSectionKeys)[number] => includesString(tutorStructuredSectionKeys, item));
+}
+
+function sectionOrderAlias(value: unknown) {
+  if (value === "answer" || value === "mainText" || value === "main_text") {
+    return "mainChat";
+  }
+  return value;
 }
 
 function normalizeRetrievalConfidence(value: unknown): RetrievalConfidence {
@@ -305,93 +222,50 @@ function optionalStringValue(value: unknown) {
   return undefined;
 }
 
-function normalizeSectionStringValue(value: string) {
-  const trimmed = value.trim();
-  const textMatch = trimmed.match(/^\{\s*['"]text['"]\s*:\s*(['"])([\s\S]*)\1\s*\}$/);
-
-  return textMatch ? textMatch[2].trim() : trimmed;
-}
-
-function repairSplitReferenceNextStep(answer: string, nextStep: string) {
-  if (!nextStep || !/^\d+\b/.test(nextStep)) {
-    return { answer, nextStep };
+function finalSectionValue(section: string, value: unknown) {
+  const text = stringValue(value);
+  if (!text || looksLikeWorkflowStatusText(text)) {
+    return "";
   }
 
-  if (!/\b(Example|Exercise|Section|Definition|Theorem|Lemma|Corollary)\s+\d+(?:\.\d+)*\.?$/i.test(answer)) {
-    return { answer, nextStep };
+  if (section === "problem" && looksLikeProblemSectionStatusText(text)) {
+    return "";
   }
 
-  const separator = answer.endsWith(".") ? "" : ".";
-  return {
-    answer: `${answer}${separator}${nextStep}`,
-    nextStep: ""
-  };
+  return text;
 }
 
-function repairHintLabeledNextStep(hint: string, nextStep: string) {
-  const hintMatch = nextStep.match(/^(?:\*\*)?hint(?:\*\*)?\s*:\s*(.+)$/is);
-
-  if (!hintMatch) {
-    return { hint, nextStep };
-  }
-
-  const nextStepHint = hintMatch[1].trim();
-
-  return {
-    hint: [hint, nextStepHint].filter(Boolean).join("\n\n"),
-    nextStep: ""
-  };
-}
-
-function isRepeatedSectionContent(previousContent: string, sectionContent: string) {
-  const normalizedPrevious = normalizeComparableSectionText(previousContent);
-  const normalizedSection = normalizeComparableSectionText(sectionContent);
-
+function duplicatesProblemSection(value: string, problem: string) {
+  const normalizedValue = normalizeComparableProblemText(value);
+  const normalizedProblem = normalizeComparableProblemText(problem);
   return Boolean(
-    normalizedSection &&
-      (normalizedPrevious === normalizedSection ||
-        (normalizedSection.length >= 24 &&
-          (normalizedPrevious.endsWith(normalizedSection) || normalizedPrevious.includes(normalizedSection))) ||
-        hasHighMeaningfulTokenOverlap(normalizedPrevious, normalizedSection))
+    normalizedValue &&
+      normalizedProblem &&
+      (normalizedValue === normalizedProblem ||
+        (normalizedProblem.length >= 24 &&
+          (normalizedValue.endsWith(normalizedProblem) || normalizedValue.includes(normalizedProblem))))
   );
-}
-
-function suppressDuplicatedTutorSections<T extends Record<string, string>>(
-  sections: T,
-  mode: (typeof tutorModes)[number]
-): T {
-  const nextSections = { ...sections };
-
-  if (nextSections.hint && sectionRepeatsEarlierContent(nextSections.hint, [
-    nextSections.answer,
-    nextSections.explanation
-  ])) {
-    delete nextSections.hint;
-  }
-
-  if (
-    nextSections.nextStep &&
-    (mode === "source_lookup" ||
-      nextSections.problem ||
-      looksLikeRetrievalStatusText(nextSections.nextStep) ||
-      (looksLikeRetrievalStatusText(nextSections.answer) && asksForPastedProblemOrSource(nextSections.nextStep)) ||
-      sectionRepeatsEarlierContent(nextSections.nextStep, [
-        nextSections.answer,
-        nextSections.hint,
-        nextSections.explanation,
-        nextSections.checkWork
-      ]))
-  ) {
-    delete nextSections.nextStep;
-  }
-
-  return nextSections;
 }
 
 function sectionRepeatsEarlierContent(sectionContent: string, previousSections: Array<string | undefined>) {
-  return previousSections.some((previousContent) =>
-    previousContent ? isRepeatedSectionContent(previousContent, sectionContent) : false
-  );
+  const normalizedSection = normalizeComparableSectionText(sectionContent);
+  if (!normalizedSection) {
+    return false;
+  }
+
+  return previousSections.some((previousContent) => {
+    const normalizedPrevious = normalizeComparableSectionText(previousContent ?? "");
+    if (!normalizedPrevious) {
+      return false;
+    }
+
+    return (
+      normalizedPrevious === normalizedSection ||
+      (normalizedSection.length >= 24 &&
+        (normalizedPrevious.endsWith(normalizedSection) || normalizedPrevious.includes(normalizedSection))) ||
+      hasHighMeaningfulTokenOverlap(normalizedPrevious, normalizedSection)
+    );
+  });
 }
 
 function hasHighMeaningfulTokenOverlap(previousContent: string, sectionContent: string) {
@@ -440,46 +314,80 @@ function meaningfulTokens(value: string) {
   return matches.filter((token) => token.length > 2 && !sectionTokenStopWords.has(token));
 }
 
-function looksLikeRetrievalStatusText(text: string) {
-  const normalized = text.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
-  return Boolean(
-    /\b(checking|locating|looking|searching|finding)\b/.test(normalized) &&
-      /\b(problem|exercise|question|page|source|textbook|homework|worksheet|class material|materials)\b/.test(normalized)
-  );
-}
-
-function asksForPastedProblemOrSource(text: string) {
-  const normalized = text.toLowerCase();
-  return Boolean(
-    /\bpaste\s+(the\s+)?(exact\s+)?(problem|question|source|text|worksheet)\b/.test(normalized) ||
-      /\btype\s+(the\s+)?(full\s+|exact\s+)?(problem|question|source|text|worksheet)(\s+text)?\b/.test(
-        normalized
-      ) ||
-      /\bsend\s+(the\s+)?(full\s+|exact\s+)?(problem|question|source|text|worksheet|page|photo|image|screenshot)(\s+(text|photo|image|screenshot))?\b/.test(
-        normalized
-      ) ||
-      /\b(?:send|upload)\s+(?:me\s+)?(?:the\s+)?(?:textbook|homework|worksheet|page|source).{0,40}\b(?:title|photo|page|name|image|screenshot|text)\b/.test(
-        normalized
-      ) ||
-      /\bshare\s+(the\s+)?(full\s+|exact\s+)?(problem|question|source|text|worksheet|page|photo|image|screenshot)(\s+(text|photo|image|screenshot))?\b/.test(
-        normalized
-      )
-  );
-}
-
 function normalizeComparableSectionText(value: string) {
   return value
-    .replace(/^(?:\*\*)?(?:answer|hint|source note|your next step|next step)(?:\*\*)?\s*:\s*/i, "")
+    .replace(/^(?:\*\*)?(?:answer|hint|source note|your next step|next step|main chat)(?:\*\*)?\s*:\s*/i, "")
     .replace(/\s+/g, " ")
     .replace(/[.!?]+$/g, "")
     .trim()
     .toLowerCase();
 }
 
-function normalizeProblemDuplicateText(value: string) {
-  return normalizeComparableSectionText(
-    value.replace(/^(?:\*\*)?(?:problem|exercise|question)(?:\s+\d+(?:\.\d+)*)?(?:\*\*)?\s*:\s*/i, "")
+function normalizeComparableProblemText(value: string) {
+  return normalizeSectionStringValue(value)
+    .replace(/^\s*(?:problem|exercise|question)(?:\s+\d+(?:\.\d+)*)?\s*:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function looksLikeWorkflowStatusText(text: string) {
+  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+
+  return (
+    (/\b(checking|looking up|searching|locating|finding)\b/.test(normalized) &&
+      /\b(class materials?|problem|exercise|question|page|source|textbook|worksheet|homework)\b/.test(normalized)) ||
+    /\bplease wait\b/.test(normalized) ||
+    /\bsend (?:me )?(?:the|a|your)?\s*(page|textbook|worksheet|homework|screenshot|photo|image)\b/.test(normalized)
   );
+}
+
+function looksLikeProblemSectionStatusText(text: string) {
+  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+
+  return /\b(you said|which problem|what problem|page or textbook|textbook name)\b/.test(normalized);
+}
+
+function statusLineFromProblemSection(text: string) {
+  if (!looksLikeProblemSectionStatusText(text)) {
+    return "";
+  }
+
+  return text
+    .split(/\n{2,}/)[0]
+    .split(/\n/)[0]
+    .trim();
+}
+
+function splitProblemSectionFollowup(problem: string) {
+  const followupPattern = [
+    String.raw`(?:That(?:'|\u2019)s|This is|It(?:'|\u2019)s)\s+(?:the\s+)?(?:exact\s+)?(?:problem|exercise|question)\b.+\b(?:page|printed\s+page|source|textbook|worksheet)\b.+`,
+    String.raw`(?:You can find|I found)\s+.+\b(?:page|printed\s+page|source|textbook|worksheet)\b.+`,
+    String.raw`If you (?:want|can),?\s+.+`,
+    String.raw`I can help you\s+.+`,
+    String.raw`Want to\s+.+`,
+    String.raw`Send me\s+.+`,
+    String.raw`Show me\s+.+`,
+    String.raw`What have you\s+.+`,
+    String.raw`Where do you\s+.+`
+  ].join("|");
+  const match = problem.match(new RegExp(String.raw`\s+(${followupPattern})$`, "i"));
+
+  if (!match) {
+    return { problem, followup: "" };
+  }
+
+  return {
+    problem: problem.slice(0, match.index).trim(),
+    followup: match[1].trim().replace(/[.!?]+$/g, "")
+  };
+}
+
+function normalizeSectionStringValue(value: string) {
+  const trimmed = value.trim();
+  const textMatch = trimmed.match(/^\{\s*['"]text['"]\s*:\s*(['"])([\s\S]*)\1\s*\}$/);
+
+  return textMatch ? textMatch[2].trim() : trimmed;
 }
 
 function normalizeWrappedReferenceNumbers(text: string) {

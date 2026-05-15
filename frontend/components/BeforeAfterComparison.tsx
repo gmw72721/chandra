@@ -3,16 +3,16 @@
 import type { ReactElement, ReactNode } from "react";
 import { useMemo, useState } from "react";
 
-type GuidanceKey = "hint" | "nextStep" | "explain";
+type GuidanceKey = "hint" | "action" | "explain";
 type SubjectKey = "biology" | "math" | "chemistry";
 type GuidanceCombination =
   | "hint"
-  | "nextStep"
+  | "action"
   | "explain"
-  | "hint+nextStep"
+  | "hint+action"
   | "hint+explain"
-  | "nextStep+explain"
-  | "hint+nextStep+explain";
+  | "action+explain"
+  | "hint+action+explain";
 
 type ProblemOption = {
   label: string;
@@ -29,7 +29,7 @@ type SubjectExample = {
 
 const guidanceButtons: { key: GuidanceKey; label: string }[] = [
   { key: "hint", label: "Hint" },
-  { key: "nextStep", label: "Next step" },
+  { key: "action", label: "Action" },
   { key: "explain", label: "Explain" }
 ];
 
@@ -50,16 +50,16 @@ const subjectExamples: Record<SubjectKey, SubjectExample> = {
     ),
     guidance: {
       hint: "Look for the choice that cells use as a quick, usable energy carrier.",
-      nextStep: "First separate the choices by role: gases, finished sugar, and energy carrier.",
+      action: "First separate the choices by role: gases, finished sugar, and energy carrier.",
       explain:
         "The Calvin cycle is a building process, so it needs an input that can provide usable energy during the reactions. Match each option to what it does in photosynthesis.",
-      "hint+nextStep":
+      "hint+action":
         "Look for the quick energy carrier. Start by sorting out the gases, then compare what remains.",
       "hint+explain":
         "Focus on the option that transfers usable energy inside cells. A good test is whether the molecule is used to power reactions or whether it is something being produced or exchanged.",
-      "nextStep+explain":
+      "action+explain":
         "Sort the options by job first. One is a product, two are gases, and one is used by cells to drive reactions. That role should point you toward the best choice.",
-      "hint+nextStep+explain":
+      "hint+action+explain":
         "Look for the quick energy carrier, then sort the choices by job. The Calvin cycle builds sugar, so ask which option helps power that building process rather than being a gas or the final sugar."
     }
   },
@@ -75,16 +75,16 @@ const subjectExamples: Record<SubjectKey, SubjectExample> = {
     normalResponse: <>Add 6 to both sides to get 4x = 24. Then divide by 4, so x = 6.</>,
     guidance: {
       hint: "Think about which operation you should undo first to start isolating x.",
-      nextStep: "Focus on the part outside the x-term first. What would cancel the “minus 6”?",
+      action: "Focus on the part outside the x-term first. What would cancel the “minus 6”?",
       explain:
         "Solving means keeping both sides balanced while undoing operations around x in reverse order.",
-      "hint+nextStep":
+      "hint+action":
         "To isolate x, undo the outside operation first. Look at the “minus 6” and decide what operation cancels it.",
       "hint+explain":
         "Work backward from the expression around x. Since x is being changed in more than one way, undo the last change first while doing the same thing to both sides.",
-      "nextStep+explain":
+      "action+explain":
         "The first move should remove the constant term from the left side. Whatever you do to the left, you must also do to the right to keep the equation balanced.",
-      "hint+nextStep+explain":
+      "hint+action+explain":
         "Start by isolating the x-term. Identify the operation that cancels the constant, apply it to both sides, then look at what operation is still attached to x."
     }
   },
@@ -104,24 +104,24 @@ const subjectExamples: Record<SubjectKey, SubjectExample> = {
     ),
     guidance: {
       hint: "Think about the particle found outside the nucleus of an atom.",
-      nextStep:
+      action:
         "Eliminate any option that is neutral, positive, or names a whole region instead of one particle.",
       explain:
         "Atomic particles are often identified by charge and location. Use those two clues to compare each option before choosing.",
-      "hint+nextStep":
+      "hint+action":
         "Look for the particle outside the nucleus. Then remove choices that are neutral, positive, or not a single particle.",
       "hint+explain":
         "Use location as your clue: the negatively charged particle is associated with the space around the nucleus, while the nucleus contains different particles.",
-      "nextStep+explain":
+      "action+explain":
         "Sort the choices by charge first, then by whether the option names a particle or a region. That should leave the option that matches “negative charge.”",
-      "hint+nextStep+explain":
+      "hint+action+explain":
         "Use both clues together: outside the nucleus and negative charge. Remove the neutral and positive particles, then remove the option that names a region instead of a particle."
     }
   }
 };
 
 const subjectOrder: SubjectKey[] = ["biology", "math", "chemistry"];
-const guidanceOrder: GuidanceKey[] = ["hint", "nextStep", "explain"];
+const guidanceOrder: GuidanceKey[] = ["hint", "action", "explain"];
 
 export function BeforeAfterComparison() {
   const [subjectKey, setSubjectKey] = useState<SubjectKey>("biology");

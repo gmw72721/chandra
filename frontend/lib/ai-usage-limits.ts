@@ -19,6 +19,7 @@ import {
   listAiUsageTokenBucketsPostgres,
   PostgresAiUsageLimitDataError,
   reserveAiUsagePostgres,
+  updateAiUsageAnchorPostgres,
   upsertAiUsageAllowancePostgres,
   type AiUsageRequestBucketInput,
   type AiUsageTokenBucketInput
@@ -124,7 +125,9 @@ type TokenBucketSnapshot = TokenBucketSpec & {
 type StudentAiUsageAnchor = {
   anchorAt: Date;
   classId: string;
+  dayAnchorAt: Date;
   studentId: string;
+  weekAnchorAt: Date;
 };
 
 export class AiUsageLimitError extends Error {
@@ -199,7 +202,7 @@ export async function reserveAiTokenUsage({
   const usageAnchor = role === "student" && quotaUserId
     ? await ensureStudentAiUsageAnchor({ classId, now, studentId: quotaUserId })
     : null;
-  const usageWindows = usageAnchor ? aiUsageWindows(now, usageAnchor.anchorAt) : null;
+  const usageWindows = usageAnchor ? aiUsageWindows(now, usageAnchor) : null;
   const limits = await tokenLimitsWithActiveAllowance({
     classId,
     dayBucket: usageWindows?.day.bucketKey,
@@ -208,7 +211,7 @@ export async function reserveAiTokenUsage({
     tokenLimits
   });
   const specs = role === "student" && quotaUserId
-    ? tokenBucketSpecs({ anchor: usageAnchor?.anchorAt, classId, ipAddress, now, studentId: quotaUserId, tokenLimits: limits })
+    ? tokenBucketSpecs({ anchor: usageAnchor, classId, ipAddress, now, studentId: quotaUserId, tokenLimits: limits })
     : [];
   const requestQuotaSpecs = requestQuotaBucketSpecs({
     classId,
@@ -217,6 +220,7 @@ export async function reserveAiTokenUsage({
     provider,
     requestLimits: normalizeAiRequestLimitSettings(requestLimits),
     role,
+    usageWindows,
     userId: quotaUserId
   });
   const reservationReference = adminDb!.collection("aiUsageReservations").doc(reservationId);
@@ -650,7 +654,7 @@ export async function getStudentAiUsageStatus(
     return studentStatusFromBuckets([]);
   }
 
-  const usageWindows = aiUsageWindows(now, usageAnchor.anchorAt);
+  const usageWindows = aiUsageWindows(now, usageAnchor);
   const limits = await tokenLimitsWithActiveAllowance({
     classId,
     dayBucket: usageWindows.day.bucketKey,
@@ -659,7 +663,7 @@ export async function getStudentAiUsageStatus(
     tokenLimits
   });
   const specs = tokenBucketSpecs({
-    anchor: usageAnchor.anchorAt,
+    anchor: usageAnchor,
     classId,
     ipAddress: "",
     now,
@@ -709,7 +713,7 @@ export async function grantStudentAiUsageAllowance({
   const now = new Date();
   const cleanPercent = normalizeAllowancePercent(percent);
   const usageAnchor = await getStudentAiUsageAnchor({ classId, studentId });
-  const dayBucket = usageAnchor ? aiUsageWindows(now, usageAnchor.anchorAt).day.bucketKey : dayBucketKey(now);
+  const dayBucket = usageAnchor ? aiUsageWindows(now, usageAnchor).day.bucketKey : dayBucketKey(now);
   const allowanceReference = aiUsageAllowanceReference(classId, studentId, dayBucket);
 
   if (isPostgresConfigured()) {
@@ -952,7 +956,7 @@ function tokenBucketSpecs({
   studentId,
   tokenLimits
 }: {
-  anchor?: Date | null;
+  anchor?: StudentAiUsageAnchor | null;
   classId?: string;
   ipAddress: string;
   now: Date;
@@ -975,6 +979,7 @@ function requestQuotaBucketSpecs({
   provider,
   requestLimits,
   role,
+  usageWindows,
   userId
 }: {
   classId: string;
@@ -983,10 +988,13 @@ function requestQuotaBucketSpecs({
   provider: string;
   requestLimits: AiRequestLimitSettings;
   role: "student" | "teacher";
+  usageWindows?: ReturnType<typeof aiUsageWindows> | null;
   userId: string;
 }): RequestQuotaSpec[] {
   const dayBucket = dayBucketKey(now);
   const weekBucket = weekBucketKey(now);
+  const studentDayBucket = usageWindows?.day.bucketKey ?? dayBucket;
+  const studentWeekBucket = usageWindows?.week.bucketKey ?? weekBucket;
   const classHash = stableHash(classId);
   const specs: RequestQuotaSpec[] = [
     requestQuotaBucketSpec({
@@ -1007,7 +1015,7 @@ function requestQuotaBucketSpecs({
     specs.push(
       requestQuotaBucketSpec({
         classId,
-        dayBucket,
+        dayBucket: studentDayBucket,
         limit: requestLimits.perStudentDaily,
         modelId,
         period: "day",
@@ -1019,7 +1027,7 @@ function requestQuotaBucketSpecs({
       }),
       requestQuotaBucketSpec({
         classId,
-        dayBucket: weekBucket,
+        dayBucket: studentWeekBucket,
         limit: requestLimits.perStudentWeekly,
         modelId,
         period: "week",
@@ -1179,11 +1187,27 @@ async function ensureStudentAiUsageAnchor({
 }): Promise<StudentAiUsageAnchor> {
   if (isPostgresConfigured()) {
     try {
-      return normalizeStudentAiUsageAnchor(await ensureAiUsageAnchorPostgres({
+      const existingAnchor = normalizeStudentAiUsageAnchor(await ensureAiUsageAnchorPostgres({
         anchorAt: now.toISOString(),
         classId,
+        dayAnchorAt: now.toISOString(),
         studentId
       }));
+      const activeAnchor = activeStudentAiUsageAnchor(existingAnchor, now);
+
+      if (
+        activeAnchor.dayAnchorAt.getTime() !== existingAnchor.dayAnchorAt.getTime() ||
+        activeAnchor.weekAnchorAt.getTime() !== existingAnchor.weekAnchorAt.getTime()
+      ) {
+        return normalizeStudentAiUsageAnchor(await updateAiUsageAnchorPostgres({
+          classId,
+          dayAnchorAt: activeAnchor.dayAnchorAt.toISOString(),
+          studentId,
+          weekAnchorAt: activeAnchor.weekAnchorAt.toISOString()
+        }));
+      }
+
+      return existingAnchor;
     } catch (caughtError) {
       if (!shouldFallbackToFirestoreWhenPostgresFails()) {
         throw caughtError;
@@ -1240,21 +1264,39 @@ function ensureStudentAiUsageAnchorFirestore({
     const snapshot = await transaction.get(reference);
 
     if (snapshot.exists) {
-      return anchorFromFirestoreData(classId, studentId, snapshot.data() ?? {});
+      const existingAnchor = anchorFromFirestoreData(classId, studentId, snapshot.data() ?? {});
+      const activeAnchor = activeStudentAiUsageAnchor(existingAnchor, now);
+
+      if (
+        activeAnchor.dayAnchorAt.getTime() !== existingAnchor.dayAnchorAt.getTime() ||
+        activeAnchor.weekAnchorAt.getTime() !== existingAnchor.weekAnchorAt.getTime()
+      ) {
+        transaction.set(reference, {
+          dayAnchorAt: activeAnchor.dayAnchorAt.toISOString(),
+          updatedAt: FieldValue.serverTimestamp(),
+          weekAnchorAt: activeAnchor.weekAnchorAt.toISOString()
+        }, { merge: true });
+      }
+
+      return activeAnchor;
     }
 
     transaction.set(reference, {
       anchorAt,
       classId,
       createdAt: FieldValue.serverTimestamp(),
+      dayAnchorAt: anchorAt,
       studentId,
-      updatedAt: FieldValue.serverTimestamp()
+      updatedAt: FieldValue.serverTimestamp(),
+      weekAnchorAt: anchorAt
     });
 
     return {
       anchorAt: now,
       classId,
-      studentId
+      dayAnchorAt: now,
+      studentId,
+      weekAnchorAt: now
     };
   });
 }
@@ -1263,19 +1305,33 @@ function aiUsageAnchorReference(classId: string, studentId: string) {
   return adminDb!.collection("aiUsageAnchors").doc(stableHash(`${classId}:${studentId}`));
 }
 
-function normalizeStudentAiUsageAnchor(anchor: { anchorAt: Date | string; classId: string; studentId: string }): StudentAiUsageAnchor {
+function normalizeStudentAiUsageAnchor(anchor: {
+  anchorAt: Date | string;
+  classId: string;
+  dayAnchorAt?: Date | string;
+  studentId: string;
+  weekAnchorAt?: Date | string;
+}): StudentAiUsageAnchor {
+  const anchorAt = dateFromUnknown(anchor.anchorAt);
+
   return {
-    anchorAt: dateFromUnknown(anchor.anchorAt),
+    anchorAt,
     classId: anchor.classId,
-    studentId: anchor.studentId
+    dayAnchorAt: dateFromUnknown(anchor.dayAnchorAt ?? anchorAt),
+    studentId: anchor.studentId,
+    weekAnchorAt: dateFromUnknown(anchor.weekAnchorAt ?? anchorAt)
   };
 }
 
 function anchorFromFirestoreData(classId: string, studentId: string, data: Record<string, unknown>): StudentAiUsageAnchor {
+  const anchorAt = dateFromUnknown(data.anchorAt);
+
   return {
-    anchorAt: dateFromUnknown(data.anchorAt),
+    anchorAt,
     classId,
-    studentId
+    dayAnchorAt: dateFromUnknown(data.dayAnchorAt ?? anchorAt),
+    studentId,
+    weekAnchorAt: dateFromUnknown(data.weekAnchorAt ?? anchorAt)
   };
 }
 
@@ -1305,11 +1361,24 @@ export function buildAnchoredAiUsageResetAt(now: Date, anchorAt: Date, period: "
   return anchoredBucketWindow(now, anchorAt, period).resetAt;
 }
 
-function aiUsageWindows(now: Date, anchorAt: Date) {
+function aiUsageWindows(now: Date, anchor: StudentAiUsageAnchor) {
   return {
-    day: anchoredBucketWindow(now, anchorAt, "day"),
-    week: anchoredBucketWindow(now, anchorAt, "week")
+    day: anchoredBucketWindow(now, anchor.dayAnchorAt, "day"),
+    week: anchoredBucketWindow(now, anchor.weekAnchorAt, "week")
   };
+}
+
+function activeStudentAiUsageAnchor(anchor: StudentAiUsageAnchor, now: Date): StudentAiUsageAnchor {
+  return {
+    ...anchor,
+    dayAnchorAt: anchoredBucketWindowExpired(now, anchor.dayAnchorAt, "day") ? now : anchor.dayAnchorAt,
+    weekAnchorAt: anchoredBucketWindowExpired(now, anchor.weekAnchorAt, "week") ? now : anchor.weekAnchorAt
+  };
+}
+
+function anchoredBucketWindowExpired(now: Date, anchorAt: Date, period: "day" | "week") {
+  const periodMs = period === "day" ? dayBucketDurationMs : weekBucketDurationMs;
+  return now.getTime() >= anchorAt.getTime() + periodMs;
 }
 
 function anchoredBucketWindow(now: Date, anchorAt: Date, period: "day" | "week") {

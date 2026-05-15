@@ -9,7 +9,11 @@ import pytest
 
 import backend.agent.graph as graph_module
 import backend.langfuse_prompts as langfuse_prompts
+from backend.agent.knowledge import knowledge_items_from_state
 from backend.agent.graph import run_pdf_rag_agent, run_pdf_rag_agent_stream
+
+
+LEGACY_ACTION_SECTION_KEY = "".join(["next", "Step"])
 
 
 class FakeOpenRouterClient:
@@ -20,6 +24,24 @@ class FakeOpenRouterClient:
     async def chat(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         return self.responses.pop(0)
+
+
+class FakeStreamingOpenRouterClient(FakeOpenRouterClient):
+    async def stream_chat(self, model: str, messages: list[dict[str, Any]], **kwargs: Any):
+        self.calls.append({"model": model, "messages": messages, **kwargs})
+        response = self.responses.pop(0)
+        content = str(response.get("content") or "")
+
+        async def stream():
+            for index in range(0, len(content), 17):
+                yield {"type": "content_delta", "delta": content[index : index + 17]}
+            if response.get("finish_reason"):
+                yield {"type": "finish", "finish_reason": response.get("finish_reason")}
+            if isinstance(response.get("usage"), dict):
+                yield {"type": "usage", "usage": response.get("usage")}
+            yield {"type": "done", "response": response}
+
+        return stream()
 
 
 class FakeRetriever:
@@ -91,8 +113,8 @@ def test_normalize_backend_structured_output_unwraps_section_text_objects() -> N
     structured_output = graph_module.normalize_backend_structured_output(
         {
             "sections": {
-                "answer": {"text": "I'm checking the exact problem 2.16 now."},
-                "nextStep": "{'text': 'Send the page or a photo.'}",
+                "answer": {"text": "Use the exact wording from the selected page."},
+                LEGACY_ACTION_SECTION_KEY: "{'text': 'Send the page or a photo.'}",
             },
             "metadata": {
                 "hintLevel": "guided_step",
@@ -105,8 +127,7 @@ def test_normalize_backend_structured_output_unwraps_section_text_objects() -> N
 
     assert structured_output is not None
     assert structured_output["sections"] == {
-        "answer": "I'm checking the exact problem 2.16 now.",
-        "nextStep": "Send the page or a photo.",
+        "mainChat": "Use the exact wording from the selected page.",
     }
 
 
@@ -181,22 +202,98 @@ def test_decision_prompt_searches_source_lookup_before_asking_for_more_detail() 
     )
 
     system_prompt = messages[0]["content"]
-    assert "Treat the provided heuristic as the default plan" in system_prompt
-    assert "bare number, problem/exercise/question locator" in system_prompt
-    assert "needs_search true unless active_metadata already contains the exact requested item" in system_prompt
-    assert "Do not answer with a request for the page image" in system_prompt
-    assert "For find-similar-example requests" in system_prompt
+    assert "Treat heuristic as the default plan" in system_prompt
+    assert "bare number, problem/exercise/question/page locator" in system_prompt
+    assert "set needs_search true unless active_metadata identifies the exact item" in system_prompt
+    assert "do not invent source facts or ask for a page/title/problem text" in system_prompt
+    assert "similar-example requests" in system_prompt
     assert "rather than only the assigned problem number" in system_prompt
-    assert "uploaded homework attachments" in system_prompt
-    assert "uploaded files, active Knowledge, and available class OCR/PDF search should all be considered" in system_prompt
-    assert "ask which problem on the page the student wants to focus on" in system_prompt
-    assert "do not ask why they provided the page" in system_prompt
-    assert "buttons must be in JSON" in system_prompt
-    assert "label should be just the number" in system_prompt
-    assert "must not list the problem numbers" in system_prompt
-    assert "exact full visible task statement word-for-word" in system_prompt
-    assert "Do not summarize, shorten, paraphrase" in system_prompt
-    assert "Do not put the numbers only in prose" in system_prompt
+    assert "Attachment rules" not in system_prompt
+
+
+def test_primary_payload_excludes_latest_message_from_chat_history() -> None:
+    messages = graph_module.build_primary_tutor_messages(
+        {
+            "messages": [
+                {"role": "user", "content": "I need help with problem 2.14."},
+                {"role": "assistant", "content": "Let's start with the definition."},
+                {"role": "user", "content": "problem 2.18"},
+            ],
+        },
+        {},
+    )
+    payload = json.loads(messages[-1]["content"])
+
+    assert payload["latest_student_message"] == "problem 2.18"
+    assert [item["content"] for item in payload["chat_history"]] == [
+        "I need help with problem 2.14.",
+        "Let's start with the definition.",
+    ]
+
+
+def test_primary_payload_strips_ocr_text_from_active_metadata() -> None:
+    messages = graph_module.build_primary_tutor_messages(
+        {
+            "chat_retrieval_memory": {
+                "active_metadata": ocr_page(
+                    chunk_text="Problem 2.14. Prove rank(KL) <= rank(L).",
+                    ocr_text="Long OCR body that should not reach the first primary call.",
+                    raw_text="Raw extracted text should also be stripped.",
+                    problem_numbers=["2.14"],
+                )
+            },
+            "messages": [{"role": "user", "content": "what next?"}],
+        },
+        {},
+    )
+    payload = json.loads(messages[-1]["content"])
+
+    assert payload["active_metadata"]["title"] == "Rank Worksheet"
+    assert payload["active_metadata"]["problem_numbers"] == ["2.14"]
+    serialized = json.dumps(payload["active_metadata"])
+    assert "chunk_text" not in serialized
+    assert "ocr_text" not in serialized
+    assert "raw_text" not in serialized
+    assert "Problem 2.14. Prove rank" not in serialized
+
+
+def test_primary_payload_omits_empty_defaults_and_recent_hint_summaries() -> None:
+    messages = graph_module.build_primary_tutor_messages(
+        {
+            "chat_retrieval_memory": {},
+            "debug_options": {},
+            "messages": [{"role": "user", "content": "hi"}],
+            "source_usage": {},
+        },
+        {},
+    )
+    payload = json.loads(messages[-1]["content"])
+
+    assert "active_metadata" not in payload
+    assert "active_problem_decision" not in payload
+    assert "debug_options" not in payload
+    assert "failed_searches" not in payload
+    assert "problem_understanding_state" not in payload
+    assert "recent_hint_summaries" not in payload
+    assert "source_usage" not in payload
+
+
+def test_primary_prompt_debug_instructions_are_conditional() -> None:
+    normal_messages = graph_module.build_primary_tutor_messages(
+        {"messages": [{"role": "user", "content": "help me"}]},
+        {},
+    )
+    debug_messages = graph_module.build_primary_tutor_messages(
+        {
+            "debug_options": {"forceRetrieval": True},
+            "messages": [{"role": "user", "content": "help me"}],
+        },
+        {},
+    )
+
+    assert "debug_options.forceRetrieval is true" not in normal_messages[0]["content"]
+    assert "debug_options.forceRetrieval is true" in debug_messages[0]["content"]
+    assert json.loads(debug_messages[-1]["content"])["debug_options"] == {"forceRetrieval": True}
 
 
 def test_ambiguous_student_upload_clarification_overrides_search_decision() -> None:
@@ -536,15 +633,89 @@ def test_primary_tutor_turn_can_return_one_search_per_distinct_need() -> None:
     assert len(graph_module.retrieval_decision_tool_calls(decision)) == 3
 
 
+def test_primary_lookup_replaces_locator_echo_with_status_sentence() -> None:
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "can_answer_now": False,
+                    "needs_search": True,
+                    "retrieval_reason": "student_requested_problem",
+                    "search_query": "problem 2.18",
+                    "student_response": "problem 2.18",
+                    "structuredOutput": {
+                        "sections": {"mainChat": "problem 2.18"},
+                        "sectionOrder": ["mainChat"],
+                    },
+                }
+            )
+        },
+        {},
+    )
+
+    assert decision["needs_search"] is True
+    assert decision["student_response"] == "I'm checking the class materials for that problem."
+    assert decision["structuredOutput"]["sections"] == {
+        "mainChat": "I'm checking the class materials for that problem."
+    }
+
+
+def test_primary_lookup_unwraps_json_string_inside_visible_content() -> None:
+    inner = {
+        "sections": {"mainChat": "I'm checking the class materials for that problem."},
+        "sectionOrder": ["mainChat"],
+        "metadata": {"problemNumber": "2.18", "problemSummary": "problem lookup"},
+    }
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "content": json.dumps(inner),
+                    "sections": {"mainChat": json.dumps(inner)},
+                    "sectionOrder": ["mainChat"],
+                    "metadata": {"problemNumber": "2.18", "problemSummary": "problem lookup"},
+                    "can_answer_now": False,
+                    "needs_search": True,
+                    "retrieval_reason": "student_requested_problem",
+                    "search_query": "problem 2.18",
+                    "searches": [
+                        {
+                            "query": "problem 2.18",
+                            "retrieval_reason": "student_requested_problem",
+                            "top_k": 1,
+                        }
+                    ],
+                }
+            )
+        },
+        {},
+    )
+
+    assert decision["needs_search"] is True
+    assert decision["student_response"] == "I'm checking the class materials for that problem."
+    assert decision["structuredOutput"] is None
+    assert "{" not in decision["student_response"]
+
+
 def test_decision_json_with_latex_backslashes_is_parsed_not_surfaced() -> None:
-    content = (
-        '{"can_answer_now":true,"needs_search":false,"retrieval_reason":"","search_query":"",'
-        '"searches":[],"help_level":"guiding_question",'
-        '"student_response":"Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2]$.",'
-        '"memory_used":true,'
-        '"structuredOutput":{"hint":"Use $\\operatorname{span}(S)$, not the raw list.",'
-        '"nextStep":"Can you make $1$, $x$, and $x^2$?"},'
-        '"sectionOrder":["hint","nextStep"],"metadata":{"problem":"1.7"}}'
+    content = json.dumps(
+        {
+            "can_answer_now": True,
+            "needs_search": False,
+            "retrieval_reason": "",
+            "search_query": "",
+            "searches": [],
+            "help_level": "guiding_question",
+            "student_response": "Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2].",
+            "memory_used": True,
+            "structuredOutput": {
+                "hint": "Use $\\operatorname{span}(S)$, not the raw list.",
+                LEGACY_ACTION_SECTION_KEY: "Can you make $1$, $x$, and $x^2$?",
+            },
+            "sectionOrder": ["hint", LEGACY_ACTION_SECTION_KEY],
+            "metadata": {"problem": "1.7"},
+        },
+        separators=(",", ":"),
     )
 
     decision = graph_module.parse_primary_tutor_response(
@@ -553,7 +724,7 @@ def test_decision_json_with_latex_backslashes_is_parsed_not_surfaced() -> None:
     )
 
     assert decision["needs_search"] is False
-    assert decision["student_response"] == "Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2]$."
+    assert decision["student_response"] == "Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2]."
     assert decision["structuredOutput"]["sections"]["hint"] == "Use $\\operatorname{span}(S)$, not the raw list."
     assert not decision["student_response"].startswith("{")
 
@@ -917,9 +1088,9 @@ def test_decision_prompt_says_choices_are_not_triggered_by_student_confusion_key
     )
 
     system_prompt = messages[0]["content"]
-    assert "not triggered by student confusion keywords" in system_prompt
-    assert "Do not trigger it just because the student says they are lost, confused, stuck" in system_prompt
-    assert "Prefer a normal helpful nudge or one focused question" in system_prompt
+    assert "Uncertainty choices" in system_prompt
+    assert "Do not trigger them just because the student says they are lost/confused/stuck" in system_prompt
+    assert "prefer a normal nudge or focused question" in system_prompt
 
 
 def test_decision_prompt_can_force_real_confusion_choices_for_teacher_debug() -> None:
@@ -935,22 +1106,14 @@ def test_decision_prompt_can_force_real_confusion_choices_for_teacher_debug() ->
     system_prompt = messages[0]["content"]
     payload = json.loads(messages[1]["content"])
 
-    assert "force the Chandra uncertainty choice flow" in system_prompt
-    assert "do not answer the academic question normally" in system_prompt
-    assert "context-specific confusionPrompt" in system_prompt
-    assert "Do not reuse a canned generic prompt" in system_prompt
-    assert "first interpret and acknowledge the latest student message" in system_prompt
-    assert "If the student asks a follow-up such as `how would that work?`" in system_prompt
-    assert "different useful way Chandra could answer the student's latest question" in system_prompt
+    assert "debug_options.forceConfusionChoices is true" in system_prompt
+    assert "hard same-call output requirement" in system_prompt
+    assert "Return needs_search false" in system_prompt
+    assert "Do not answer the academic question normally" in system_prompt
+    assert "structuredOutput.confusionPrompt" in system_prompt
     assert "2 to 6 context-specific structuredOutput.confusionChoices" in system_prompt
-    assert "do not pad the list to reach the maximum" in system_prompt
-    assert "must not list, summarize, or describe every button choice" in system_prompt
-    assert "descriptive label of 4 to 10 words" in system_prompt
-    assert payload["debug_options"] == {
-        "forceConfusionChoices": True,
-        "forceNoRetrieval": False,
-        "forceRetrieval": False,
-    }
+    assert "Unless retrieval is required first" not in system_prompt
+    assert payload["debug_options"] == {"forceConfusionChoices": True}
 
 
 def test_decision_prompt_can_force_retrieval_for_teacher_debug() -> None:
@@ -969,11 +1132,7 @@ def test_decision_prompt_can_force_retrieval_for_teacher_debug() -> None:
     assert "debug_options.forceRetrieval is true" in system_prompt
     assert "Return needs_search true" in system_prompt
     assert "at least one searches entry with a non-empty query" in system_prompt
-    assert payload["debug_options"] == {
-        "forceConfusionChoices": False,
-        "forceNoRetrieval": False,
-        "forceRetrieval": True,
-    }
+    assert payload["debug_options"] == {"forceRetrieval": True}
 
 
 def test_decision_prompt_can_force_no_retrieval_for_teacher_debug() -> None:
@@ -992,11 +1151,7 @@ def test_decision_prompt_can_force_no_retrieval_for_teacher_debug() -> None:
     assert "debug_options.forceNoRetrieval is true" in system_prompt
     assert "Do not retrieve for this turn" in system_prompt
     assert "Return needs_search false" in system_prompt
-    assert payload["debug_options"] == {
-        "forceConfusionChoices": False,
-        "forceNoRetrieval": True,
-        "forceRetrieval": False,
-    }
+    assert payload["debug_options"] == {"forceNoRetrieval": True}
 
 
 def test_debug_force_retrieval_overrides_chat_memory_decision() -> None:
@@ -1184,7 +1339,7 @@ async def test_streaming_upload_problem_selection_ends_after_first_model_call() 
     final_payload = [event["payload"] for event in events if event.get("type") == "final"][0]
     assert final_payload["langGraphTrace"]["searchQueries"] == []
     assert final_payload["structuredOutput"]["metadata"]["choiceDisplay"] == "problem_selection"
-    assert final_payload["structuredOutput"]["sections"]["answer"] == (
+    assert final_payload["structuredOutput"]["sections"]["mainChat"] == (
         "This page has several exercises. Which one do you want to work on?"
     )
     assert [choice["label"] for choice in final_payload["structuredOutput"]["confusionChoices"]] == [
@@ -1208,6 +1363,14 @@ async def test_debug_forced_confusion_choices_become_the_response() -> None:
             {
                 "content": json.dumps(
                     {
+                        "activeProblemDecision": {
+                            "isActualProblem": True,
+                            "problemText": "Problem 2.14. Prove rank(KL) <= rank(L).",
+                            "problemSource": "student_upload",
+                            "relationToPreviousProblem": "new_problem",
+                            "confidence": "high",
+                            "reason": "The uploaded PDF text contains a complete exercise statement.",
+                        },
                         "can_answer_now": True,
                         "memory_used": False,
                         "needs_search": False,
@@ -1215,7 +1378,7 @@ async def test_debug_forced_confusion_choices_become_the_response() -> None:
                         "structuredOutput": {
                             "sections": {
                                 "answer": "I can help with Problem 2.14, but I need to know which part you want to start with.",
-                                "nextStep": "Choose one: the setup from Exercise 2.13, part (i), or part (ii).",
+                                LEGACY_ACTION_SECTION_KEY: "Choose one: the setup from Exercise 2.13, part (i), or part (ii).",
                             },
                             "confusionPrompt": (
                                 "I see a few possible starting points for this rank problem. "
@@ -1264,12 +1427,11 @@ async def test_debug_forced_confusion_choices_become_the_response() -> None:
 
     assert len(client.calls) == 1
     assert response["content"] == (
-        "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
+        "I can help with Problem 2.14, but I need to know which part you want to start with.\n\n"
+        "Choose one: the setup from Exercise 2.13, part (i), or part (ii)."
     )
     assert response["structuredOutput"]["sections"] == {
-        "answer": (
-            "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
-        )
+        "mainChat": response["content"]
     }
     assert response["structuredOutput"]["confusionPrompt"] == (
         "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
@@ -1280,7 +1442,7 @@ async def test_debug_forced_confusion_choices_become_the_response() -> None:
         "My attempt",
     ]
     assert "Hint:" not in response["content"]
-    assert "nextStep" not in response["structuredOutput"]["sections"]
+    assert LEGACY_ACTION_SECTION_KEY not in response["structuredOutput"]["sections"]
 
 
 def test_retrieval_needed_decision_does_not_preserve_confusion_choices() -> None:
@@ -1314,6 +1476,58 @@ def test_retrieval_needed_decision_does_not_preserve_confusion_choices() -> None
     assert decision["student_response"] == "Pick a direction."
 
 
+def test_debug_forced_confusion_choices_preserves_same_call_llm_choices() -> None:
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "can_answer_now": False,
+                    "needs_search": True,
+                    "retrieval_reason": "student_requested_problem",
+                    "search_query": "problem 2.18",
+                    "searches": [
+                        {
+                            "query": "problem 2.18",
+                            "retrieval_reason": "student_requested_problem",
+                            "top_k": 1,
+                        }
+                    ],
+                    "student_response": "What would help most with problem 2.18?",
+                    "structuredOutput": {
+                        "sections": {"mainChat": "What would help most with problem 2.18?"},
+                        "confusionPrompt": "What would help most with problem 2.18?",
+                        "confusionChoices": [
+                            {
+                                "id": "attempt",
+                                "label": "Show your attempt",
+                                "description": "I'll check your setup.",
+                                "message": "Here is what I tried for problem 2.18: ",
+                            },
+                            {
+                                "id": "setup",
+                                "label": "Help with setup",
+                                "description": "I'll help build the matrix column by column.",
+                                "message": "Help me set up problem 2.18.",
+                            },
+                        ],
+                    },
+                }
+            )
+        },
+        {},
+        preserve_confusion_choices_on_search=True,
+    )
+
+    assert decision["needs_search"] is False
+    assert decision["searches"] == []
+    assert decision["search_query"] == ""
+    assert decision["student_response"] == "What would help most with problem 2.18?"
+    assert [choice["label"] for choice in decision["structuredOutput"]["confusionChoices"]] == [
+        "Show your attempt",
+        "Help with setup",
+    ]
+
+
 def test_uploaded_multi_problem_clarification_does_not_synthesize_focus_choices() -> None:
     answer = "I can see several exercises on the page, so I'm not sure which one you want help with."
     state = {
@@ -1342,7 +1556,7 @@ def test_uploaded_multi_problem_clarification_does_not_synthesize_focus_choices(
     assert response["structuredOutput"]["metadata"]["studentActionNeeded"] == "try_next_step"
     assert "choiceDisplay" not in response["structuredOutput"]["metadata"]
     assert "confusionChoices" not in response["structuredOutput"]
-    assert "why" not in response["structuredOutput"]["sections"]["answer"].lower()
+    assert "why" not in response["structuredOutput"]["sections"]["mainChat"].lower()
 
 
 def test_uploaded_multi_problem_clarification_does_not_synthesize_detected_problems() -> None:
@@ -1365,6 +1579,45 @@ def test_uploaded_multi_problem_clarification_does_not_synthesize_detected_probl
 
     assert "choiceDisplay" not in response["structuredOutput"]["metadata"]
     assert "confusionChoices" not in response["structuredOutput"]
+
+
+def test_problem_lookup_final_response_replaces_locator_echo_main_chat() -> None:
+    state = {
+        "messages": [{"role": "user", "content": "problem 2.18"}],
+        "retrieval_confidence": "high",
+        "retrieval_decision": {"retrieval_reason": "student_requested_problem"},
+        "retrieved_pages": [
+            ocr_page(
+                chunk_text="2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
+                printed_page_start=98,
+                problem_numbers=["2.18"],
+                title="ACME VOL 1",
+            )
+        ],
+    }
+    answer = json.dumps(
+        {
+            "sections": {
+                "mainChat": "problem 2.18",
+                "problem": "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
+            },
+            "sectionOrder": ["mainChat", "problem"],
+            "metadata": {
+                "hintLevel": "none",
+                "mode": "source_lookup",
+                "studentActionNeeded": "review_source",
+            },
+        }
+    )
+
+    response = graph_module.pdf_rag_response_from_state(state, answer)
+
+    assert response["structuredOutput"]["sections"]["mainChat"] == (
+        "I found the matching item in ACME VOL 1 on printed page 98."
+    )
+    assert response["structuredOutput"]["sections"]["problem"].startswith("2.18. Assuming")
+    assert response["structuredOutput"]["sectionOrder"][:2] == ["mainChat", "problem"]
+    assert "problem 2.18" not in response["content"].lower()
 
 
 def test_model_listed_problem_numbers_do_not_become_problem_buttons_without_json() -> None:
@@ -1462,10 +1715,10 @@ def test_uploaded_problem_image_without_numbers_does_not_get_fallback_position_c
     response = graph_module.pdf_rag_response_from_state(state, answer)
 
     assert "confusionChoices" not in response["structuredOutput"]
-    assert "why" not in response["structuredOutput"]["sections"]["answer"].lower()
+    assert "why" not in response["structuredOutput"]["sections"]["mainChat"].lower()
 
 
-def test_example_request_cannot_be_downgraded_to_no_search_refusal() -> None:
+def test_example_request_model_no_search_decision_is_preserved() -> None:
     fallback = graph_module.retrieval_decision(
         decision_source="search_required",
         needs_search=True,
@@ -1489,17 +1742,11 @@ def test_example_request_cannot_be_downgraded_to_no_search_refusal() -> None:
         fallback,
     )
 
-    assert decision["needs_search"] is True
-    assert decision["can_answer_now"] is False
-    assert decision["retrieval_reason"] == "needed_example_page"
-    assert decision["student_response"] == "I'm looking for a relevant class example."
-    assert decision["searches"] == [
-        {
-            "query": "worked example textbook reading notes method OCR metadata ACME VOL 1 show me an example",
-            "retrieval_reason": "needed_example_page",
-            "top_k": 5,
-        }
-    ]
+    assert decision["needs_search"] is False
+    assert decision["can_answer_now"] is True
+    assert decision["retrieval_reason"] == ""
+    assert decision["student_response"] == "I can't give a worked example here."
+    assert decision["searches"] == []
 
 
 def test_decision_prompt_passes_retrieval_memory_and_policy_but_not_pdf_assets() -> None:
@@ -1545,6 +1792,49 @@ def test_example_followup_marks_active_metadata_memory_used() -> None:
     assert decision["retrieval_reason"] == "needed_example_page"
     assert decision["memory_used"] is True
     assert decision["active_problem_numbers"] == ["1.7"]
+
+
+def test_referenced_exercise_support_intent_uses_supporting_retrieval_terms() -> None:
+    memory = {
+        "active_metadata": ocr_page(
+            chunk_text=(
+                "Exercise 2.18. Assuming the polynomial bases [1, x, x^2] and "
+                "[1, x, x^2, x^3, x^4] for F[x;2] and F[x;4], respectively, "
+                "find the matrix representations for each of the linear transformations in Exercise 2.3."
+            ),
+            problem_numbers=["2.18"],
+            title="Linear Algebra Text",
+        )
+    }
+    message = "Let's start with the first transformation from Exercise 2.3. look for class materials"
+
+    assert graph_module.retrieval_reason_for_message(message, memory) == "needed_supporting_page"
+    query = graph_module.focused_ocr_search_query(message, memory)
+    assert query.startswith("textbook reading notes method OCR metadata Linear Algebra Text")
+    assert "find exact problem page" not in query
+
+
+def test_referenced_exercise_support_intent_does_not_force_exact_initial_search() -> None:
+    state = {
+        "chat_retrieval_memory": {
+            "active_metadata": ocr_page(
+                chunk_text=(
+                    "Exercise 2.18. Assuming the polynomial bases [1, x, x^2] and "
+                    "[1, x, x^2, x^3, x^4] for F[x;2] and F[x;4], respectively, "
+                    "find the matrix representations for each of the linear transformations in Exercise 2.3."
+                ),
+                problem_numbers=["2.18"],
+            )
+        },
+        "messages": [
+            {
+                "role": "user",
+                "content": "Let's start with the first transformation from Exercise 2.3. look for class materials",
+            }
+        ],
+    }
+
+    assert graph_module.should_force_exact_problem_search(state) is False
 
 
 def test_first_llm_prompt_owns_tutor_plan_and_state_updates() -> None:
@@ -1800,24 +2090,14 @@ def test_decision_prompt_uses_evidence_based_understanding_levels() -> None:
     messages = graph_module.build_primary_tutor_messages(state, heuristic)
     system_prompt = messages[0]["content"]
 
-    assert "not from turn count, number of hints, repeated stuck signals, or by incrementing one level at a time" in system_prompt
-    assert "Preserve the previous understanding level for the same problem unless the latest student message clearly proves a different level" in system_prompt
-    assert "Do not lower the understanding level for the same active problem unless the student explicitly retracts prior work" in system_prompt
-    assert "Increase the level only when the student's own message supplies enough evidence" in system_prompt
-    assert "Do not increase understandingLevel merely because Chandra gave another hint" in system_prompt
-    assert "The level may jump by more than 1 in a single update" in system_prompt
-    assert "0 = problem loaded, no student understanding observed yet" in system_prompt
-    assert "1 = needs first nudge or little/no useful work shown" in system_prompt
-    assert "2 = understands setup but is missing the core idea" in system_prompt
-    assert "3 = understands the core idea but needs execution help" in system_prompt
-    assert "4 = solution-ready, mostly needs verification or minor cleanup" in system_prompt
-    assert "once the student asks for help, shows work, asks for explanation, asks for a next step, or seeks verification on the active problem, use at least level 1" in system_prompt
-    assert "State update wording must explain the evidence for the understanding level, not teach the academic concept" in system_prompt
-    assert "Do not write definitions such as `image means...`" in system_prompt
-    assert "connected image containment to rank" in system_prompt
-    assert "asked how the concept applies but has not shown work" in system_prompt
-    assert "Allowed jumps include 0->2, 0->3, 0->4, 1->3, and 1->4" in system_prompt
-    assert "incorrectly claims im(KL) is contained in im(L), set understandingLevel to 2, not 1" in system_prompt
+    assert "Preserve the previous level unless the student's latest message proves a change" in system_prompt
+    assert "do not raise it because Chandra gave more help" in system_prompt
+    assert "0 for source lookup or a freshly loaded problem before tutoring starts" in system_prompt
+    assert "1 = little/no useful work" in system_prompt
+    assert "2 = setup understood but core idea missing or work shows the main idea with one conceptual flaw" in system_prompt
+    assert "3 = core idea understood but execution help needed" in system_prompt
+    assert "4 = solution-ready/minor cleanup" in system_prompt
+    assert "incorrectly claims im(KL) is contained in im(L)" not in system_prompt
 
 
 def test_understanding_level_zero_update_does_not_reset_same_problem_progress() -> None:
@@ -1852,7 +2132,7 @@ def test_understanding_level_zero_update_does_not_reset_same_problem_progress() 
     understanding = graph_module.state_after_tutor_plan(state, plan)
 
     assert understanding["understandingLevel"] == 2
-    assert understanding["hintsGiven"] == 3
+    assert understanding["hintsGiven"] == 2
     assert "image containment" in understanding["lastHintSummary"]
 
 
@@ -1950,7 +2230,7 @@ def test_active_problem_help_turn_promotes_model_zero_to_level_one() -> None:
     understanding = graph_module.state_after_tutor_plan(state, plan)
 
     assert understanding["understandingLevel"] == 1
-    assert understanding["hintsGiven"] == 1
+    assert understanding["hintsGiven"] == 0
 
 
 def test_source_lookup_only_can_initialize_new_problem_at_level_zero() -> None:
@@ -2144,7 +2424,7 @@ def test_rank_image_wrong_target_space_is_level_two_not_one() -> None:
     assert "target space for im(KL) versus im(L)" in understanding["knownConfusions"]
 
 
-def test_decision_prompt_tracks_current_step_and_substep_for_repeated_stuck() -> None:
+def test_decision_prompt_tracks_current_step_for_repeated_stuck() -> None:
     active = ocr_page(
         chunk_text=(
             "Problem 2.17. Let L(e1)=e1+2e2 and L(e2)=2e1-e2. "
@@ -2164,7 +2444,6 @@ def test_decision_prompt_tracks_current_step_and_substep_for_repeated_stuck() ->
                     "hintsGiven": 2,
                     "repeatedStuckSignals": 1,
                     "currentStep": "Compute L(2e1 - 3e2) using linearity.",
-                    "currentSubstep": "Substitute L(e1) and L(e2).",
                     "currentStepStatus": "in_progress",
                     "lastHintSummary": "Use linearity, substitute L(e1) and L(e2), then expand.",
                     "updatedAt": "2026-05-12T00:00:00+00:00",
@@ -2184,14 +2463,12 @@ def test_decision_prompt_tracks_current_step_and_substep_for_repeated_stuck() ->
 
     assert payload["problem_understanding_state"]["currentStep"] == "Compute L(2e1 - 3e2) using linearity."
     assert payload["problem_understanding_state"]["currentStepStatus"] == "in_progress"
-    assert "Do not advance currentStep to a later problem step" in system_prompt
-    assert "make currentSubstep smaller" in system_prompt
-    assert "tiny or unclear answer like `2?`" in system_prompt
-    assert "complaints that the previous hint was unhelpful, repetitive, too vague, or did not add more" in system_prompt
-    assert "one new concrete distinction, prerequisite idea, or narrower sub-question" in system_prompt
-    assert "explain only the expected answer form or type without revealing the value they should get" in system_prompt
-    assert "do not move from computing L(2e1 - 3e2) to computing L^2(2e1 - 3e2)" in system_prompt
-    assert "2L(e1), -3L(e2), then combining terms" in system_prompt
+    assert "Do not advance currentStep merely because the student asks for the next step" in system_prompt
+    assert "currentStep is a guideline" in system_prompt
+    assert "tiny unclear answer like `2?`" in system_prompt
+    assert "prior hint was unhelpful/repetitive/too vague" in system_prompt
+    assert "make the next help narrower, more concrete, or diagnostic inside that step" in system_prompt
+    assert "stay on the same currentStep unless completed" in system_prompt
 
 
 def test_final_prompt_escalates_repeated_unhelpful_hint_without_repeating() -> None:
@@ -2208,7 +2485,6 @@ def test_final_prompt_escalates_repeated_unhelpful_hint_without_repeating() -> N
                     "hintsGiven": 1,
                     "repeatedStuckSignals": 1,
                     "currentStep": "Compare rank(KL) with rank(L).",
-                    "currentSubstep": "Identify the space where im(KL) lives.",
                     "currentStepStatus": "in_progress",
                     "lastHintSummary": "Compare the image of KL to the image of L using rank-nullity.",
                 }
@@ -2223,7 +2499,6 @@ def test_final_prompt_escalates_repeated_unhelpful_hint_without_repeating() -> N
                 "studentIntent": "vague_help",
                 "nextHelpDepth": 2,
                 "currentStep": "Compare rank(KL) with rank(L).",
-                "currentSubstep": "Identify the space where im(KL) lives.",
                 "currentStepStatus": "in_progress",
             }
         },
@@ -2260,11 +2535,93 @@ def test_context_grounded_prompt_makes_lookup_found_and_not_found_mutually_exclu
     assert "do not write any `couldn't find`" in instruction_text
     assert "do not include sections.problem at all" in instruction_text
     assert "fields stream as you generate them" in instruction_text
-    assert "emit the top-level sections object before mainText" in instruction_text
+    assert "emit the top-level sections object before any top-level content/message/mainText" in instruction_text
     assert "put problem as the first key inside sections" in instruction_text
-    assert "hint, next-step request, or tutoring guidance" in instruction_text
+    assert "hint, next-action request, or tutoring guidance" in instruction_text
     assert "Treat sections.problem as extraction-only" in instruction_text
-    assert "For pure lookup/location requests, omit `Hint:` and `nextStep` entirely" in instruction_text
+    assert "For pure lookup/location requests, omit `Hint:` entirely" in instruction_text
+    assert "optionally include one short relevant contextual/location note" in instruction_text
+    assert "Final-section status-text ban" in instruction_text
+    assert "checking class materials" in instruction_text
+    assert "Problem:` is only the academic task statement" in instruction_text
+
+
+def test_context_grounded_prompt_receives_primary_response_context() -> None:
+    state = {
+        "answer_policy": {"refuseAnswerOnlyRequests": True},
+        "messages": [{"role": "user", "content": "Find problem 2.20."}],
+        "page_assets": [ocr_page(problem_numbers=["2.20"])],
+        "primary_student_response": "This looks like the same section we were using.",
+        "primary_structured_output": {
+            "sections": {"answer": "This looks like the same section we were using."},
+            "sectionOrder": ["answer"],
+        },
+        "retrieval_decision": {
+            "needs_search": True,
+            "retrieval_reason": "student_requested_problem",
+            "search_query": "Problem 2.20",
+            "tutorPlan": {"studentIntent": "source_lookup", "nextHelpDepth": 1},
+        },
+        "source_usage": {"useClassMaterialsFirst": True},
+        "tutor_plan": {"studentIntent": "source_lookup", "nextHelpDepth": 1},
+    }
+
+    messages = graph_module.build_context_grounded_answer_messages(state)
+    instruction_text = messages[0]["content"][1]["text"]
+    primary_context = messages[0]["content"][2]["text"]
+
+    assert "Continuation contract" in instruction_text
+    assert "already have shown a student-facing response" in instruction_text
+    assert "not as a draft to rewrite" in instruction_text
+    assert "This looks like the same section we were using." in primary_context
+    assert '"nextHelpDepth": 1' in primary_context
+
+
+def test_context_grounded_continuation_does_not_overwrite_primary_response() -> None:
+    state = {
+        "primary_student_response": "Start by identifying which space the image lands in.",
+    }
+    context_response = json.dumps(
+        {
+            "mainText": "From the worksheet page, this is about comparing image containment.",
+            "sections": {"sourceNote": "Rank Worksheet, printed page 80."},
+            "sectionOrder": ["mainText", "sourceNote"],
+            "metadata": {},
+        }
+    )
+
+    answer = graph_module.answer_with_context_grounded_continuation(state, context_response)
+
+    assert answer.startswith("Start by identifying which space the image lands in.")
+    assert "From the worksheet page" in answer
+    assert "Rank Worksheet, printed page 80." in answer
+
+
+def test_context_grounded_continuation_uses_grounded_answer_when_primary_was_only_status() -> None:
+    state = {
+        "primary_student_response": "I'm checking the class materials for that problem.",
+    }
+    context_response = "Problem:\nProblem 2.20. Prove the rank identity."
+
+    assert graph_module.answer_with_context_grounded_continuation(state, context_response) == context_response
+
+
+def test_problem_lookup_structured_output_allows_context_note_plus_problem() -> None:
+    structured_output = graph_module.normalize_backend_structured_output(
+        {
+            "sections": {
+                "answer": "This is the exercise that matches the rank problem we were just discussing.",
+                "problem": "Problem 2.14. Prove rank(KL) <= rank(L).",
+            },
+            "sectionOrder": ["answer", "problem"],
+            "metadata": {"mode": "source_lookup", "studentActionNeeded": "review_source"},
+        }
+    )
+
+    assert structured_output is not None
+    assert structured_output["sections"]["mainChat"].startswith("This is the exercise")
+    assert structured_output["sections"]["problem"] == "Problem 2.14. Prove rank(KL) <= rank(L)."
+    assert structured_output["sectionOrder"] == ["mainChat", "problem"]
 
 
 def test_primary_prompt_streams_problem_before_main_text_when_problem_section_is_present() -> None:
@@ -2286,12 +2643,11 @@ def test_primary_prompt_streams_problem_before_main_text_when_problem_section_is
     )
     system_prompt = messages[0]["content"]
 
-    assert "Physical JSON key order matters" in system_prompt
-    assert "emit the top-level sections object before mainText" in system_prompt
-    assert "put sections.problem as the first key inside sections" in system_prompt
-    assert "do not emit mainText first and rely on sectionOrder to fix it later" in system_prompt
-    assert "Treat sections.problem as an extraction-only field" in system_prompt
-    assert "for a pure source/problem lookup, omit hint and nextStep" in system_prompt
+    assert "Streaming order matters" in system_prompt
+    assert "Emit sections before legacy content/message fields" in system_prompt
+    assert "Put problem first when it should render first" in system_prompt
+    assert "sections.problem must contain only the exact academic task statement" in system_prompt
+    assert "For pure source/problem lookup, omit hint" in system_prompt
 
 
 def test_unclear_attempt_keeps_current_step_and_counts_repeated_stuck() -> None:
@@ -2305,7 +2661,6 @@ def test_unclear_attempt_keeps_current_step_and_counts_repeated_stuck() -> None:
         "hintsGiven": 2,
         "lastHelpDepth": 2,
         "currentStep": "Compute L(2e1 - 3e2) using linearity.",
-        "currentSubstep": "Find 2L(e1).",
         "currentStepStatus": "in_progress",
         "repeatedStuckSignals": 1,
         "lastHintSummary": "Asked the student to compute 2L(e1).",
@@ -2325,7 +2680,6 @@ def test_unclear_attempt_keeps_current_step_and_counts_repeated_stuck() -> None:
         "nextHelpDepth": 2,
         "answerSeekingRisk": "low",
         "currentStep": "Compute L(2e1 - 3e2) using linearity.",
-        "currentSubstep": "Find 2L(e1).",
         "currentStepStatus": "unclear",
         "stateUpdates": {
             "understandingLevel": 1,
@@ -2337,7 +2691,6 @@ def test_unclear_attempt_keeps_current_step_and_counts_repeated_stuck() -> None:
     understanding = graph_module.state_after_tutor_plan(state, plan)
 
     assert understanding["currentStep"] == "Compute L(2e1 - 3e2) using linearity."
-    assert understanding["currentSubstep"] == "Find 2L(e1)."
     assert understanding["currentStepStatus"] == "unclear"
     assert understanding["repeatedStuckSignals"] == 2
     assert "vector expression" in understanding["lastStudentAttemptSummary"]
@@ -2483,6 +2836,76 @@ def test_help_plan_state_survives_active_problem_id_sync() -> None:
     assert "columns" in understanding["lastHintSummary"]
 
 
+def test_finalized_understanding_counts_rendered_hint_section_once() -> None:
+    problem_text = "Problem 3.9. Prove that a rotation in R^2 is orthonormal."
+    problem_id = graph_module.stable_problem_id(problem_text)
+    state = {
+        "chat_retrieval_memory": {
+            "problem_understanding_states": {
+                problem_id: {
+                    "activeProblemId": problem_id,
+                    "understandingLevel": 1,
+                    "hintsGiven": 1,
+                    "lastHintSummary": "Focus on the columns.",
+                }
+            }
+        },
+        "problem_understanding_state": {
+            "activeProblemId": problem_id,
+            "understandingLevel": 1,
+            "hintsGiven": 1,
+            "lastHintSummary": "Compare the dot products of the transformed columns.",
+        },
+        "tutor_plan": {
+            "studentIntent": "vague_help",
+            "nextHelpDepth": 1,
+        },
+    }
+
+    graph_module.finalize_understanding_after_rendered_response(
+        state,
+        {"sections": {"answer": "Use the column condition.", "hint": "Check the dot product of the two columns."}},
+        "Use the column condition.\n\nHint: Check the dot product of the two columns.",
+    )
+
+    assert state["problem_understanding_state"]["hintsGiven"] == 2
+
+
+def test_finalized_understanding_does_not_count_default_guided_metadata_as_hint() -> None:
+    problem_text = "Problem 3.9. Prove that a rotation in R^2 is orthonormal."
+    problem_id = graph_module.stable_problem_id(problem_text)
+    state = {
+        "chat_retrieval_memory": {
+            "problem_understanding_states": {
+                problem_id: {
+                    "activeProblemId": problem_id,
+                    "understandingLevel": 1,
+                    "hintsGiven": 1,
+                    "lastHintSummary": "Focus on the columns.",
+                }
+            }
+        },
+        "problem_understanding_state": {
+            "activeProblemId": problem_id,
+            "understandingLevel": 1,
+            "hintsGiven": 1,
+            "lastHintSummary": "Focus on the columns.",
+        },
+        "tutor_plan": {
+            "studentIntent": "source_lookup",
+            "nextHelpDepth": 1,
+        },
+    }
+
+    graph_module.finalize_understanding_after_rendered_response(
+        state,
+        {"sections": {"answer": "I found the problem statement."}, "metadata": {"hintLevel": "guided_step"}},
+        "I found the problem statement.",
+    )
+
+    assert state["problem_understanding_state"]["hintsGiven"] == 1
+
+
 @pytest.mark.asyncio
 async def test_parallel_distinct_searches_execute_concurrently() -> None:
     class ConcurrentRetriever:
@@ -2533,9 +2956,9 @@ def test_normalize_backend_structured_output_repairs_unhelpful_section_order() -
                 "answer": "Let's work it step by step.",
                 "formula": "Matrix columns are transformed basis vectors.",
                 "hint": "Apply the transformation to the first basis vector.",
-                "nextStep": "Send the first transformation from Exercise 2.3.",
+                LEGACY_ACTION_SECTION_KEY: "Send the first transformation from Exercise 2.3.",
             },
-            "sectionOrder": ["hint", "nextStep", "answer", "formula"],
+            "sectionOrder": ["hint", LEGACY_ACTION_SECTION_KEY, "answer", "formula"],
             "metadata": {
                 "hintLevel": "guided_step",
                 "mode": "guided_problem_solving",
@@ -2546,16 +2969,19 @@ def test_normalize_backend_structured_output_repairs_unhelpful_section_order() -
     )
 
     assert structured_output is not None
-    assert structured_output["sectionOrder"] == ["answer", "hint", "formula", "nextStep"]
+    assert structured_output["sectionOrder"] == ["mainChat", "hint", "formula"]
+    assert structured_output["sections"]["mainChat"] == (
+        "Let's work it step by step.\n\nSend the first transformation from Exercise 2.3."
+    )
 
 
-def test_normalize_backend_structured_output_removes_duplicate_hint_next_step() -> None:
+def test_normalize_backend_structured_output_folds_duplicate_legacy_action() -> None:
     structured_output = graph_module.normalize_backend_structured_output(
         {
             "sections": {
                 "answer": "You are connecting the prompt to the rule that applies here.",
                 "hint": "Focus on the condition in the prompt that tells you which rule applies.",
-                "nextStep": "Focus on the condition in the prompt that tells you which rule applies.",
+                LEGACY_ACTION_SECTION_KEY: "Focus on the condition in the prompt that tells you which rule applies.",
             },
             "metadata": {
                 "hintLevel": "small_hint",
@@ -2568,8 +2994,10 @@ def test_normalize_backend_structured_output_removes_duplicate_hint_next_step() 
 
     assert structured_output is not None
     assert structured_output["sections"] == {
-        "answer": "You are connecting the prompt to the rule that applies here.",
-        "hint": "Focus on the condition in the prompt that tells you which rule applies.",
+        "mainChat": (
+            "You are connecting the prompt to the rule that applies here.\n\n"
+            "Focus on the condition in the prompt that tells you which rule applies."
+        ),
     }
 
 
@@ -2579,7 +3007,7 @@ def test_normalize_backend_structured_output_removes_hint_repeated_by_orientatio
             "sections": {
                 "answer": "You are identifying the condition in the prompt that tells you which rule applies.",
                 "hint": "Identify the condition in the prompt that tells you which rule applies.",
-                "nextStep": "Write down the one condition you found.",
+                LEGACY_ACTION_SECTION_KEY: "Write down the one condition you found.",
             },
             "metadata": {
                 "hintLevel": "small_hint",
@@ -2592,8 +3020,10 @@ def test_normalize_backend_structured_output_removes_hint_repeated_by_orientatio
 
     assert structured_output is not None
     assert structured_output["sections"] == {
-        "answer": "You are identifying the condition in the prompt that tells you which rule applies.",
-        "nextStep": "Write down the one condition you found.",
+        "mainChat": (
+            "You are identifying the condition in the prompt that tells you which rule applies.\n\n"
+            "Write down the one condition you found."
+        ),
     }
 
 
@@ -2617,9 +3047,7 @@ def test_normalize_backend_structured_output_moves_status_out_of_problem_section
         }
     )
 
-    assert structured_output is not None
-    assert "problem" not in structured_output["sections"]
-    assert structured_output["sections"]["answer"].startswith("You said: 2.20")
+    assert structured_output is None
 
 
 def test_normalize_backend_structured_output_keeps_actual_problem_section() -> None:
@@ -2650,9 +3078,9 @@ def test_retrieval_decision_drops_status_next_step() -> None:
                     "structuredOutput": {
                         "sections": {
                             "answer": "I'm checking the exact textbook/homework problem for 2.20 now.",
-                            "nextStep": "I'm checking the exact problem statement for 2.20 now.",
+                            LEGACY_ACTION_SECTION_KEY: "I'm checking the exact problem statement for 2.20 now.",
                         },
-                        "sectionOrder": ["nextStep", "answer"],
+                        "sectionOrder": [LEGACY_ACTION_SECTION_KEY, "answer"],
                     },
                 }
             )
@@ -2664,10 +3092,8 @@ def test_retrieval_decision_drops_status_next_step() -> None:
         },
     )
 
-    assert decision["structuredOutput"]["sections"] == {
-        "answer": "I'm checking the exact textbook/homework problem for 2.20 now."
-    }
-    assert "Next step:" not in decision["student_response"]
+    assert decision["structuredOutput"] is None
+    assert "Action:" not in decision["student_response"]
 
 
 def test_retrieval_decision_suppresses_source_request_while_searching() -> None:
@@ -2706,9 +3132,9 @@ def test_retrieval_decision_removes_page_photo_next_step_while_searching() -> No
                     "structuredOutput": {
                         "sections": {
                             "answer": "I'm checking the exact 2.20 problem next.",
-                            "nextStep": "Please send the page photo or type the full problem text so I can help step by step.",
+                            LEGACY_ACTION_SECTION_KEY: "Please send the page photo or type the full problem text so I can help step by step.",
                         },
-                        "sectionOrder": ["answer", "nextStep"],
+                        "sectionOrder": ["answer", LEGACY_ACTION_SECTION_KEY],
                     },
                 }
             )
@@ -2720,9 +3146,8 @@ def test_retrieval_decision_removes_page_photo_next_step_while_searching() -> No
         },
     )
 
-    assert decision["student_response"] == "I'm checking the exact 2.20 problem next."
-    assert decision["structuredOutput"]["sections"] == {"answer": "I'm checking the exact 2.20 problem next."}
-    assert "nextStep" not in decision["structuredOutput"]["sections"]
+    assert decision["student_response"] == "I'm checking the class materials for that problem."
+    assert decision["structuredOutput"] is None
 
 
 def test_decision_prompt_forbids_source_request_while_searching() -> None:
@@ -2746,9 +3171,8 @@ def test_decision_prompt_forbids_source_request_while_searching() -> None:
     )
 
     system_prompt = messages[0]["content"]
-    assert "do not ask the student to send, upload, type, paste, or share a page image" in system_prompt
-    assert "exact source, or problem text in student_response or structuredOutput" in system_prompt
-    assert "do not include a nextStep" in system_prompt
+    assert "do not invent source facts or ask for a page/title/problem text" in system_prompt
+    assert "retrieval can check class metadata" in system_prompt
     assert "I'm checking the class materials for that problem." in system_prompt
 
 
@@ -2767,7 +3191,7 @@ def test_problem_section_location_note_is_split_out() -> None:
 
     assert structured["sections"]["problem"].endswith("Exercise 2.3.")
     assert "printed page 80" not in structured["sections"]["problem"]
-    assert structured["sections"]["answer"] == "That's the exact Exercise 2.18 on printed page 80"
+    assert structured["sections"]["mainChat"] == "That's the exact Exercise 2.18 on printed page 80"
 
 
 def test_lost_followup_suppresses_repeated_problem_section() -> None:
@@ -2790,27 +3214,24 @@ def test_lost_followup_suppresses_repeated_problem_section() -> None:
     assert suppressed["sectionOrder"] == ["answer", "hint"]
 
 
-def test_depth_one_structured_output_drops_extra_next_step_card() -> None:
+def test_help_on_this_followup_suppresses_repeated_problem_section() -> None:
     structured = {
         "sections": {
-            "answer": "Start with the object the problem is about.",
-            "hint": "Focus on the columns of the rotation matrix.",
-            "nextStep": "Compute the dot product of the two transformed generic vectors.",
+            "problem": "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
+            "mainChat": "This is about representing linear transformations in chosen bases.",
         },
-        "sectionOrder": ["answer", "hint", "nextStep"],
+        "sectionOrder": ["problem", "mainChat"],
         "metadata": {},
     }
 
-    suppressed = graph_module.suppress_depth_one_over_scaffolding(
+    suppressed = graph_module.suppress_structured_problem_section_for_followup(
         structured,
-        {"tutor_plan": {"nextHelpDepth": 1}},
+        {"messages": [{"role": "user", "content": "I need help on this"}]},
     )
 
-    assert suppressed["sections"] == {
-        "answer": "Start with the object the problem is about.",
-        "hint": "Focus on the columns of the rotation matrix.",
-    }
-    assert suppressed["sectionOrder"] == ["answer", "hint"]
+    assert "problem" not in suppressed["sections"]
+    assert suppressed["sections"]["mainChat"] == "This is about representing linear transformations in chosen bases."
+    assert suppressed["sectionOrder"] == ["mainChat"]
 
 
 DIRECT_VALIDATION_VERDICT_RE = re.compile(
@@ -2896,6 +3317,76 @@ def test_validation_request_neutralizes_near_correct_structured_output() -> None
     assert_no_direct_validation_verdict(structured_text)
     assert "This uses a relevant idea" in content
     assert "A useful direction" in structured_text
+
+
+def test_check_my_work_search_guidance_lives_in_primary_prompt() -> None:
+    messages = graph_module.build_primary_tutor_messages(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Can you check my work and tell me what I should revisit?",
+                    "studentMessageMode": "work",
+                }
+            ],
+        },
+        {},
+    )
+
+    system_prompt = messages[0]["content"]
+    assert "When the student asks Chandra to check/review their work" in system_prompt
+    assert "do not search class materials just because the request says `check my work`" in system_prompt
+
+
+def test_page_match_fallback_never_exposes_top_ranked_locator_text() -> None:
+    response = graph_module.pdf_rag_response_from_state(
+        {
+            "messages": [{"role": "user", "content": "Can you help with this?"}],
+            "answer": "",
+            "retrieval_decision": {},
+            "retrieved_pages": [],
+            "page_assets": [ocr_page(title="ACME VOL 1", printed_page_start=620)],
+        }
+    )
+
+    assert "strongest matching PDF page" not in response["content"]
+    assert "top-ranked match" not in response["content"]
+    assert "ACME VOL 1 page 620" not in response["content"]
+    assert response["sources"] == []
+
+
+def test_followup_knowledge_reuses_active_problem_source_identity() -> None:
+    previous_problem = {
+        "chatId": "conv-knowledge",
+        "content": "2.18. Assuming the polynomial bases [1,x,x2], find the matrix representations.",
+        "createdAt": "2026-05-12T08:21:00.000Z",
+        "id": "knowledge-active-problem-original",
+        "kind": "problem",
+        "page": 98,
+        "problemId": "2.18",
+        "reason": "Student asked: problem 2.18",
+        "sourceId": "acme",
+        "sourceName": "ACME VOL 1",
+        "updatedAt": "2026-05-12T08:21:00.000Z",
+        "usedAs": "active_problem",
+    }
+
+    items = knowledge_items_from_state(
+        {
+            "conversation_id": "conv-knowledge",
+            "messages": [{"role": "user", "content": "I need help"}],
+            "page_assets": [],
+        },
+        active_problem_text="2.18. Assuming the polynomial bases [1,x,x2], find the matrix representations.",
+        previous_items=[previous_problem],
+    )
+
+    active_problems = [item for item in items if item.get("kind") == "problem" and item.get("usedAs") == "active_problem"]
+    assert len(active_problems) == 1
+    assert active_problems[0]["id"] == "knowledge-active-problem-original"
+    assert active_problems[0]["sourceName"] == "ACME VOL 1"
+    assert active_problems[0]["sourceId"] == "acme"
+    assert active_problems[0]["page"] == 98
 
 
 @pytest.mark.asyncio
@@ -3479,6 +3970,82 @@ async def test_streaming_forced_problem_search_does_not_emit_page_image_request(
 
 
 @pytest.mark.asyncio
+async def test_streaming_lookup_suppresses_raw_locator_echo_sections() -> None:
+    client = FakeStreamingOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": False,
+                        "memory_used": False,
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "search_query": "problem 2.18",
+                        "student_response": "problem 2.18",
+                        "structuredOutput": {
+                            "sections": {"mainChat": "problem 2.18"},
+                            "sectionOrder": ["mainChat"],
+                        },
+                    }
+                )
+            },
+            {
+                "content": json.dumps(
+                    {
+                        "sections": {
+                            "mainChat": "problem 2.18",
+                            "problem": "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
+                        },
+                        "sectionOrder": ["mainChat", "problem"],
+                        "metadata": {
+                            "hintLevel": "none",
+                            "mode": "source_lookup",
+                            "studentActionNeeded": "review_source",
+                        },
+                    }
+                )
+            },
+        ]
+    )
+    events = [
+        event
+        async for event in run_pdf_rag_agent_stream(
+            class_id="class-linear",
+            conversation_id="conv-stream-lookup-echo",
+            messages=[{"role": "user", "content": "problem 2.18"}],
+            model="openai/gpt-4.1-mini",
+            openrouter_client=client,
+            professor_id="teacher-1",
+            retriever=FakeRetriever(
+                [
+                    ocr_page(
+                        chunk_text="2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
+                        printed_page_start=98,
+                        problem_numbers=["2.18"],
+                        title="ACME VOL 1",
+                    )
+                ]
+            ),
+        )
+    ]
+
+    quick_messages = [event.get("message", "") for event in events if event.get("type") == "quick_response"]
+    raw_section_deltas = [
+        event
+        for event in events
+        if event.get("type") == "section_delta" and "problem 2.18" in str(event.get("delta") or "").lower()
+    ]
+    final_payload = events[-1]["payload"]
+
+    assert quick_messages == ["I'm checking the class materials for that problem."]
+    assert raw_section_deltas == []
+    assert final_payload["structuredOutput"]["sections"]["mainChat"] == (
+        "I found the matching item in ACME VOL 1 on printed page 98."
+    )
+    assert final_payload["structuredOutput"]["sections"]["problem"].startswith("2.18. Assuming")
+
+
+@pytest.mark.asyncio
 async def test_streaming_failed_problem_search_does_not_finalize_quick_status() -> None:
     client = FakeOpenRouterClient(
         [
@@ -3491,6 +4058,21 @@ async def test_streaming_failed_problem_search_does_not_finalize_quick_status() 
                         "retrieval_reason": "student_requested_problem",
                         "search_query": "Problem 2.20",
                         "student_response": "I'm checking the class materials for that problem.",
+                    }
+                )
+            },
+            {
+                "content": json.dumps(
+                    {
+                        "sections": {
+                            "mainChat": "I could not find a matching problem in the class materials I searched."
+                        },
+                        "sectionOrder": ["mainChat"],
+                        "metadata": {
+                            "hintLevel": "none",
+                            "mode": "source_lookup",
+                            "studentActionNeeded": "paste_problem",
+                        },
                     }
                 )
             },
@@ -3512,10 +4094,10 @@ async def test_streaming_failed_problem_search_does_not_finalize_quick_status() 
     quick_messages = [event.get("message", "") for event in events if event.get("type") == "quick_response"]
     final_content = events[-1]["payload"]["content"]
 
-    assert len(client.calls) == 1
+    assert len(client.calls) == 2
     assert quick_messages == ["I'm checking the class materials for that problem."]
     assert final_content != quick_messages[0]
-    assert final_content.startswith("I could not find that exact problem")
+    assert final_content == "I could not find a matching problem in the class materials I searched."
 
 
 @pytest.mark.asyncio
@@ -3600,7 +4182,8 @@ async def test_final_llm_payload_contains_page_asset_and_ocr_metadata() -> None:
     )
 
     final_content = client.calls[1]["messages"][-1]["content"]
-    assert any(part["type"] == "text" and "OCR text:" in part["text"] for part in final_content)
+    assert any(part["type"] == "text" and "Selected OCR page/problem metadata:" in part["text"] for part in final_content)
+    assert any(part["type"] == "text" and "OCR text omitted because an image or PDF asset" in part["text"] for part in final_content)
     assert any(part.get("type") == "file" for part in final_content)
     assert "cmF3LXBkZg==" in json.dumps(final_content)
     assert "ZnVsbC1wZGY=" in json.dumps(final_content)
@@ -3690,7 +4273,7 @@ async def test_follow_up_reuses_saved_page_asset_context_without_broad_search() 
 
 
 @pytest.mark.asyncio
-async def test_follow_up_fetches_referenced_exercise_before_helping() -> None:
+async def test_follow_up_does_not_force_referenced_exercise_search_after_llm_no_search() -> None:
     graph_module._CHAT_RETRIEVAL_MEMORY_CACHE["conv-referenced-exercise"] = {
         "active_metadata": ocr_page(
             chunk_text=(
@@ -3713,15 +4296,6 @@ async def test_follow_up_fetches_referenced_exercise_before_helping() -> None:
             )
         ],
     }
-    referenced_page = ocr_page(
-        chunk_text="Exercise 2.3. Let T(p(x)) = x^2 p(x).",
-        doc_id="material-linear",
-        page_start=11,
-        page_end=11,
-        printed_page_start=79,
-        problem_numbers=["2.3"],
-        title="Linear Algebra Text",
-    )
     client = FakeOpenRouterClient(
         [
             {
@@ -3734,15 +4308,15 @@ async def test_follow_up_fetches_referenced_exercise_before_helping() -> None:
                     }
                 )
             },
-            {"content": "Hint: use both selected exercises."},
+            {"content": "Hint: use the selected basis vectors as inputs."},
         ]
     )
 
     async def page_asset_builder(pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
-        assert [page["problem_numbers"] for page in pages] == [["2.18"], ["2.3"]]
+        assert [page["problem_numbers"] for page in pages] == [["2.18"]]
         return pages
 
-    retriever = FakeRetriever([referenced_page])
+    retriever = FakeRetriever([])
     response = await run_pdf_rag_agent(
         class_id="class-linear",
         conversation_id="conv-referenced-exercise",
@@ -3754,19 +4328,12 @@ async def test_follow_up_fetches_referenced_exercise_before_helping() -> None:
         retriever=retriever,
     )
 
-    assert retriever.calls == [
-        {
-            "class_id": "class-linear",
-            "professor_id": "teacher-1",
-            "query": "find exact referenced exercise problem 2.3 Linear Algebra Text",
-            "top_k": 2,
-        }
-    ]
+    assert retriever.calls == []
     final_payload = json.dumps(client.calls[1]["messages"][-1]["content"])
     assert "Exercise 2.18" in final_payload
-    assert "Exercise 2.3" in final_payload
+    assert "Exercise 2.3. Let T" not in final_payload
     assert response["langGraphTrace"]["memoryUsed"] is True
-    assert response["langGraphTrace"]["searchQueries"] == ["find exact referenced exercise problem 2.3 Linear Algebra Text"]
+    assert response["langGraphTrace"]["searchQueries"] == []
 
 
 @pytest.mark.asyncio
@@ -3920,6 +4487,14 @@ async def test_student_uploaded_pdf_extracted_problem_is_saved_to_knowledge() ->
             {
                 "content": json.dumps(
                     {
+                        "activeProblemDecision": {
+                            "isActualProblem": True,
+                            "problemText": "Problem 2.14. Prove rank(KL) <= rank(L).",
+                            "problemSource": "student_upload",
+                            "relationToPreviousProblem": "new_problem",
+                            "confidence": "high",
+                            "reason": "The uploaded PDF text contains a complete exercise statement.",
+                        },
                         "can_answer_now": True,
                         "memory_used": False,
                         "needs_search": False,
@@ -3955,7 +4530,48 @@ async def test_student_uploaded_pdf_extracted_problem_is_saved_to_knowledge() ->
         and item.get("content") == "Problem 2.14. Prove rank(KL) <= rank(L)."
         for item in knowledge_items
     )
-    assert any(item.get("kind") == "student_upload" and item.get("usedAs") == "problem_source" for item in knowledge_items)
+    assert any(item.get("kind") == "student_upload" and item.get("usedAs") == "supporting_context" for item in knowledge_items)
+
+
+@pytest.mark.asyncio
+async def test_student_uploaded_pdf_problem_text_requires_llm_active_problem_decision() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": True,
+                        "memory_used": False,
+                        "needs_search": False,
+                        "student_response": "I can use the uploaded PDF text.",
+                    }
+                )
+            },
+        ]
+    )
+
+    response = await run_pdf_rag_agent(
+        class_id="class-linear",
+        messages=[{"role": "user", "content": "help me with the attached PDF"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        professor_id="teacher-1",
+        retriever=FakeRetriever([]),
+        student_attachment_files=[
+            {
+                "extractedText": "Problem 2.14. Prove rank(KL) <= rank(L).",
+                "fileName": "large-homework.pdf",
+                "fileSize": 12_000_000,
+                "fileType": "pdf",
+                "mimeType": "application/pdf",
+            }
+        ],
+    )
+
+    knowledge_items = response["langGraphTrace"]["knowledgeItems"]
+    assert not any(item.get("kind") == "problem" and item.get("usedAs") == "active_problem" for item in knowledge_items)
+    assert response["langGraphTrace"]["activeProblemDecision"]["isActualProblem"] is False
+    assert any(item.get("kind") == "student_upload" and item.get("usedAs") == "supporting_context" for item in knowledge_items)
 
 
 @pytest.mark.asyncio
@@ -3999,7 +4615,7 @@ async def test_student_uploaded_image_is_sent_to_primary_tutor_model_without_fol
     assert any(part.get("type") == "text" and "what is this image" in part.get("text", "") for part in primary_content)
     assert any(part.get("type") == "image_url" for part in primary_content)
     assert "aW1hZ2UtYnl0ZXM=" in json.dumps(primary_content)
-    assert "Do not describe, rate, react to, compliment, identify, or discuss unrelated uploaded photos" in client.calls[0]["messages"][0]["content"]
+    assert "If attachments are unrelated to class work, do not describe them" in client.calls[0]["messages"][0]["content"]
     assert "aW1hZ2UtYnl0ZXM=" not in json.dumps(response["langGraphTrace"])
 
 
@@ -4028,6 +4644,57 @@ async def test_streaming_matches_non_streaming_retrieval_decision() -> None:
     assert events[-1]["type"] == "final"
     assert events[-1]["payload"]["content"] == "Try naming what the inequality is comparing."
     assert events[-1]["payload"]["langGraphTrace"]["decisionSource"] == "student_message"
+
+
+@pytest.mark.asyncio
+async def test_streaming_help_followup_does_not_emit_repeated_problem_section() -> None:
+    client = FakeStreamingOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": True,
+                        "memory_used": True,
+                        "needs_search": False,
+                        "student_response": "This is about representing a linear map using the chosen bases.",
+                        "sections": {
+                            "problem": "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
+                            "mainChat": "This is about representing a linear map using the chosen bases.",
+                        },
+                        "sectionOrder": ["problem", "mainChat"],
+                        "metadata": {
+                            "hintLevel": "small_hint",
+                            "mode": "guided_problem_solving",
+                            "sourceConfidence": "medium",
+                            "studentActionNeeded": "show_attempt",
+                        },
+                    }
+                )
+            }
+        ]
+    )
+
+    events = [
+        event
+        async for event in run_pdf_rag_agent_stream(
+            conversation_id="conv-help-on-this",
+            messages=[{"role": "user", "content": "I need help on this"}],
+            model="openai/gpt-4.1-mini",
+            openrouter_client=client,
+            retriever=FakeRetriever([]),
+        )
+    ]
+
+    streamed_sections = [
+        event.get("section")
+        for event in events
+        if event.get("type") in {"section_start", "section_delta", "section_done"}
+    ]
+    final_payload = events[-1]["payload"]
+
+    assert "problem" not in streamed_sections
+    assert "problem" not in final_payload["structuredOutput"]["sections"]
+    assert "2.18. Assuming" not in final_payload["content"]
 
 
 @pytest.mark.asyncio

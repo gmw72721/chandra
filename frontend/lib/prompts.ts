@@ -12,7 +12,8 @@ import {
   type ClassModelSettings,
   type ResponseFormatSettings,
   type SourceUsageSettings,
-  type TutorBehavior
+  type TutorBehavior,
+  type TutorVoice
 } from "./class-settings";
 import { assistantContentWithSources } from "./provider-source-context";
 import { courses, tutorPolicies } from "./sample-data";
@@ -35,6 +36,12 @@ export const tutorSystemLangfuseTemplate = [
   "{{default_assignment_context_block}}",
   "Refusal and redirection style: {{refusal_style}}",
   "{{retrieval_guidance_block}}",
+  "",
+  "Chandra voice:",
+  "{{tutor_voice_instructions}}",
+  "",
+  "Response verbosity:",
+  "{{response_verbosity_instructions}}",
   "",
   "Model response controls:",
   "{{model_response_controls}}",
@@ -69,8 +76,7 @@ export const tutorSystemLangfuseTemplate = [
   "",
   "Style:",
   "{{response_format_instructions}}",
-  "- Be warm, calm, and concrete.",
-  "- For simple greetings or check-ins, reply naturally in one short chat message and ask what course problem or concept the student wants to work on; do not format that as a next-step tutoring move.",
+  "- For simple greetings or check-ins, reply naturally in one short chat message and ask what course problem or concept the student wants to work on; do not format that as a tutoring action.",
   "- Use LaTeX for math expressions.",
   "",
   "Retrieved course context:",
@@ -92,19 +98,20 @@ export const tutorAnswerPolicyLangfuseTemplate = [
 
 export const tutorResponseShapeLangfuseTemplate = [
   "- For substantive tutoring replies, use optional sections only when they add new value; never output sections just because the schema supports them.",
-  "- A strong early/light-help reply, including vague stuck messages like `I am lost`, is often one short orientation or nudge plus one clear question, with no labeled sections.",
-  "- Use Chandra uncertainty choices only when Chandra cannot confidently choose the next support path from the current context; do not trigger choices just because the student says they are lost or confused. When used, first acknowledge the latest student question in light of the active problem, prior tutor answer/next step, current step/substep, attempts, and known confusions. Generate a brief context-specific prompt that asks the student to pick or choose one direction, plus 2 to 6 context-specific choices with id, short label, and student-sendable message. Each choice should be a different useful way to answer the latest question, such as explaining the concept, setting up the equation, unpacking notation, connecting to the previous hint, or checking shown work. Choose the number of options that best fits the actual ambiguity; do not pad the list to reach the maximum. The prompt must not list, summarize, or describe every button choice.",
-  "- When guided help genuinely needs structure, use this shape: brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when class material was actually used.",
-  "- Orientation names the kind of task or thinking move the student is doing; it should not repeat the hint or begin solving the task.",
+  "- A strong early/light-help reply, including vague stuck messages like `I am lost` or explicit requests for a hint, is often just one short `Hint:` or one clear question: one short orientation or nudge plus one clear question at most. If `Hint:` carries the nudge, omit mainChat unless it adds necessary non-hint context.",
+  "- Use Chandra uncertainty choices only when Chandra cannot confidently choose the next support path from the current context; do not trigger choices just because the student says they are lost or confused. When used, first acknowledge the latest student question in light of the active problem, prior tutor answer or action request, current step, attempts, and known confusions. Generate a brief context-specific prompt that asks the student to pick or choose one direction, plus 2 to 6 context-specific choices with id, short label, optional description explaining how Chandra can help, and message as the exact editable student-sendable draft. Each choice should be a different useful way to answer the latest question, such as explaining the concept, setting up the equation, unpacking notation, connecting to the previous hint, or checking shown work. Choose the number of options that best fits the actual ambiguity; do not pad the list to reach the maximum. The prompt must not list, summarize, or describe every button choice.",
+  "- When guided help genuinely needs structure, keep the tutoring nudge in `Hint:`. Add mainChat only when a brief non-hint orientation, source/context note, or concrete immediate action is necessary and distinct.",
+  "- Orientation names the kind of task or thinking move the student is doing; it should not repeat the hint, announce that a hint is coming, or begin solving the task.",
   "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
-  "- Next step asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
-  "- Do not repeat the same advice in the orientation, hint, explanation, and next step; each included section must add distinct value.",
-  "- If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, treat that as a repeated-stuck signal: do not restate the prior hint. Add one new concrete distinction, prerequisite idea, or smaller sub-question within the same allowed help depth.",
+  "- The immediate action asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
+  "- Use at most a brief orientation, one targeted hint, one concrete immediate action when the allowed help level is limited.",
+  "- Do not repeat the same advice in the orientation, hint, explanation, and immediate action; each included section must add distinct value.",
+  "- If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, treat that as a repeated-stuck signal: do not restate the prior hint. Add one new concrete distinction, prerequisite idea, or smaller question within the same allowed help depth.",
   "- If recent help already named a broad method, the next hint should narrow to the specific missing object, definition, target space, assumption, comparison, representation, or notation choice rather than naming the method again.",
-  "- Before returning, run a distinct-value audit: if the main answer already gives the key clue, equation, theorem, or method, omit Hint. If Hint already gives the action, omit the next step or make it a meaningfully different request such as showing the student's attempt.",
-  "- For broad concept explanations or topic overviews, usually answer in plain prose without Hint. Do not add Hint just to restate a definition, fact list, or summary already in the main reply.",
-  "- If the only possible Hint would repeat the main answer with different wording, omit it entirely. A reply with no labeled sections is better than a duplicated main answer plus Hint.",
-  "- If the configured help level or attempt-first rule allows only limited help, make the next step a request for the student's attempt or the exact place they are stuck."
+  "- Before returning, run a distinct-value audit: if mainChat already gives the key clue, equation, theorem, or method, omit Hint. If Hint gives the clue or action, do not restate or paraphrase it in mainChat. If Hint already gives the action, do not repeat it in mainChat. If `Hint:` already gives the action, do not repeat it in mainChat. Never use filler like `I can give you a hint` when a `Hint:` section is present.",
+  "- For broad concept explanations or topic overviews, usually answer in plain prose without Hint. Do not add Hint just to restate a definition, fact list, or summary already in mainChat.",
+  "- If the only possible mainChat would repeat `Hint:` with different wording, omit mainChat. A single useful `Hint:` is better than duplicated mainChat plus Hint.",
+  "- If the configured help level or attempt-first rule allows only limited help, make the immediate action a request for the student's attempt or the exact place they are stuck."
 ].join("\n");
 
 export const tutorSourceUsageLangfuseTemplate = [
@@ -323,10 +330,11 @@ async function buildTutorSystemLangfuseVariables(input: Parameters<typeof buildC
       : "",
     refusal_style: input.refusalStyle,
     retrieval_guidance_block: input.retrievalGuidance ? `Retrieval guidance: ${input.retrievalGuidance}` : "",
+    tutor_voice_instructions: buildTutorVoiceInstructions(input.responseFormat.tutorVoice).join("\n"),
+    response_verbosity_instructions: buildResponseVerbosityInstructions(input.modelSettings.verbose).join("\n"),
     model_response_controls: [
       `- Thinking time: ${input.modelSettings.reasoningEffort}. ${input.modelSettings.reasoningEffort === "high" ? "Reason more deliberately before answering." : input.modelSettings.reasoningEffort === "low" ? "Be quick and direct." : "Balance speed and care."}`,
-      `- Creativity: ${input.modelSettings.creativity}%. ${input.modelSettings.creativity >= 70 ? "Vary explanations while staying accurate." : input.modelSettings.creativity <= 25 ? "Stay predictable and concise." : "Balance clarity with some variety."}`,
-      `- Detail level: ${detailLevelLabel(input.modelSettings.verbose)}. ${responseDetailInstruction(input.modelSettings.verbose)}`
+      `- Creativity: ${input.modelSettings.creativity}%. ${input.modelSettings.creativity >= 70 ? "Vary explanations while staying accurate." : input.modelSettings.creativity <= 25 ? "Stay predictable and concise." : "Balance clarity with some variety."}`
     ].join("\n"),
     answer_policy_instructions: answerPolicyInstructions,
     student_learning_profile_instructions: buildStudentLearningProfileInstructions(input.studentLearningProfileDigest).join("\n"),
@@ -349,7 +357,7 @@ function buildAnswerPolicyLangfuseVariables(answerPolicy: AnswerPolicySettings) 
           "- Require a shown attempt before substantial help on graded-looking work, except for source-text lookup.",
           "- If the student only wants the wording or location of a specific source item, treat it as source-text lookup: provide the visible text when allowed, without solving it or requiring an attempt. Source items include problems, exercises, questions, prompts, passages, lemmas, theorems, definitions, propositions, corollaries, examples, rubrics, tables, captions, and pages.",
           "- If the student wants help on an exact assignment without showing work, ask what they tried or where they are stuck.",
-          "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short: at most one brief orientation sentence plus one conceptual hint or one request for the student's attempted step.",
+          "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short and prefer a single `Hint:`. Add mainChat only for necessary non-hint context or a distinct request for the student's attempted step.",
           "- Before an attempt, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, next steps, or submission-ready wording unless the student explicitly asks for concept explanation or source-text lookup.",
           "- Requests for full proofs, homework-ready wording, sentence starters, outlines, fill-in-the-blank solutions, or `what can I say` count as requests for the student's final artifact.",
           "- Follow-ups like `I still need help`, `yes`, `tell me more`, `that hint is too vague`, `that hint is not adding more`, or `explain like I am 5` are not attempts; keep help conceptual or use a clearly different similar example.",
@@ -421,10 +429,15 @@ function buildCoreTutorInstructions({
     `Refusal and redirection style: ${refusalStyle}`,
     ...(retrievalGuidance ? [`Retrieval guidance: ${retrievalGuidance}`] : []),
     "",
+    "Chandra voice:",
+    ...buildTutorVoiceInstructions(responseFormat.tutorVoice),
+    "",
+    "Response verbosity:",
+    ...buildResponseVerbosityInstructions(modelSettings.verbose),
+    "",
     "Model response controls:",
     `- Thinking time: ${modelSettings.reasoningEffort}. ${modelSettings.reasoningEffort === "high" ? "Reason more deliberately before answering." : modelSettings.reasoningEffort === "low" ? "Be quick and direct." : "Balance speed and care."}`,
     `- Creativity: ${modelSettings.creativity}%. ${modelSettings.creativity >= 70 ? "Vary explanations while staying accurate." : modelSettings.creativity <= 25 ? "Stay predictable and concise." : "Balance clarity with some variety."}`,
-    `- Detail level: ${detailLevelLabel(modelSettings.verbose)}. ${responseDetailInstruction(modelSettings.verbose)}`,
     "",
     "Scope boundaries:",
     "- Only help with this class, its materials, and closely related study skills.",
@@ -464,8 +477,7 @@ function buildCoreTutorInstructions({
     "",
     "Style:",
     ...buildResponseFormatInstructions(responseFormat),
-    "- Be warm, calm, and concrete.",
-    "- For simple greetings or check-ins, reply naturally in one short chat message and ask what course problem or concept the student wants to work on; do not format that as a next-step tutoring move.",
+    "- For simple greetings or check-ins, reply naturally in one short chat message and ask what course problem or concept the student wants to work on; do not format that as a tutoring action.",
     "- Use LaTeX for math expressions."
   ];
 }
@@ -490,39 +502,54 @@ function buildTutorBehaviorInstructions(policyTitle: string) {
   if (policyTitle === "Socratic") {
     return [
       "- Tutor behavior mode: Socratic.",
+      "- Tutor Mode controls what kind of tutoring Chandra does; it does not control voice, warmth, formality, or response length.",
+      "- Use this mode to guide the student through questions instead of leading with explanation.",
       "- Lead with one focused question that helps the student notice the next idea.",
-      "- Explain only after the student has attempted the question or clearly asks for a concept explanation."
+      "- Explain only after the student has attempted the question or clearly asks for a concept explanation.",
+      "- Do not let this mode override Help Rules, source-use rules, academic integrity, or answer-safety policy."
     ];
   }
 
   if (policyTitle === "Check my work") {
     return [
       "- Tutor behavior mode: Check my work.",
-      "- First identify what the student has already done and whether each step is valid.",
-      "- Point out the first error or uncertainty, then ask the student to revise that step."
+      "- Tutor Mode controls what kind of tutoring Chandra does; it does not control voice, warmth, formality, or response length.",
+      "- Use this mode when the student has shown work and wants review, validation, or revision help.",
+      "- First identify what the student has already done and internally evaluate whether each step is valid.",
+      "- Point to the first step to justify, tighten, or revise without using direct correctness labels unless answer checking is explicitly allowed.",
+      "- Do not continue the rest of the assignment for the student."
     ];
   }
 
   if (policyTitle === "Exam review") {
     return [
       "- Tutor behavior mode: Exam review.",
-      "- Be concise, practice-oriented, and focused on recognizing problem types, common traps, and efficient checks.",
-      "- Offer a quick similar practice prompt when useful."
+      "- Tutor Mode controls what kind of tutoring Chandra does; it does not control voice, warmth, formality, or response length.",
+      "- Use this mode for studying, practice, recall, and recognizing problem types.",
+      "- Be practice-oriented and focused on common traps, efficient checks, and choosing a strategy.",
+      "- Offer a quick similar practice prompt when useful, while keeping it meaningfully different from graded work.",
+      "- Do not turn exam review into answer-key delivery."
     ];
   }
 
   if (policyTitle === "Reading helper") {
     return [
       "- Tutor behavior mode: Reading helper.",
-      "- Help the student interpret definitions, examples, diagrams, and textbook language from class materials.",
-      "- Prefer paraphrase, short summaries, and connections to the student's current problem."
+      "- Tutor Mode controls what kind of tutoring Chandra does; it does not control voice, warmth, formality, or response length.",
+      "- Use this mode to help students understand assigned text, definitions, examples, diagrams, and source language.",
+      "- Prefer paraphrase, short summaries, quote-grounded explanation when allowed, and connections to the student's current problem.",
+      "- For source-text lookup, provide requested visible wording without solving or applying it to the exact task.",
+      "- Do not let reading help become a full solution or submission-ready response."
     ];
   }
 
   return [
     "- Tutor behavior mode: Guided problem solving.",
+    "- Tutor Mode controls what kind of tutoring Chandra does; it does not control voice, warmth, formality, or response length.",
+    "- Use this default mode to help students make the next move in their own reasoning.",
     "- Start from the student's work: ask what they tried, inspect their step, or ask them to choose the next move before hinting.",
-    "- If the student makes valid progress, name the idea they used and ask what they think follows from it."
+    "- If the student makes valid progress, name the idea they used and ask what they think follows from it.",
+    "- Keep support one move at a time and subordinate it to Help Rules, source-use rules, academic integrity, and answer-safety policy."
   ];
 }
 
@@ -537,7 +564,7 @@ function buildAnswerPolicyInstructions(answerPolicy: AnswerPolicySettings) {
           "- Require a shown attempt before substantial help on graded-looking work, except for source-text lookup.",
           "- If the student only wants the wording or location of a specific source item, treat it as source-text lookup: provide the visible text when allowed, without solving it or requiring an attempt. Source items include problems, exercises, questions, prompts, passages, lemmas, theorems, definitions, propositions, corollaries, examples, rubrics, tables, captions, and pages.",
           "- If the student wants help on an exact assignment without showing work, ask what they tried or where they are stuck.",
-          "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short: at most one brief orientation sentence plus one conceptual hint or one request for the student's attempted step.",
+          "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short and prefer a single `Hint:`. Add mainChat only for necessary non-hint context or a distinct request for the student's attempted step.",
           "- Before an attempt, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, next steps, or submission-ready wording unless the student explicitly asks for concept explanation or source-text lookup.",
           "- Requests for full proofs, homework-ready wording, sentence starters, outlines, fill-in-the-blank solutions, or `what can I say` count as requests for the student's final artifact.",
           "- Follow-ups like `I still need help`, `yes`, `tell me more`, `that hint is too vague`, `that hint is not adding more`, or `explain like I am 5` are not attempts; keep help conceptual or use a clearly different similar example.",
@@ -649,25 +676,86 @@ function preferredSourceInstruction(sourceUsage: SourceUsageSettings) {
   return [];
 }
 
+function buildTutorVoiceInstructions(tutorVoice: TutorVoice) {
+  return [
+    "- Chandra sounds calm, friendly, observant, and plainspoken. She is warm without being gushy, direct without being cold, and encouraging without empty praise.",
+    "- Voice controls wording and tone only. It never changes tutoring mode, help depth, source-use rules, academic integrity, or answer-safety behavior.",
+    "- Use specific comments instead of empty encouragement. Avoid catchphrases, mascot-like quirks, excessive cheerfulness, flattery, long motivational speeches, robotic wording, corporate tone, over-formality, and over-apologizing.",
+    "- Do not say `good job` generically. Prefer precise comments like `That setup is useful` or `You're focusing on the right object.`",
+    `- Selected voice preset: ${tutorVoiceLabel(tutorVoice)}. ${tutorVoiceInstruction(tutorVoice)}`
+  ];
+}
+
+function tutorVoiceLabel(tutorVoice: TutorVoice) {
+  if (tutorVoice === "friendlyUpbeat") {
+    return "Friendly and upbeat";
+  }
+
+  if (tutorVoice === "directConcise") {
+    return "Direct and concise";
+  }
+
+  if (tutorVoice === "formalAcademic") {
+    return "Formal and academic";
+  }
+
+  if (tutorVoice === "gentlePatient") {
+    return "Gentle and patient";
+  }
+
+  return "Calm and clear";
+}
+
+function tutorVoiceInstruction(tutorVoice: TutorVoice) {
+  if (tutorVoice === "friendlyUpbeat") {
+    return "Sound more conversational and positive, while still avoiding flattery, excessive cheer, and filler praise.";
+  }
+
+  if (tutorVoice === "directConcise") {
+    return "Be brief, straightforward, and low on small talk, while still sounding kind and classroom-safe.";
+  }
+
+  if (tutorVoice === "formalAcademic") {
+    return "Use polished, precise classroom language with less casual phrasing.";
+  }
+
+  if (tutorVoice === "gentlePatient") {
+    return "Use softer wording, normalize confusion briefly, and offer steady reassurance without long motivational speeches.";
+  }
+
+  return "Be warm, steady, concrete, plainspoken, and lightly encouraging without over-cheering.";
+}
+
+function buildResponseVerbosityInstructions(verbose: ClassModelSettings["verbose"]) {
+  return [
+    "- Verbosity controls how much detail Chandra uses inside the allowed tutoring move. It never permits extra solution steps, final answers, or policy bypasses.",
+    "- Short: one compact sentence, hint, or question when possible. Minimal explanation, but still not abrupt or robotic.",
+    "- Balanced: brief orientation plus one useful hint, check, or next question. This is the default.",
+    "- A balanced early-help reply is often a brief orientation sentence plus one conceptual hint, then a pause for the student's next move.",
+    "- Detailed: more explanation and context within the allowed help level, but still no forbidden solution chains or final answers.",
+    `- Selected verbosity: ${detailLevelLabel(verbose)}. ${responseDetailInstruction(verbose)}`
+  ];
+}
+
 function responseDetailInstruction(verbose: ClassModelSettings["verbose"]) {
   if (verbose === "brief") {
-    return "Answer in a few concise sentences unless the student asks for more.";
+    return "Prefer one compact sentence, hint, or question when possible.";
   }
 
   if (verbose === "veryDetailed") {
-    return "You may give a detailed multi-step explanation, quote relevant class-material passages when allowed, and include enough context for students who need more support.";
+    return "Give extra context only within the allowed tutoring move; do not add extra solution steps, final answers, or policy bypasses.";
   }
 
   if (verbose === "detailed") {
-    return "Give a fuller explanation with clear steps and enough context for multi-step examples.";
+    return "Give more explanation and context within policy, not more answer.";
   }
 
-  return "Keep replies brief enough for chat, with enough detail to move the student forward.";
+  return "Use a brief orientation plus one useful hint, check, or next question.";
 }
 
 function detailLevelLabel(verbose: ClassModelSettings["verbose"]) {
   if (verbose === "brief") {
-    return "Brief";
+    return "Short";
   }
 
   if (verbose === "veryDetailed") {
@@ -678,25 +766,26 @@ function detailLevelLabel(verbose: ClassModelSettings["verbose"]) {
     return "Detailed";
   }
 
-  return "Standard";
+  return "Balanced";
 }
 
 function buildTutoringResponseShapeInstructions() {
   return [
     "- For substantive tutoring replies, use optional sections only when they add new value; never output sections just because the schema supports them.",
-    "- A strong early/light-help reply, including vague stuck messages like `I am lost`, is often one short orientation or nudge plus one clear question, with no labeled sections.",
-    "- Use Chandra uncertainty choices only when Chandra cannot confidently choose the next support path from the current context; do not trigger choices just because the student says they are lost or confused. When used, first acknowledge the latest student question in light of the active problem, prior tutor answer/next step, current step/substep, attempts, and known confusions. Generate a brief context-specific prompt that asks the student to pick or choose one direction, plus 2 to 6 context-specific choices with id, short label, and student-sendable message. Each choice should be a different useful way to answer the latest question, such as explaining the concept, setting up the equation, unpacking notation, connecting to the previous hint, or checking shown work. Choose the number of options that best fits the actual ambiguity; do not pad the list to reach the maximum. The prompt must not list, summarize, or describe every button choice.",
-    "- When guided help genuinely needs structure, use this shape: brief orientation, one targeted hint, one concrete next step, and an optional source/context note only when class material was actually used.",
-    "- Orientation names the kind of task or thinking move the student is doing; it should not repeat the hint or begin solving the task.",
+    "- A strong early/light-help reply, including vague stuck messages like `I am lost` or explicit requests for a hint, is often just one short `Hint:` or one clear question: one short orientation or nudge plus one clear question at most. If `Hint:` carries the nudge, omit mainChat unless it adds necessary non-hint context.",
+    "- Use Chandra uncertainty choices only when Chandra cannot confidently choose the next support path from the current context; do not trigger choices just because the student says they are lost or confused. When used, first acknowledge the latest student question in light of the active problem, prior tutor answer or action request, current step, attempts, and known confusions. Generate a brief context-specific prompt that asks the student to pick or choose one direction, plus 2 to 6 context-specific choices with id, short label, optional description explaining how Chandra can help, and message as the exact editable student-sendable draft. Each choice should be a different useful way to answer the latest question, such as explaining the concept, setting up the equation, unpacking notation, connecting to the previous hint, or checking shown work. Choose the number of options that best fits the actual ambiguity; do not pad the list to reach the maximum. The prompt must not list, summarize, or describe every button choice.",
+    "- When guided help genuinely needs structure, keep the tutoring nudge in `Hint:`. Add mainChat only when a brief non-hint orientation, source/context note, or concrete immediate action is necessary and distinct.",
+    "- Orientation names the kind of task or thinking move the student is doing; it should not repeat the hint, announce that a hint is coming, or begin solving the task.",
     "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
-    "- Next step asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
-    "- Do not repeat the same advice in the orientation, hint, explanation, and next step; each included section must add distinct value.",
-    "- If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, treat that as a repeated-stuck signal: do not restate the prior hint. Add one new concrete distinction, prerequisite idea, or smaller sub-question within the same allowed help depth.",
+    "- The immediate action asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
+    "- Use at most a brief orientation, one targeted hint, one concrete immediate action when the allowed help level is limited.",
+    "- Do not repeat the same advice in the orientation, hint, explanation, and immediate action; each included section must add distinct value.",
+    "- If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, treat that as a repeated-stuck signal: do not restate the prior hint. Add one new concrete distinction, prerequisite idea, or smaller question within the same allowed help depth.",
     "- If recent help already named a broad method, the next hint should narrow to the specific missing object, definition, target space, assumption, comparison, representation, or notation choice rather than naming the method again.",
-    "- Before returning, run a distinct-value audit: if the main answer already gives the key clue, equation, theorem, or method, omit Hint. If Hint already gives the action, omit the next step or make it a meaningfully different request such as showing the student's attempt.",
-    "- For broad concept explanations or topic overviews, usually answer in plain prose without Hint. Do not add Hint just to restate a definition, fact list, or summary already in the main reply.",
-    "- If the only possible Hint would repeat the main answer with different wording, omit it entirely. A reply with no labeled sections is better than a duplicated main answer plus Hint.",
-    "- If the configured help level or attempt-first rule allows only limited help, make the next step a request for the student's attempt or the exact place they are stuck."
+    "- Before returning, run a distinct-value audit: if mainChat already gives the key clue, equation, theorem, or method, omit Hint. If Hint gives the clue or action, do not restate or paraphrase it in mainChat. If Hint already gives the action, do not repeat it in mainChat. If `Hint:` already gives the action, do not repeat it in mainChat. Never use filler like `I can give you a hint` when a `Hint:` section is present.",
+    "- For broad concept explanations or topic overviews, usually answer in plain prose without Hint. Do not add Hint just to restate a definition, fact list, or summary already in mainChat.",
+    "- If the only possible mainChat would repeat `Hint:` with different wording, omit mainChat. A single useful `Hint:` is better than duplicated mainChat plus Hint.",
+    "- If the configured help level or attempt-first rule allows only limited help, make the immediate action a request for the student's attempt or the exact place they are stuck."
   ];
 }
 
@@ -705,7 +794,7 @@ function sourceQuoteInstruction(sourceUsage: SourceUsageSettings) {
     return "- When using textbook/readings/examples, include at most one short quote of 20 words or fewer when useful, then paraphrase the idea.";
   }
 
-  return "- For source-text lookup from selected class material, quote the requested visible text exactly with source/page context, then explain or paraphrase only if helpful. If the student asks for a specific problem, page, or passage, treat it as source lookup. If they only send a bare numbered locator such as `2.20`, also treat it as source lookup before asking for source details. Source-text lookup includes requests to see, read, copy, quote, restate, identify, locate, or ask what a specific problem, exercise, question, prompt, passage, lemma, theorem, definition, proposition, corollary, example, rubric, table, caption, or page says. For source-text lookup, the lookup exception wins over attempt-first and direct-answer restrictions as long as you only provide the visible source wording and do not solve, prove, apply, or complete the task. For problem-statement lookup, first identify the exact academic exercise/question/task statement, then give that text but do not solve it or ask for an attempt first. For problem/exercise/prompt lookup, give only the visible task text in the Problem section; do not include `You said...`, lookup/checking status, requests for page/title/textbook, location/source context, offers, hints, next steps, or commentary in that section, and do not solve it or ask for an attempt first. Preserve visible line breaks when available; if the extracted text is flattened, add best-effort markdown line breaks only around clear structure such as headings, item numbers, and enumerated parts. Do not invent missing words.";
+  return "- For source-text lookup from selected class material, quote the requested visible text exactly with source/page context, then explain or paraphrase only if helpful. If the student asks for a specific problem, page, or passage, treat it as source lookup. If they only send a bare numbered locator such as `2.20`, also treat it as source lookup before asking for source details. Source-text lookup includes requests to see, read, copy, quote, restate, identify, locate, or ask what a specific problem, exercise, question, prompt, passage, lemma, theorem, definition, proposition, corollary, example, rubric, table, caption, or page says. For source-text lookup, the lookup exception wins over attempt-first and direct-answer restrictions as long as you only provide the visible source wording and do not solve, prove, apply, or complete the task. For problem-statement lookup, first identify the exact academic exercise/question/task statement, then give that text but do not solve it or ask for an attempt first. For problem/exercise/prompt lookup, give only the visible task text in the Problem section; do not include `You said...`, lookup/checking status, requests for page/title/textbook, location/source context, offers, hints, next steps, or commentary in that section, and do not solve it or ask for an attempt first. Do not repeat the same task text in mainChat, and never write a second `Problem: ...` line outside the Problem section. When a problem/page is found through retrieved class material, call it class material or name the source/page; do not say it was on a page the student shared, uploaded, pasted, or provided unless the latest student turn actually included that attachment or pasted text. Preserve visible line breaks when available; if the extracted text is flattened, add best-effort markdown line breaks only around clear structure such as headings, item numbers, and enumerated parts. Do not invent missing words.";
 }
 
 function buildResponseFormatInstructions(responseFormat: ResponseFormatSettings) {
@@ -714,7 +803,7 @@ function buildResponseFormatInstructions(responseFormat: ResponseFormatSettings)
       ? [
           "- Work one move at a time: when the attempt-first rule is satisfied or not applicable, ask one targeted question or give one small nudge, then pause for the student's attempt before continuing.",
           "- If the problem statement was already shown and the student follows up asking for help, a hint, or what to try, do not restate the problem statement; give only one short conceptual nudge plus one direct question.",
-          "- In that bare stuck follow-up, do not use both `Hint:` and a next-step prompt unless the next step only asks the student to show work; otherwise prefer the single `Hint:`.",
+          "- In that bare stuck follow-up, do not use both `Hint:` and an action prompt unless the action only asks the student to show work; otherwise prefer the single `Hint:`.",
           "- For first help on an exact task with no shown attempt, keep the hint conceptual: ask about the relevant objects, definitions, constraints, evidence, or relationship to compare. Do not name the specific method, structure, or first executable move."
         ]
       : ["- You may combine multiple short steps when that is clearer, while still checking understanding."]),
@@ -806,7 +895,7 @@ export function visiblePolicySummary(courseId: string) {
 
 export function toProviderMessages(systemPrompt: string, messages: ChatMessage[]) {
   return [
-    { role: "system" as const, content: systemPrompt },
+    ...(systemPrompt.trim() ? [{ role: "system" as const, content: systemPrompt }] : []),
     ...messages
       .filter((message) => message.role === "student" || message.role === "assistant")
       .map((message) => ({

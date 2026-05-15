@@ -549,12 +549,15 @@ service cloud.firestore {
           "oneStepAtATime",
           "endWithCheckQuestion",
           "simpleWording",
+          "tutorVoice",
           "exampleFrequency",
           "mathNotation"
         ])
         && responseFormat.oneStepAtATime is bool
         && responseFormat.endWithCheckQuestion is bool
         && responseFormat.simpleWording is bool
+        && responseFormat.tutorVoice is string
+        && responseFormat.tutorVoice in ["calmClear", "friendlyUpbeat", "directConcise", "formalAcademic", "gentlePatient"]
         && responseFormat.exampleFrequency is string
         && responseFormat.exampleFrequency in ["rarely", "whenHelpful", "often"]
         && responseFormat.mathNotation is string

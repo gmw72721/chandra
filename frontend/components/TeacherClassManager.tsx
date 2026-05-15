@@ -47,6 +47,7 @@ import {
   materialSourceTypePreferenceOptions,
   preferredSourceTypeOptions,
   reasoningEffortOptions,
+  tutorVoiceOptions,
   tutorBehaviorOptions,
   understandingLevelOptions,
   verboseOptions,
@@ -198,7 +199,7 @@ const materialUploadExactSteps: Array<{
   }
 ];
 
-type TeacherTab = "overview" | "roster" | "problems" | "settings" | "knowledge" | "conversations";
+type TeacherTab = "overview" | "roster" | "problems" | "sources" | "settings" | "knowledge" | "conversations";
 type SettingsPane =
   | "general"
   | "classAccess"
@@ -207,7 +208,8 @@ type SettingsPane =
   | "usage"
   | "account"
   | "appearance";
-type AiTutorSection = "sources" | "sourceSettings" | "access" | "behavior" | "answerPolicy" | "model";
+type SourceSection = "sources" | "sourceSettings";
+type AiTutorSection = "access" | "tutorMode" | "voiceDetail" | "helpRules" | "classInstructions" | "model";
 type KnowledgeTypeFilter = "Assignments" | "Textbook" | "Notes" | "Worked Examples" | "Rubrics" | "Answer Keys";
 type KnowledgeFilter = "All" | KnowledgeTypeFilter;
 type RosterFilter = "all" | "active" | "inactive" | "highQuestions" | "noConversations";
@@ -398,16 +400,25 @@ const knowledgeTypeOptions: Array<{
 ];
 const knowledgeFilters: KnowledgeFilter[] = ["All", ...knowledgeTypeOptions.map((option) => option.label)];
 
+const sourceSections: Array<{
+  icon: ReactNode;
+  id: SourceSection;
+  label: string;
+}> = [
+  { icon: <DocumentIcon />, id: "sources", label: "Sources" },
+  { icon: <SettingsIcon />, id: "sourceSettings", label: "Source Settings" }
+];
+
 const aiTutorSections: Array<{
   icon: ReactNode;
   id: AiTutorSection;
   label: string;
 }> = [
-  { icon: <DocumentIcon />, id: "sources", label: "Sources" },
-  { icon: <SettingsIcon />, id: "sourceSettings", label: "Source Settings" },
   { icon: <ShieldIcon />, id: "access", label: "Access" },
-  { icon: <ChatIcon />, id: "behavior", label: "Teaching Style" },
-  { icon: <CheckCircleIcon />, id: "answerPolicy", label: "Help Rules" },
+  { icon: <ChatIcon />, id: "tutorMode", label: "Tutor Mode" },
+  { icon: <SettingsIcon />, id: "voiceDetail", label: "Voice & Detail" },
+  { icon: <CheckCircleIcon />, id: "helpRules", label: "Help Rules" },
+  { icon: <NoteIcon />, id: "classInstructions", label: "Class Instructions" },
   { icon: <NoteIcon />, id: "model", label: "Advanced" }
 ];
 
@@ -469,6 +480,24 @@ const academicIntegritySettings = [
   }
 ] as const;
 
+const answerBoundarySettings = [
+  academicIntegritySettings[0],
+  academicIntegritySettings[3]
+] as const;
+
+const studentEffortSettings = [
+  academicIntegritySettings[1],
+  {
+    id: "askGuidingQuestionBeforeExplaining",
+    title: "Ask guiding question before explaining",
+    description: "Prompt with a question to promote deeper thinking."
+  }
+] as const;
+
+const workedExampleSettings = [
+  academicIntegritySettings[2]
+] as const;
+
 const responseStructureSettings = [
   {
     id: "oneStepAtATime",
@@ -477,18 +506,20 @@ const responseStructureSettings = [
     description: "After an attempt, give one hint or step before continuing."
   },
   {
-    id: "askGuidingQuestionBeforeExplaining",
-    name: "answerPolicy.askGuidingQuestionBeforeExplaining",
-    title: "Ask guiding question before explaining",
-    description: "Prompt with a question to promote deeper thinking."
-  },
-  {
     id: "endWithCheckQuestion",
     name: "responseFormat.endWithCheckQuestion",
     title: "End with a student action",
     description: "Close replies with one small next step or check question when it fits."
   }
 ] as const;
+
+const tutorModeDescriptions = {
+  "Guided problem solving": "Guide the next reasoning move without taking over.",
+  Socratic: "Lead with focused questions before explanation.",
+  "Check my work": "Inspect shown work and point to what to revise.",
+  "Exam review": "Practice, recall, common traps, and strategy checks.",
+  "Reading helper": "Interpret assigned text, examples, diagrams, and source language."
+} as const;
 
 const sourceUsageSettings = [
   {
@@ -681,7 +712,8 @@ export function TeacherClassManager({
   const [privacyStudentSearchQuery, setPrivacyStudentSearchQuery] = useState("");
   const [selectedPrivacyStudentId, setSelectedPrivacyStudentId] = useState("");
   const [savingPrivacyDataAction, setSavingPrivacyDataAction] = useState("");
-  const [activeAiTutorSection, setActiveAiTutorSection] = useState<AiTutorSection>("sources");
+  const [activeSourceSection, setActiveSourceSection] = useState<SourceSection>("sources");
+  const [activeAiTutorSection, setActiveAiTutorSection] = useState<AiTutorSection>("access");
   const [isSidebarDrawerOpen, setIsSidebarDrawerOpen] = useState(false);
   const [isPrimarySidebarPulledOpen, setIsPrimarySidebarPulledOpen] = useState(false);
   const [hasLoadedPrimarySidebarPreference, setHasLoadedPrimarySidebarPreference] = useState(false);
@@ -814,12 +846,13 @@ export function TeacherClassManager({
         tab === "overview" ||
         tab === "roster" ||
         tab === "problems" ||
+        tab === "sources" ||
         tab === "settings" ||
         tab === "knowledge" ||
         tab === "conversations"
       ) {
         setActiveTab(tab);
-        setIsSecondarySidebarOpen(tab === "settings" || tab === "knowledge" || tab === "conversations");
+        setIsSecondarySidebarOpen(tab === "settings" || tab === "sources" || tab === "knowledge" || tab === "conversations");
       }
 
       if (student) {
@@ -1865,6 +1898,7 @@ export function TeacherClassManager({
         oneStepAtATime: formData.has("responseFormat.oneStepAtATime"),
         endWithCheckQuestion: formData.has("responseFormat.endWithCheckQuestion"),
         simpleWording: formData.has("responseFormat.simpleWording"),
+        tutorVoice: String(formData.get("responseFormat.tutorVoice") ?? ""),
         exampleFrequency: String(formData.get("responseFormat.exampleFrequency") ?? ""),
         mathNotation: String(formData.get("responseFormat.mathNotation") ?? "")
       });
@@ -3568,7 +3602,7 @@ export function TeacherClassManager({
     }
 
     if (action.action === "openKnowledge") {
-      setActiveTab("knowledge");
+      setActiveTab("sources");
       return;
     }
 
@@ -3588,7 +3622,7 @@ export function TeacherClassManager({
     }
 
     if (action.action === "testRetrieval") {
-      setActiveTab("knowledge");
+      setActiveTab("sources");
       return;
     }
 
@@ -3636,6 +3670,7 @@ export function TeacherClassManager({
     { icon: <UserGroupIcon />, id: "roster", label: "Students" },
     { icon: <LightbulbIcon />, id: "problems", label: "Problems" },
     { icon: <ChatIcon />, id: "conversations", label: "Conversations" },
+    { icon: <DocumentIcon />, id: "sources", label: "Sources" },
     { icon: <BookOpenIcon />, id: "knowledge", label: "AI Tutor" },
     {
       href: selectedClass ? `/teacher/student-view?classId=${selectedClass.id}` : "/teacher",
@@ -3661,6 +3696,11 @@ export function TeacherClassManager({
     ...section,
     active: activeAiTutorSection === section.id,
     onClick: () => setActiveAiTutorSection(section.id)
+  }));
+  const sourceSecondaryItems = sourceSections.map((section) => ({
+    ...section,
+    active: activeSourceSection === section.id,
+    onClick: () => setActiveSourceSection(section.id)
   }));
   const settingsSecondaryItems = settingsPanes.map((settingsPane) => ({
     icon: settingsPane.icon,
@@ -3709,6 +3749,12 @@ export function TeacherClassManager({
           items: aiTutorSecondaryItems,
           title: "AI Tutor"
         }
+      : activeTab === "sources"
+      ? {
+          description: "Class materials",
+          items: sourceSecondaryItems,
+          title: "Sources"
+        }
       : activeTab === "conversations"
       ? {
           description: "Review center",
@@ -3734,6 +3780,7 @@ export function TeacherClassManager({
           }
       : null;
   const hasSecondarySidebar = Boolean((isSecondarySidebarOpen || isStudentProfileRoute) && secondarySidebarContent);
+  const isTutorSettingsTab = activeTab === "sources" || activeTab === "knowledge";
   const renderLegacyOverview = false;
   const nextAppearance = selectedAppearance === "dark" ? "light" : "dark";
   const handlePrimaryNavigate = (tab: TeacherTab) => {
@@ -3742,7 +3789,7 @@ export function TeacherClassManager({
       return;
     }
 
-    const tabSupportsSecondary = tab === "knowledge" || tab === "conversations" || tab === "settings";
+    const tabSupportsSecondary = tab === "sources" || tab === "knowledge" || tab === "conversations" || tab === "settings";
     const shouldToggleSecondary = tabSupportsSecondary && activeTab === tab;
 
     setActiveTab(tab);
@@ -3929,36 +3976,40 @@ export function TeacherClassManager({
 
         <section className="teacher-main" aria-label="Class workspace">
           <div className="teacher-main-inner">
-            {!selectedClass || activeTab === "knowledge" || activeTab === "settings" || error ? (
+            {!selectedClass || isTutorSettingsTab || activeTab === "settings" || error ? (
               <div className={selectedClass ? "teacher-sticky-chrome" : undefined}>
-                {!selectedClass || activeTab === "knowledge" || activeTab === "settings" ? (
+                {!selectedClass || isTutorSettingsTab || activeTab === "settings" ? (
                   <header
                     className={`teacher-main-header ${
-                      activeTab === "knowledge" || activeTab === "settings" ? "ai-tutor-main-header" : ""
+                      isTutorSettingsTab || activeTab === "settings" ? "ai-tutor-main-header" : ""
                     }`}
                   >
                     <div>
                       <h1>
-                        {selectedClass && activeTab === "knowledge"
+                        {selectedClass && activeTab === "sources"
+                          ? "Sources"
+                          : selectedClass && activeTab === "knowledge"
                           ? "AI Tutor"
                           : selectedClass && activeTab === "settings"
                             ? "Settings"
                             : "Create a class"}
                       </h1>
                       <p>
-                        {selectedClass && activeTab === "knowledge"
+                        {selectedClass && activeTab === "sources"
+                          ? "Upload and manage the class materials Chandra can use."
+                          : selectedClass && activeTab === "knowledge"
                           ? "Control how Chandra teaches, answers, and uses your class materials."
                           : selectedClass && activeTab === "settings"
                             ? "Manage class details, student access, account, and display preferences."
-                          : "Add your first class from the sidebar."}
+                            : "Add your first class from the sidebar."}
                       </p>
-                      {selectedClass && (activeTab === "knowledge" || activeTab === "settings") ? (
+                      {selectedClass && (isTutorSettingsTab || activeTab === "settings") ? (
                         <span className="ai-tutor-class-context">
                           {selectedClass.name} · {formatSectionLabel(selectedClass.section)}
                         </span>
                       ) : null}
                     </div>
-                    {selectedClass && (activeTab === "knowledge" || activeTab === "settings") ? (
+                    {selectedClass && (isTutorSettingsTab || activeTab === "settings") ? (
                       <div className="ai-tutor-header-actions">
                         {activeTab === "settings" && activeSettingsPane === "account" ? (
                           <button
@@ -3973,7 +4024,7 @@ export function TeacherClassManager({
                           <button
                             className="primary-button teacher-primary-button compact"
                             disabled={isSavingSettings}
-                            form={activeTab === "knowledge" ? "ai-tutor-settings-form" : "class-settings-form"}
+                            form={isTutorSettingsTab ? "ai-tutor-settings-form" : "class-settings-form"}
                             type="submit"
                           >
                             {isSavingSettings ? "Saving" : "Save changes"}
@@ -4328,6 +4379,11 @@ export function TeacherClassManager({
                         name="responseFormat.exampleFrequency"
                         type="hidden"
                         defaultValue={selectedResponseFormat.exampleFrequency}
+                      />
+                      <input
+                        name="responseFormat.tutorVoice"
+                        type="hidden"
+                        defaultValue={selectedResponseFormat.tutorVoice}
                       />
                       <input
                         name="responseFormat.mathNotation"
@@ -5224,7 +5280,7 @@ export function TeacherClassManager({
                   </div>
                 ) : null}
 
-                {activeTab === "knowledge" ? (
+                {isTutorSettingsTab ? (
                   <form
                     className="ai-tutor-workspace teacher-content-block"
                     id="ai-tutor-settings-form"
@@ -5288,13 +5344,23 @@ export function TeacherClassManager({
                     {materialSuccess ? <p className="form-success">{materialSuccess}</p> : null}
 
                     <div className="ai-tutor-layout">
-                      <nav className="ai-tutor-section-nav" aria-label="AI Tutor sections">
-                        {aiTutorSections.map((section) => (
+                      <nav className="ai-tutor-section-nav" aria-label={activeTab === "sources" ? "Source sections" : "AI Tutor sections"}>
+                        {(activeTab === "sources" ? sourceSections : aiTutorSections).map((section) => (
                           <button
-                            aria-current={section.id === activeAiTutorSection ? "page" : undefined}
+                            aria-current={
+                              section.id === (activeTab === "sources" ? activeSourceSection : activeAiTutorSection)
+                                ? "page"
+                                : undefined
+                            }
                             key={section.id}
                             type="button"
-                            onClick={() => setActiveAiTutorSection(section.id)}
+                            onClick={() => {
+                              if (activeTab === "sources") {
+                                setActiveSourceSection(section.id as SourceSection);
+                                return;
+                              }
+                              setActiveAiTutorSection(section.id as AiTutorSection);
+                            }}
                           >
                             <span aria-hidden="true">{section.icon}</span>
                             {section.label}
@@ -5305,7 +5371,7 @@ export function TeacherClassManager({
                       <div className="ai-tutor-panel-stack">
                         <section
                           className="ai-tutor-section-panel"
-                          hidden={activeAiTutorSection !== "sources"}
+                          hidden={activeTab !== "sources" || activeSourceSection !== "sources"}
                           aria-labelledby="ai-tutor-sources-title"
                         >
                           <div className="ai-tutor-section-heading">
@@ -5488,7 +5554,7 @@ export function TeacherClassManager({
 
                         <section
                           className="ai-tutor-section-panel"
-                          hidden={activeAiTutorSection !== "sourceSettings"}
+                          hidden={activeTab !== "sources" || activeSourceSection !== "sourceSettings"}
                           aria-labelledby="ai-tutor-source-settings-title"
                         >
                           <div className="ai-tutor-section-heading">
@@ -5604,7 +5670,7 @@ export function TeacherClassManager({
 
                         <section
                           className="ai-tutor-section-panel"
-                          hidden={activeAiTutorSection !== "access"}
+                          hidden={activeTab !== "knowledge" || activeAiTutorSection !== "access"}
                           aria-labelledby="ai-tutor-access-title"
                         >
                           <div className="ai-tutor-section-heading">
@@ -5630,107 +5696,90 @@ export function TeacherClassManager({
 
                         <section
                           className="ai-tutor-section-panel"
-                          hidden={activeAiTutorSection !== "behavior"}
+                          hidden={activeTab !== "knowledge" || activeAiTutorSection !== "tutorMode"}
                           aria-labelledby="ai-tutor-behavior-title"
                         >
                           <div className="ai-tutor-section-heading">
                             <div>
-                              <h2 id="ai-tutor-behavior-title">Teaching Style</h2>
-                              <span>Choose how Chandra guides students and shapes replies.</span>
+                              <h2 id="ai-tutor-behavior-title">Tutor Mode</h2>
+                              <span>Choose the main tutoring behavior. Voice, detail, and help limits stay separate.</span>
                             </div>
                           </div>
-                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-behavior-card-title">
-                            <h3 id="ai-tutor-behavior-card-title">Tutor Mode</h3>
-                            <div className="settings-pill-group" role="radiogroup" aria-label="Tutor behavior">
+                          <section className="ai-tutor-card teaching-style-card" aria-labelledby="ai-tutor-behavior-card-title">
+                            <div className="teaching-style-card-heading">
+                              <div>
+                                <h3 id="ai-tutor-behavior-card-title">Tutor Mode</h3>
+                                <p>Tutor Mode controls what kind of tutoring Chandra does. Voice and verbosity only change how that tutoring is worded.</p>
+                              </div>
+                            </div>
+                            <div className="tutor-mode-grid" role="radiogroup" aria-label="Tutor behavior">
                               {tutorBehaviorOptions.map((option) => (
-                                <label className="settings-choice-pill" key={option}>
+                                <label className="tutor-mode-option" key={option}>
                                   <input
                                     defaultChecked={selectedTutorBehavior === option}
                                     name="behaviorTitle"
                                     type="radio"
                                     value={option}
                                   />
-                                  <span>{option}</span>
+                                  <span className="tutor-mode-card">
+                                    <strong>{option}</strong>
+                                    <small>{tutorModeDescriptions[option]}</small>
+                                  </span>
                                 </label>
                               ))}
                             </div>
-
-                            <label className="ai-tutor-control-label" htmlFor="ai-default-assignment-context">
-                              Default assignment context
-                            </label>
-                            <textarea
-                              id="ai-default-assignment-context"
-                              name="defaultAssignmentContext"
-                              rows={3}
-                              defaultValue={selectedClass.defaultAssignmentContext ?? ""}
-                              placeholder="Limits and introductory derivatives"
-                            />
-
-                            <label className="ai-tutor-control-label" htmlFor="ai-opening-message">
-                              Student opening message
-                            </label>
-                            <textarea
-                              id="ai-opening-message"
-                              name="openingMessage"
-                              rows={3}
-                              defaultValue={selectedOpeningMessage}
-                              placeholder="Hi. I can help with Algebra step by step. What problem are you on?"
-                            />
-
-                            <label className="ai-tutor-control-label" htmlFor="ai-student-facing-instructions">
-                              Student-facing instructions
-                            </label>
-                            <textarea
-                              id="ai-student-facing-instructions"
-                              name="studentFacingInstructions"
-                              rows={3}
-                              defaultValue={selectedStudentFacingInstructions}
-                              placeholder="Show your work. Use exact values unless asked for decimals."
-                            />
-
-                            <label className="ai-tutor-control-label" htmlFor="ai-behavior-instructions">
-                              Hidden tutor instructions
-                            </label>
-                            <p>Teacher-only instructions not shown to students.</p>
-                            <textarea
-                              id="ai-behavior-instructions"
-                              name="behaviorInstructions"
-                              rows={7}
-                              defaultValue={selectedBehaviorInstructions}
-                            />
-
                           </section>
-                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-response-card-title">
-                            <h3 id="ai-tutor-response-card-title">Reply Style</h3>
-                            <div className="settings-toggle-list">
-                              {responseStructureSettings.map((setting) => (
-                                <SettingsToggle
-                                  defaultChecked={
-                                    setting.id === "askGuidingQuestionBeforeExplaining"
-                                      ? selectedAnswerPolicy.askGuidingQuestionBeforeExplaining
-                                      : selectedResponseFormat[setting.id]
-                                  }
-                                  key={setting.title}
-                                  name={setting.name}
-                                  title={setting.title}
-                                  description={setting.description}
-                                />
-                              ))}
-                              <SettingsToggle
-                                defaultChecked={selectedResponseFormat.simpleWording}
-                                description="Use shorter sentences and define specialized terms briefly."
-                                name="responseFormat.simpleWording"
-                                title="Use simpler wording"
-                              />
+                        </section>
+
+                        <section
+                          className="ai-tutor-section-panel"
+                          hidden={activeTab !== "knowledge" || activeAiTutorSection !== "voiceDetail"}
+                          aria-labelledby="ai-tutor-voice-detail-title"
+                        >
+                          <div className="ai-tutor-section-heading">
+                            <div>
+                              <h2 id="ai-tutor-voice-detail-title">Voice & Detail</h2>
+                              <span>Set how Chandra sounds and how much detail she uses inside the selected Tutor Mode.</span>
+                            </div>
+                          </div>
+                          <section className="ai-tutor-card teaching-style-card" aria-labelledby="ai-tutor-voice-card-title">
+                            <div className="teaching-style-card-heading">
+                              <div>
+                                <h3 id="ai-tutor-voice-card-title">Chandra Voice</h3>
+                                <p>Controls tone and conversational style only. It does not change help depth or tutoring behavior.</p>
+                              </div>
+                            </div>
+                            <div className="ai-tutor-control-grid single">
+                              <div>
+                                <label className="ai-tutor-control-label" htmlFor="ai-tutor-voice">
+                                  Voice preset
+                                </label>
+                                <select
+                                  id="ai-tutor-voice"
+                                  name="responseFormat.tutorVoice"
+                                  defaultValue={selectedResponseFormat.tutorVoice}
+                                >
+                                  {tutorVoiceOptions.map((voice) => (
+                                    <option key={voice} value={voice}>
+                                      {formatTutorVoiceLabel(voice)}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
                             </div>
                           </section>
 
-                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-response-detail-title">
-                            <h3 id="ai-tutor-response-detail-title">Response Detail</h3>
+                          <section className="ai-tutor-card teaching-style-card" aria-labelledby="ai-tutor-response-detail-title">
+                            <div className="teaching-style-card-heading">
+                              <div>
+                                <h3 id="ai-tutor-response-detail-title">Response Verbosity</h3>
+                                <p>Controls how much Chandra says per response, within the selected Tutor Mode and Help Rules.</p>
+                              </div>
+                            </div>
                             <div className="ai-tutor-control-grid">
                               <div>
                                 <label className="ai-tutor-control-label" htmlFor="ai-response-length">
-                                  Verbose
+                                  Detail level
                                 </label>
                                 <select
                                   id="ai-response-length"
@@ -5784,11 +5833,99 @@ export function TeacherClassManager({
                               </div>
                             </div>
                           </section>
+
+                          <section className="ai-tutor-card teaching-style-card" aria-labelledby="ai-tutor-response-card-title">
+                            <div className="teaching-style-card-heading">
+                              <div>
+                                <h3 id="ai-tutor-response-card-title">Reply Format</h3>
+                                <p>Controls the shape of each tutoring turn without changing the selected Tutor Mode.</p>
+                              </div>
+                            </div>
+                            <div className="settings-toggle-list compact-toggle-list">
+                              {responseStructureSettings.map((setting) => (
+                                <SettingsToggle
+                                  defaultChecked={selectedResponseFormat[setting.id]}
+                                  key={setting.title}
+                                  name={setting.name}
+                                  title={setting.title}
+                                  description={setting.description}
+                                />
+                              ))}
+                              <SettingsToggle
+                                defaultChecked={selectedResponseFormat.simpleWording}
+                                description="Use shorter sentences and define specialized terms briefly."
+                                name="responseFormat.simpleWording"
+                                title="Use simpler wording"
+                              />
+                            </div>
+                          </section>
                         </section>
 
                         <section
                           className="ai-tutor-section-panel"
-                          hidden={activeAiTutorSection !== "answerPolicy"}
+                          hidden={activeTab !== "knowledge" || activeAiTutorSection !== "classInstructions"}
+                          aria-labelledby="ai-tutor-class-instructions-title"
+                        >
+                          <div className="ai-tutor-section-heading">
+                            <div>
+                              <h2 id="ai-tutor-class-instructions-title">Class Instructions</h2>
+                              <span>Set class-specific chat copy. Hidden tutor instructions stay at the bottom.</span>
+                            </div>
+                          </div>
+                          <section className="ai-tutor-card teaching-style-card" aria-labelledby="ai-tutor-student-copy-title">
+                            <div className="teaching-style-card-heading">
+                              <div>
+                                <h3 id="ai-tutor-student-copy-title">Student-facing Copy</h3>
+                                <p>Messages students can see before or during chat.</p>
+                              </div>
+                            </div>
+                            <div className="teaching-style-textarea-grid">
+                              <div>
+                                <label className="ai-tutor-control-label" htmlFor="ai-opening-message">
+                                  Student opening message
+                                </label>
+                                <textarea
+                                  id="ai-opening-message"
+                                  name="openingMessage"
+                                  rows={3}
+                                  defaultValue={selectedOpeningMessage}
+                                  placeholder="Hi. I can help with Algebra step by step. What problem are you on?"
+                                />
+                              </div>
+                              <div>
+                                <label className="ai-tutor-control-label" htmlFor="ai-student-facing-instructions">
+                                  Student-facing instructions
+                                </label>
+                                <textarea
+                                  id="ai-student-facing-instructions"
+                                  name="studentFacingInstructions"
+                                  rows={3}
+                                  defaultValue={selectedStudentFacingInstructions}
+                                  placeholder="Show your work. Use exact values unless asked for decimals."
+                                />
+                              </div>
+                            </div>
+                          </section>
+
+                          <section className="ai-tutor-card teaching-style-card" aria-labelledby="ai-tutor-hidden-instructions-title">
+                            <div className="teaching-style-card-heading">
+                              <div>
+                                <h3 id="ai-tutor-hidden-instructions-title">Hidden Tutor Instructions</h3>
+                                <p>Teacher-only instructions not shown to students. Keep operational guidance here, below the student-facing copy.</p>
+                              </div>
+                            </div>
+                            <textarea
+                              id="ai-behavior-instructions"
+                              name="behaviorInstructions"
+                              rows={7}
+                              defaultValue={selectedBehaviorInstructions}
+                            />
+                          </section>
+                        </section>
+
+                        <section
+                          className="ai-tutor-section-panel"
+                          hidden={activeTab !== "knowledge" || activeAiTutorSection !== "helpRules"}
                           aria-labelledby="ai-tutor-answer-policy-title"
                         >
                           <div className="ai-tutor-section-heading">
@@ -5797,43 +5934,94 @@ export function TeacherClassManager({
                               <span>Set academic integrity guardrails and how much help Chandra may give.</span>
                             </div>
                           </div>
-                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-answer-policy-card-title">
-                            <h3 id="ai-tutor-answer-policy-card-title">Academic Integrity</h3>
-                            <div className="settings-toggle-list">
-                              {academicIntegritySettings.map((setting) => (
-                                <SettingsToggle
-                                  defaultChecked={selectedAnswerPolicy[setting.id]}
-                                  key={setting.title}
-                                  name={`answerPolicy.${setting.id}`}
-                                  {...setting}
+                          <div className="help-rules-grid">
+                            <section className="ai-tutor-card help-rule-card help-rule-card-wide" aria-labelledby="ai-tutor-answer-boundaries-title">
+                              <div className="teaching-style-card-heading">
+                                <div>
+                                  <h3 id="ai-tutor-answer-boundaries-title">Answer Boundaries</h3>
+                                  <p>Define what Chandra must not complete for students, and how she should redirect answer-only requests.</p>
+                                </div>
+                              </div>
+                              <div className="settings-toggle-list compact-toggle-list">
+                                {answerBoundarySettings.map((setting) => (
+                                  <SettingsToggle
+                                    defaultChecked={selectedAnswerPolicy[setting.id]}
+                                    key={setting.title}
+                                    name={`answerPolicy.${setting.id}`}
+                                    {...setting}
+                                  />
+                                ))}
+                              </div>
+                              <div className="help-rule-textarea-block">
+                                <label className="ai-tutor-control-label" htmlFor="ai-refusal-style">
+                                  Redirect wording
+                                </label>
+                                <textarea
+                                  id="ai-refusal-style"
+                                  name="refusalStyle"
+                                  rows={4}
+                                  defaultValue={selectedRefusalStyle}
                                 />
-                              ))}
-                            </div>
-                          </section>
-                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-help-limits-card-title">
-                            <h3 id="ai-tutor-help-limits-card-title">Help Limits by Understanding Level</h3>
-                            <p>Set the most help Chandra may provide. Chandra can choose lighter support when appropriate.</p>
-                            <HelpLimitSelectors
-                              idPrefix="ai-help-limit"
-                              labelClassName="ai-tutor-control-label"
-                              selectedAnswerPolicy={selectedAnswerPolicy}
-                            />
-                          </section>
-                          <section className="ai-tutor-card" aria-labelledby="ai-tutor-refusal-card-title">
-                            <h3 id="ai-tutor-refusal-card-title">Direct-answer Redirect</h3>
-                            <p>Tell Chandra how to respond when students ask for answers only.</p>
-                            <textarea
-                              id="ai-refusal-style"
-                              name="refusalStyle"
-                              rows={4}
-                              defaultValue={selectedRefusalStyle}
-                            />
-                          </section>
+                              </div>
+                            </section>
+
+                            <section className="ai-tutor-card help-rule-card" aria-labelledby="ai-tutor-student-effort-title">
+                              <div className="teaching-style-card-heading">
+                                <div>
+                                  <h3 id="ai-tutor-student-effort-title">Student Effort</h3>
+                                  <p>Control when Chandra asks students to show thinking before receiving task-specific help.</p>
+                                </div>
+                              </div>
+                              <div className="settings-toggle-list">
+                                {studentEffortSettings.map((setting) => (
+                                  <SettingsToggle
+                                    defaultChecked={selectedAnswerPolicy[setting.id]}
+                                    key={setting.title}
+                                    name={`answerPolicy.${setting.id}`}
+                                    {...setting}
+                                  />
+                                ))}
+                              </div>
+                            </section>
+
+                            <section className="ai-tutor-card help-rule-card" aria-labelledby="ai-tutor-worked-examples-title">
+                              <div className="teaching-style-card-heading">
+                                <div>
+                                  <h3 id="ai-tutor-worked-examples-title">Worked Examples</h3>
+                                  <p>Decide whether Chandra may use full examples, while keeping them different from assigned work.</p>
+                                </div>
+                              </div>
+                              <div className="settings-toggle-list">
+                                {workedExampleSettings.map((setting) => (
+                                  <SettingsToggle
+                                    defaultChecked={selectedAnswerPolicy[setting.id]}
+                                    key={setting.title}
+                                    name={`answerPolicy.${setting.id}`}
+                                    {...setting}
+                                  />
+                                ))}
+                              </div>
+                            </section>
+
+                            <section className="ai-tutor-card help-rule-card help-rule-card-wide" aria-labelledby="ai-tutor-help-limits-card-title">
+                              <div className="teaching-style-card-heading">
+                                <div>
+                                  <h3 id="ai-tutor-help-limits-card-title">Help Limits by Understanding Level</h3>
+                                  <p>Set the most help Chandra may provide. Chandra can choose lighter support when appropriate.</p>
+                                </div>
+                              </div>
+                              <HelpLimitSelectors
+                                idPrefix="ai-help-limit"
+                                labelClassName="ai-tutor-control-label"
+                                selectedAnswerPolicy={selectedAnswerPolicy}
+                              />
+                            </section>
+                          </div>
                         </section>
 
                         <section
                           className="ai-tutor-section-panel"
-                          hidden={activeAiTutorSection !== "model"}
+                          hidden={activeTab !== "knowledge" || activeAiTutorSection !== "model"}
                           aria-labelledby="ai-tutor-model-title"
                         >
                           <div className="ai-tutor-section-heading">
@@ -7650,7 +7838,7 @@ function formatMathNotationLabel(value: string) {
 
 function formatVerboseLabel(value: string) {
   if (value === "brief") {
-    return "Brief";
+    return "Short";
   }
 
   if (value === "detailed") {
@@ -7661,7 +7849,27 @@ function formatVerboseLabel(value: string) {
     return "Very detailed";
   }
 
-  return "Standard";
+  return "Balanced";
+}
+
+function formatTutorVoiceLabel(value: string) {
+  if (value === "friendlyUpbeat") {
+    return "Friendly and upbeat";
+  }
+
+  if (value === "directConcise") {
+    return "Direct and concise";
+  }
+
+  if (value === "formalAcademic") {
+    return "Formal and academic";
+  }
+
+  if (value === "gentlePatient") {
+    return "Gentle and patient";
+  }
+
+  return "Calm and clear";
 }
 
 function formatExampleFrequencyLabel(value: string) {
