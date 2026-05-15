@@ -12,7 +12,7 @@ import { assistantContentWithSources } from "../frontend/lib/provider-source-con
 import { resolveStudentChatClassId, StudentChatScopeError } from "../frontend/lib/student-chat-scope.ts";
 import { assistantMessageBlocks } from "../frontend/lib/chat-message-format.ts";
 import { buildChatContextMemory } from "../frontend/lib/chat-context-memory.ts";
-import { normalizeTutorResponse } from "../frontend/lib/tutor-response.ts";
+import { normalizeStructuredTutorOutput, normalizeTutorResponse } from "../frontend/lib/tutor-response.ts";
 import { buildUnderstandingState, safeUnderstandingReasons } from "../frontend/lib/understanding-state.ts";
 
 const repoRoot = process.cwd();
@@ -502,6 +502,80 @@ test("student chat response normalization preserves structured output", () => {
       studentActionNeeded: "try_next_step"
     }
   });
+});
+
+test("student chat response normalization unwraps raw structured JSON messages", () => {
+  const response = normalizeTutorResponse({
+    content: JSON.stringify({
+      content: "",
+      sections: {
+        mainChat: "I'm staying with Problem 2.10.",
+        hint: "Start by writing the two rotation matrices.",
+        problem: "Show that R_{theta+phi}=R_theta R_phi."
+      },
+      sectionOrder: ["problem", "mainChat", "hint"],
+      metadata: {
+        hintLevel: "small_hint",
+        mode: "guided_problem_solving",
+        sourceConfidence: "high",
+        studentActionNeeded: "try_next_step"
+      }
+    }),
+    retrievalConfidence: "high",
+    sources: []
+  });
+
+  assert.equal(response.content, "I'm staying with Problem 2.10.");
+  assert.equal(response.message, "I'm staying with Problem 2.10.");
+  assert.equal(response.structuredOutput?.sections.mainChat, "I'm staying with Problem 2.10.");
+  assert.equal(response.structuredOutput?.sections.hint, "Start by writing the two rotation matrices.");
+  assert.equal(response.structuredOutput?.sections.problem, "Show that R_{theta+phi}=R_theta R_phi.");
+  assert.deepEqual(response.structuredOutput?.sectionOrder, ["problem", "mainChat", "hint"]);
+});
+
+test("student chat response normalization unwraps nested raw structured JSON messages", () => {
+  const response = normalizeTutorResponse({
+    message: JSON.stringify({
+      content: JSON.stringify({
+        sections: {
+          mainChat: "Use the angle-addition identities first."
+        },
+        metadata: {
+          hintLevel: "small_hint",
+          mode: "guided_problem_solving",
+          sourceConfidence: "medium",
+          studentActionNeeded: "try_next_step"
+        }
+      })
+    }),
+    retrievalConfidence: "medium",
+    sources: []
+  });
+
+  assert.equal(response.content, "Use the angle-addition identities first.");
+  assert.equal(response.message, "Use the angle-addition identities first.");
+  assert.equal(response.structuredOutput?.sections.mainChat, "Use the angle-addition identities first.");
+});
+
+test("student chat structured output normalization hydrates raw structured JSON content", () => {
+  const structuredOutput = normalizeStructuredTutorOutput(
+    undefined,
+    JSON.stringify({
+      sections: {
+        mainChat: "Stay with the current problem.",
+        hint: "Compute the first matrix product entry."
+      },
+      metadata: {
+        hintLevel: "small_hint",
+        mode: "guided_problem_solving",
+        sourceConfidence: "low",
+        studentActionNeeded: "try_next_step"
+      }
+    })
+  );
+
+  assert.equal(structuredOutput?.sections.mainChat, "Stay with the current problem.");
+  assert.equal(structuredOutput?.sections.hint, "Compute the first matrix product entry.");
 });
 
 test("student chat response normalization preserves valid confusion choices", () => {

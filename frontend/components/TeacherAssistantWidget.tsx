@@ -1,10 +1,14 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { Fragment, type FormEvent, type ReactNode, useMemo, useState } from "react";
 import type { Route } from "next";
 import { useRouter } from "next/navigation";
 import { apiUrl } from "@/lib/api-client";
-import type { TeacherAssistantAction, TeacherAssistantResponse } from "@/lib/teacher-assistant/types";
+import type {
+  TeacherAssistantAction,
+  TeacherAssistantChatHistoryMessage,
+  TeacherAssistantResponse
+} from "@/lib/teacher-assistant/types";
 import { useAuth } from "./AuthProvider";
 import { TeacherAssistantActionCard } from "./TeacherAssistantActionCard";
 
@@ -48,18 +52,20 @@ export function TeacherAssistantWidget({
 
     setInput("");
     setError("");
-    setMessages((currentMessages) => [
-      ...currentMessages,
+    const nextMessages: LocalMessage[] = [
+      ...messages,
       {
         content: message,
         id: `user-${Date.now()}`,
         role: "user"
       }
-    ]);
-    await sendAssistantRequest({ message });
+    ];
+    setMessages(nextMessages);
+    await sendAssistantRequest({ chatHistory: toAssistantChatHistory(messages), message });
   }
 
   async function sendAssistantRequest(inputBody: {
+    chatHistory?: TeacherAssistantChatHistoryMessage[];
     confirmation?: {
       decision: "approved" | "rejected";
       pendingActionId: string;
@@ -78,6 +84,7 @@ export function TeacherAssistantWidget({
       const response = await fetch(apiUrl("/api/teacher-assistant"), {
         body: JSON.stringify({
           classId,
+          chatHistory: inputBody.chatHistory ?? toAssistantChatHistory(messages),
           confirmation: inputBody.confirmation,
           message: inputBody.message ?? "",
           sessionId
@@ -128,7 +135,7 @@ export function TeacherAssistantWidget({
           <div className="teacher-assistant-messages" aria-live="polite">
             {messages.map((message) => (
               <article className={`teacher-assistant-message ${message.role}`} key={message.id}>
-                <p>{message.content}</p>
+                {renderAssistantMessageContent(message.content)}
                 {message.actions?.length ? (
                   <div className="teacher-assistant-action-list">
                     {message.actions.map((action) => (
@@ -183,6 +190,60 @@ export function TeacherAssistantWidget({
       </button>
     </aside>
   );
+}
+
+function toAssistantChatHistory(messages: LocalMessage[]): TeacherAssistantChatHistoryMessage[] {
+  return messages
+    .filter((message) => message.id !== "welcome")
+    .slice(-10)
+    .map((message) => ({
+      content: message.content,
+      role: message.role
+    }));
+}
+
+function renderAssistantMessageContent(content: string) {
+  const blocks = content.split(/\n{2,}/).filter((block) => block.trim());
+
+  if (blocks.length === 0) {
+    return null;
+  }
+
+  return blocks.map((block, index) => <p key={`${index}-${block.slice(0, 12)}`}>{renderInlineMarkdown(block)}</p>);
+}
+
+function renderInlineMarkdown(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const tokenPattern = /(\*\*[^*]+?\*\*)/g;
+  const tokens = text.split(tokenPattern);
+
+  tokens.forEach((token, tokenIndex) => {
+    if (!token) {
+      return;
+    }
+
+    const content = token.startsWith("**") && token.endsWith("**") ? token.slice(2, -2) : token;
+    const pieces = content.split(/\n/);
+
+    pieces.forEach((piece, pieceIndex) => {
+      if (pieceIndex > 0) {
+        nodes.push(<br key={`br-${tokenIndex}-${pieceIndex}`} />);
+      }
+
+      if (!piece) {
+        return;
+      }
+
+      if (token.startsWith("**") && token.endsWith("**")) {
+        nodes.push(<strong key={`strong-${tokenIndex}-${pieceIndex}`}>{piece}</strong>);
+        return;
+      }
+
+      nodes.push(<Fragment key={`text-${tokenIndex}-${pieceIndex}`}>{piece}</Fragment>);
+    });
+  });
+
+  return nodes;
 }
 
 function teacherAssistantActionKey(action: TeacherAssistantAction) {

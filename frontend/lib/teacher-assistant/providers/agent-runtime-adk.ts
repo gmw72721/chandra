@@ -1,4 +1,6 @@
-import { GoogleAuth, type JWTInput } from "google-auth-library";
+import { createHash } from "node:crypto";
+import { GoogleAuth, type AuthClient, type JWTInput } from "google-auth-library";
+import { adminDb } from "../../firebase-admin.ts";
 import type {
   AssistantEvent,
   AssistantTurnInput,
@@ -17,6 +19,19 @@ type AgentRuntimeProviderOptions = {
 };
 
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
+const remoteSessionTtlMs = 4 * 60 * 60 * 1000;
+const remoteSessions = new Map<string, RemoteAgentSessionRecord>();
+let googleAuthClientPromise: Promise<AuthClient> | null = null;
+
+type RemoteAgentSessionRecord = {
+  actorUid: string;
+  createdAt: number;
+  id: string;
+  key: string;
+  resource: string;
+  sessionId: string;
+  updatedAt: number;
+};
 
 export function createAgentRuntimeAdkProvider(options: AgentRuntimeProviderOptions = {}): TeacherAssistantProvider {
   return {
@@ -29,10 +44,11 @@ export function createAgentRuntimeAdkProvider(options: AgentRuntimeProviderOptio
 
       const fetchFn = options.fetchFn ?? fetch;
       const accessToken = await (options.getAccessToken ?? getGoogleAccessToken)();
-      const remoteSession = await createRemoteAgentSession({
+      const remoteSession = await getOrCreateRemoteAgentSession({
         accessToken,
         config,
         fetchFn,
+        sessionId: input.sessionId,
         userId: input.actorUid
       });
       let yielded = false;
@@ -118,9 +134,25 @@ function buildAgentMessage(input: AssistantTurnInput) {
     `allowed_tool_names: ${allowedTools}`,
     `tool_policy: ${input.sanitizedContext?.toolPolicy?.reason ?? "default"}`,
     `max_tool_calls: ${input.sanitizedContext?.toolPolicy?.maxToolCalls ?? 2}`,
+    "Recent chat history:",
+    formatRecentChatHistory(input),
     "Teacher message:",
     input.message
   ].join("\n");
+}
+
+function formatRecentChatHistory(input: AssistantTurnInput) {
+  const history = input.chatHistory?.slice(-8) ?? [];
+  if (history.length === 0) {
+    return "(none)";
+  }
+
+  return history
+    .map((message) => {
+      const role = message.role === "assistant" ? "Assistant" : "Teacher";
+      return `${role}: ${message.content.replace(/\s+/g, " ").slice(0, 1_000)}`;
+    })
+    .join("\n");
 }
 
 async function createRemoteAgentSession(input: {
@@ -150,6 +182,111 @@ async function createRemoteAgentSession(input: {
   }
 
   return { id };
+}
+
+async function getOrCreateRemoteAgentSession(input: {
+  accessToken: string;
+  config: AgentRuntimeConfig;
+  fetchFn: typeof fetch;
+  sessionId: string;
+  userId: string;
+}) {
+  const key = remoteSessionKey({
+    resource: input.config.resource,
+    sessionId: input.sessionId,
+    userId: input.userId
+  });
+  const cached = await readRemoteAgentSession(key);
+
+  if (cached) {
+    return { id: cached.id };
+  }
+
+  const created = await createRemoteAgentSession(input);
+  const now = Date.now();
+  const record: RemoteAgentSessionRecord = {
+    actorUid: input.userId,
+    createdAt: now,
+    id: created.id,
+    key,
+    resource: input.config.resource,
+    sessionId: input.sessionId,
+    updatedAt: now
+  };
+  await writeRemoteAgentSession(record);
+
+  return created;
+}
+
+async function readRemoteAgentSession(key: string) {
+  const now = Date.now();
+  const cached = remoteSessions.get(key);
+  if (cached && cached.updatedAt + remoteSessionTtlMs > now) {
+    cached.updatedAt = now;
+    return cached;
+  }
+
+  if (!adminDb) {
+    return null;
+  }
+
+  const snapshot = await adminDb.collection("teacherAssistantAgentRuntimeSessions").doc(key).get();
+  if (!snapshot.exists) {
+    return null;
+  }
+
+  const record = normalizeRemoteAgentSessionRecord(snapshot.data(), key);
+  if (!record || record.updatedAt + remoteSessionTtlMs <= now) {
+    await snapshot.ref.delete().catch(() => undefined);
+    return null;
+  }
+
+  record.updatedAt = now;
+  remoteSessions.set(key, record);
+  await snapshot.ref.set({ updatedAt: now }, { merge: true }).catch(() => undefined);
+  return record;
+}
+
+async function writeRemoteAgentSession(record: RemoteAgentSessionRecord) {
+  remoteSessions.set(record.key, record);
+  if (adminDb) {
+    await adminDb.collection("teacherAssistantAgentRuntimeSessions").doc(record.key).set(record);
+  }
+}
+
+function normalizeRemoteAgentSessionRecord(value: unknown, key: string): RemoteAgentSessionRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const source = value as Record<string, unknown>;
+  if (
+    source.key !== key ||
+    typeof source.actorUid !== "string" ||
+    typeof source.createdAt !== "number" ||
+    typeof source.id !== "string" ||
+    typeof source.resource !== "string" ||
+    typeof source.sessionId !== "string" ||
+    typeof source.updatedAt !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    actorUid: source.actorUid,
+    createdAt: source.createdAt,
+    id: source.id,
+    key,
+    resource: source.resource,
+    sessionId: source.sessionId,
+    updatedAt: source.updatedAt
+  };
+}
+
+function remoteSessionKey(input: { resource: string; sessionId: string; userId: string }) {
+  return createHash("sha256")
+    .update(`${input.resource}\n${input.userId}\n${input.sessionId}`)
+    .digest("hex");
 }
 
 async function* streamRemoteAgentQuery(input: {
@@ -307,12 +444,7 @@ async function readErrorBody(response: Response) {
 }
 
 async function getGoogleAccessToken() {
-  const credentials = getGoogleCredentials();
-  const auth = new GoogleAuth({
-    ...(credentials ? { credentials } : {}),
-    scopes: [cloudPlatformScope]
-  });
-  const client = await auth.getClient();
+  const client = await getGoogleAuthClient();
   const accessTokenResponse = await client.getAccessToken();
   const token = typeof accessTokenResponse === "string" ? accessTokenResponse : accessTokenResponse?.token;
 
@@ -323,6 +455,19 @@ async function getGoogleAccessToken() {
   }
 
   return token;
+}
+
+async function getGoogleAuthClient() {
+  if (!googleAuthClientPromise) {
+    const credentials = getGoogleCredentials();
+    const auth = new GoogleAuth({
+      ...(credentials ? { credentials } : {}),
+      scopes: [cloudPlatformScope]
+    });
+    googleAuthClientPromise = auth.getClient();
+  }
+
+  return googleAuthClientPromise;
 }
 
 function getGoogleCredentials(): JWTInput | undefined {

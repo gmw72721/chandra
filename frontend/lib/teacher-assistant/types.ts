@@ -5,6 +5,11 @@ export type TeacherAssistantMessage = {
   role: TeacherAssistantRole;
 };
 
+export type TeacherAssistantChatHistoryMessage = {
+  content: string;
+  role: "assistant" | "user";
+};
+
 export type TeacherAssistantAction =
   | {
       href: string;
@@ -34,6 +39,7 @@ export type AssistantTurnInput = {
   assistantContextId?: string;
   actorEmail?: string;
   actorUid: string;
+  chatHistory?: TeacherAssistantChatHistoryMessage[];
   classId: string;
   message: string;
   runTool?: (toolName: string, args: Record<string, unknown>) => Promise<TeacherAssistantToolResult>;

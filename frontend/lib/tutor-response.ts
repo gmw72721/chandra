@@ -36,8 +36,9 @@ const tutorStructuredSectionKeys = [
 export function normalizeTutorResponse(payload: Partial<TutorApiResponse>): TutorApiResponse {
   const rawMessage = String(payload.message ?? payload.content ?? "");
   const retrievalConfidence = normalizeRetrievalConfidence(payload.retrievalConfidence);
-  const structuredOutput = normalizeStructuredTutorOutput(payload.structuredOutput, rawMessage);
-  const message = rawMessage;
+  const rawStructuredMessagePayload = parseStructuredTutorMessagePayload(rawMessage);
+  const structuredOutput = normalizeStructuredTutorOutput(payload.structuredOutput ?? rawStructuredMessagePayload, rawMessage);
+  const message = rawStructuredMessagePayload && structuredOutput ? visibleTextFromStructuredOutput(structuredOutput) : rawMessage;
 
   return {
     assistantMessageId: payload.assistantMessageId,
@@ -56,13 +57,14 @@ export function normalizeStructuredTutorOutput(
   fallbackAnswer = ""
 ): TutorStructuredOutput | undefined {
   if (!value || typeof value !== "object") {
-    return undefined;
+    const fallbackPayload = parseStructuredTutorMessagePayload(fallbackAnswer);
+    return fallbackPayload ? normalizeStructuredTutorOutput(fallbackPayload, fallbackAnswer) : undefined;
   }
 
   const record = value as Record<string, unknown>;
   const sectionsRecord = isRecord(record.sections) ? record.sections : record;
   const metadataRecord = isRecord(record.metadata) ? record.metadata : record;
-  const explicitMainChat = optionalStringValue(sectionsRecord.mainChat ?? record.mainChat);
+  const explicitMainChat = optionalStringValue(sectionsRecord.mainChat ?? record.mainChat ?? record.mainText ?? record.main_text);
   const explicitSectionAnswer = optionalStringValue(sectionsRecord.answer);
   const explicitLegacyAnswer = optionalStringValue(record.answer);
   const hasExplicitStructuredSection = tutorStructuredSectionKeys.some((key) => Boolean(optionalStringValue(sectionsRecord[key])));
@@ -127,6 +129,81 @@ export function normalizeStructuredTutorOutput(
       mode
     }
   };
+}
+
+function parseStructuredTutorMessagePayload(value: string): Record<string, unknown> | undefined {
+  const parsed = parseJsonObjectFromText(value);
+  if (!parsed) {
+    return undefined;
+  }
+
+  const unwrapped = unwrapNestedTutorJsonPayload(parsed);
+  return looksLikeTutorStructuredPayload(unwrapped) ? unwrapped : undefined;
+}
+
+function parseJsonObjectFromText(value: string): Record<string, unknown> | undefined {
+  if (!value.trim()) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  const candidate = trimmed.startsWith("{") ? trimmed : trimmed.match(/\{[\s\S]*\}/)?.[0];
+  if (!candidate) {
+    return undefined;
+  }
+
+  return parseJsonObjectCandidate(candidate) ?? parseJsonObjectCandidate(escapeInvalidJsonBackslashes(candidate));
+}
+
+function parseJsonObjectCandidate(candidate: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(candidate) as unknown;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function escapeInvalidJsonBackslashes(candidate: string) {
+  return candidate.replace(/\\(?!["\\/bfnrtu])/g, "\\\\");
+}
+
+function unwrapNestedTutorJsonPayload(value: Record<string, unknown>): Record<string, unknown> {
+  const nested =
+    typeof value.content === "string"
+      ? parseStructuredTutorMessagePayload(value.content)
+      : typeof value.message === "string"
+        ? parseStructuredTutorMessagePayload(value.message)
+        : undefined;
+  if (!nested) {
+    return value;
+  }
+
+  const { content: _content, message: _message, metadata: _metadata, sectionOrder: _sectionOrder, sections: _sections, ...outer } = value;
+  return { ...nested, ...outer };
+}
+
+function looksLikeTutorStructuredPayload(value: Record<string, unknown>) {
+  return (
+    isRecord(value.sections) ||
+    isRecord(value.metadata) ||
+    tutorStructuredSectionKeys.some((key) => typeof value[key] === "string") ||
+    typeof value.mainText === "string" ||
+    typeof value.main_text === "string"
+  );
+}
+
+function visibleTextFromStructuredOutput(value: TutorStructuredOutput) {
+  const sections = value.sections;
+  return (
+    sections.mainChat?.trim() ||
+    sections.answer?.trim() ||
+    sections.hint?.trim() ||
+    sections.explanation?.trim() ||
+    sections.problem?.trim() ||
+    value.confusionPrompt?.trim() ||
+    ""
+  );
 }
 
 function normalizeConfusionChoices(

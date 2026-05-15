@@ -10,6 +10,7 @@ import {
 } from "@/lib/teacher-assistant/tool-registry";
 import type {
   TeacherAssistantAction,
+  TeacherAssistantChatHistoryMessage,
   TeacherAssistantConfirmationRequest,
   TeacherAssistantMessage,
   TeacherAssistantResponse
@@ -22,6 +23,7 @@ export async function POST(request: Request) {
   try {
     const body = (await request.json().catch(() => ({}))) as {
       classId?: unknown;
+      chatHistory?: unknown;
       confirmation?: TeacherAssistantConfirmationRequest;
       message?: unknown;
       sessionId?: unknown;
@@ -44,6 +46,7 @@ export async function POST(request: Request) {
 
     const authorization = await authorizeClassAccess(request, classId, "viewOverview");
     const message = String(body.message ?? "").trim();
+    const chatHistory = normalizeChatHistory(body.chatHistory);
     const toolPolicy = selectTeacherAssistantToolPolicy(
       message,
       getTeacherAssistantAllowedToolNames(authorization.permissions)
@@ -65,6 +68,7 @@ export async function POST(request: Request) {
       assistantContextId: assistantContext.id,
       actorEmail: authorization.email,
       actorUid: authorization.uid,
+      chatHistory,
       classId,
       sanitizedContext: {
         allowedToolNames: assistantContext.allowedToolNames,
@@ -114,6 +118,31 @@ export async function POST(request: Request) {
     const message = caughtError instanceof Error ? caughtError.message : "Teacher assistant request failed.";
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+function normalizeChatHistory(value: unknown): TeacherAssistantChatHistoryMessage[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .slice(-10)
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return null;
+      }
+
+      const source = item as Record<string, unknown>;
+      const role = source.role === "assistant" || source.role === "user" ? source.role : null;
+      const content = typeof source.content === "string" ? source.content.trim().slice(0, 2_000) : "";
+
+      if (!role || !content) {
+        return null;
+      }
+
+      return { content, role } satisfies TeacherAssistantChatHistoryMessage;
+    })
+    .filter((item): item is TeacherAssistantChatHistoryMessage => Boolean(item));
 }
 
 function responseFromToolResult(

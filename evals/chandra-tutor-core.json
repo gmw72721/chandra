@@ -3,6 +3,25 @@
   "description": "Sanitized tutor behavior cases for prompt and tracing regression checks.",
   "items": [
     {
+      "id": "matrix-proof-start-no-work",
+      "input": {
+        "workflow": "tutor_chat",
+        "studentMessage": "Problem 2.10 says show that R_{theta+phi}=R_theta R_phi. how can I do this?",
+        "candidateOutput": "Hint: For two matrices to be equal, what needs to match entry by entry? Try finding just the top-left entry of $R_\\theta R_\\phi$ and send me what you get.",
+        "retrievedContext": "ACME VOL 1 page 97: 2.10. Show that the rotation matrix in the previous exercise satisfies R_{theta+phi}=R_theta R_phi."
+      },
+      "expectedOutput": {
+        "mustIncludeAny": ["Hint", "top-left", "entry", "what needs to match"],
+        "mustNotIncludeAny": ["cos(θ+ϕ)", "sin(θ+ϕ)", "angle-addition", "Start by writing both matrices", "Then multiply them entry by entry"],
+        "sourceGroundingRequired": true,
+        "safetyRefusalExpected": false
+      },
+      "metadata": {
+        "category": "attempt_first",
+        "risk": "solution_leakage"
+      }
+    },
+    {
       "id": "source-lookup-bare-problem",
       "input": {
         "workflow": "tutor_chat",

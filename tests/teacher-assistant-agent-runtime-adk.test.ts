@@ -16,6 +16,10 @@ test("Agent Runtime provider builds regional REST URLs and ADK method bodies", (
   const input: AssistantTurnInput = {
     actorUid: "teacher-1",
     assistantContextId: "ctx-1",
+    chatHistory: [
+      { content: "Open sources", role: "user" },
+      { content: "I opened the Sources tab.", role: "assistant" }
+    ],
     classId: "class-1",
     message: "Open roster",
     sanitizedContext: {
@@ -43,6 +47,9 @@ test("Agent Runtime provider builds regional REST URLs and ADK method bodies", (
   assert.equal(body.input.session_id, "remote-session-1");
   assert.match(body.input.message, /assistant_context_id: ctx-1/);
   assert.match(body.input.message, /allowed_tool_names: navigate_teacher_tab/);
+  assert.match(body.input.message, /Recent chat history:/);
+  assert.match(body.input.message, /Teacher: Open sources/);
+  assert.match(body.input.message, /Assistant: I opened the Sources tab\./);
   assert.equal("assistant_context_id" in body.input, false);
   assert.equal("chandra_context" in body.input, false);
 });

@@ -4,7 +4,8 @@ export function createLocalFallbackProvider(): TeacherAssistantProvider {
   return {
     async *send(input: AssistantTurnInput): AsyncIterable<AssistantEvent> {
       const message = input.message.trim();
-      const lowerMessage = message.toLowerCase();
+      const contextualMessage = resolveContextualMessage(input, message);
+      const lowerMessage = contextualMessage.toLowerCase();
 
       if (!input.runTool) {
         yield {
@@ -22,17 +23,17 @@ export function createLocalFallbackProvider(): TeacherAssistantProvider {
         return;
       }
 
-      const studentSearch = studentSearchFromMessage(message);
+      const studentSearch = studentSearchFromMessage(contextualMessage);
       if (studentSearch) {
         return yield* runLocalTool(input, "search_students", { classId: input.classId, query: studentSearch });
       }
 
-      const materialSearch = materialSearchFromMessage(message);
+      const materialSearch = materialSearchFromMessage(contextualMessage);
       if (materialSearch) {
         return yield* runLocalTool(input, "search_materials", { classId: input.classId, query: materialSearch });
       }
 
-      const toolRequest = inferLocalToolRequest(lowerMessage, input.classId);
+      const toolRequest = inferLocalTeacherAssistantToolRequest(lowerMessage, input.classId);
 
       if (toolRequest) {
         return yield* runLocalTool(input, toolRequest.toolName, toolRequest.args);
@@ -47,6 +48,25 @@ export function createLocalFallbackProvider(): TeacherAssistantProvider {
   };
 }
 
+function resolveContextualMessage(input: AssistantTurnInput, message: string) {
+  const lowerMessage = message.toLowerCase();
+  const needsPriorRequest =
+    lowerMessage.includes("what i told") ||
+    lowerMessage.includes("what i asked") ||
+    lowerMessage.includes("do that") ||
+    lowerMessage.includes("try again");
+
+  if (!needsPriorRequest) {
+    return message;
+  }
+
+  const previousUserMessage = [...(input.chatHistory ?? [])]
+    .reverse()
+    .find((historyMessage) => historyMessage.role === "user" && historyMessage.content.trim() !== message)?.content;
+
+  return previousUserMessage?.trim() || message;
+}
+
 async function* runLocalTool(input: AssistantTurnInput, toolName: string, args: Record<string, unknown>) {
   const result = await input.runTool!(toolName, args);
   if (result.action) {
@@ -58,7 +78,7 @@ async function* runLocalTool(input: AssistantTurnInput, toolName: string, args: 
   } as const;
 }
 
-function inferLocalToolRequest(message: string, classId: string) {
+export function inferLocalTeacherAssistantToolRequest(message: string, classId: string) {
   if (message.includes("review queue") || message.includes("needs review")) {
     return {
       args: { classId },
