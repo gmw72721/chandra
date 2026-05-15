@@ -90,7 +90,7 @@ MAX_MESSAGE_CONTENT_CHARS = 20000
 MAX_TOTAL_MESSAGE_CHARS = 100000
 MAX_PROVIDER_MESSAGE_CONTENT_CHARS = 60000
 MAX_PROVIDER_TOTAL_MESSAGE_CHARS = 140000
-MAX_MODEL_RESPONSE_TOKENS = 8000
+MAX_MODEL_RESPONSE_TOKENS = 16000
 MAX_MATERIAL_UPLOAD_BYTES = 500 * 1024 * 1024
 MAX_EXTRACTED_TEXT_CHARS = 250000
 UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
@@ -1573,12 +1573,12 @@ def model_response_control_lines(model_settings: dict[str, Any]) -> list[str]:
 
 def verbose_to_max_tokens(verbose: str) -> int:
     if verbose == "brief":
-        return 900
+        return 1800
     if verbose == "veryDetailed":
-        return 7000
+        return 14000
     if verbose == "detailed":
-        return 4200
-    return 2200
+        return 8400
+    return 4400
 
 
 def verbose_style_line(verbose: str) -> str:

@@ -62,6 +62,8 @@ test("tutor prompt separates voice and verbosity from tutoring behavior policy",
   assert.match(promptSource, /never permits extra solution steps, final answers, or policy bypasses/);
   assert.match(seedSource, /{{tutor_voice_instructions}}/);
   assert.match(seedSource, /{{response_verbosity_instructions}}/);
+  assert.match(seedSource, /chandra\/rag\/context-grounded-answer/);
+  assert.match(seedSource, /{{context_grounded_answer_instruction_bullets}}/);
 });
 
 test("tutor mode prompt guidance remains behavior-only and expanded", () => {

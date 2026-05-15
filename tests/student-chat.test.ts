@@ -1852,6 +1852,8 @@ test("teacher preview sidebar exposes compact AI tutor settings", () => {
   assert.match(backendStateSource, /behavior_title: NotRequired\[str\]/);
   assert.match(backendSource, /f"Tutor Mode: \{behavior_title\}/);
   assert.match(backendSource, /tutor_voice_instruction_for_state/);
+  assert.match(backendSource, /build_context_grounded_answer_messages/);
+  assert.match(backendSource, /f"Response verbosity: \{verbosity_instruction_for_state\(model_settings\['verbose'\]\)\}/);
   assert.match(styles, /\.teacher-preview-settings-panel\s*\{/);
   assert.match(styles, /max-height: min\(52vh, 470px\)/);
   assert.match(styles, /data-sidebar-collapsed="true"\] \.teacher-preview-settings-panel/);
@@ -2101,11 +2103,28 @@ test("student tutoring-time buckets are anchored to first class AI use", () => {
 test("student chat verbose settings leave room for math-heavy examples", () => {
   const source = readFileSync(join(repoRoot, "frontend/lib/class-settings.ts"), "utf8");
 
-  assert.match(source, /return 900/);
-  assert.match(source, /return 2200/);
-  assert.match(source, /return 4200/);
-  assert.match(source, /return 7000/);
+  assert.match(source, /return 1800/);
+  assert.match(source, /return 4400/);
+  assert.match(source, /return 8400/);
+  assert.match(source, /return 14000/);
   assert.match(source, /"veryDetailed"/);
+});
+
+test("student chat repairs OCR matrix math before KaTeX rendering", () => {
+  const source = readFileSync(join(repoRoot, "frontend/lib/chat-message-format.ts"), "utf8");
+
+  assert.match(source, /function repairMissingBmatrixMarkdown/);
+  assert.match(source, /\\\\begin\{bmatrix\}/);
+  assert.match(source, /\\\\end\{bmatrix\}/);
+  assert.match(source, /replace\(\/\(\[A-Za-z\]\)__\(\[A-Za-z0-9\{\]\)\/g, "\$1_\$2"\)/);
+});
+
+test("student chat quick response uses structured mainChat instead of raw JSON", () => {
+  const source = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
+
+  assert.match(source, /event\.structuredOutput\?\.sections\?\.mainChat\?\.trim\(\)/);
+  assert.match(source, /\^\\s\*\[\\\{\\\[\]/);
+  assert.match(source, /I'm checking the class materials for that problem\./);
 });
 
 test("student chat does not drop generated answers when assistant persistence fails", () => {

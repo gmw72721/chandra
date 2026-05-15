@@ -190,8 +190,8 @@ HELP_LIMIT_DESCRIPTIONS = {
     "check_work_explain_gaps": "check shown work and explain gaps without taking over the rest",
     "full_explanation_allowed": "full explanation allowed when other teacher policy permits",
 }
-PRIMARY_TUTOR_DEFAULT_MAX_TOKENS = 700
-PRIMARY_TUTOR_MAX_TOKENS = 900
+PRIMARY_TUTOR_DEFAULT_MAX_TOKENS = 1400
+PRIMARY_TUTOR_MAX_TOKENS = 1800
 PRIMARY_TUTOR_LENGTH_RETRY_MAX_TOKENS = PRIMARY_TUTOR_MAX_TOKENS * 2
 CONFUSION_CHOICE_MIN_COUNT = 2
 CONFUSION_CHOICE_MAX_COUNT = 6
@@ -1560,6 +1560,30 @@ def fallback_quick_retrieval_response(retrieval_reason: str) -> str:
         return "I'm looking for a relevant class example."
 
     return "I'm checking the class materials for the relevant page."
+
+
+def retrieval_quick_response_text(decision: dict[str, Any]) -> str:
+    structured_output = decision.get("structuredOutput") if isinstance(decision.get("structuredOutput"), dict) else {}
+    sections = structured_output.get("sections") if isinstance(structured_output.get("sections"), dict) else {}
+    for key in ("mainChat", "answer"):
+        text = coerce_structured_section_text(sections.get(key))
+        if text and not looks_like_json_object_text(text):
+            return text
+
+    text = jsonish_visible_text(str(decision.get("student_response") or "").strip())
+    if text and not looks_like_json_object_text(text):
+        return text
+
+    text = str(decision.get("student_response") or "").strip()
+    if text and not looks_like_json_object_text(text):
+        return text
+
+    return fallback_quick_retrieval_response(str(decision.get("retrieval_reason") or ""))
+
+
+def looks_like_json_object_text(value: str) -> bool:
+    trimmed = value.lstrip()
+    return trimmed.startswith("{") or trimmed.startswith("[")
 
 
 def normalize_backend_structured_output(value: Any) -> dict[str, Any] | None:
@@ -4274,6 +4298,10 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
 
     base_messages = state["messages"]
     answer_policy = normalize_answer_policy_state(state.get("answer_policy"))
+    behavior_title = normalize_behavior_title_state(state.get("behavior_title"))
+    behavior_instructions = str(state.get("behavior_instructions") or "").strip()
+    model_settings = normalize_model_settings_state(state.get("model_settings"))
+    response_format = normalize_response_format_state(state.get("response_format"))
     source_usage = normalize_source_usage_state(state.get("source_usage"))
     selected_context = compact_selected_page_context(state)
     knowledge_context = build_llm_knowledge_context_package(state)
@@ -4308,6 +4336,11 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
         f"Primary tutor turn trace for internal use only: {compact_json_dumps(decision)}",
         f"TutorPlan for internal use only: {compact_json_dumps(state.get('tutor_plan') or decision.get('tutorPlan') or {})}",
         "Continuation contract: the primary_tutor_turn may already have shown a student-facing response. Use the provided primary response context as prior visible conversation, not as a draft to rewrite. If it already gave orientation, a hint, or a next action, continue from it and add only the class-material grounding, exact source wording, or citation detail still needed. Do not restart, contradict, or replace that visible response.",
+        f"Tutor Mode: {behavior_title}. Tutor Mode controls what kind of tutoring Chandra does; it does not control voice, warmth, formality, or response length. {tutor_behavior_instruction_for_state(behavior_title)} Do not let Tutor Mode override Help Rules, source-use rules, academic integrity, or answer-safety policy.",
+        *([f"Hidden tutor instructions from teacher: {behavior_instructions}"] if behavior_instructions else []),
+        f"Chandra voice: {tutor_voice_instruction_for_state(response_format['tutorVoice'])} Voice controls wording and tone only. It never changes tutoring mode, help depth, source-use rules, academic integrity, retrieval, or answer-safety behavior.",
+        f"Response verbosity: {verbosity_instruction_for_state(model_settings['verbose'])} Verbosity controls detail inside the allowed tutoring move only; it never permits extra solution steps, final answers, or policy bypasses.",
+        *response_format_instruction_lines_for_state(response_format),
         f"Current problem understanding state for internal use only: {compact_json_dumps(state.get('problem_understanding_state') or current_problem_understanding_state(state))}",
         "Tutor planning contract: obey TutorPlan.nextHelpDepth in the student-facing response. The primary tutor turn already decided understandingLevel, lastHelpDepth, summaries, and help depth; do not revise those fields.",
         *help_limit_instruction_lines(answer_policy),
@@ -6131,7 +6164,7 @@ async def run_pdf_rag_agent_stream(
                 yield pending_primary_section_events.pop(0)
 
         if state["tool_calls"]:
-            immediate_response = str(decision.get("student_response") or "").strip()
+            immediate_response = retrieval_quick_response_text(decision)
             if immediate_response:
                 normalized_model_call_usage = normalize_model_call_usage_list(state.get("token_usage_by_call"))
                 yield {

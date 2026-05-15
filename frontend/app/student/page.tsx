@@ -5814,9 +5814,17 @@ function appendProgressSearches(
 }
 
 function quickResponseContent(event: Extract<ChatStreamEvent, { type: "quick_response" }>) {
-  const answer = event.structuredOutput?.sections?.answer?.trim();
+  const answer = event.structuredOutput?.sections?.mainChat?.trim() || event.structuredOutput?.sections?.answer?.trim();
 
-  return answer || event.message.replace(/^(?:\*\*)?(?:your next step|next step)(?:\*\*)?\s*:\s*/i, "");
+  if (answer) {
+    return answer;
+  }
+
+  if (/^\s*[\{\[]/.test(event.message)) {
+    return "I'm checking the class materials for that problem.";
+  }
+
+  return event.message.replace(/^(?:\*\*)?(?:your next step|next step)(?:\*\*)?\s*:\s*/i, "");
 }
 
 function studentSearchPurposeLabel(retrievalReason: string | undefined, query: string, fallback?: string) {

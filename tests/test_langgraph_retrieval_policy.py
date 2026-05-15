@@ -4046,6 +4046,67 @@ async def test_streaming_lookup_suppresses_raw_locator_echo_sections() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streaming_lookup_never_emits_raw_primary_json_as_quick_response() -> None:
+    raw_inner = json.dumps(
+        {
+            "sections": {"mainChat": "I'm checking the class materials for that problem."},
+            "sectionOrder": ["mainChat"],
+            "metadata": {"problemNumber": "2.18", "problemSummary": "problem lookup"},
+        }
+    )
+    client = FakeStreamingOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "content": raw_inner,
+                        "sections": {"mainChat": "I'm checking the class materials for that problem."},
+                        "sectionOrder": ["mainChat"],
+                        "metadata": {"problemNumber": "2.18", "problemSummary": "problem lookup"},
+                        "can_answer_now": False,
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "search_query": "2.18 OCR metadata exact page",
+                        "searches": [
+                            {
+                                "query": "2.18 OCR metadata exact page",
+                                "retrieval_reason": "student_requested_problem",
+                                "top_k": 1,
+                            }
+                        ],
+                        "student_response": raw_inner,
+                    }
+                )
+            },
+            {"content": "Problem:\n2.18. Assuming the polynomial bases, find the matrix representations."},
+        ]
+    )
+    events = [
+        event
+        async for event in run_pdf_rag_agent_stream(
+            class_id="class-linear",
+            conversation_id="conv-stream-raw-json-quick-response",
+            messages=[{"role": "user", "content": "problem 2.18"}],
+            model="openai/gpt-4.1-mini",
+            openrouter_client=client,
+            professor_id="teacher-1",
+            retriever=FakeRetriever(
+                [
+                    ocr_page(
+                        chunk_text="2.18. Assuming the polynomial bases, find the matrix representations.",
+                        problem_numbers=["2.18"],
+                    )
+                ]
+            ),
+        )
+    ]
+
+    quick_messages = [event.get("message", "") for event in events if event.get("type") == "quick_response"]
+    assert quick_messages == ["I'm checking the class materials for that problem."]
+    assert all(not str(message).lstrip().startswith("{") for message in quick_messages)
+
+
+@pytest.mark.asyncio
 async def test_streaming_failed_problem_search_does_not_finalize_quick_status() -> None:
     client = FakeOpenRouterClient(
         [
@@ -4720,13 +4781,13 @@ async def test_retries_primary_tutor_turn_with_double_tokens_after_length_stop()
         class_id="class-linear",
         messages=[{"role": "user", "content": "I think im(KL) is inside im(L)."}],
         model="openai/gpt-4.1-mini",
-        max_tokens=900,
+        max_tokens=1800,
         openrouter_client=client,
         professor_id="teacher-1",
         retriever=FakeRetriever([]),
     )
 
-    assert [call["max_tokens"] for call in client.calls] == [900, 1800]
+    assert [call["max_tokens"] for call in client.calls] == [1800, 3600]
     assert response["content"] == decision["student_response"]
 
 
@@ -4754,12 +4815,12 @@ async def test_streaming_retries_primary_tutor_turn_with_double_tokens_after_len
             class_id="class-linear",
             messages=[{"role": "user", "content": "I think im(KL) is inside im(L)."}],
             model="openai/gpt-4.1-mini",
-            max_tokens=900,
+            max_tokens=1800,
             openrouter_client=client,
             professor_id="teacher-1",
             retriever=FakeRetriever([]),
         )
     ]
 
-    assert [call["max_tokens"] for call in client.calls] == [900, 1800]
+    assert [call["max_tokens"] for call in client.calls] == [1800, 3600]
     assert events[-1]["payload"]["content"] == decision["student_response"]

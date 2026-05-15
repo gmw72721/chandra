@@ -210,12 +210,18 @@ const routerTemplate = [
   "Answer directly only for greetings, simple self-contained questions, and clearly course-related questions that do not need PDF context. If unsure whether class PDF OCR metadata could materially help, call search_pdf_pages with a focused query and retrieval_reason. For find-similar-example requests, use retrieval_reason needed_example_page and search topic/method/example terms instead of only the assigned problem number. When a referenced exercise is being used to support the active problem, use needed_supporting_page with method/source-context terms unless the student explicitly asks to quote, read, show, locate, or restate that exercise."
 ].join("\n");
 
+const contextGroundedAnswerTemplate = [
+  "Context-grounded answer instructions:",
+  "{{context_grounded_answer_instruction_bullets}}"
+].join("\n");
+
 const prompts = [
   ["chandra/tutor/main", tutorSystemTemplate],
   ...tutorSystemBlockPrompts,
   ["chandra/routing/pdf-tool-router", pdfToolRouterTemplate],
   ["chandra/memory/student-learning-profile-update", profileUpdateTemplate],
-  ["chandra/routing/rag-router", routerTemplate]
+  ["chandra/routing/rag-router", routerTemplate],
+  ["chandra/rag/context-grounded-answer", contextGroundedAnswerTemplate]
 ];
 
 const obsoleteVariableOnlyPrompts = [

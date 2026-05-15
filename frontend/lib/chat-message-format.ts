@@ -215,11 +215,14 @@ function isMathOnlyFormulaSection(content: string) {
 
 function normalizeProblemSectionMarkdown(content: string) {
   let formatted = content
+    .replace(/([A-Za-z])__([A-Za-z0-9{])/g, "$1_$2")
     .replace(/\r\n/g, "\n")
     .replace(/^\*\*(PROBLEM|EXERCISE|QUESTION|THEOREM|DEFINITION|EXAMPLE)\*\*\s+/i, "$1\n\n")
     .replace(/^(PROBLEM|EXERCISE|QUESTION|THEOREM|DEFINITION|EXAMPLE)\s+(?=\d|[A-Z]|\$|\\\()/i, "$1\n\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+
+  formatted = repairMissingBmatrixMarkdown(formatted);
 
   const enumeratedPartPattern = /\s(\((?:i{1,4}|iv|v|vi{0,3}|[a-h])\)\s+)/gi;
   const enumeratedParts = formatted.match(enumeratedPartPattern) ?? [];
@@ -232,6 +235,58 @@ function normalizeProblemSectionMarkdown(content: string) {
     .replace(/^(PROBLEM|EXERCISE|QUESTION|THEOREM|DEFINITION|EXAMPLE)$/im, "**$1**")
     .replace(/(^|\n\n)(\d+(?:\.\d+)*[a-z]?\.?)\s+/i, "$1**$2** ")
     .replace(/(^|\n\n)(\((?:i{1,4}|iv|v|vi{0,3}|[a-h])\))\s+/gi, "$1**$2** ");
+}
+
+function repairMissingBmatrixMarkdown(content: string) {
+  let repaired = content;
+  let searchStart = 0;
+  const endToken = "\\end{bmatrix}";
+
+  while (searchStart < repaired.length) {
+    const endIndex = repaired.indexOf(endToken, searchStart);
+
+    if (endIndex === -1) {
+      break;
+    }
+
+    const previousBeginIndex = repaired.lastIndexOf("\\begin{bmatrix}", endIndex);
+    const previousEndIndex = repaired.lastIndexOf(endToken, endIndex - 1);
+
+    if (previousBeginIndex > previousEndIndex) {
+      searchStart = endIndex + endToken.length;
+      continue;
+    }
+
+    const ampersandIndex = repaired.lastIndexOf("&", endIndex);
+
+    if (ampersandIndex === -1) {
+      searchStart = endIndex + endToken.length;
+      continue;
+    }
+
+    const definedIndex = repaired.lastIndexOf("defined to be", ampersandIndex);
+    const lineStartIndex = Math.max(repaired.lastIndexOf("\n", ampersandIndex), repaired.lastIndexOf(".", ampersandIndex));
+    const matrixStart = definedIndex !== -1
+      ? definedIndex + "defined to be".length
+      : lineStartIndex === -1
+        ? 0
+        : lineStartIndex + 1;
+    const matrixBody = repaired
+      .slice(matrixStart, endIndex)
+      .replace(/\$\$/g, "")
+      .replace(/\\begin\{bmatrix\}/g, "")
+      .trim();
+    const endMatch = repaired.slice(endIndex + endToken.length).match(/^\s*,?\s*\$\$/);
+    const afterEndIndex = endIndex + endToken.length + (endMatch?.[0].length ?? 0);
+    const prefix = repaired.slice(0, matrixStart).replace(/[ \t]+$/g, "");
+    const suffix = repaired.slice(afterEndIndex);
+    const matrix = `\n\n$$\n\\begin{bmatrix}\n${matrixBody}\n\\end{bmatrix}\n$$`;
+
+    repaired = `${prefix}${matrix}${suffix}`;
+    searchStart = prefix.length + matrix.length;
+  }
+
+  return repaired;
 }
 
 export function normalizeMarkdownMath(content: string) {

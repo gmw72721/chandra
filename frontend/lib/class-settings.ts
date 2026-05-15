@@ -725,18 +725,18 @@ export function creativityToTemperature(creativity: number) {
 
 export function verboseToMaxTokens(verbose: VerboseLevel) {
   if (verbose === "brief") {
-    return 900;
+    return 1800;
   }
 
   if (verbose === "veryDetailed") {
-    return 7000;
+    return 14000;
   }
 
   if (verbose === "detailed") {
-    return 4200;
+    return 8400;
   }
 
-  return 2200;
+  return 4400;
 }
 
 function normalizeVerboseLevel(value: unknown): VerboseLevel {

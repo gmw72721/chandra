@@ -125,7 +125,7 @@ test("chat routes enforce bounded request sizes before backend work", () => {
   assert.match(nextSource, /totalCharacters > maxChatRequestCharacters/);
   assert.match(fastApiSource, /MAX_CHAT_MESSAGES_PER_REQUEST = 40/);
   assert.match(fastApiSource, /MAX_TOTAL_MESSAGE_CHARS = 100000/);
-  assert.match(fastApiSource, /MAX_MODEL_RESPONSE_TOKENS = 8000/);
+  assert.match(fastApiSource, /MAX_MODEL_RESPONSE_TOKENS = 16000/);
   assert.match(fastApiSource, /MAX_PROVIDER_MESSAGE_CONTENT_CHARS = 60000/);
   assert.match(fastApiSource, /max_message_content_chars=MAX_PROVIDER_MESSAGE_CONTENT_CHARS/);
   assert.match(fastApiSource, /maxTokens: Optional\[int\] = Field\(default=None, ge=1, le=MAX_MODEL_RESPONSE_TOKENS\)/);
