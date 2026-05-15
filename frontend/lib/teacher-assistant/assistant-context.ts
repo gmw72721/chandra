@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { adminDb } from "../firebase-admin.ts";
 import type { ClassAccessPermission } from "../class-settings.ts";
 import { TutorKnowledgeHttpError } from "../tutor-knowledge-errors.ts";
 import { permissionForTool } from "./tool-registry.ts";
@@ -31,10 +32,11 @@ type MintAssistantContextInput = {
 };
 
 const defaultContextTtlMs = 5 * 60 * 1000;
+const collectionName = "teacherAssistantContexts";
 const contexts = new Map<string, TeacherAssistantContext>();
 let classSnapshotLoader: ((classId: string) => Promise<ClassSnapshotShape>) | null = null;
 
-export function mintTeacherAssistantContext(input: MintAssistantContextInput) {
+export async function mintTeacherAssistantContext(input: MintAssistantContextInput) {
   const now = input.now ?? Date.now();
   const context: TeacherAssistantContext = {
     actorEmail: input.actorEmail,
@@ -48,6 +50,9 @@ export function mintTeacherAssistantContext(input: MintAssistantContextInput) {
   };
 
   contexts.set(context.id, context);
+  if (adminDb) {
+    await adminDb.collection(collectionName).doc(context.id).set(context);
+  }
   pruneExpiredTeacherAssistantContexts(now);
   return context;
 }
@@ -70,7 +75,7 @@ export async function resolveTeacherAssistantContextForTool(input: {
   now?: number;
   toolName: string;
 }) {
-  const context = resolveTeacherAssistantContext(input.assistantContextId, input.now);
+  const context = await resolveTeacherAssistantContextFromStore(input.assistantContextId, input.now);
 
   if (!context) {
     throw new TutorKnowledgeHttpError("Assistant context is missing or expired.", 401);
@@ -101,6 +106,58 @@ export async function resolveTeacherAssistantContextForTool(input: {
     },
     classId: context.classId,
     context
+  };
+}
+
+async function resolveTeacherAssistantContextFromStore(id: string, now = Date.now()) {
+  const inMemoryContext = resolveTeacherAssistantContext(id, now);
+  if (inMemoryContext || !adminDb) {
+    return inMemoryContext;
+  }
+
+  const snapshot = await adminDb.collection(collectionName).doc(id).get();
+  if (!snapshot.exists) {
+    return null;
+  }
+
+  const context = normalizeStoredTeacherAssistantContext(snapshot.data(), id);
+  if (!context || context.expiresAt <= now) {
+    await snapshot.ref.delete().catch(() => undefined);
+    return null;
+  }
+
+  contexts.set(context.id, context);
+  return context;
+}
+
+function normalizeStoredTeacherAssistantContext(value: unknown, id: string): TeacherAssistantContext | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const source = value as Record<string, unknown>;
+  if (
+    source.id !== id ||
+    typeof source.actorUid !== "string" ||
+    typeof source.classId !== "string" ||
+    typeof source.createdAt !== "number" ||
+    typeof source.expiresAt !== "number" ||
+    typeof source.sessionId !== "string" ||
+    !Array.isArray(source.allowedToolNames) ||
+    !source.allowedToolNames.every((toolName) => typeof toolName === "string")
+  ) {
+    return null;
+  }
+
+  return {
+    actorEmail: typeof source.actorEmail === "string" ? source.actorEmail : undefined,
+    actorUid: source.actorUid,
+    allowedToolNames: source.allowedToolNames,
+    classId: source.classId,
+    createdAt: source.createdAt,
+    expiresAt: source.expiresAt,
+    id,
+    sessionId: source.sessionId
   };
 }
 

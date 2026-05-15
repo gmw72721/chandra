@@ -28,7 +28,7 @@ test("internal assistant tool callback rejects missing or invalid shared secret"
 test("internal assistant tool callback rejects expired context and unallowed tools", async () => {
   __clearTeacherAssistantContextsForTests();
   process.env.CHANDRA_ASSISTANT_TOOL_SHARED_SECRET = "secret-1";
-  const expired = mintTeacherAssistantContext({
+  const expired = await mintTeacherAssistantContext({
     actorUid: "teacher-1",
     allowedToolNames: ["navigate_teacher_tab"],
     classId: "class-1",
@@ -49,7 +49,7 @@ test("internal assistant tool callback rejects expired context and unallowed too
   );
   assert.equal(expiredResult.status, 401);
 
-  const context = mintTeacherAssistantContext({
+  const context = await mintTeacherAssistantContext({
     actorUid: "teacher-1",
     allowedToolNames: ["navigate_teacher_tab"],
     classId: "class-1",
@@ -75,7 +75,7 @@ test("internal assistant tool callback executes allowed navigation through regis
     exists: true,
     id: "class-1"
   }));
-  const context = mintTeacherAssistantContext({
+  const context = await mintTeacherAssistantContext({
     actorUid: "teacher-1",
     allowedToolNames: ["navigate_teacher_tab"],
     classId: "class-1",
@@ -114,7 +114,7 @@ test("internal assistant tool callback preserves confirmation for notification s
     exists: true,
     id: "class-1"
   }));
-  const context = mintTeacherAssistantContext({
+  const context = await mintTeacherAssistantContext({
     actorUid: "teacher-1",
     allowedToolNames: ["update_notification_settings"],
     classId: "class-1",

@@ -43,7 +43,7 @@ export async function POST(request: Request) {
 
     const authorization = await authorizeClassAccess(request, classId, "viewOverview");
     const message = String(body.message ?? "").trim();
-    const assistantContext = mintTeacherAssistantContext({
+    const assistantContext = await mintTeacherAssistantContext({
       actorEmail: authorization.email,
       actorUid: authorization.uid,
       allowedToolNames: getTeacherAssistantAllowedToolNames(authorization.permissions),

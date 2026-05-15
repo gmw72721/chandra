@@ -8,9 +8,9 @@ import {
   resolveTeacherAssistantContextForTool
 } from "../frontend/lib/teacher-assistant/assistant-context.ts";
 
-test("assistant context mints and resolves a short-lived server-side context", () => {
+test("assistant context mints and resolves a short-lived server-side context", async () => {
   __clearTeacherAssistantContextsForTests();
-  const context = mintTeacherAssistantContext({
+  const context = await mintTeacherAssistantContext({
     actorEmail: "teacher@example.com",
     actorUid: "teacher-1",
     allowedToolNames: ["navigate_teacher_tab"],
@@ -26,7 +26,7 @@ test("assistant context mints and resolves a short-lived server-side context", (
 
 test("assistant context resolver rejects unallowed tools and rechecks current class access", async () => {
   __clearTeacherAssistantContextsForTests();
-  const context = mintTeacherAssistantContext({
+  const context = await mintTeacherAssistantContext({
     actorUid: "teacher-1",
     allowedToolNames: ["navigate_teacher_tab"],
     classId: "class-1",
