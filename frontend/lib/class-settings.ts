@@ -1,4 +1,4 @@
-import { defaultOpenRouterModelId } from "./model-options";
+import { defaultOpenRouterModelId } from "./model-options.ts";
 
 export const tutorBehaviorOptions = [
   "Guided problem solving",

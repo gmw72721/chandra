@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ClassAccessPermission } from "../class-settings.ts";
+import type { MaterialRecord } from "../data/materials.ts";
 import type { TeacherConversationReviewSummary } from "../types.ts";
 import {
   assertPendingTeacherAssistantActionMatches,
@@ -45,6 +46,7 @@ type AssistantToolDependencies = {
     patch: Record<string, boolean>;
   }) => Promise<NotificationUpdateResult>;
   getClassConversations?: (classId: string) => Promise<TeacherConversationReviewSummary[]>;
+  listClassMaterials?: (classId: string) => Promise<MaterialRecord[]>;
   listStudents?: (classId: string) => Promise<Array<{ email?: string; id?: string; studentEmail?: string }>>;
 };
 
@@ -57,15 +59,36 @@ const studentNavigationSchema = classIdSchema.extend({
   newTab: z.boolean().optional(),
   studentEmail: z.string().email()
 });
+const searchStudentsSchema = classIdSchema.extend({
+  query: z.string().max(200).optional()
+});
 const conversationNavigationSchema = classIdSchema.extend({
   conversationId: z.string().min(1).max(200),
   newTab: z.boolean().optional()
+});
+const searchConversationsSchema = classIdSchema.extend({
+  query: z.string().max(200).optional(),
+  retrievalConfidence: z.string().max(40).optional(),
+  status: z.string().max(80).optional(),
+  studentEmail: z.string().email().optional()
+});
+const studentContextSchema = classIdSchema.extend({
+  studentEmail: z.string().email()
+});
+const searchMaterialsSchema = classIdSchema.extend({
+  query: z.string().max(200).optional()
 });
 const studentViewSchema = classIdSchema.extend({
   newTab: z.boolean().optional()
 });
 const updateNotificationSettingsSchema = classIdSchema.extend({
   patch: z.unknown()
+});
+const updatePatchSchema = classIdSchema.extend({
+  patch: z.unknown()
+});
+const updateInstructionsSchema = classIdSchema.extend({
+  instructions: z.string().max(4000)
 });
 const notificationPatchSchema = z
   .object({
@@ -78,7 +101,11 @@ const notificationPatchSchema = z
 
 const toolPermissions: Record<string, ClassAccessPermission> = {
   get_review_queue: "viewConversations",
+  get_class_materials: "viewMaterials",
+  get_class_settings: "manageClassSettings",
+  get_student_context: "viewRoster",
   get_teacher_dashboard_summary: "viewOverview",
+  get_tutor_settings: "manageClassSettings",
   navigate_ai_tutor_section: "manageClassSettings",
   navigate_settings_pane: "manageClassSettings",
   navigate_sources_section: "viewMaterials",
@@ -87,7 +114,16 @@ const toolPermissions: Record<string, ClassAccessPermission> = {
   open_student_conversations: "viewConversations",
   open_student_profile: "viewRoster",
   open_student_view: "teacherPreviewChat",
-  update_notification_settings: "manageClassSettings"
+  search_conversations: "viewConversations",
+  search_materials: "viewMaterials",
+  search_students: "viewRoster",
+  update_appearance_settings: "manageClassSettings",
+  update_class_general_settings: "manageClassSettings",
+  update_class_instructions: "manageClassSettings",
+  update_notification_settings: "manageClassSettings",
+  update_source_defaults: "manageClassSettings",
+  update_tutor_access_settings: "manageClassSettings",
+  update_tutor_behavior_settings: "manageClassSettings"
 };
 
 export function getTeacherAssistantAllowedToolNames(
@@ -154,8 +190,34 @@ export async function executeTeacherAssistantToolWithActor(input: {
       return getTeacherDashboardSummary(input.classId);
     case "get_review_queue":
       return getReviewQueue(input.classId);
+    case "search_students":
+      return searchStudents(input.args, input.classId, input.dependencies);
+    case "get_student_context":
+      return getStudentContext(input.args, input.classId, input.dependencies);
+    case "search_conversations":
+      return searchConversations(input.args, input.classId, input.dependencies);
+    case "get_class_materials":
+      return getClassMaterials(input.classId, input.dependencies);
+    case "search_materials":
+      return searchMaterials(input.args, input.classId, input.dependencies);
+    case "get_class_settings":
+      return getClassSettings(input.classId, input.actor.classData);
+    case "get_tutor_settings":
+      return getTutorSettings(input.classId, input.actor.classData);
     case "update_notification_settings":
       return updateNotificationSettings(input);
+    case "update_class_general_settings":
+      return updateClassGeneralSettings(input);
+    case "update_tutor_access_settings":
+      return updateTutorAccessSettings(input);
+    case "update_tutor_behavior_settings":
+      return updateTutorBehaviorSettings(input);
+    case "update_class_instructions":
+      return updateClassInstructions(input);
+    case "update_source_defaults":
+      return updateSourceDefaults(input);
+    case "update_appearance_settings":
+      return updateAppearanceSettings(input);
     default:
       throw new Error(`Unsupported teacher assistant tool: ${input.toolName}`);
   }
@@ -321,6 +383,159 @@ async function getReviewQueue(classId: string): Promise<TeacherAssistantToolResu
   };
 }
 
+async function searchStudents(
+  args: Record<string, unknown>,
+  classId: string,
+  dependencies?: AssistantToolDependencies
+): Promise<TeacherAssistantToolResult> {
+  const parsed = searchStudentsSchema.parse(args);
+  const { searchStudentsForAssistantWithDependencies } = await import("./read-tools.ts");
+  const data = await searchStudentsForAssistantWithDependencies(
+    { classId, query: parsed.query ?? "" },
+    {
+      listRosterActivity: dependencies?.listStudents
+        ? async () => (await dependencies.listStudents?.(classId) ?? []).map((student) => ({
+            chatBlocked: false,
+            conversationCount: 0,
+            displayName: student.email ?? student.studentEmail ?? student.id ?? "Student",
+            lastActiveAt: "",
+            lastChatTopic: "",
+            questionsPerDay: 0,
+            questionsToday: 0,
+            recentConversations: [],
+            status: "no_activity" as const,
+            studentEmail: student.email ?? student.studentEmail ?? "",
+            studentId: student.id ?? student.email ?? student.studentEmail ?? "",
+            teacherNotes: "",
+            totalQuestions: 0
+          }))
+        : undefined
+    }
+  );
+
+  return {
+    content: data.length ? `Found ${data.length} matching students.` : "No matching students found.",
+    data: { classId, students: data },
+    status: "success",
+    summary: data.length ? `Found ${data.length} matching students.` : "No matching students found.",
+    toolName: "search_students"
+  };
+}
+
+async function getStudentContext(
+  args: Record<string, unknown>,
+  classId: string,
+  dependencies?: AssistantToolDependencies
+): Promise<TeacherAssistantToolResult> {
+  const parsed = studentContextSchema.parse(args);
+  const { getStudentContextTool } = await import("./read-tools.ts");
+  const data = await getStudentContextTool(
+    { classId, studentEmail: parsed.studentEmail },
+    { listTeacherClassConversations: dependencies?.getClassConversations }
+  );
+
+  return {
+    content: `${data.summary.title}: ${data.summary.body}`,
+    data: data as Record<string, unknown>,
+    status: "success",
+    summary: data.summary.body,
+    toolName: "get_student_context"
+  };
+}
+
+async function searchConversations(
+  args: Record<string, unknown>,
+  classId: string,
+  dependencies?: AssistantToolDependencies
+): Promise<TeacherAssistantToolResult> {
+  const parsed = searchConversationsSchema.parse(args);
+  const { searchConversationsTool } = await import("./read-tools.ts");
+  const data = await searchConversationsTool(
+    {
+      classId,
+      query: parsed.query,
+      retrievalConfidence: parsed.retrievalConfidence,
+      status: parsed.status,
+      studentEmail: parsed.studentEmail
+    },
+    { listTeacherClassConversations: dependencies?.getClassConversations }
+  );
+
+  return {
+    content: data.count ? `Found ${data.count} matching conversations.` : "No matching conversations found.",
+    data,
+    status: "success",
+    summary: data.count ? `Found ${data.count} matching conversations.` : "No matching conversations found.",
+    toolName: "search_conversations"
+  };
+}
+
+async function getClassMaterials(
+  classId: string,
+  dependencies?: AssistantToolDependencies
+): Promise<TeacherAssistantToolResult> {
+  const { getClassMaterialsTool } = await import("./read-tools.ts");
+  const data = await getClassMaterialsTool({ classId }, dependencies);
+
+  return {
+    content: data.count ? `${data.count} class materials are available.` : "No class materials found.",
+    data,
+    status: "success",
+    summary: data.count ? `${data.count} class materials are available.` : "No class materials found.",
+    toolName: "get_class_materials"
+  };
+}
+
+async function searchMaterials(
+  args: Record<string, unknown>,
+  classId: string,
+  dependencies?: AssistantToolDependencies
+): Promise<TeacherAssistantToolResult> {
+  const parsed = searchMaterialsSchema.parse(args);
+  const { searchMaterialsTool } = await import("./read-tools.ts");
+  const data = await searchMaterialsTool({ classId, query: parsed.query ?? "" }, dependencies);
+
+  return {
+    content: data.count ? `Found ${data.count} matching materials.` : "No matching materials found.",
+    data,
+    status: "success",
+    summary: data.count ? `Found ${data.count} matching materials.` : "No matching materials found.",
+    toolName: "search_materials"
+  };
+}
+
+async function getClassSettings(
+  classId: string,
+  classData: Record<string, unknown>
+): Promise<TeacherAssistantToolResult> {
+  const { getClassSettingsSummaryTool } = await import("./read-tools.ts");
+  const data = getClassSettingsSummaryTool({ classData, classId });
+
+  return {
+    content: `Class settings for ${data.name}.`,
+    data,
+    status: "success",
+    summary: `Class settings for ${data.name}.`,
+    toolName: "get_class_settings"
+  };
+}
+
+async function getTutorSettings(
+  classId: string,
+  classData: Record<string, unknown>
+): Promise<TeacherAssistantToolResult> {
+  const { getTutorSettingsSummaryTool } = await import("./read-tools.ts");
+  const data = getTutorSettingsSummaryTool({ classData, classId });
+
+  return {
+    content: "Tutor settings loaded.",
+    data,
+    status: "success",
+    summary: "Tutor settings loaded.",
+    toolName: "get_tutor_settings"
+  };
+}
+
 async function updateNotificationSettings(input: {
   actor: AuthorizedAssistantActor;
   args: Record<string, unknown>;
@@ -399,6 +614,202 @@ async function updateNotificationSettings(input: {
     status: "success",
     summary: result.changed ? "Notification settings updated." : "Notification settings were already unchanged.",
     toolName: "update_notification_settings"
+  };
+}
+
+async function updateClassGeneralSettings(input: {
+  actor: AuthorizedAssistantActor;
+  args: Record<string, unknown>;
+  classId: string;
+  confirmation?: TeacherAssistantConfirmationRequest;
+}): Promise<TeacherAssistantToolResult> {
+  const parsed = updatePatchSchema.parse(input.args);
+  const { buildClassGeneralSettingsChange, applyClassGeneralSettingsUpdate } = await import("./write-tools.ts");
+  return confirmOrApplySettingsUpdate({
+    applyUpdate: applyClassGeneralSettingsUpdate,
+    args: { classId: input.classId, patch: buildClassGeneralSettingsChange({ classData: input.actor.classData, patch: parsed.patch }).patch },
+    actor: input.actor,
+    buildChange: () => buildClassGeneralSettingsChange({ classData: input.actor.classData, patch: parsed.patch }),
+    classId: input.classId,
+    confirmation: input.confirmation,
+    toolName: "update_class_general_settings"
+  });
+}
+
+async function updateTutorAccessSettings(input: {
+  actor: AuthorizedAssistantActor;
+  args: Record<string, unknown>;
+  classId: string;
+  confirmation?: TeacherAssistantConfirmationRequest;
+}): Promise<TeacherAssistantToolResult> {
+  const parsed = updatePatchSchema.parse(input.args);
+  const { buildTutorAccessSettingsChange, applyTutorAccessSettingsUpdate } = await import("./write-tools.ts");
+  return confirmOrApplySettingsUpdate({
+    applyUpdate: applyTutorAccessSettingsUpdate,
+    args: { classId: input.classId, patch: buildTutorAccessSettingsChange({ classData: input.actor.classData, patch: parsed.patch }).patch },
+    actor: input.actor,
+    buildChange: () => buildTutorAccessSettingsChange({ classData: input.actor.classData, patch: parsed.patch }),
+    classId: input.classId,
+    confirmation: input.confirmation,
+    toolName: "update_tutor_access_settings"
+  });
+}
+
+async function updateTutorBehaviorSettings(input: {
+  actor: AuthorizedAssistantActor;
+  args: Record<string, unknown>;
+  classId: string;
+  confirmation?: TeacherAssistantConfirmationRequest;
+}): Promise<TeacherAssistantToolResult> {
+  const parsed = updatePatchSchema.parse(input.args);
+  const { buildTutorBehaviorSettingsChange, applyTutorBehaviorSettingsUpdate } = await import("./write-tools.ts");
+  return confirmOrApplySettingsUpdate({
+    applyUpdate: applyTutorBehaviorSettingsUpdate,
+    args: { classId: input.classId, patch: buildTutorBehaviorSettingsChange({ classData: input.actor.classData, patch: parsed.patch }).patch },
+    actor: input.actor,
+    buildChange: () => buildTutorBehaviorSettingsChange({ classData: input.actor.classData, patch: parsed.patch }),
+    classId: input.classId,
+    confirmation: input.confirmation,
+    toolName: "update_tutor_behavior_settings"
+  });
+}
+
+async function updateClassInstructions(input: {
+  actor: AuthorizedAssistantActor;
+  args: Record<string, unknown>;
+  classId: string;
+  confirmation?: TeacherAssistantConfirmationRequest;
+}): Promise<TeacherAssistantToolResult> {
+  const parsed = updateInstructionsSchema.parse(input.args);
+  const { buildClassInstructionsChange, applyClassInstructionsUpdate } = await import("./write-tools.ts");
+  return confirmOrApplySettingsUpdate({
+    applyUpdate: applyClassInstructionsUpdate,
+    args: {
+      classId: input.classId,
+      instructions: buildClassInstructionsChange({ classData: input.actor.classData, instructions: parsed.instructions }).instructions
+    },
+    actor: input.actor,
+    buildChange: () => buildClassInstructionsChange({ classData: input.actor.classData, instructions: parsed.instructions }),
+    classId: input.classId,
+    confirmation: input.confirmation,
+    toolName: "update_class_instructions"
+  });
+}
+
+async function updateSourceDefaults(input: {
+  actor: AuthorizedAssistantActor;
+  args: Record<string, unknown>;
+  classId: string;
+  confirmation?: TeacherAssistantConfirmationRequest;
+}): Promise<TeacherAssistantToolResult> {
+  const parsed = updatePatchSchema.parse(input.args);
+  const { buildSourceDefaultsChange, applySourceDefaultsUpdate } = await import("./write-tools.ts");
+  return confirmOrApplySettingsUpdate({
+    applyUpdate: applySourceDefaultsUpdate,
+    args: { classId: input.classId, patch: buildSourceDefaultsChange({ classData: input.actor.classData, patch: parsed.patch }).patch },
+    actor: input.actor,
+    buildChange: () => buildSourceDefaultsChange({ classData: input.actor.classData, patch: parsed.patch }),
+    classId: input.classId,
+    confirmation: input.confirmation,
+    toolName: "update_source_defaults"
+  });
+}
+
+async function updateAppearanceSettings(input: {
+  actor: AuthorizedAssistantActor;
+  args: Record<string, unknown>;
+  classId: string;
+  confirmation?: TeacherAssistantConfirmationRequest;
+}): Promise<TeacherAssistantToolResult> {
+  const parsed = updatePatchSchema.parse(input.args);
+  const { buildAppearanceSettingsChange, applyAppearanceSettingsUpdate } = await import("./write-tools.ts");
+  return confirmOrApplySettingsUpdate({
+    applyUpdate: applyAppearanceSettingsUpdate,
+    args: { classId: input.classId, patch: buildAppearanceSettingsChange({ classData: input.actor.classData, patch: parsed.patch }).patch },
+    actor: input.actor,
+    buildChange: () => buildAppearanceSettingsChange({ classData: input.actor.classData, patch: parsed.patch }),
+    classId: input.classId,
+    confirmation: input.confirmation,
+    toolName: "update_appearance_settings"
+  });
+}
+
+async function confirmOrApplySettingsUpdate(input: {
+  actor: AuthorizedAssistantActor;
+  applyUpdate: (input: {
+    actorEmail?: string;
+    actorUid: string;
+    classData: Record<string, unknown>;
+    classId: string;
+    confirmationId: string;
+    patch?: unknown;
+    instructions?: string;
+  }) => Promise<{ after: unknown; before: unknown; changed: boolean }>;
+  args: Record<string, unknown>;
+  buildChange: () => { after: unknown; before: unknown; summary: string };
+  classId: string;
+  confirmation?: TeacherAssistantConfirmationRequest;
+  toolName: string;
+}): Promise<TeacherAssistantToolResult> {
+  const change = input.buildChange();
+
+  if (!input.confirmation) {
+    const pendingAction = await createPendingTeacherAssistantAction({
+      actorEmail: input.actor.email,
+      actorUid: input.actor.uid,
+      args: input.args,
+      classId: input.classId,
+      summary: change.summary,
+      toolName: input.toolName
+    });
+
+    return {
+      action: {
+        kind: "confirmation",
+        pendingActionId: pendingAction.id,
+        summary: change.summary,
+        toolName: input.toolName
+      },
+      status: "confirmation_required",
+      summary: change.summary,
+      toolName: input.toolName
+    };
+  }
+
+  const pendingAction = await readPendingTeacherAssistantAction(input.confirmation.pendingActionId);
+  if (!pendingAction) {
+    throw new Error("This assistant confirmation was not found. Ask Chandra to prepare the change again.");
+  }
+
+  assertPendingTeacherAssistantActionMatches({
+    actorUid: input.actor.uid,
+    args: input.args,
+    classId: input.classId,
+    pendingAction,
+    toolName: input.toolName
+  });
+
+  const result = await input.applyUpdate({
+    actorEmail: input.actor.email,
+    actorUid: input.actor.uid,
+    classData: input.actor.classData,
+    classId: input.classId,
+    confirmationId: input.confirmation.pendingActionId,
+    instructions: typeof input.args.instructions === "string" ? input.args.instructions : undefined,
+    patch: input.args.patch
+  });
+
+  await consumePendingTeacherAssistantAction(input.confirmation.pendingActionId);
+
+  return {
+    data: {
+      after: result.after,
+      before: result.before,
+      changed: result.changed
+    },
+    status: "success",
+    summary: result.changed ? "Settings updated." : "Settings were already unchanged.",
+    toolName: input.toolName
   };
 }
 

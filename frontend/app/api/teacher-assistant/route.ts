@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { mintTeacherAssistantContext } from "@/lib/teacher-assistant/assistant-context";
 import { createTeacherAssistantProvider } from "@/lib/teacher-assistant/provider";
+import { selectTeacherAssistantToolPolicy } from "@/lib/teacher-assistant/tool-policy";
 import {
   executeTeacherAssistantTool,
   getTeacherAssistantAllowedToolNames,
@@ -43,16 +44,22 @@ export async function POST(request: Request) {
 
     const authorization = await authorizeClassAccess(request, classId, "viewOverview");
     const message = String(body.message ?? "").trim();
+    const toolPolicy = selectTeacherAssistantToolPolicy(
+      message,
+      getTeacherAssistantAllowedToolNames(authorization.permissions)
+    );
     const assistantContext = await mintTeacherAssistantContext({
       actorEmail: authorization.email,
       actorUid: authorization.uid,
-      allowedToolNames: getTeacherAssistantAllowedToolNames(authorization.permissions),
+      allowedToolNames: toolPolicy.allowedToolNames,
       classId,
+      maxToolCalls: toolPolicy.maxToolCalls,
       sessionId
     });
     const provider = createTeacherAssistantProvider();
     const messages: TeacherAssistantMessage[] = [];
     const actions: TeacherAssistantAction[] = [];
+    let localToolCallCount = 0;
 
     for await (const event of provider.send({
       assistantContextId: assistantContext.id,
@@ -63,16 +70,28 @@ export async function POST(request: Request) {
         allowedToolNames: assistantContext.allowedToolNames,
         classId,
         expiresAt: assistantContext.expiresAt,
+        toolPolicy: {
+          maxToolCalls: toolPolicy.maxToolCalls,
+          reason: toolPolicy.reason
+        },
         sessionId
       },
       message,
-      runTool: (toolName, args) =>
-        executeTeacherAssistantTool({
+      runTool: (toolName, args) => {
+        if (!assistantContext.allowedToolNames.includes(toolName)) {
+          throw new Error("Assistant tool is not allowed for this turn.");
+        }
+        if (localToolCallCount >= toolPolicy.maxToolCalls) {
+          throw new Error("Assistant tool call budget is exhausted for this turn.");
+        }
+        localToolCallCount += 1;
+        return executeTeacherAssistantTool({
           args,
           classId,
           request,
           toolName
-        }),
+        });
+      },
       sessionId
     })) {
       if (event.type === "message") {

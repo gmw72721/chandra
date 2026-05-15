@@ -67,3 +67,33 @@ test("assistant context resolver rejects unallowed tools and rechecks current cl
     /permission/
   );
 });
+
+test("assistant context enforces per-turn tool call budget", async () => {
+  __clearTeacherAssistantContextsForTests();
+  const context = await mintTeacherAssistantContext({
+    actorUid: "teacher-1",
+    allowedToolNames: ["navigate_teacher_tab", "get_teacher_dashboard_summary"],
+    classId: "class-1",
+    maxToolCalls: 1,
+    sessionId: "session-1"
+  });
+
+  __setTeacherAssistantClassSnapshotLoaderForTests(async () => ({
+    data: { teacherId: "teacher-1" },
+    exists: true,
+    id: "class-1"
+  }));
+
+  await resolveTeacherAssistantContextForTool({
+    assistantContextId: context.id,
+    toolName: "navigate_teacher_tab"
+  });
+
+  await assert.rejects(
+    resolveTeacherAssistantContextForTool({
+      assistantContextId: context.id,
+      toolName: "get_teacher_dashboard_summary"
+    }),
+    /budget/
+  );
+});

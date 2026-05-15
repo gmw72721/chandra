@@ -41,6 +41,10 @@ export type AssistantTurnInput = {
     allowedToolNames: string[];
     classId: string;
     expiresAt: number;
+    toolPolicy?: {
+      maxToolCalls: number;
+      reason: string;
+    };
     sessionId: string;
   };
   sessionId: string;
@@ -64,7 +68,7 @@ export type TeacherAssistantToolResult = {
   action?: TeacherAssistantAction;
   content?: string;
   data?: Record<string, unknown>;
-  status: "success" | "confirmation_required" | "rejected" | "unavailable";
+  status: "success" | "confirmation_required" | "rejected" | "unavailable" | "error";
   summary: string;
   toolName: string;
 };

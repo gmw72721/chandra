@@ -22,18 +22,20 @@ export function createLocalFallbackProvider(): TeacherAssistantProvider {
         return;
       }
 
+      const studentSearch = studentSearchFromMessage(message);
+      if (studentSearch) {
+        return yield* runLocalTool(input, "search_students", { classId: input.classId, query: studentSearch });
+      }
+
+      const materialSearch = materialSearchFromMessage(message);
+      if (materialSearch) {
+        return yield* runLocalTool(input, "search_materials", { classId: input.classId, query: materialSearch });
+      }
+
       const toolRequest = inferLocalToolRequest(lowerMessage, input.classId);
 
       if (toolRequest) {
-        const result = await input.runTool(toolRequest.toolName, toolRequest.args);
-        if (result.action) {
-          yield { action: result.action, type: "action" };
-        }
-        yield {
-          content: result.content ?? result.summary,
-          type: "message"
-        };
-        return;
+        return yield* runLocalTool(input, toolRequest.toolName, toolRequest.args);
       }
 
       yield {
@@ -45,11 +47,43 @@ export function createLocalFallbackProvider(): TeacherAssistantProvider {
   };
 }
 
+async function* runLocalTool(input: AssistantTurnInput, toolName: string, args: Record<string, unknown>) {
+  const result = await input.runTool!(toolName, args);
+  if (result.action) {
+    yield { action: result.action, type: "action" } as const;
+  }
+  yield {
+    content: result.content ?? result.summary,
+    type: "message"
+  } as const;
+}
+
 function inferLocalToolRequest(message: string, classId: string) {
   if (message.includes("review queue") || message.includes("needs review")) {
     return {
       args: { classId },
       toolName: "get_review_queue"
+    };
+  }
+
+  if (message.includes("class settings")) {
+    return {
+      args: { classId },
+      toolName: "get_class_settings"
+    };
+  }
+
+  if (message.includes("tutor settings")) {
+    return {
+      args: { classId },
+      toolName: "get_tutor_settings"
+    };
+  }
+
+  if (message.includes("class material") || message.includes("materials list") || message.includes("all materials")) {
+    return {
+      args: { classId },
+      toolName: "get_class_materials"
     };
   }
 
@@ -104,6 +138,14 @@ function inferLocalToolRequest(message: string, classId: string) {
     return {
       args: { classId, patch: notificationPatch },
       toolName: "update_notification_settings"
+    };
+  }
+
+  const tutorAccessPatch = tutorAccessPatchFromMessage(message);
+  if (tutorAccessPatch) {
+    return {
+      args: { classId, patch: tutorAccessPatch },
+      toolName: "update_tutor_access_settings"
     };
   }
 
@@ -221,4 +263,31 @@ function notificationPatchFromMessage(message: string) {
   }
 
   return Object.keys(patch).length ? patch : null;
+}
+
+function tutorAccessPatchFromMessage(message: string) {
+  if (!message.includes("tutor") && !message.includes("chat")) {
+    return null;
+  }
+
+  if (message.includes("pause") || message.includes("disable") || message.includes("turn off")) {
+    return { enabled: false };
+  }
+
+  if (message.includes("enable") || message.includes("turn on") || message.includes("allow")) {
+    return { enabled: true };
+  }
+
+  return null;
+}
+
+function studentSearchFromMessage(message: string) {
+  const match = message.match(/\b(?:find|search|look up)\s+(?:student|roster)?\s*([^?.!]+)/i);
+  return match?.[1]?.trim() ?? "";
+}
+
+function materialSearchFromMessage(message: string) {
+  const match = message.match(/\b(?:find|search|look up)\s+(?:material|source|pdf|document)?\s*([^?.!]+)/i);
+  const candidate = match?.[1]?.trim() ?? "";
+  return /\b(material|source|pdf|document|worksheet|homework|textbook|notes)\b/i.test(message) ? candidate : "";
 }

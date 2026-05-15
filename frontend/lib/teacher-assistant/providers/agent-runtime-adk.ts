@@ -116,6 +116,8 @@ function buildAgentMessage(input: AssistantTurnInput) {
     `class_id: ${input.classId}`,
     `chandra_session_id: ${input.sessionId}`,
     `allowed_tool_names: ${allowedTools}`,
+    `tool_policy: ${input.sanitizedContext?.toolPolicy?.reason ?? "default"}`,
+    `max_tool_calls: ${input.sanitizedContext?.toolPolicy?.maxToolCalls ?? 2}`,
     "Teacher message:",
     input.message
   ].join("\n");

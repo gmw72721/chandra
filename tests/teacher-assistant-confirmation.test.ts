@@ -118,3 +118,59 @@ test("teacher assistant rejects mismatched confirmation actors and arbitrary pat
     /different teacher session/
   );
 });
+
+test("teacher assistant requires confirmation and allowlisted patches for tutor access writes", async () => {
+  __clearPendingTeacherAssistantActionsForTests();
+
+  const result = await executeTeacherAssistantToolWithActor({
+    actor: {
+      ...actor,
+      classData: {
+        tutorAccess: { enabled: true }
+      }
+    },
+    args: { classId: "class-1", patch: { enabled: false } },
+    classId: "class-1",
+    toolName: "update_tutor_access_settings"
+  });
+
+  assert.equal(result.status, "confirmation_required");
+  assert.equal(result.action?.kind, "confirmation");
+  assert.match(result.summary, /tutor access/i);
+
+  await assert.rejects(
+    executeTeacherAssistantToolWithActor({
+      actor,
+      args: { classId: "class-1", patch: { rawWrite: true } },
+      classId: "class-1",
+      toolName: "update_tutor_access_settings"
+    }),
+    /Unrecognized key/
+  );
+});
+
+test("teacher assistant requires confirmation for class instruction and appearance writes", async () => {
+  __clearPendingTeacherAssistantActionsForTests();
+
+  const instructions = await executeTeacherAssistantToolWithActor({
+    actor,
+    args: { classId: "class-1", instructions: "Show work before asking for hints." },
+    classId: "class-1",
+    toolName: "update_class_instructions"
+  });
+  assert.equal(instructions.status, "confirmation_required");
+
+  const appearance = await executeTeacherAssistantToolWithActor({
+    actor: {
+      ...actor,
+      classData: {
+        appearance: "light",
+        themeColor: "emerald"
+      }
+    },
+    args: { classId: "class-1", patch: { appearance: "dark", themeColor: "blue" } },
+    classId: "class-1",
+    toolName: "update_appearance_settings"
+  });
+  assert.equal(appearance.status, "confirmation_required");
+});

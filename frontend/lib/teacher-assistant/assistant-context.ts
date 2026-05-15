@@ -12,7 +12,9 @@ export type TeacherAssistantContext = {
   createdAt: number;
   expiresAt: number;
   id: string;
+  maxToolCalls: number;
   sessionId: string;
+  toolCallCount: number;
 };
 
 type ClassSnapshotShape = {
@@ -29,6 +31,7 @@ type MintAssistantContextInput = {
   now?: number;
   sessionId: string;
   ttlMs?: number;
+  maxToolCalls?: number;
 };
 
 const defaultContextTtlMs = 5 * 60 * 1000;
@@ -46,7 +49,9 @@ export async function mintTeacherAssistantContext(input: MintAssistantContextInp
     createdAt: now,
     expiresAt: now + (input.ttlMs ?? defaultContextTtlMs),
     id: randomUUID(),
-    sessionId: input.sessionId
+    maxToolCalls: input.maxToolCalls ?? 3,
+    sessionId: input.sessionId,
+    toolCallCount: 0
   };
 
   contexts.set(context.id, context);
@@ -98,6 +103,8 @@ export async function resolveTeacherAssistantContextForTool(input: {
     throw new TutorKnowledgeHttpError("You do not have permission to use this class feature.", 403);
   }
 
+  await incrementTeacherAssistantToolCallCount(context);
+
   return {
     actor: {
       classData: snapshot.data,
@@ -130,6 +137,43 @@ async function resolveTeacherAssistantContextFromStore(id: string, now = Date.no
   return context;
 }
 
+async function incrementTeacherAssistantToolCallCount(context: TeacherAssistantContext) {
+  if (adminDb) {
+    const ref = adminDb.collection(collectionName).doc(context.id);
+    const updatedContext = await adminDb.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(ref);
+      const storedContext = snapshot.exists
+        ? normalizeStoredTeacherAssistantContext(snapshot.data(), context.id)
+        : context;
+
+      if (!storedContext || storedContext.expiresAt <= Date.now()) {
+        throw new TutorKnowledgeHttpError("Assistant context is missing or expired.", 401);
+      }
+
+      if (storedContext.toolCallCount >= storedContext.maxToolCalls) {
+        throw new TutorKnowledgeHttpError("Assistant tool call budget is exhausted for this turn.", 429);
+      }
+
+      const nextContext = {
+        ...storedContext,
+        toolCallCount: storedContext.toolCallCount + 1
+      };
+      transaction.set(ref, { toolCallCount: nextContext.toolCallCount }, { merge: true });
+      return nextContext;
+    });
+
+    contexts.set(updatedContext.id, updatedContext);
+    return;
+  }
+
+  if (context.toolCallCount >= context.maxToolCalls) {
+    throw new TutorKnowledgeHttpError("Assistant tool call budget is exhausted for this turn.", 429);
+  }
+
+  context.toolCallCount += 1;
+  contexts.set(context.id, context);
+}
+
 function normalizeStoredTeacherAssistantContext(value: unknown, id: string): TeacherAssistantContext | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -157,7 +201,9 @@ function normalizeStoredTeacherAssistantContext(value: unknown, id: string): Tea
     createdAt: source.createdAt,
     expiresAt: source.expiresAt,
     id,
-    sessionId: source.sessionId
+    maxToolCalls: typeof source.maxToolCalls === "number" ? source.maxToolCalls : 3,
+    sessionId: source.sessionId,
+    toolCallCount: typeof source.toolCallCount === "number" ? source.toolCallCount : 0
   };
 }
 
