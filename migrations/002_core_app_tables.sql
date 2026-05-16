@@ -446,6 +446,7 @@ CREATE TABLE IF NOT EXISTS ai_usage_request_buckets (
   scope_hash TEXT NOT NULL,
   provider TEXT NOT NULL DEFAULT '',
   model_id TEXT NOT NULL DEFAULT '',
+  period TEXT NOT NULL DEFAULT 'day' CHECK (period IN ('day', 'week')),
   day_bucket TEXT NOT NULL,
   limit_requests INTEGER NOT NULL DEFAULT 0,
   request_count INTEGER NOT NULL DEFAULT 0,
@@ -457,8 +458,17 @@ CREATE TABLE IF NOT EXISTS ai_usage_request_buckets (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_usage_request_buckets_scope_day
-  ON ai_usage_request_buckets (scope, scope_hash, provider, model_id, day_bucket);
+ALTER TABLE ai_usage_request_buckets
+  ADD COLUMN IF NOT EXISTS period TEXT NOT NULL DEFAULT 'day' CHECK (period IN ('day', 'week'));
+
+UPDATE ai_usage_request_buckets
+SET period = 'week'
+WHERE id LIKE '%\_week\_%' ESCAPE '\';
+
+DROP INDEX IF EXISTS idx_ai_usage_request_buckets_scope_day;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_usage_request_buckets_scope_period
+  ON ai_usage_request_buckets (scope, scope_hash, provider, model_id, period, day_bucket);
 
 CREATE TABLE IF NOT EXISTS ai_usage_allowances (
   id TEXT PRIMARY KEY,

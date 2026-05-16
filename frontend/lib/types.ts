@@ -292,7 +292,7 @@ export type TutorStructuredSectionKey =
 
 export type TutorStructuredMetadata = {
   hintLevel: "none" | "small_hint" | "guided_step" | "worked_example" | "refusal";
-  choiceDisplay?: "problem_selection";
+  choiceDisplay?: "problem_selection" | "support_path_choice";
   problemNumber?: string;
   problemSummary?: string;
   sourceConfidence: "high" | "medium" | "low";
@@ -529,6 +529,7 @@ export type TutorTrace = {
   knowledgeItems?: KnowledgeItem[];
   memoryUsed?: boolean;
   modelCallUsage?: TutorModelCallUsage[];
+  outcome?: "answer_now" | "retrieve_then_answer" | "ask_problem_selection" | "ask_support_path_choice";
   problemUnderstandingState?: TutorProblemUnderstandingState;
   retrievalDecision?: Record<string, unknown>;
   retrievalReason?: string;

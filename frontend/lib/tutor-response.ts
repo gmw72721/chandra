@@ -92,7 +92,10 @@ export function normalizeStructuredTutorOutput(
   const checkWork = finalSectionValue("checkWork", sectionsRecord.checkWork);
   const sourceNote = finalSectionValue("sourceNote", sectionsRecord.sourceNote);
   const mode = includesString(tutorModes, metadataRecord.mode) ? metadataRecord.mode : "guided_problem_solving";
-  const choiceDisplay = metadataRecord.choiceDisplay === "problem_selection" ? "problem_selection" : undefined;
+  const choiceDisplay =
+    metadataRecord.choiceDisplay === "problem_selection" || metadataRecord.choiceDisplay === "support_path_choice"
+      ? metadataRecord.choiceDisplay
+      : undefined;
   const sections = {
     ...(mainChat ? { mainChat } : {}),
     ...(problem ? { problem } : {}),

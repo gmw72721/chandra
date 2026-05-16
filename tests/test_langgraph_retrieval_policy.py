@@ -586,7 +586,7 @@ def test_primary_tutor_turn_can_return_one_search_per_distinct_need() -> None:
         "needed_supporting_page",
         "needed_example_page",
     ]
-    assert [search["top_k"] for search in decision["searches"]] == [1, 5, 5]
+    assert [search["top_k"] for search in decision["searches"]] == [5, 5, 5]
     assert "problem 2.14" not in decision["searches"][2]["query"].lower()
     assert len(graph_module.retrieval_decision_tool_calls(decision)) == 3
 
@@ -777,7 +777,7 @@ def test_primary_tutor_problem_selection_json_cancels_search() -> None:
                     "top_k": 1,
                 }
             ],
-            "top_k": 1,
+            "top_k": 5,
         },
     )
 
@@ -3225,7 +3225,7 @@ def test_retrieval_decision_drops_status_next_step() -> None:
         {
             "query": "Problem 2.20",
             "retrieval_reason": "student_requested_problem",
-            "top_k": 1,
+            "top_k": 5,
         },
     )
 
@@ -3251,7 +3251,7 @@ def test_retrieval_decision_suppresses_source_request_while_searching() -> None:
         {
             "query": "Problem 2.18",
             "retrieval_reason": "student_requested_problem",
-            "top_k": 1,
+            "top_k": 5,
         },
     )
 
@@ -3731,7 +3731,7 @@ async def test_specific_problem_lookup_uses_two_llm_calls_and_only_exact_problem
             "class_id": "class-linear",
             "professor_id": "teacher-1",
             "query": "Problem 2.14",
-            "top_k": 1,
+            "top_k": 5,
         }
     ]
     assert "Example:" not in response["content"]
@@ -3775,10 +3775,67 @@ async def test_bare_decimal_problem_reference_is_framed_as_problem_lookup() -> N
             "class_id": "class-linear",
             "professor_id": "teacher-1",
             "query": "find exact problem page OCR metadata 2.14",
-            "top_k": 1,
+            "top_k": 5,
         }
     ]
     assert response["langGraphTrace"]["retrievalReason"] == "student_requested_problem"
+
+
+@pytest.mark.asyncio
+async def test_exact_problem_lookup_filters_reference_mentions_to_actual_heading() -> None:
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "can_answer_now": False,
+                        "memory_used": False,
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "search_query": "problem 2.20",
+                        "student_response": "",
+                    }
+                )
+            },
+            {"content": "Problem:\n2.20. Let a != 0 be fixed and let V be the function space."},
+        ]
+    )
+    reference_page = ocr_page(
+        chunk_text=(
+            "2.41. Let A be the matrix in Exercise 2.20. "
+            "Use its inverse to find the antiderivative."
+        ),
+        page_end=101,
+        page_start=101,
+        printed_page_start=101,
+        problem_numbers=["2.20"],
+        title="ACME VOL 1",
+    )
+    actual_page = ocr_page(
+        chunk_text=(
+            "2.20. Let a != 0 be fixed, and let V be the space of infinitely "
+            "differentiable real-valued functions."
+        ),
+        page_end=98,
+        page_start=98,
+        printed_page_start=98,
+        problem_numbers=["2.20"],
+        title="ACME VOL 1",
+    )
+    retriever = FakeRetriever([reference_page, actual_page])
+
+    response = await run_pdf_rag_agent(
+        class_id="class-linear",
+        conversation_id="conv-reference-filter",
+        messages=[{"role": "user", "content": "problem 2.20"}],
+        model="openai/gpt-4.1-mini",
+        openrouter_client=client,
+        professor_id="teacher-1",
+        retriever=retriever,
+    )
+
+    assert response["langGraphTrace"]["selectedMetadataRecords"][0]["page_start"] == 98
+    assert response["langGraphTrace"]["selectedPages"][0]["pageStart"] == 98
 
 
 @pytest.mark.asyncio
@@ -3815,7 +3872,7 @@ async def test_bare_decimal_problem_reference_forces_search_before_clarifying() 
             "class_id": "class-linear",
             "professor_id": "teacher-1",
             "query": "find exact task in assignment problem PDF worksheet lab prompt practice problems textbook section 2.16",
-            "top_k": 1,
+            "top_k": 5,
         }
     ]
     assert response["content"].startswith("Problem:")

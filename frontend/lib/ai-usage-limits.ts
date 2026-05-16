@@ -1159,6 +1159,7 @@ function requestQuotaSpecToPostgres(spec: RequestQuotaSpec): AiUsageRequestBucke
     id: spec.id,
     limit: spec.limit,
     modelId: spec.modelId,
+    period: spec.period,
     provider: spec.provider,
     role: spec.role,
     scope: spec.scope,

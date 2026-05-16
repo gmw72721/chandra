@@ -301,6 +301,9 @@ const chatRequestSchema = z.object({
             })
             .optional(),
           answerSeekingAssessment: z.record(z.unknown()).optional(),
+          outcome: z
+            .enum(["answer_now", "retrieve_then_answer", "ask_problem_selection", "ask_support_path_choice"])
+            .optional(),
           searchQueries: z.array(z.string()),
           selectedPages: z.array(
             z.object({
@@ -382,7 +385,7 @@ const chatRequestSchema = z.object({
             confusionChoices: tutorConfusionChoicesSchema.optional(),
             metadata: z.object({
               hintLevel: z.enum(tutorHintLevels),
-              choiceDisplay: z.enum(["problem_selection"]).optional(),
+              choiceDisplay: z.enum(["problem_selection", "support_path_choice"]).optional(),
               problemNumber: z.string().optional(),
               problemSummary: z.string().optional(),
               sourceConfidence: z.enum(["high", "medium", "low"]),

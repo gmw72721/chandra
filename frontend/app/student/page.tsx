@@ -2572,6 +2572,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
   const confusionChoices = message.structuredOutput?.confusionChoices;
   const confusionPrompt = message.structuredOutput?.confusionPrompt?.trim();
   const isProblemSelectionPrompt = message.structuredOutput?.metadata.choiceDisplay === "problem_selection";
+  const isSupportPathChoicePrompt = message.structuredOutput?.metadata.choiceDisplay === "support_path_choice";
   const visibleConfusionPrompt =
     confusionPrompt && !messageBlocks.some((block) => sameDisplayedText(block.content, confusionPrompt))
       ? confusionPrompt
@@ -2649,6 +2650,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
             choices={confusionChoices}
             disabled={isSending}
             isProblemSelection={isProblemSelectionPrompt}
+            isSupportPathChoice={isSupportPathChoicePrompt}
             prompt={visibleConfusionPrompt}
             onChoiceSelect={onChoiceSelect}
           />
@@ -2783,18 +2785,22 @@ function TutorConfusionChoices({
   choices,
   disabled,
   isProblemSelection,
+  isSupportPathChoice,
   prompt,
   onChoiceSelect
 }: {
   choices: TutorConfusionChoice[];
   disabled: boolean;
   isProblemSelection?: boolean;
+  isSupportPathChoice?: boolean;
   prompt?: string;
   onChoiceSelect: (message: string) => void;
 }) {
   return (
     <div
-      className={`assistant-confusion-choice-panel${isProblemSelection ? " problem-selection" : ""}`}
+      className={`assistant-confusion-choice-panel${isProblemSelection ? " problem-selection" : ""}${
+        isSupportPathChoice ? " support-path-choice" : ""
+      }`}
     >
       {prompt ? <p>{prompt}</p> : null}
       <div className="assistant-confusion-choice-grid" aria-label="Choose what Chandra should focus on">

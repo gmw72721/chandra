@@ -222,6 +222,12 @@ CONFUSION_CHOICE_MAX_COUNT = 6
 PROBLEM_SELECTION_CHOICE_MAX_COUNT = 80
 CONFUSION_CHOICE_LABEL_MAX_LENGTH = 80
 CONFUSION_CHOICE_MESSAGE_MAX_LENGTH = 240
+ROUTER_OUTCOMES = {
+    "answer_now",
+    "retrieve_then_answer",
+    "ask_problem_selection",
+    "ask_support_path_choice",
+}
 NORMALIZE_SEARCH_QUERY_RE = re.compile(r"[^a-z0-9]+")
 ATTACHMENT_TUTOR_CONTEXT_MARKER = "Student uploaded homework attachments available for this turn:"
 PAGE_LOCATOR_RE = re.compile(r"\b(?:page|pg\.?|p\.)\s*\d")
@@ -367,7 +373,7 @@ def build_pdf_rag_graph(
 
         retrieved_pages = [*state.get("retrieved_pages", []), *new_pages]
         retrieval_diagnostics = [*state.get("retrieval_diagnostics", []), *new_diagnostics]
-        return {
+        update = {
             "retrieved_pages": deduplicate_retrieved_windows(retrieved_pages),
             "tool_call_count": state.get("tool_call_count", 0) + len(new_search_queries),
             "retrieval_confidence": retrieval_confidence_from_pages(retrieved_pages, retrieval_diagnostics),
@@ -381,6 +387,8 @@ def build_pdf_rag_graph(
             ],
             "tool_calls": [],
         }
+        exact_update = exact_problem_selection_update_after_search({**state, **update}, update["retrieved_pages"])
+        return {**update, **exact_update}
 
     async def prepare_metadata_context(state: PdfRagState) -> dict[str, Any]:
         pages_for_context = page_context_records_for_state(state)
@@ -536,7 +544,7 @@ def build_retrieval_decision(state: PdfRagState) -> dict[str, Any]:
         )
 
     reason = retrieval_reason_for_message(message, memory)
-    top_k = 1 if reason in {"student_requested_problem", "student_changed_problem"} else MAX_RETRIEVED_WINDOWS
+    top_k = default_top_k_for_retrieval_reason(reason)
     return retrieval_decision(
         decision_source="search_required",
         needs_search=True,
@@ -561,6 +569,7 @@ def retrieval_decision(
     note: str = "",
 ) -> dict[str, Any]:
     active_problem_numbers = active_record.get("problem_numbers") if active_record else []
+    outcome = "retrieve_then_answer" if needs_search else "answer_now"
     return {
         "active_material_id": active_record.get("doc_id") if active_record else None,
         "active_page": active_record.get("printed_page_start") or active_record.get("page_start") if active_record else None,
@@ -570,6 +579,7 @@ def retrieval_decision(
         "memory_used": memory_used,
         "needs_search": needs_search,
         "note": note,
+        "outcome": outcome,
         "query": query,
         "retrieval_reason": normalize_retrieval_reason(retrieval_reason, query=query) if retrieval_reason else "",
         "tutorPlan": default_tutor_plan_for_message(
@@ -638,10 +648,10 @@ def route_after_metadata_context(state: PdfRagState) -> str:
     decision = state.get("retrieval_decision") or {}
     structured_output = decision.get("structuredOutput")
     if (
-        (str(state.get("answer") or "").strip() or structured_output_is_problem_selection(structured_output))
+        (str(state.get("answer") or "").strip() or structured_output_is_terminal_choice(structured_output))
         and not decision.get("needs_search")
         and (
-            structured_output_is_problem_selection(structured_output)
+            structured_output_is_terminal_choice(structured_output)
             or
             forced_confusion_choice_response(state)
             or not (decision.get("memory_used") and state.get("page_assets"))
@@ -665,6 +675,35 @@ def structured_output_is_problem_selection(structured_output: Any) -> bool:
 
     metadata = structured_output.get("metadata")
     return isinstance(metadata, dict) and metadata.get("choiceDisplay") == "problem_selection"
+
+
+def structured_output_is_support_path_choice(structured_output: Any) -> bool:
+    if not isinstance(structured_output, dict):
+        return False
+
+    metadata = structured_output.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("choiceDisplay") == "support_path_choice"
+
+
+def structured_output_is_terminal_choice(structured_output: Any) -> bool:
+    return structured_output_is_problem_selection(structured_output) or structured_output_is_support_path_choice(structured_output)
+
+
+def normalize_router_outcome(value: Any, *, needs_search: bool, structured_output: Any) -> str:
+    if needs_search:
+        return "retrieve_then_answer"
+
+    if structured_output_is_problem_selection(structured_output):
+        return "ask_problem_selection"
+
+    if structured_output_is_support_path_choice(structured_output):
+        return "ask_support_path_choice"
+
+    outcome = str(value or "").strip()
+    if outcome in ROUTER_OUTCOMES:
+        return outcome
+
+    return "answer_now"
 
 
 def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) -> list[dict[str, Any]]:
@@ -795,14 +834,14 @@ def build_primary_tutor_system_prompt(state: PdfRagState) -> str:
             " When the student asks Chandra to check/review their work, inspect the visible attempt or ask for the attempted step; do not search class materials just because the request says `check my work`. Search only if the student explicitly asks to compare their work against a source, rubric, answer key, textbook page, class note, or other class material."
         ),
         (
-            "Uncertainty choices: use ordinary Chandra uncertainty choices only when the latest tutoring turn has real ambiguity, retrieval is not needed, and one normal response would likely guess at the student's need. Do not trigger them just because the student says they are lost/confused/stuck; prefer a normal nudge or focused question when a useful next move is inferable. When choices are used, return a brief context-specific confusionPrompt plus 2 to 6 meaningfully different choices. Each choice should have label as a short title, optional description as how Chandra can help, and message as the exact editable student-sendable draft to place in the chat box; do not write tutor-voice text in message, and do not promise final answers, full solutions, or policy bypasses."
+            "Uncertainty choices and support-path choices: when the student has not chosen what kind of help they want and retrieval is not needed, you may ask them to choose a support path instead of guessing. Return outcome ask_support_path_choice, needs_search false, metadata.choiceDisplay support_path_choice, a brief confusionPrompt, and 2 to 6 choices such as hint, concept explanation, similar example, or check my work. Each choice should have label as a short title, optional description as how Chandra can help, and message as the exact editable student-sendable draft to place in the chat box; do not write tutor-voice text in message, and do not promise final answers, full solutions, or policy bypasses. Do not trigger them just because the student says they are lost/confused/stuck; prefer a normal nudge or focused question when a useful next move is inferable."
         ),
         (
             "Structured output: Use structuredOutput.sections for student-visible content. Include only useful non-empty sections. Allowed section keys: mainChat, problem, answer, hint, explanation, formula, example, checkWork, sourceNote. Put each idea in one place; do not duplicate text across sections. For stuck/help/hint requests, put the tutoring nudge in sections.hint and omit sections.mainChat unless it adds necessary non-hint context or a distinct action request; never paraphrase the hint or write filler like `I can give you a hint` in mainChat. sections.problem must contain only the exact academic task statement, never hints, lookup status, source notes, or next actions. For pure source/problem lookup, omit hint; if problem is present, set metadata.problemNumber when visible and metadata.problemSummary to a short non-solving noun phrase. If needs_search is true, keep visible output to one short natural mainChat/status sentence about checking the relevant class material, and do not invent source facts. Never use a bare locator echo like `problem 2.18` as mainChat or student_response."
             " For requested problem lookup, an acceptable status sentence is: I'm checking the class materials for that problem."
         ),
         (
-            "Streaming order matters: emit structuredOutput.sections in the exact student-visible order. sectionOrder must match that order. Put problem first when it should render first. Emit sections before legacy content/message fields. JSON schema: {\"content\": string, \"sections\": object, \"sectionOrder\": string[], \"metadata\": object, \"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, \"search_query\": string, \"searches\": [{\"query\": string, \"retrieval_reason\": string, \"top_k\": number}], \"help_level\": string, \"student_response\": string, \"memory_used\": boolean, \"activeProblemDecision\": object, \"answerSeekingAssessment\": object, \"tutorPlan\": object, \"structuredOutput\": {\"sections\": object, \"sectionOrder\": array, \"confusionPrompt\": string, \"confusionChoices\": [{\"id\": string, \"label\": string, \"description\": string, \"message\": string}], \"metadata\": object}}."
+            "Streaming order matters: emit structuredOutput.sections in the exact student-visible order. sectionOrder must match that order. Put problem first when it should render first. Emit sections before legacy content/message fields. JSON schema: {\"outcome\": \"answer_now\"|\"retrieve_then_answer\"|\"ask_problem_selection\"|\"ask_support_path_choice\", \"content\": string, \"sections\": object, \"sectionOrder\": string[], \"metadata\": object, \"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, \"search_query\": string, \"searches\": [{\"query\": string, \"retrieval_reason\": string, \"top_k\": number}], \"help_level\": string, \"student_response\": string, \"memory_used\": boolean, \"activeProblemDecision\": object, \"answerSeekingAssessment\": object, \"tutorPlan\": object, \"structuredOutput\": {\"sections\": object, \"sectionOrder\": array, \"confusionPrompt\": string, \"confusionChoices\": [{\"id\": string, \"label\": string, \"description\": string, \"message\": string}], \"metadata\": {\"choiceDisplay\"?: \"problem_selection\"|\"support_path_choice\"}}}."
         ),
         (
             "Set needs_search according to the whole context: uploads, active metadata, and available class PDF/OCR search. A context-grounded answer call should only be needed after retrieval, active selected source context, or if this primary call cannot produce a student_response. When needs_search is false, structuredOutput is the complete student-facing reply. For follow-ups that depend on active_metadata or prior selected source context, set memory_used true."
@@ -1229,7 +1268,7 @@ def parse_primary_tutor_response(
     structured_output = normalize_backend_structured_output(
         parsed.get("structuredOutput") or parsed.get("structured_output")
     ) or structured_output_from_ordered_json_payload(parsed, source_confidence="low")
-    if structured_output_is_problem_selection(structured_output):
+    if structured_output_is_terminal_choice(structured_output):
         needs_search = False
         first_search = {}
         query = ""
@@ -1272,6 +1311,7 @@ def parse_primary_tutor_response(
         student_response = ""
     if needs_search and not student_response:
         student_response = fallback_quick_retrieval_response(retrieval_reason)
+    outcome = normalize_router_outcome(parsed.get("outcome"), needs_search=needs_search, structured_output=structured_output)
 
     return {
         **fallback,
@@ -1284,6 +1324,7 @@ def parse_primary_tutor_response(
         "help_level": str(parsed.get("help_level") or ""),
         "memory_used": bool(parsed.get("memory_used") or fallback.get("memory_used")),
         "needs_search": needs_search,
+        "outcome": outcome,
         "query": query,
         "retrieval_reason": retrieval_reason,
         "search_query": query,
@@ -2072,7 +2113,7 @@ def search_need_key(retrieval_reason: str) -> str:
 
 def default_top_k_for_retrieval_reason(retrieval_reason: str) -> int:
     if retrieval_reason in {"student_requested_problem", "student_changed_problem"}:
-        return 1
+        return MAX_RETRIEVED_WINDOWS
     return MAX_RETRIEVED_WINDOWS
 
 
@@ -2117,7 +2158,7 @@ def normalize_backend_structured_output(value: Any) -> dict[str, Any] | None:
     metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
     choice_display = (
         metadata.get("choiceDisplay")
-        if metadata.get("choiceDisplay") in {"problem_selection"}
+        if metadata.get("choiceDisplay") in {"problem_selection", "support_path_choice"}
         else None
     )
     confusion_prompt = coerce_structured_section_text(value.get("confusionPrompt") or value.get("confusion_prompt"))[:240]
@@ -2379,6 +2420,10 @@ def preferred_confusion_choice_prompt(answer: Any, confusion_prompt: str) -> str
 
 def problem_selection_display_prompt() -> str:
     return "Pick the problem you want help with."
+
+
+def problem_source_selection_display_prompt(problem_number: str) -> str:
+    return f"I found more than one match for problem {problem_number}. Which one should we use?"
 
 
 def normalize_confusion_choices(value: Any, max_count: int = CONFUSION_CHOICE_MAX_COUNT) -> list[dict[str, str]] | None:
@@ -2801,6 +2846,179 @@ def suppress_repeated_failed_search_decision(decision: dict[str, Any], state: Pd
 def problem_number_sort_key(problem_number: str) -> tuple[int, ...]:
     parts = re.findall(r"\d+", problem_number)
     return tuple(int(part) for part in parts) or (0,)
+
+
+def exact_problem_selection_update_after_search(state: PdfRagState, pages: list[dict[str, Any]]) -> dict[str, Any]:
+    requested_numbers = requested_problem_numbers_for_decision(state)
+    decision = state.get("retrieval_decision") if isinstance(state.get("retrieval_decision"), dict) else {}
+    retrieval_reason = str(decision.get("retrieval_reason") or state.get("retrieval_reason") or "")
+
+    if retrieval_reason not in {"student_requested_problem", "student_changed_problem"} or not requested_numbers or len(pages) <= 1:
+        return {}
+
+    requested_number = requested_numbers[0]
+    actual_pages = [
+        page for page in pages
+        if page_contains_actual_problem_heading(page, requested_number)
+    ]
+
+    if len(actual_pages) == 1:
+        selected_pages = actual_pages[:1]
+        return {
+            "retrieved_pages": selected_pages,
+            "retrieval_confidence": retrieval_confidence_from_pages(selected_pages, state.get("retrieval_diagnostics", [])),
+            "sources": sources_from_pages(selected_pages),
+            "retrieval_decision": {
+                **decision,
+                "active_problem_numbers": [requested_number],
+                "outcome": "retrieve_then_answer",
+            },
+        }
+
+    if len(actual_pages) <= 1:
+        return {}
+
+    prompt = problem_source_selection_display_prompt(requested_number)
+    choices = problem_source_selection_choices(actual_pages, requested_number)
+    structured_output = normalize_backend_structured_output(
+        {
+            "sections": {"mainChat": prompt},
+            "confusionPrompt": prompt,
+            "confusionChoices": choices,
+            "metadata": {
+                "choiceDisplay": "problem_selection",
+                "hintLevel": "none",
+                "mode": "clarification",
+                "sourceConfidence": "medium",
+                "studentActionNeeded": "answer_question",
+            },
+        }
+    )
+    if not structured_output:
+        return {}
+
+    return {
+        "answer": prompt,
+        "retrieved_pages": [],
+        "retrieval_confidence": "low",
+        "sources": [],
+        "retrieval_decision": {
+            **decision,
+            "can_answer_now": True,
+            "needs_search": False,
+            "outcome": "ask_problem_selection",
+            "query": "",
+            "retrieval_reason": "",
+            "search_query": "",
+            "searches": [],
+            "student_response": prompt,
+            "structuredOutput": structured_output,
+            "tool_calls": [],
+        },
+        "structured_output_override": structured_output,
+        "tool_calls": [],
+    }
+
+
+def requested_problem_numbers_for_decision(state: PdfRagState) -> list[str]:
+    decision = state.get("retrieval_decision") if isinstance(state.get("retrieval_decision"), dict) else {}
+    texts: list[str] = []
+    for key in ("query", "search_query"):
+        value = str(decision.get(key) or "").strip()
+        if value:
+            texts.append(value)
+
+    searches = decision.get("searches")
+    if isinstance(searches, list):
+        texts.extend(str(search.get("query") or "") for search in searches if isinstance(search, dict))
+
+    texts.append(latest_student_message_content(state.get("messages", [])))
+    seen: set[str] = set()
+    numbers: list[str] = []
+    for text in texts:
+        for problem_number in problem_numbers_from_text(text):
+            normalized = problem_number.upper()
+            if normalized not in seen:
+                seen.add(normalized)
+                numbers.append(problem_number)
+    return numbers
+
+
+def page_contains_actual_problem_heading(page: dict[str, Any], problem_number: str) -> bool:
+    text = page_ocr_text(page)
+    if not text:
+        return False
+
+    number_pattern = problem_number_regex_source(problem_number)
+    start_words = PROBLEM_STATEMENT_ITEM_START_PATTERN
+    bare_heading = re.compile(
+        rf"(?:^|[\n\r]|\s)({number_pattern})\s*\.\s*(?=(?:{start_words})\b)",
+        re.I,
+    )
+    for match in bare_heading.finditer(text):
+        prefix = text[max(0, match.start() - 24):match.start()]
+        if re.search(r"\b(?:problem|exercise|exercises|question|questions|ex\.?)\s*$", prefix, re.I):
+            continue
+        return True
+
+    labeled_heading = re.compile(
+        rf"(?:^|[\n\r])\s*(?:problem|exercise|exercises|question|questions|ex\.?)\s*#?\s*{number_pattern}\s*[.)]\s*(?=(?:{start_words})\b)",
+        re.I,
+    )
+    return bool(labeled_heading.search(text))
+
+
+def problem_number_regex_source(problem_number: str) -> str:
+    parts = [part for part in re.split(r"\s*\.\s*", str(problem_number).strip()) if part]
+    if len(parts) >= 2:
+        return r"\s*\.\s*".join(re.escape(part) for part in parts)
+    return re.escape(str(problem_number).strip())
+
+
+def page_ocr_text(page: dict[str, Any]) -> str:
+    return str(
+        page.get("ocrText")
+        or page.get("ocr_text")
+        or page.get("chunk_text")
+        or page.get("chunkText")
+        or ""
+    )
+
+
+def problem_source_selection_choices(pages: list[dict[str, Any]], problem_number: str) -> list[dict[str, str]]:
+    choices: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for page in pages[:PROBLEM_SELECTION_CHOICE_MAX_COUNT]:
+        title = str(page.get("title") or "Class material").strip()
+        page_label = page_display_label(page)
+        key = "|".join([title, page_label, problem_number])
+        if key in seen:
+            continue
+        seen.add(key)
+        label = " · ".join(part for part in [problem_number, title, page_label] if part)
+        message_parts = [f"Use problem {problem_number} from {title}"]
+        if page_label:
+            message_parts.append(f"{page_label}.")
+        message = " ".join(message_parts).strip()
+        choices.append(
+            {
+                "id": f"problem-{len(choices) + 1}",
+                "label": label[:CONFUSION_CHOICE_LABEL_MAX_LENGTH],
+                "message": message[:CONFUSION_CHOICE_MESSAGE_MAX_LENGTH],
+            }
+        )
+    return choices
+
+
+def page_display_label(page: dict[str, Any]) -> str:
+    printed_page = page.get("printed_page_start") or page.get("printedPageStart")
+    page_start = page.get("page_start") or page.get("pageStart")
+    if printed_page:
+        return f"printed page {printed_page}"
+    if page_start:
+        return f"page {page_start}"
+    return ""
+
 
 def enforce_ambiguous_student_upload_clarification(decision: dict[str, Any], state: PdfRagState) -> dict[str, Any]:
     if structured_output_is_problem_selection(decision.get("structuredOutput")):
@@ -4741,7 +4959,7 @@ def forced_exact_problem_search_tool_call(state: PdfRagState) -> dict[str, Any]:
                 {
                     "query": query,
                     "retrieval_reason": "student_requested_problem",
-                    "top_k": 1,
+                    "top_k": default_top_k_for_retrieval_reason("student_requested_problem"),
                 }
             ),
         },
@@ -6662,6 +6880,10 @@ async def run_pdf_rag_agent_stream(
             state["stage_history"] = append_stage(state, "search_ocr_metadata")
             state["search_queries"] = [*state.get("search_queries", []), *new_search_queries]
             state["tool_calls"] = []
+            exact_update = exact_problem_selection_update_after_search(state, state["retrieved_pages"])
+            if exact_update:
+                state.update(exact_update)
+                decision = state.get("retrieval_decision") or decision
 
         pages_for_context = page_context_records_for_state(state)
         state["page_assets"] = (
@@ -6676,10 +6898,10 @@ async def run_pdf_rag_agent_stream(
         state["stage_history"] = append_stage(state, "prepare_metadata_context")
 
         if (
-            (state.get("answer") or structured_output_is_problem_selection(decision.get("structuredOutput")))
+            (state.get("answer") or structured_output_is_terminal_choice(decision.get("structuredOutput")))
             and not decision.get("needs_search")
             and (
-                structured_output_is_problem_selection(decision.get("structuredOutput"))
+                structured_output_is_terminal_choice(decision.get("structuredOutput"))
                 or
                 forced_confusion_choice_response(state)
                 or not (decision.get("memory_used") and state.get("page_assets"))
@@ -6915,6 +7137,7 @@ def pdf_rag_response_from_state(state: PdfRagState, answer: str | None = None) -
             "decisionSource": (state.get("retrieval_decision") or {}).get("decision_source"),
             "failedSearchesSkipped": state.get("failed_searches_skipped") or [],
             "memoryUsed": bool((state.get("retrieval_decision") or {}).get("memory_used")),
+            "outcome": (state.get("retrieval_decision") or {}).get("outcome") or "",
             "retrievalDecision": state.get("retrieval_decision") or {},
             "retrievalReason": (state.get("retrieval_decision") or {}).get("retrieval_reason") or state.get("retrieval_reason") or "",
             "answerSeekingAssessment": (state.get("tutor_plan") or {}).get("answerSeekingAssessment") if isinstance(state.get("tutor_plan"), dict) else {},

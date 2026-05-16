@@ -87,6 +87,12 @@ ALTER TABLE pdf_materials
   ADD COLUMN IF NOT EXISTS full_pdf_sha256 TEXT;
 
 ALTER TABLE pdf_pages
+  ADD COLUMN IF NOT EXISTS embedding VECTOR(768),
+  ADD COLUMN IF NOT EXISTS embedding_dimensions INTEGER,
+  ADD COLUMN IF NOT EXISTS embedding_model TEXT,
+  ADD COLUMN IF NOT EXISTS embedding_provider TEXT,
+  ADD COLUMN IF NOT EXISTS embedding_task_type TEXT,
+  ADD COLUMN IF NOT EXISTS embedding_created_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS full_pdf_bucket TEXT,
   ADD COLUMN IF NOT EXISTS full_pdf_path TEXT,
   ADD COLUMN IF NOT EXISTS full_pdf_uri TEXT,
@@ -134,6 +140,14 @@ CREATE TABLE IF NOT EXISTS pdf_detected_problems (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE pdf_detected_problems
+  ADD COLUMN IF NOT EXISTS embedding VECTOR(768),
+  ADD COLUMN IF NOT EXISTS embedding_dimensions INTEGER,
+  ADD COLUMN IF NOT EXISTS embedding_model TEXT,
+  ADD COLUMN IF NOT EXISTS embedding_provider TEXT,
+  ADD COLUMN IF NOT EXISTS embedding_task_type TEXT,
+  ADD COLUMN IF NOT EXISTS embedding_created_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_pdf_materials_class_professor
   ON pdf_materials (class_id, professor_id);

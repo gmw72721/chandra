@@ -77,7 +77,7 @@ SEARCH_PDF_PAGES_TOOL: dict[str, Any] = {
                 "top_k": {
                     "type": "integer",
                     "description": (
-                        "Maximum OCR metadata records to return. Exact problem lookups should use 1."
+                        "Maximum OCR metadata records to return. Exact problem lookups should use several candidates when source disambiguation may be needed."
                     ),
                     "default": 5,
                 },

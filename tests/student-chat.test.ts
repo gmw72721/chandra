@@ -1889,7 +1889,7 @@ test("student chat route schema accepts structured output with confusion choices
   assert.match(source, /description: z\.string\(\)\.min\(1\)\.max\(180\)\.optional\(\)/);
   assert.match(source, /confusionPrompt: z\.string\(\)\.max\(240\)\.optional\(\)/);
   assert.match(source, /const tutorConfusionChoicesSchema = z\.array\(tutorConfusionChoiceSchema\)\.min\(2\)\.max\(80\)/);
-  assert.match(source, /choiceDisplay: z\.enum\(\["problem_selection"\]\)\.optional\(\)/);
+  assert.match(source, /choiceDisplay: z\.enum\(\["problem_selection", "support_path_choice"\]\)\.optional\(\)/);
   assert.match(source, /Generic confusion choices must include 2 to 6 choices\./);
 });
 

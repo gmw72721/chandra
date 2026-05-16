@@ -22,6 +22,10 @@ test("student usage windows keep independent daily and weekly anchors", () => {
   assert.match(dataSource, /week_anchor_at/);
   assert.match(migrationSource, /day_anchor_at TIMESTAMPTZ/);
   assert.match(migrationSource, /week_anchor_at TIMESTAMPTZ/);
+  assert.match(dataSource, /period: "day" \| "week"/);
+  assert.match(migrationSource, /period TEXT NOT NULL DEFAULT 'day' CHECK \(period IN \('day', 'week'\)\)/);
+  assert.match(migrationSource, /idx_ai_usage_request_buckets_scope_period/);
+  assert.match(migrationSource, /scope, scope_hash, provider, model_id, period, day_bucket/);
 });
 
 test("student request quotas use anchored usage windows", () => {

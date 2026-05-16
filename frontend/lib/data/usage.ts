@@ -16,6 +16,7 @@ export type AiUsageRequestBucketInput = {
   id: string;
   limit: number;
   modelId: string;
+  period: "day" | "week";
   provider: string;
   role: "student" | "teacher";
   scope: "student" | "teacherPreview" | "class";
@@ -84,6 +85,7 @@ type RequestBucketRow = {
   scope_hash: string;
   provider: string;
   model_id: string;
+  period: "day" | "week";
   day_bucket: string;
   limit_requests: number;
   request_count: number;
@@ -491,9 +493,9 @@ async function ensureRequestBuckets(client: PostgresQueryClient | undefined, spe
     await runPostgresQuery(
       client,
       `INSERT INTO ai_usage_request_buckets (
-        id, class_id, user_id, role, scope, scope_hash, provider, model_id, day_bucket, limit_requests
+        id, class_id, user_id, role, scope, scope_hash, provider, model_id, period, day_bucket, limit_requests
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
       )
       ON CONFLICT (id) DO UPDATE SET
         limit_requests = EXCLUDED.limit_requests`,
@@ -506,6 +508,7 @@ async function ensureRequestBuckets(client: PostgresQueryClient | undefined, spe
         spec.scopeHash,
         spec.provider,
         spec.modelId,
+        spec.period,
         spec.dayBucket,
         spec.limit
       ]
