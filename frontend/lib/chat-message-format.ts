@@ -12,20 +12,23 @@ export type AssistantMessageBlock =
 
 type MessageSource = NonNullable<ChatMessage["sources"]>[number];
 const defaultSectionOrder: TutorStructuredSectionKey[] = [
-  "mainChat",
+  "studentResponse",
   "problem",
-  "answer",
   "hint",
-  "explanation",
-  "formula",
+  "keyIdea",
+  "rule",
+  "method",
   "example",
-  "checkWork",
-  "sourceNote"
+  "sourceContext",
+  "checkWork"
 ];
 
 export function assistantMessageAnswerContent(message: ChatMessage) {
   return message.structuredOutput
-    ? message.structuredOutput.sections.mainChat || message.structuredOutput.sections.answer || ""
+    ? message.structuredOutput.sections.studentResponse ||
+        message.structuredOutput.sections.mainChat ||
+        message.structuredOutput.sections.answer ||
+        ""
     : message.content;
 }
 
@@ -34,17 +37,23 @@ export function assistantMessageBlocks(message: ChatMessage): AssistantMessageBl
     return message.content ? [{ content: message.content, kind: "answer" }] : [];
   }
 
-  const sections = message.structuredOutput.sections;
+  const sections = {
+    ...message.structuredOutput.sections,
+    studentResponse:
+      message.structuredOutput.sections.studentResponse ||
+      message.structuredOutput.sections.mainChat ||
+      message.structuredOutput.sections.answer
+  };
   const sectionMap: Record<TutorStructuredSectionKey, AssistantMessageBlock | undefined> = {
-    mainChat: sections.mainChat ? { content: sections.mainChat, kind: "answer" } : undefined,
-    answer: sections.answer ? { content: sections.answer, kind: "answer" } : undefined,
+    studentResponse: sections.studentResponse ? { content: sections.studentResponse, kind: "answer" } : undefined,
     problem: sections.problem ? { content: sections.problem, kind: "problem", label: "Problem" } : undefined,
     hint: sections.hint ? { content: sections.hint, kind: "hint", label: "Hint" } : undefined,
-    explanation: sections.explanation ? { content: sections.explanation, kind: "explanation", label: "Why this works" } : undefined,
-    formula: sections.formula ? { content: sections.formula, kind: "formula", label: "Formula" } : undefined,
+    keyIdea: sections.keyIdea ? { content: sections.keyIdea, kind: "key-idea", label: "Key idea" } : undefined,
+    rule: sections.rule ? { content: sections.rule, kind: "rule", label: "Rule" } : undefined,
+    method: sections.method ? { content: sections.method, kind: "method", label: "Method" } : undefined,
     example: sections.example ? { content: sections.example, kind: "example", label: "Similar example" } : undefined,
-    checkWork: sections.checkWork ? { content: sections.checkWork, kind: "check-work", label: "Check your work" } : undefined,
-    sourceNote: sections.sourceNote ? { content: sections.sourceNote, kind: "source-note", label: "Source" } : undefined
+    sourceContext: sections.sourceContext ? { content: sections.sourceContext, kind: "source-context", label: "Source context" } : undefined,
+    checkWork: sections.checkWork ? { content: sections.checkWork, kind: "check-work", label: "Check your work" } : undefined
   };
   const effectiveOrder = orderedTutorSectionKeys(message);
   const seen = new Set<TutorStructuredSectionKey>();
@@ -76,38 +85,7 @@ function orderedTutorSectionKeys(message: ChatMessage): TutorStructuredSectionKe
   const presentKeys = new Set(defaultSectionOrder.filter((key) => Boolean(sections[key])));
   const orderedKeys = requestedOrder.filter((key) => presentKeys.has(key));
   const remainingKeys = defaultSectionOrder.filter((key) => presentKeys.has(key) && !orderedKeys.includes(key));
-  const candidateOrder = [...orderedKeys, ...remainingKeys];
-  const sourceLookupNoteKey = presentKeys.has("mainChat") ? "mainChat" : presentKeys.has("answer") ? "answer" : undefined;
-  const leadKeys: TutorStructuredSectionKey[] = [];
-  const shouldKeepSourceLookupNoteFirst =
-    message.structuredOutput?.metadata.mode === "source_lookup" &&
-    Boolean(sourceLookupNoteKey) &&
-    presentKeys.has("problem") &&
-    requestedOrder.indexOf(sourceLookupNoteKey as TutorStructuredSectionKey) !== -1 &&
-    requestedOrder.indexOf("problem") !== -1 &&
-    requestedOrder.indexOf(sourceLookupNoteKey as TutorStructuredSectionKey) < requestedOrder.indexOf("problem");
-
-  if (shouldKeepSourceLookupNoteFirst) {
-    return [
-      ...candidateOrder,
-      ...defaultSectionOrder.filter((key) => presentKeys.has(key) && !candidateOrder.includes(key))
-    ];
-  }
-
-  if (presentKeys.has("problem")) {
-    leadKeys.push("problem");
-  }
-
-  if (presentKeys.has("mainChat")) {
-    leadKeys.push("mainChat");
-  } else if (presentKeys.has("answer")) {
-    leadKeys.push("answer");
-  }
-
-  return [
-    ...leadKeys,
-    ...candidateOrder.filter((key) => !leadKeys.includes(key))
-  ];
+  return [...orderedKeys, ...remainingKeys];
 }
 
 export function condensedSourceLabels(sources: NonNullable<ChatMessage["sources"]>) {
@@ -158,7 +136,7 @@ export function normalizeStructuredSectionMarkdown(content: string, kind: string
     return normalizeProblemSectionMarkdown(cleaned);
   }
 
-  if (kind === "formula") {
+  if (kind === "rule") {
     return normalizeFormulaSectionMarkdown(cleaned);
   }
 
@@ -182,10 +160,27 @@ function normalizeFormulaSectionMarkdown(content: string) {
     .filter(Boolean);
 
   if (formulas.length <= 1) {
-    return `$$\n${splitFormula.formula.replace(/^\$|\$$/g, "")}\n$$`;
+    return `$$\n${stripOuterMathDelimiters(splitFormula.formula)}\n$$`;
   }
 
-  return formulas.map((formula) => `$$\n${formula.replace(/^\$|\$$/g, "")}\n$$`).join("\n\n");
+  return formulas.map((formula) => `$$\n${stripOuterMathDelimiters(formula)}\n$$`).join("\n\n");
+}
+
+function stripOuterMathDelimiters(content: string) {
+  const trimmed = content.trim();
+  const inlineDelimited = trimmed.match(/^\$(?!\$)([\s\S]*?)(?<!\$)\$$/);
+
+  if (inlineDelimited) {
+    return inlineDelimited[1].trim();
+  }
+
+  const parenDelimited = trimmed.match(/^\\\(([\s\S]*?)\\\)$/);
+
+  if (parenDelimited) {
+    return parenDelimited[1].trim();
+  }
+
+  return trimmed;
 }
 
 function splitFormulaCommentary(content: string) {

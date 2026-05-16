@@ -43,6 +43,20 @@ class FakeStreamingOpenRouterClient(FakeOpenRouterClient):
         return stream()
 
 
+class FakeStreamingEmptyDoneOpenRouterClient(FakeOpenRouterClient):
+    async def stream_chat(self, model: str, messages: list[dict[str, Any]], **kwargs: Any):
+        self.calls.append({"model": model, "messages": messages, **kwargs})
+        response = self.responses.pop(0)
+        content = str(response.get("content") or "")
+
+        async def stream():
+            for index in range(0, len(content), 17):
+                yield {"type": "content_delta", "delta": content[index : index + 17]}
+            yield {"type": "done", "response": {**response, "content": ""}}
+
+        return stream()
+
+
 class FakeRetriever:
     def __init__(self, pages: list[dict[str, Any]]) -> None:
         self.pages = pages
@@ -51,6 +65,61 @@ class FakeRetriever:
     async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
         self.calls.append(kwargs)
         return self.pages
+
+
+@pytest.mark.asyncio
+async def test_streaming_trace_preserves_accumulated_content_when_done_response_is_empty() -> None:
+    client = FakeStreamingEmptyDoneOpenRouterClient(
+        [{"content": "Use the selected source to identify the problem setup.", "finish_reason": "stop"}]
+    )
+
+    response = await graph_module.traced_openrouter_chat_streaming(
+        client,
+        name="langgraph.context-grounded-answer",
+        model="openai/gpt-4.1-mini",
+        messages=[{"role": "user", "content": "test"}],
+        state={},
+        prompt_key="context_grounded_answer",
+        metadata={"purpose": "context_grounded_answer"},
+    )
+
+    assert response["content"] == "Use the selected source to identify the problem setup."
+
+
+def test_active_problem_decision_strips_leaked_support_payload() -> None:
+    decision = graph_module.normalize_active_problem_decision(
+        {
+            "isActualProblem": True,
+            "problemSource": "retrieved_pdf",
+            "problemText": (
+                '2.14. Given the setup of Exercise 2.13, prove the rank inequalities.}'
+                '{"type":"theorem","topic":"rank-nullity theorem","method":null,"priority":"medium"}'
+            ),
+            "relationToPreviousProblem": "different_problem",
+            "confidence": "high",
+        }
+    )
+
+    assert decision["isActualProblem"] is True
+    assert decision["problemText"] == "2.14. Given the setup of Exercise 2.13, prove the rank inequalities."
+
+
+def test_active_problem_decision_rejects_support_payload_without_problem_statement() -> None:
+    decision = graph_module.normalize_active_problem_decision(
+        {
+            "isActualProblem": True,
+            "problemSource": "retrieved_pdf",
+            "problemText": (
+                '2.14 and will likely help if the student is stuck on the main idea.}'
+                '{"type":"theorem","topic":"rank-nullity theorem","method":null,"priority":"medium"}'
+            ),
+            "relationToPreviousProblem": "different_problem",
+            "confidence": "high",
+        }
+    )
+
+    assert decision["isActualProblem"] is False
+    assert decision["problemText"] == ""
 
 
 def ocr_page(**overrides: Any) -> dict[str, Any]:
@@ -108,6 +177,55 @@ async def _return_async(value: str) -> str:
     return value
 
 
+def confusion_diagnostic_prompt_texts() -> list[str]:
+    primary_messages = graph_module.build_primary_tutor_messages(
+        {
+            "chat_retrieval_memory": {},
+            "messages": [
+                {"role": "assistant", "content": "What does Im(T) collect?"},
+                {"role": "user", "content": "I don't know."},
+            ],
+        },
+        {},
+    )
+    context_messages = graph_module.build_context_grounded_answer_messages(
+        {
+            "answer_policy": {"refuseAnswerOnlyRequests": True},
+            "messages": [
+                {"role": "assistant", "content": "What does Im(T) collect?"},
+                {"role": "user", "content": "I don't know."},
+            ],
+            "page_assets": [ocr_page()],
+            "retrieved_pages": [ocr_page()],
+            "retrieval_decision": {
+                "response_mode": "retrieve_then_answer",
+                "needs_search": True,
+                "retrieval_reason": "needed_supporting_page",
+                "search_query": "image notation linear maps",
+                "tutorPlan": {
+                    "studentIntent": "vague_help",
+                    "nextHelpDepth": 1,
+                    "currentStep": "Compare images of composed linear maps.",
+                    "currentStepStatus": "in_progress",
+                },
+            },
+            "source_usage": {"useClassMaterialsFirst": True},
+            "tutor_plan": {
+                "studentIntent": "vague_help",
+                "nextHelpDepth": 1,
+                "currentStep": "Compare images of composed linear maps.",
+                "currentStepStatus": "in_progress",
+            },
+            "problem_understanding_state": {"repeatedStuckSignals": 1},
+        }
+    )
+
+    return [
+        str(primary_messages[0]["content"]),
+        json.dumps(context_messages[0]["content"]),
+    ]
+
+
 def test_normalize_backend_structured_output_unwraps_section_text_objects() -> None:
     structured_output = graph_module.normalize_backend_structured_output(
         {
@@ -126,8 +244,81 @@ def test_normalize_backend_structured_output_unwraps_section_text_objects() -> N
 
     assert structured_output is not None
     assert structured_output["sections"] == {
-        "mainChat": "Use the exact wording from the selected page.",
+        "studentResponse": "Use the exact wording from the selected page.",
     }
+
+
+def test_structured_problem_metadata_prefers_visible_problem_over_page_metadata() -> None:
+    metadata = graph_module.structured_problem_metadata(
+        {},
+        "2.20. Let a != 0 be fixed. Find the matrix A representing D on S.",
+        [{"problemNumbers": ["2.13", "2.20"]}],
+    )
+
+    assert metadata["problemNumber"] == "2.20"
+
+
+def test_sources_use_structured_problem_reference_for_problem_lookup_chip() -> None:
+    sources = graph_module.sources_with_structured_problem_reference(
+        [
+            {
+                "title": "ACME VOL 1",
+                "pageNumber": 98,
+                "problemNumber": "2.13",
+                "sourceItemLabel": "Problem 2.13",
+                "problemNumbers": ["2.13", "2.20"],
+                "retrievalReason": "student_requested_problem",
+                "usedAs": "problem_source",
+            }
+        ],
+        {
+            "sections": {"problem": "2.20. Let a != 0 be fixed. Find the matrix A representing D on S."},
+            "metadata": {"problemNumber": "2.20"},
+        },
+    )
+
+    assert sources[0]["problemNumber"] == "2.20"
+    assert "sourceItemLabel" not in sources[0]
+    assert sources[0]["problemNumbers"] == ["2.13", "2.20"]
+
+
+def test_reference_lookup_label_does_not_override_active_problem_source_number() -> None:
+    active_problem = ocr_page(
+        chunk_text="Problem 2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+        page_start=98,
+        page_end=98,
+        printed_page_start=98,
+        problem_numbers=["2.14"],
+        title="ACME VOL 1",
+        lookup_role="reference_expansion",
+        reference_type="problem",
+        reference_query="Problem 2.13",
+    )
+
+    sources = graph_module.sources_from_page_assets([active_problem])
+
+    assert sources[0]["pageNumber"] == 98
+    assert sources[0]["problemNumber"] == "2.14"
+    assert "sourceItemLabel" not in sources[0]
+
+
+def test_reference_lookup_label_is_kept_for_matching_reference_source() -> None:
+    referenced_setup = ocr_page(
+        chunk_text="Exercise 2.13. Let K and L be linear transformations.",
+        page_start=97,
+        page_end=97,
+        printed_page_start=97,
+        problem_numbers=["2.13"],
+        title="ACME VOL 1",
+        lookup_role="reference_expansion",
+        reference_type="exercise",
+        reference_query="Exercise 2.13",
+    )
+
+    sources = graph_module.sources_from_page_assets([referenced_setup])
+
+    assert sources[0]["problemNumber"] == "2.13"
+    assert sources[0]["sourceItemLabel"] == "Exercise 2.13"
 
 
 def test_json_problem_context_preserves_internal_tracking_contract() -> None:
@@ -165,8 +356,8 @@ def test_json_referenced_sources_preserves_internal_source_tracking_contract() -
     answer = json.dumps(
         {
             "mainText": "That item is on printed page 80.",
-            "sections": {"sourceNote": "Rank Worksheet, printed page 80."},
-            "sectionOrder": ["mainText", "sourceNote"],
+            "sections": {"sourceContext": "Rank Worksheet, printed page 80."},
+            "sectionOrder": ["mainText", "sourceContext"],
             "metadata": {
                 "referencedSources": [
                     {"doc_id": "material-rank", "page": "80", "reason": "matched requested problem"}
@@ -201,13 +392,56 @@ def test_decision_prompt_searches_source_lookup_before_asking_for_more_detail() 
     )
 
     system_prompt = messages[0]["content"]
+    user_payload = messages[1]["content"]
     assert "Treat heuristic as the default plan" in system_prompt
+    assert "Search query authorship" in system_prompt
     assert "bare number, problem/exercise/question/page locator" in system_prompt
     assert "set needs_search true unless active_metadata identifies the exact item" in system_prompt
     assert "do not invent source facts or ask for a page/title/problem text" in system_prompt
     assert "similar-example requests" in system_prompt
     assert "rather than only the assigned problem number" in system_prompt
+    assert "If this same router response has needs_search true for student_requested_problem" in system_prompt
+    assert "topic of problem 2.14 once located" in system_prompt
+    assert "combined problem-plus-example query" in system_prompt
     assert "Attachment rules" not in system_prompt
+    assert "find exact problem page OCR metadata 2.24" not in user_payload
+
+
+def test_prior_knowledge_items_seed_primary_router_memory() -> None:
+    state = {
+        "prior_knowledge_items": [
+            {
+                "id": "knowledge-page-214",
+                "chatId": "conv-1",
+                "kind": "pdf_page",
+                "sourceName": "ACME VOL 1",
+                "sourceId": "material-acme",
+                "pdfId": "material-acme",
+                "page": 98,
+                "problemId": "2.14",
+                "usedAs": "problem_source",
+                "reason": "Previously selected page.",
+                "ocrText": "Problem 2.14. Use the setup of Exercise 2.13 to prove rank(KL) <= rank(L).",
+            }
+        ],
+        "messages": [{"role": "user", "content": "Please give me one small hint for Problem 2.14."}],
+    }
+
+    memory = graph_module.merge_prior_knowledge_into_chat_retrieval_memory({}, state)
+    active = graph_module.active_metadata_record_from_memory(memory)
+
+    assert active["title"] == "ACME VOL 1"
+    assert active["problem_numbers"] == ["2.14"]
+    assert "rank(KL)" in active["ocr_text"]
+
+    decision = graph_module.build_retrieval_decision({**state, "chat_retrieval_memory": memory})
+    messages = graph_module.build_primary_tutor_messages({**state, "chat_retrieval_memory": memory, "knowledge_items": memory["knowledge_items"]}, decision)
+    prompt_payload = messages[1]["content"]
+
+    assert decision["memory_used"] is True
+    assert decision["needs_search"] is False
+    assert "prior_knowledge_items" in prompt_payload
+    assert "ACME VOL 1" in prompt_payload
 
 
 def test_primary_payload_excludes_latest_message_from_chat_history() -> None:
@@ -254,6 +488,70 @@ def test_primary_payload_strips_ocr_text_from_active_metadata() -> None:
     assert "ocr_text" not in serialized
     assert "raw_text" not in serialized
     assert "Problem 2.14. Prove rank" not in serialized
+
+
+def test_context_grounded_prompt_requires_full_referenced_item_text() -> None:
+    messages = graph_module.build_context_grounded_answer_messages(
+        {
+            "answer_policy": {"refuseAnswerOnlyRequests": True},
+            "messages": [{"role": "user", "content": "problem 2.14"}],
+            "page_assets": [
+                ocr_page(
+                    chunk_text="Exercise 2.13. Let L: V -> W and K: W -> X be linear transformations.",
+                    lookup_role="reference_expansion",
+                    problem_numbers=["2.13"],
+                    reference_query="exercise 2.13",
+                ),
+                ocr_page(
+                    chunk_text="2.14. Given the setup of Exercise 2.13, prove the inequalities.",
+                    problem_numbers=["2.14"],
+                ),
+            ],
+            "retrieved_pages": [],
+            "retrieval_decision": {"response_mode": "retrieve_then_answer", "needs_search": True},
+            "source_usage": {"useClassMaterialsFirst": True},
+        }
+    )
+
+    prompt = json.dumps(messages[0]["content"])
+
+    assert "include the full visible referenced item text" in prompt
+    assert "not just a summary" in prompt
+
+
+def test_context_grounded_prompt_schedules_named_missing_dependency_with_top_level_intent() -> None:
+    messages = graph_module.build_context_grounded_answer_messages(
+        {
+            "answer_policy": {"refuseAnswerOnlyRequests": True},
+            "messages": [{"role": "user", "content": "problem 2.14"}],
+            "page_assets": [
+                ocr_page(
+                    chunk_text="2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+                    problem_numbers=["2.14"],
+                    title="ACME VOL 1",
+                ),
+            ],
+            "retrieved_pages": [],
+            "retrieval_decision": {"response_mode": "retrieve_then_answer", "needs_search": True},
+            "source_usage": {"useClassMaterialsFirst": True},
+        }
+    )
+
+    prompt = json.dumps(messages[0]["content"])
+
+    assert "scheduler reads only top-level `additional_support_intents`" in prompt
+    assert "It does not schedule searches from student-facing prose" in prompt
+    assert "metadata.referencedSources" in prompt
+    assert "Do not ask the student to send a retrievable class-material dependency" in prompt
+    assert "type referenced_exercise" in prompt
+    assert "Exercise 2.13 ACME VOL 1" in prompt
+    assert "Do not include the active/original problem number" in prompt
+    assert "active/original printed page" in prompt
+    assert "describe the needed concept/method/object rather than the active problem locator or active page" in prompt
+    assert "Always include additional_support_intents as a top-level array" in prompt
+    assert "use [] only when no background support retrieval is needed" in prompt
+    assert "still include top-level additional_support_intents when the found item names a missing retrievable dependency" in prompt
+    assert "These outcomes are mutually exclusive for student-visible sections only" in prompt
 
 
 def test_primary_payload_omits_empty_defaults_and_recent_hint_summaries() -> None:
@@ -532,6 +830,30 @@ def test_example_follow_up_does_not_prepend_active_problem_page() -> None:
     assert pages == [example_page]
 
 
+def test_support_follow_up_does_not_prepend_active_problem_page() -> None:
+    active_page = ocr_page(page_start=98, page_end=98, problem_numbers=["2.14"])
+    support_page = ocr_page(
+        chunk_text="The rank-nullity theorem relates rank, nullity, and domain dimension.",
+        page_start=94,
+        page_end=94,
+        problem_numbers=[],
+        retrieval_mode="vector",
+    )
+    state = {
+        "chat_retrieval_memory": {"active_metadata": active_page},
+        "retrieval_decision": {
+            "memory_used": True,
+            "retrieval_reason": "needed_supporting_page",
+            "searches": [{"query": "rank nullity theorem", "retrieval_reason": "needed_supporting_page"}],
+        },
+        "retrieved_pages": [support_page],
+    }
+
+    pages = graph_module.page_context_records_for_state(state)
+
+    assert pages == [support_page]
+
+
 def test_example_search_filters_active_problem_page_when_alternatives_exist() -> None:
     active_page = ocr_page(page_start=98, page_end=98, problem_numbers=["2.14"])
     example_page = ocr_page(
@@ -550,6 +872,735 @@ def test_example_search_filters_active_problem_page_when_alternatives_exist() ->
     )
 
     assert pages == [example_page]
+
+
+def test_support_search_filters_active_problem_page_when_alternatives_exist() -> None:
+    active_page = ocr_page(page_start=98, page_end=98, problem_numbers=["2.14"])
+    support_page = ocr_page(
+        chunk_text="The rank-nullity theorem relates rank, nullity, and domain dimension.",
+        page_start=94,
+        page_end=94,
+        problem_numbers=[],
+        retrieval_mode="vector",
+    )
+    state = {"chat_retrieval_memory": {"active_metadata": active_page}}
+
+    pages = graph_module.filter_search_result_for_retrieval_reason(
+        [active_page, support_page],
+        "needed_supporting_page",
+        state=state,
+    )
+
+    assert pages == [support_page]
+
+
+def test_primary_tutor_response_captures_background_support_searches() -> None:
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "can_answer_now": True,
+                    "needs_search": False,
+                    "student_response": "Try identifying the basis vectors first.",
+                    "background_support_searches": [
+                        {
+                            "query": "worked example matrix representation relative to a basis",
+                            "retrieval_reason": "needed_example_page",
+                            "top_k": 3,
+                            "confidence": 0.91,
+                            "why": "A similar example could help future hints.",
+                        }
+                    ],
+                }
+            )
+        },
+        graph_module.retrieval_decision(
+            decision_source="search_required",
+            needs_search=True,
+            retrieval_reason="needed_supporting_page",
+            query="help with active problem",
+            memory_used=True,
+            active_record=ocr_page(),
+        ),
+        state={"messages": [{"role": "user", "content": "Can you help me with this?"}]},
+    )
+
+    assert decision["needs_search"] is False
+    assert decision["background_support_searches"] == [
+        {
+            "query": "worked example textbook reading notes method matrix representation relative to basis",
+            "retrieval_reason": "needed_example_page",
+            "top_k": 3,
+            "confidence": 0.91,
+            "why": "A similar example could help future hints.",
+        }
+    ]
+
+
+def test_context_grounded_prompt_sees_primary_background_support_searches() -> None:
+    state = {
+        "messages": [{"role": "user", "content": "2.14"}],
+        "retrieval_decision": {
+            "needs_search": True,
+            "retrieval_reason": "student_requested_problem",
+            "search_query": "problem 2.14",
+            "searches": [{"query": "problem 2.14", "retrieval_reason": "student_requested_problem"}],
+        },
+        "primary_background_support_searches": [
+            {
+                "query": "worked example rank nullity",
+                "retrieval_reason": "needed_example_page",
+                "top_k": 3,
+                "confidence": 0.88,
+            }
+        ],
+        "page_assets": [ocr_page()],
+        "retrieved_pages": [ocr_page()],
+        "chat_retrieval_memory": {},
+        "answer_policy": {},
+        "source_usage": {},
+        "model_settings": {},
+        "response_format": {},
+        "tutor_plan": {},
+        "problem_understanding_state": {},
+    }
+
+    messages = graph_module.build_context_grounded_answer_messages(state)
+    prompt_text = json.dumps(messages)
+
+    assert "background_support_searches" in prompt_text
+    assert "worked example rank nullity" in prompt_text
+    assert "do not repeat those queries" in prompt_text
+
+
+def test_background_support_validator_requires_active_problem_and_confidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_ENTERPRISE_SEARCH_ENABLED", "true")
+    active_page = ocr_page()
+
+    valid, diagnostics = graph_module.valid_background_support_searches(
+        {
+            "chat_retrieval_memory": {"active_metadata": active_page},
+            "background_support_searches": [
+                {
+                    "query": "rank nullity theorem worked example",
+                    "retrieval_reason": "needed_example_page",
+                    "confidence": 0.9,
+                },
+                {
+                    "query": "rank nullity theorem worked example",
+                    "retrieval_reason": "needed_example_page",
+                    "confidence": 0.9,
+                },
+                {
+                    "query": "textbook method explanation topic of problem 2.14 once located",
+                    "retrieval_reason": "needed_supporting_page",
+                    "confidence": 0.9,
+                },
+                {
+                    "query": "low confidence rank support",
+                    "retrieval_reason": "needed_supporting_page",
+                    "confidence": 0.3,
+                },
+            ],
+            "search_queries": [],
+            "tutor_plan": {"answerSeekingAssessment": {"risk": "low"}},
+        }
+    )
+
+    assert [search["query"] for search in valid] == ["rank nullity theorem worked example"]
+    assert any(item["issue"] == "skipped duplicate background support query" for item in diagnostics)
+    assert any(item["issue"] == "skipped low-confidence background support query" for item in diagnostics)
+    assert any(item["issue"] == "skipped deferred background support placeholder" for item in diagnostics)
+
+    valid_without_active, diagnostics_without_active = graph_module.valid_background_support_searches(
+        {
+            "chat_retrieval_memory": {},
+            "background_support_searches": [
+                {
+                    "query": "rank nullity theorem worked example",
+                    "retrieval_reason": "needed_example_page",
+                    "confidence": 0.9,
+                }
+            ],
+        }
+    )
+
+    assert valid_without_active == []
+    assert diagnostics_without_active == [{"issue": "background support skipped because there is no active problem"}]
+
+
+def test_background_support_runner_validates_primary_and_context_searches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_ENTERPRISE_SEARCH_ENABLED", "true")
+    active_page = ocr_page()
+    primary_searches = [
+        {
+            "query": "rank nullity worked example",
+            "retrieval_reason": "needed_example_page",
+            "confidence": 0.9,
+        }
+    ]
+    context_searches = [
+        {
+            "query": "rank theorem supporting notes",
+            "retrieval_reason": "needed_supporting_page",
+            "confidence": 0.88,
+        }
+    ]
+
+    valid, diagnostics = graph_module.valid_background_support_searches(
+        {
+            "chat_retrieval_memory": {"active_metadata": active_page},
+            "background_support_searches": graph_module.combine_background_support_searches(
+                primary_searches,
+                context_searches,
+            ),
+            "search_queries": [],
+            "tutor_plan": {"answerSeekingAssessment": {"risk": "low"}},
+        }
+    )
+
+    assert diagnostics == []
+    assert [search["query"] for search in valid] == [
+        "rank nullity worked example",
+        "rank theorem supporting notes",
+    ]
+
+
+def test_background_support_scheduler_runs_primary_and_context_batches_separately(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduled: list[dict[str, Any]] = []
+
+    def capture_side_effect(label: str, _func: Any, state: dict[str, Any], *_args: Any) -> None:
+        scheduled.append({"label": label, "state": state})
+
+    monkeypatch.setattr(graph_module, "schedule_best_effort_side_effect", capture_side_effect)
+    base_state = {
+        "messages": [{"role": "user", "content": "Can you help me with this?"}],
+        "chat_retrieval_memory": {"active_metadata": ocr_page()},
+        "conversation_id": "conv-background-support",
+        "class_id": "class-linear",
+    }
+    primary_searches = [
+        {
+            "query": "rank nullity worked example",
+            "retrieval_reason": "needed_example_page",
+            "confidence": 0.9,
+        }
+    ]
+    context_searches = [
+        {
+            "query": "rank theorem supporting notes",
+            "retrieval_reason": "needed_supporting_page",
+            "confidence": 0.88,
+        }
+    ]
+
+    graph_module.schedule_background_support_prefetch(
+        base_state,
+        searches=primary_searches,
+        source="primary_tutor_turn",
+    )
+    graph_module.schedule_background_support_prefetch(
+        base_state,
+        searches=context_searches,
+        source="context_grounded_answer",
+    )
+
+    assert [item["state"]["background_support_prefetch_source"] for item in scheduled] == [
+        "primary_tutor_turn",
+        "context_grounded_answer",
+    ]
+    assert scheduled[0]["state"]["background_support_searches"] == primary_searches
+    assert scheduled[1]["state"]["background_support_searches"] == context_searches
+
+
+def test_background_support_bundle_is_limited_to_three_pages() -> None:
+    bundle = {
+        "active_problem_id": "problem-2.14",
+        "status": "ready",
+        "queries": [{"query": "rank nullity examples"}],
+        "pages": [
+            ocr_page(chunk_text=f"support page {index}", page_start=index, printed_page_start=index)
+            for index in range(1, 6)
+        ],
+    }
+
+    compacted = graph_module.compact_support_bundle_for_prompt(bundle)
+
+    assert graph_module.MAX_BACKGROUND_SUPPORT_PAGES == 3
+    assert [page["page_start"] for page in compacted["pages"]] == [1, 2, 3]
+
+
+def test_answer_now_response_mode_schedules_support_intents(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduled: list[dict[str, Any]] = []
+
+    def capture_side_effect(label: str, _func: Any, state: dict[str, Any], *_args: Any) -> None:
+        scheduled.append({"label": label, "state": state})
+
+    monkeypatch.setattr(graph_module, "schedule_best_effort_side_effect", capture_side_effect)
+    state = {
+        "messages": [{"role": "user", "content": "I'm confused"}],
+        "chat_retrieval_memory": {"active_metadata": ocr_page()},
+        "class_id": "class-linear",
+        "conversation_id": "conv-support-intents",
+        "tutor_plan": {"answerSeekingAssessment": {"risk": "low"}},
+    }
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "response_mode": "answer_now",
+                    "needs_search": False,
+                    "student_response": "Try comparing the dimensions first.",
+                    "support_intents": [
+                        {
+                            "type": "worked_example",
+                            "topic": "rank nullity examples",
+                            "method": "rank-nullity",
+                            "priority": "high",
+                            "why": "A worked example may help the next turn.",
+                        }
+                    ],
+                }
+            )
+        },
+        {"needs_search": False},
+        state=state,
+    )
+
+    jobs = graph_module.schedule_background_support_prefetch(
+        {**state, "retrieval_decision": decision, "background_support_searches": decision["background_support_searches"]},
+        searches=decision["background_support_searches"],
+        source="primary_tutor_turn",
+    )
+
+    assert decision["response_mode"] == "answer_now"
+    assert decision["support_intents"][0]["type"] == "worked_example"
+    assert jobs and jobs[0]["status"] == "scheduled"
+    assert scheduled[0]["state"]["background_support_prefetch_source"] == "primary_tutor_turn"
+
+
+def test_answer_now_active_problem_gets_default_background_support_searches() -> None:
+    active_page = ocr_page(
+        material_type="textbook",
+        page_start=42,
+        page_end=42,
+        title="Linear Algebra Textbook",
+    )
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "response_mode": "answer_now",
+                    "needs_search": False,
+                    "student_response": "Start by identifying what rank-nullity compares.",
+                }
+            )
+        },
+        {"needs_search": False},
+        state={"chat_retrieval_memory": {"active_metadata": active_page}},
+    )
+
+    assert len(decision["background_support_searches"]) == 1
+    assert decision["background_support_searches"][0]["retrieval_reason"] == "needed_supporting_page"
+    assert "rank inequalities for linear transformations" in decision["background_support_searches"][0]["query"]
+    assert "Linear Algebra Textbook" in decision["background_support_searches"][0]["query"]
+
+
+def test_next_memory_refreshes_active_metadata_from_rendered_problem() -> None:
+    active_page = ocr_page(
+        chunk_text="15.2 80 Chapter 2. Linear Transformations and Matrices 2.14. Given the setup of Exercise 2.13, prove the following",
+        material_type="textbook",
+        page_start=98,
+        printed_page_start=98,
+        problem_numbers=["15.2"],
+        title="ACME VOL 1",
+    )
+    memory = graph_module.build_next_chat_retrieval_memory(
+        {
+            "answer": "Tell me what you get for the first derivative.",
+            "chat_retrieval_memory": {"active_metadata": active_page},
+            "final_structured_output": {
+                "sections": {
+                    "problem": "2.20. Let a != 0 be fixed, and let V be spanned by [e^{ax}, xe^{ax}, x^2e^{ax}]. Find the matrix representing D on S.",
+                    "hint": "Differentiate each basis function.",
+                },
+                "sectionOrder": ["problem", "hint"],
+            },
+            "messages": [{"role": "user", "content": "help"}],
+            "retrieval_decision": {"decision_source": "chat_memory", "memory_used": True},
+            "search_queries": [],
+        }
+    )
+
+    active = memory["active_metadata"]
+    assert active["problem_numbers"] == ["2.20"]
+    assert active["chunk_text"].startswith("2.20.")
+    assert "15.2 80" not in active["chunk_text"]
+
+
+def test_default_background_support_uses_one_clean_method_query() -> None:
+    active_page = ocr_page(
+        chunk_text="2.20. Let a != 0 be fixed, and let V be spanned by [e^{ax}, xe^{ax}, x^2e^{ax}]. Let D[f](x)=f'. Find the matrix A representing D on S.",
+        material_type="textbook",
+        page_start=98,
+        printed_page_start=98,
+        problem_numbers=["2.20"],
+        title="ACME VOL 1",
+    )
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "response_mode": "answer_now",
+                    "needs_search": False,
+                    "student_response": "Start by differentiating each basis function.",
+                    "structuredOutput": {
+                        "sections": {
+                            "problem": "2.20. Let a != 0 be fixed, and let V be spanned by [e^{ax}, xe^{ax}, x^2e^{ax}]. Let D[f](x)=f'. Find the matrix A representing D on S.",
+                            "hint": "Differentiate each basis function.",
+                        },
+                        "sectionOrder": ["problem", "hint"],
+                    },
+                }
+            )
+        },
+        {"needs_search": False, "memory_used": True, "active_problem_numbers": ["2.20"]},
+        state={
+            "messages": [{"role": "user", "content": "help"}],
+            "chat_retrieval_memory": {"active_metadata": active_page},
+        },
+    )
+
+    assert len(decision["background_support_searches"]) == 1
+    query = decision["background_support_searches"][0]["query"]
+    assert "derivative operator matrix representation relative to basis" in query
+    assert "ACME VOL 1" in query
+    assert "2.20" not in query
+
+
+def test_support_path_choice_mode_preserves_specific_choices() -> None:
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "response_mode": "ask_support_path_choice",
+                    "needs_search": False,
+                    "student_response": "I can help a few ways. What would be most useful right now?",
+                    "structuredOutput": {
+                        "sections": {"studentResponse": "I can help a few ways. What would be most useful right now?"},
+                        "confusionPrompt": "What do you want help with next?",
+                        "confusionChoices": [
+                            {
+                                "id": "explain_concept",
+                                "label": "Explain the concept",
+                                "description": "Review the main idea behind this step.",
+                                "message": "Explain the concept behind this problem.",
+                            },
+                            {
+                                "id": "help_setup",
+                                "label": "Help me set it up",
+                                "description": "Start the structure without solving it.",
+                                "message": "Help me set up this problem without giving the final answer.",
+                            },
+                        ],
+                        "metadata": {
+                            "choiceDisplay": "support_path_uncertainty",
+                            "hintLevel": "none",
+                            "mode": "clarification",
+                            "sourceConfidence": "low",
+                            "studentActionNeeded": "answer_question",
+                        },
+                    },
+                }
+            )
+        },
+        {"needs_search": False},
+        state={"messages": [{"role": "user", "content": "I am not sure what I need for this rank problem."}]},
+    )
+
+    assert decision["response_mode"] == "ask_support_path_choice"
+    assert decision["structuredOutput"]["metadata"]["choiceDisplay"] == "support_path_uncertainty"
+    assert [choice["id"] for choice in decision["structuredOutput"]["confusionChoices"]] == [
+        "explain_concept",
+        "help_setup",
+    ]
+
+
+def test_background_support_ledger_skips_duplicate_support_intent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_ENTERPRISE_SEARCH_ENABLED", "1")
+    active = ocr_page()
+    search_state = {"chat_retrieval_memory": {"active_metadata": active}, "class_id": "class-linear"}
+    duplicate_searches = graph_module.background_support_searches_from_intents(
+        [
+            {
+                "type": "worked_example",
+                "topic": "rank nullity examples",
+                "priority": "high",
+                "why": "Already searched.",
+            }
+        ],
+        search_state,
+    )
+    duplicate_key = graph_module.background_support_idempotency_key(search_state, duplicate_searches[0])
+    state = {
+        "chat_retrieval_memory": {
+            "active_metadata": active,
+            "search_ledger": [
+                {
+                    "idempotency_key": duplicate_key,
+                    "status": "completed",
+                }
+            ],
+        },
+        "class_id": "class-linear",
+        "background_support_searches": duplicate_searches,
+        "tutor_plan": {"answerSeekingAssessment": {"risk": "low"}},
+    }
+
+    valid, diagnostics = graph_module.valid_background_support_searches(state)
+
+    assert valid == []
+    assert diagnostics[0]["issue"] == "skipped duplicate background support intent"
+
+
+def test_context_grounded_additional_support_intents_dedupe_against_existing() -> None:
+    active = ocr_page()
+    state = {
+        "chat_retrieval_memory": {"active_metadata": active},
+        "class_id": "class-linear",
+        "background_support_searches": graph_module.background_support_searches_from_intents(
+            [{"type": "definition", "topic": "rank", "priority": "medium", "why": "Need a definition."}],
+            {"chat_retrieval_memory": {"active_metadata": active}, "class_id": "class-linear"},
+        ),
+    }
+    additional = graph_module.support_intents_from_answer(
+        json.dumps(
+            {
+                "additional_support_intents": [
+                    {"type": "definition", "topic": "rank", "priority": "medium", "why": "Duplicate."},
+                    {"type": "theorem", "topic": "rank-nullity theorem", "priority": "high", "why": "New support."},
+                ]
+            }
+        ),
+        key_names=("additional_support_intents",),
+    )
+
+    searches = graph_module.background_support_searches_from_intents(
+        additional,
+        state,
+        existing_searches=state["background_support_searches"],
+    )
+
+    assert [search["support_intent"]["type"] for search in searches] == ["theorem"]
+
+
+def test_referenced_exercise_background_query_omits_active_problem_page() -> None:
+    active = ocr_page(
+        chunk_text="2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+        page_start=98,
+        printed_page_start=98,
+        problem_numbers=["2.14"],
+        title="ACME VOL 1",
+    )
+
+    searches = graph_module.background_support_searches_from_intents(
+        [
+            {
+                "type": "referenced_exercise",
+                "topic": "Exercise 2.13 setup from ACME VOL 1, printed page 98",
+                "priority": "high",
+                "why": "Problem 2.14 depends on this setup.",
+            }
+        ],
+        {"chat_retrieval_memory": {"active_metadata": active}, "class_id": "class-linear"},
+    )
+
+    query = searches[0]["query"]
+    assert searches[0]["retrieval_reason"] == "needed_supporting_page"
+    assert "Exercise 2.13" in query
+    assert "ACME VOL 1" in query
+    assert "2.14" not in query
+    assert "98" not in query
+    assert "referenced exercise" not in query.lower()
+
+
+def test_method_background_query_omits_active_problem_locator() -> None:
+    active = ocr_page(
+        page_start=98,
+        printed_page_start=98,
+        problem_numbers=["2.14"],
+        title="ACME VOL 1",
+    )
+
+    searches = graph_module.background_support_searches_from_intents(
+        [
+            {
+                "type": "method_explanation",
+                "topic": "rank inequalities for Problem 2.14 on printed page 98",
+                "method": "rank of composition",
+                "priority": "medium",
+                "why": "A method explanation could help.",
+            }
+        ],
+        {"chat_retrieval_memory": {"active_metadata": active}, "class_id": "class-linear"},
+    )
+
+    query = searches[0]["query"]
+    assert searches[0]["retrieval_reason"] == "needed_supporting_page"
+    assert "ACME VOL 1" in query
+    assert "rank inequalities" in query
+    assert "rank of composition" in query
+    assert "2.14" not in query
+    assert "98" not in query
+
+
+@pytest.mark.asyncio
+async def test_context_grounded_referenced_exercise_intent_schedules_background_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled: list[dict[str, Any]] = []
+
+    def capture_side_effect(label: str, _func: Any, state: dict[str, Any], *_args: Any) -> None:
+        scheduled.append({"label": label, "state": state})
+
+    monkeypatch.setattr(graph_module, "schedule_best_effort_side_effect", capture_side_effect)
+    active_problem = ocr_page(
+        chunk_text="2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+        doc_id="material-acme",
+        page_start=98,
+        printed_page_start=98,
+        problem_numbers=["2.14"],
+        title="ACME VOL 1",
+    )
+    client = FakeOpenRouterClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "response_mode": "retrieve_then_answer",
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "search_query": "Problem 2.14 ACME VOL 1",
+                        "student_response": "I'm checking the class materials for that problem.",
+                    }
+                )
+            },
+            {
+                "content": json.dumps(
+                    {
+                        "response_mode": "retrieve_then_answer",
+                        "sections": {
+                            "studentResponse": "I found Problem 2.14 on page 98 of ACME VOL 1.",
+                            "problem": "2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+                        },
+                        "sectionOrder": ["studentResponse", "problem"],
+                        "metadata": {"problemNumber": "2.14"},
+                        "additional_support_intents": [
+                            {
+                                "type": "referenced_exercise",
+                                "topic": "Exercise 2.13 setup from ACME VOL 1",
+                                "method": None,
+                                "priority": "high",
+                                "why": "Problem 2.14 depends on the setup of Exercise 2.13.",
+                            }
+                        ],
+                    }
+                )
+            },
+        ]
+    )
+
+    async def page_asset_builder(pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
+        return pages
+
+    response = await run_pdf_rag_agent(
+        class_id="class-linear",
+        conversation_id="conv-context-referenced-exercise",
+        messages=[{"role": "user", "content": "problem 2.14"}],
+        model="openai/gpt-5.4-mini",
+        openrouter_client=client,
+        page_asset_builder=page_asset_builder,
+        professor_id="teacher-1",
+        retriever=FakeRetriever([active_problem]),
+    )
+
+    assert response["langGraphTrace"]["additionalSupportIntents"][0]["type"] == "referenced_exercise"
+    assert response["langGraphTrace"]["scheduledBackgroundJobs"][0]["intent_type"] == "referenced_exercise"
+    assert scheduled[0]["state"]["background_support_prefetch_source"] == "context_grounded_answer"
+    assert scheduled[0]["state"]["background_support_searches"][0]["retrieval_reason"] == "needed_supporting_page"
+    assert "Exercise 2.13 setup" in scheduled[0]["state"]["background_support_searches"][0]["query"]
+    assert "2.14" not in scheduled[0]["state"]["background_support_searches"][0]["query"]
+    assert "98" not in scheduled[0]["state"]["background_support_searches"][0]["query"]
+
+
+def test_primary_exact_lookup_drops_deferred_background_support_intents() -> None:
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": json.dumps(
+                {
+                    "response_mode": "retrieve_then_answer",
+                    "needs_search": True,
+                    "searches": [
+                        {
+                            "query": "Problem 2.14 ACME VOL 1",
+                            "retrieval_reason": "student_requested_problem",
+                        }
+                    ],
+                    "student_response": "I'm checking the class materials for problem 2.14.",
+                    "support_intents": [
+                        {
+                            "type": "method_explanation",
+                            "topic": "topic of problem 2.14 once located",
+                            "method": "use nearby textbook context and an earlier related example if available",
+                            "priority": "low",
+                            "why": "After locating the problem, a nearby method or example may help.",
+                        }
+                    ],
+                    "background_support_searches": [
+                        {
+                            "query": "textbook method explanation topic of problem 2.14 once located use nearby textbook context and an earlier related example if available",
+                            "retrieval_reason": "needed_supporting_page",
+                            "top_k": 3,
+                            "confidence": 0.8,
+                            "why": "After locating the problem, a nearby method or example may help.",
+                        }
+                    ],
+                }
+            )
+        },
+        {},
+        state={"messages": [{"role": "user", "content": "problem 2.14"}], "chat_retrieval_memory": {}},
+    )
+
+    assert decision["needs_search"] is True
+    assert decision["retrieval_reason"] == "student_requested_problem"
+    assert decision["support_intents"] == []
+    assert decision["background_support_searches"] == []
+
+
+def test_support_intents_reject_once_located_placeholder_topics() -> None:
+    intents = graph_module.support_intents_from_payload(
+        {
+            "support_intents": [
+                {
+                    "type": "method_explanation",
+                    "topic": "topic of problem 2.14 once located",
+                    "method": "use nearby textbook context",
+                    "priority": "medium",
+                    "why": "Too early.",
+                },
+                {
+                    "type": "theorem",
+                    "topic": "rank-nullity theorem",
+                    "priority": "high",
+                    "why": "Concrete support.",
+                },
+            ]
+        },
+        key_names=("support_intents",),
+    )
+
+    assert [intent["topic"] for intent in intents] == ["rank-nullity theorem"]
 
 
 def test_primary_tutor_turn_can_return_one_search_per_distinct_need() -> None:
@@ -602,8 +1653,8 @@ def test_primary_lookup_replaces_locator_echo_with_status_sentence() -> None:
                     "search_query": "problem 2.18",
                     "student_response": "problem 2.18",
                     "structuredOutput": {
-                        "sections": {"mainChat": "problem 2.18"},
-                        "sectionOrder": ["mainChat"],
+                        "sections": {"studentResponse": "problem 2.18"},
+                        "sectionOrder": ["studentResponse"],
                     },
                 }
             )
@@ -614,14 +1665,14 @@ def test_primary_lookup_replaces_locator_echo_with_status_sentence() -> None:
     assert decision["needs_search"] is True
     assert decision["student_response"] == "I'm checking the class materials for that problem."
     assert decision["structuredOutput"]["sections"] == {
-        "mainChat": "I'm checking the class materials for that problem."
+        "studentResponse": "I'm checking the class materials for that problem."
     }
 
 
 def test_primary_lookup_unwraps_json_string_inside_visible_content() -> None:
     inner = {
-        "sections": {"mainChat": "I'm checking the class materials for that problem."},
-        "sectionOrder": ["mainChat"],
+        "sections": {"studentResponse": "I'm checking the class materials for that problem."},
+        "sectionOrder": ["studentResponse"],
         "metadata": {"problemNumber": "2.18", "problemSummary": "problem lookup"},
     }
     decision = graph_module.parse_primary_tutor_response(
@@ -629,8 +1680,8 @@ def test_primary_lookup_unwraps_json_string_inside_visible_content() -> None:
             "content": json.dumps(
                 {
                     "content": json.dumps(inner),
-                    "sections": {"mainChat": json.dumps(inner)},
-                    "sectionOrder": ["mainChat"],
+                    "sections": {"studentResponse": json.dumps(inner)},
+                    "sectionOrder": ["studentResponse"],
                     "metadata": {"problemNumber": "2.18", "problemSummary": "problem lookup"},
                     "can_answer_now": False,
                     "needs_search": True,
@@ -653,6 +1704,40 @@ def test_primary_lookup_unwraps_json_string_inside_visible_content() -> None:
     assert decision["student_response"] == "I'm checking the class materials for that problem."
     assert decision["structuredOutput"] is None
     assert "{" not in decision["student_response"]
+
+
+def test_primary_tutor_never_surfaces_malformed_json_blob_as_visible_response() -> None:
+    content = (
+        '{"response_mode":"answer_now","content":"","sections":{"hint":"Start by differentiating each basis vector.",'
+        '"explanation":"Read each derivative as coefficients in the same basis."},'
+        '"sectionOrder":["hint","explanation"],"can_answer_now":true,"needs_search":false,'
+        '"student_response":"help me","activeProblemDecision":{"is_problem":true,"exactTaskText":"2.20. Let \n'
+        'a\nn\ne\nq\n0\na\nneq0 be fixed"},'
+        '"structuredOutput":{"sections":{"hint":"Start by differentiating each basis vector.",'
+        '"explanation":"Read each derivative as coefficients in the same basis."},'
+        '"sectionOrder":["hint","explanation"],"metadata":{"choiceDisplay":"problem_selection"}}}'
+    )
+
+    decision = graph_module.parse_primary_tutor_response({"content": content}, {})
+
+    assert not decision["student_response"].lstrip().startswith("{")
+    assert "response_mode" not in decision["student_response"]
+    assert decision["structuredOutput"]["sections"]["hint"] == "Start by differentiating each basis vector."
+
+
+def test_unparseable_json_like_primary_content_fails_closed() -> None:
+    decision = graph_module.parse_primary_tutor_response(
+        {
+            "content": (
+                '{"response_mode":"answer_now","sections":{"hint":"Use the product rule."},'
+                '"activeProblemDecision":{"exactTaskText":"line one\nline two"}'
+            )
+        },
+        {},
+    )
+
+    assert not decision["student_response"].lstrip().startswith("{")
+    assert "response_mode" not in decision["student_response"]
 
 
 def test_decision_json_with_latex_backslashes_is_parsed_not_surfaced() -> None:
@@ -1002,27 +2087,25 @@ def test_bare_problem_number_after_upload_problem_selection_uses_upload_context(
     assert graph_module.selected_upload_problem_numbers(state) == ["2.14"]
 
 
-def test_forced_initial_search_skips_selected_upload_problem_number() -> None:
-    decision = {"needs_search": False, "student_response": "Use the uploaded problem text."}
-    state = {
-        "messages": [{"role": "user", "content": "Help me with problem 2.14 from this upload."}],
-        "student_attachment_files": [
-            {
-                "fileName": "worksheet.pdf",
-                "fileType": "pdf",
-                "extractedText": "2.14. Prove rank(KL) <= rank(L).\n2.15. Find a basis for the image.",
-                "mimeType": "application/pdf",
-            }
-        ],
-    }
+def test_primary_tutor_turn_preserves_six_generic_confusion_choices() -> None:
+    choices = [
+        {"id": f"choice-{index}", "label": f"Choice {index}", "message": f"Help me with option {index}."}
+        for index in range(1, 7)
+    ]
+    structured_output = graph_module.normalize_backend_structured_output(
+        {
+            "sections": {"answer": "I'm a little unsure what you want next, so here are a few ways I can help."},
+            "confusionPrompt": "I'm a little unsure what you want next, so here are a few ways I can help.",
+            "confusionChoices": choices,
+            "metadata": {"choiceDisplay": "support_path_uncertainty"},
+        }
+    )
 
-    fixed = graph_module.enforce_initial_source_lookup_search(decision, state)
-
-    assert fixed is decision
-    assert graph_module.forced_initial_search_tool_call(state) is not None
+    assert structured_output is not None
+    assert structured_output["confusionChoices"] == choices
 
 
-def test_primary_tutor_turn_drops_choice_counts_outside_two_to_five() -> None:
+def test_primary_tutor_turn_drops_choice_counts_outside_allowed_range() -> None:
     structured_output = graph_module.normalize_backend_structured_output(
         {
             "sections": {"answer": "Pick a direction."},
@@ -1034,6 +2117,97 @@ def test_primary_tutor_turn_drops_choice_counts_outside_two_to_five() -> None:
 
     assert structured_output is not None
     assert "confusionChoices" not in structured_output
+
+
+def test_final_response_preserves_support_path_choices_for_prior_visible_problem() -> None:
+    structured_output = {
+        "sections": {"studentResponse": "I need a tiny bit more from you before I choose the best hint."},
+        "sectionOrder": ["studentResponse"],
+        "confusionPrompt": "I need a tiny bit more from you before I choose the best hint.",
+        "confusionChoices": [
+            {
+                "id": "part-i",
+                "label": "Part (i)",
+                "description": "Focus on the first inequality.",
+                "message": "I'm stuck on part (i). Here's what I know so far:",
+            },
+            {
+                "id": "part-ii",
+                "label": "Part (ii)",
+                "description": "Focus on the second inequality.",
+                "message": "I'm stuck on part (ii). I think the key formula is",
+            },
+        ],
+        "metadata": {
+            "choiceDisplay": "support_path_uncertainty",
+            "hintLevel": "guided_step",
+            "mode": "guided_problem_solving",
+            "sourceConfidence": "low",
+            "studentActionNeeded": "try_next_step",
+        },
+    }
+    state = {
+        "answer": "I need a tiny bit more from you before I choose the best hint.",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "Problem 2.14. Given the setup of Exercise 2.13, prove the inequalities.",
+                "structuredOutput": {
+                    "sections": {
+                        "problem": "2.14. Given the setup of Exercise 2.13, prove the following inequalities."
+                    }
+                },
+            },
+            {"role": "user", "content": "help me"},
+        ],
+        "retrieval_confidence": "low",
+        "retrieval_decision": {"response_mode": "answer_now", "structuredOutput": structured_output},
+        "structured_output_override": structured_output,
+        "tutor_plan": {
+            "answerSeekingAssessment": {
+                "exactTaskPresent": True,
+                "risk": "low",
+            }
+        },
+    }
+
+    response = graph_module.pdf_rag_response_from_state(state)
+
+    assert response["structuredOutput"]["metadata"]["choiceDisplay"] == "support_path_uncertainty"
+    assert [choice["label"] for choice in response["structuredOutput"]["confusionChoices"]] == [
+        "Part (i)",
+        "Part (ii)",
+    ]
+
+
+def test_final_response_preserves_support_path_choices_without_context_gate() -> None:
+    structured_output = {
+        "sections": {"studentResponse": "I can help a few ways. What would be most useful?"},
+        "confusionPrompt": "I can help a few ways. What would be most useful?",
+        "confusionChoices": [
+            {"id": "concept", "label": "Concept", "message": "Explain the concept."},
+            {"id": "example", "label": "Example", "message": "Show me an example."},
+        ],
+        "metadata": {
+            "choiceDisplay": "support_path_uncertainty",
+            "hintLevel": "guided_step",
+            "mode": "guided_problem_solving",
+            "sourceConfidence": "low",
+            "studentActionNeeded": "try_next_step",
+        },
+    }
+    state = {
+        "answer": "I can help a few ways. What would be most useful?",
+        "messages": [{"role": "user", "content": "help"}],
+        "retrieval_confidence": "low",
+        "retrieval_decision": {"response_mode": "answer_now", "structuredOutput": structured_output},
+        "structured_output_override": structured_output,
+    }
+
+    response = graph_module.pdf_rag_response_from_state(state)
+
+    assert response["structuredOutput"]["metadata"]["choiceDisplay"] == "support_path_uncertainty"
+    assert [choice["id"] for choice in response["structuredOutput"]["confusionChoices"]] == ["concept", "example"]
 
 
 def test_decision_prompt_says_choices_are_not_triggered_by_student_confusion_keywords() -> None:
@@ -1049,6 +2223,45 @@ def test_decision_prompt_says_choices_are_not_triggered_by_student_confusion_key
     assert "Uncertainty choices" in system_prompt
     assert "Do not trigger them just because the student says they are lost/confused/stuck" in system_prompt
     assert "prefer a normal nudge or focused question" in system_prompt
+
+
+def test_student_confusion_prompt_diagnoses_root_cause_and_micro_question() -> None:
+    for prompt_text in confusion_diagnostic_prompt_texts():
+        assert "Student confusion and stuck moments" in prompt_text
+        assert "Identify the likely root cause of confusion" in prompt_text
+        assert "current problem, currentStep/TutorPlan, chat history, and latest student message" in prompt_text
+        assert "Give the smallest helpful nudge, not the full solution" in prompt_text
+        assert "Prefer micro-questions" in prompt_text
+
+
+def test_unclear_root_cause_prompts_diagnostic_or_support_path_choice() -> None:
+    for prompt_text in confusion_diagnostic_prompt_texts():
+        assert "decide whether that root cause is clear or only a guess" in prompt_text
+        assert "unclear support need" in prompt_text
+        assert "ask a short diagnostic question or offer support-path choices" in prompt_text
+        assert "ask_support_path_choice" in prompt_text
+        assert "retrieve_then_answer" in prompt_text
+
+
+def test_notation_confusion_rule_defines_then_asks_student_to_apply() -> None:
+    for prompt_text in confusion_diagnostic_prompt_texts():
+        assert "notation confusion" in prompt_text
+        assert "briefly define the notation" in prompt_text
+        assert "ask the student to apply it to the current object" in prompt_text
+
+
+def test_proof_confusion_rule_avoids_revealing_key_move_too_early() -> None:
+    for prompt_text in confusion_diagnostic_prompt_texts():
+        assert "proof structure confusion" in prompt_text
+        assert "Do not state the target proof move, formula, equality, inclusion, or final answer too early" in prompt_text
+        assert "ask about the object or relationship to prove before naming the key proof move" in prompt_text
+
+
+def test_repeated_failure_rule_uses_fill_in_blank_before_full_solution() -> None:
+    for prompt_text in confusion_diagnostic_prompt_texts():
+        assert "only increase help if the student fails several smaller prompts" in prompt_text
+        assert "For repeated failure, provide a fill-in-the-blank scaffold" in prompt_text
+        assert "instead of the full solution unless policy and help level allow" in prompt_text
 
 
 def test_decision_prompt_can_force_real_confusion_choices_for_teacher_debug() -> None:
@@ -1297,7 +2510,7 @@ async def test_streaming_upload_problem_selection_ends_after_first_model_call() 
     final_payload = [event["payload"] for event in events if event.get("type") == "final"][0]
     assert final_payload["langGraphTrace"]["searchQueries"] == []
     assert final_payload["structuredOutput"]["metadata"]["choiceDisplay"] == "problem_selection"
-    assert final_payload["structuredOutput"]["sections"]["mainChat"] == (
+    assert final_payload["structuredOutput"]["sections"]["studentResponse"] == (
         "This page has several exercises. Which one do you want to work on?"
     )
     assert [choice["label"] for choice in final_payload["structuredOutput"]["confusionChoices"]] == [
@@ -1389,7 +2602,7 @@ async def test_debug_forced_confusion_choices_become_the_response() -> None:
         "Choose one: the setup from Exercise 2.13, part (i), or part (ii)."
     )
     assert response["structuredOutput"]["sections"] == {
-        "mainChat": response["content"]
+        "studentResponse": response["content"]
     }
     assert response["structuredOutput"]["confusionPrompt"] == (
         "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
@@ -1452,7 +2665,7 @@ def test_debug_forced_confusion_choices_preserves_same_call_llm_choices() -> Non
                     ],
                     "student_response": "What would help most with problem 2.18?",
                     "structuredOutput": {
-                        "sections": {"mainChat": "What would help most with problem 2.18?"},
+                        "sections": {"studentResponse": "What would help most with problem 2.18?"},
                         "confusionPrompt": "What would help most with problem 2.18?",
                         "confusionChoices": [
                             {
@@ -1514,7 +2727,7 @@ def test_uploaded_multi_problem_clarification_does_not_synthesize_focus_choices(
     assert response["structuredOutput"]["metadata"]["studentActionNeeded"] == "try_next_step"
     assert "choiceDisplay" not in response["structuredOutput"]["metadata"]
     assert "confusionChoices" not in response["structuredOutput"]
-    assert "why" not in response["structuredOutput"]["sections"]["mainChat"].lower()
+    assert "why" not in response["structuredOutput"]["sections"]["studentResponse"].lower()
 
 
 def test_uploaded_multi_problem_clarification_does_not_synthesize_detected_problems() -> None:
@@ -1542,6 +2755,8 @@ def test_uploaded_multi_problem_clarification_does_not_synthesize_detected_probl
 def test_problem_lookup_final_response_replaces_locator_echo_main_chat() -> None:
     state = {
         "messages": [{"role": "user", "content": "problem 2.18"}],
+        "primary_student_response": "I'm checking the class materials for that problem.",
+        "context_grounded_response": "Use the selected source to identify the problem setup.",
         "retrieval_confidence": "high",
         "retrieval_decision": {"retrieval_reason": "student_requested_problem"},
         "retrieved_pages": [
@@ -1556,10 +2771,10 @@ def test_problem_lookup_final_response_replaces_locator_echo_main_chat() -> None
     answer = json.dumps(
         {
             "sections": {
-                "mainChat": "problem 2.18",
+                "studentResponse": "problem 2.18",
                 "problem": "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
             },
-            "sectionOrder": ["mainChat", "problem"],
+            "sectionOrder": ["studentResponse", "problem"],
             "metadata": {
                 "hintLevel": "none",
                 "mode": "source_lookup",
@@ -1570,12 +2785,14 @@ def test_problem_lookup_final_response_replaces_locator_echo_main_chat() -> None
 
     response = graph_module.pdf_rag_response_from_state(state, answer)
 
-    assert response["structuredOutput"]["sections"]["mainChat"] == (
+    assert response["structuredOutput"]["sections"]["studentResponse"] == (
         "I found the matching item in ACME VOL 1 on printed page 98."
     )
     assert response["structuredOutput"]["sections"]["problem"].startswith("2.18. Assuming")
-    assert response["structuredOutput"]["sectionOrder"][:2] == ["mainChat", "problem"]
+    assert response["structuredOutput"]["sectionOrder"][:2] == ["studentResponse", "problem"]
     assert "problem 2.18" not in response["content"].lower()
+    assert response["langGraphTrace"]["primaryStudentResponse"] == "I'm checking the class materials for that problem."
+    assert response["langGraphTrace"]["contextGroundedResponse"] == "Use the selected source to identify the problem setup."
 
 
 def test_model_listed_problem_numbers_do_not_become_problem_buttons_without_json() -> None:
@@ -1656,6 +2873,361 @@ def test_multiple_model_referenced_pages_are_returned_as_visible_sources() -> No
     assert "Referenced sources:" not in response["content"]
 
 
+def test_context_grounded_prompt_includes_reference_lookup_context() -> None:
+    active_problem = ocr_page(
+        chunk_text="Problem 2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+        doc_id="material-acme",
+        page_start=98,
+        page_end=98,
+        printed_page_start=98,
+        problem_numbers=["2.14"],
+        title="ACME VOL 1",
+    )
+    referenced_setup = ocr_page(
+        chunk_text="Exercise 2.13. Let K and L be linear transformations with the following setup.",
+        doc_id="material-acme",
+        page_start=97,
+        page_end=97,
+        printed_page_start=97,
+        problem_numbers=["2.13"],
+        title="ACME VOL 1",
+        lookup_role="reference_expansion",
+        reference_type="exercise",
+        reference_query="Exercise 2.13",
+        reference_why="Problem 2.14 explicitly depends on the setup of Exercise 2.13.",
+        reference_expansion_depth=1,
+        used_as="supporting_context",
+        retrieval_reason="student_requested_problem",
+        search_query="Exercise 2.13",
+    )
+
+    messages = graph_module.build_context_grounded_answer_messages(
+        {
+            "messages": [{"role": "user", "content": "problem 2.14"}],
+            "page_assets": [active_problem, referenced_setup],
+            "retrieved_pages": [active_problem, referenced_setup],
+            "retrieval_decision": {"needs_search": True, "retrieval_reason": "student_requested_problem"},
+            "tool_call_count": 2,
+            "search_queries": ["problem 2.14", "Exercise 2.13"],
+            "answer": "",
+        }
+    )
+
+    serialized = json.dumps(messages)
+    assert "Reference lookup contract" in serialized
+    assert "sections.sourceContext is required" in serialized
+    assert "include the full visible referenced item text" in serialized
+    assert "not just a summary" in serialized
+    assert "also include one concise sections.studentResponse sentence explaining how Chandra can help" in serialized
+    assert "referenceLookups" in serialized
+    assert "Exercise 2.13" in serialized
+    assert "Problem 2.14 explicitly depends on the setup of Exercise 2.13." in serialized
+    assert "supporting_context" in serialized
+
+
+def test_reference_lookup_source_context_saves_referenced_page_as_source() -> None:
+    active_problem = ocr_page(
+        chunk_text="Problem 2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+        doc_id="material-acme",
+        page_start=98,
+        page_end=98,
+        printed_page_start=98,
+        problem_numbers=["2.14"],
+        title="ACME VOL 1",
+    )
+    referenced_setup = ocr_page(
+        chunk_text="Exercise 2.13. Let K and L be linear transformations with the following setup.",
+        doc_id="material-acme",
+        page_start=97,
+        page_end=97,
+        printed_page_start=97,
+        problem_numbers=["2.13"],
+        title="ACME VOL 1",
+        lookup_role="reference_expansion",
+        reference_type="exercise",
+        reference_query="Exercise 2.13",
+        reference_why="Problem 2.14 explicitly depends on the setup of Exercise 2.13.",
+        reference_expansion_depth=1,
+        used_as="supporting_context",
+        retrieval_reason="student_requested_problem",
+        search_query="Exercise 2.13",
+    )
+    answer = json.dumps(
+        {
+            "sections": {
+                "studentResponse": "I can help unpack the setup from Exercise 2.13, choose which inequality to start with, or check your next step.",
+                "problem": "2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+                "sourceContext": "This problem depends on the setup from Exercise 2.13.",
+            },
+            "sectionOrder": ["studentResponse", "problem", "sourceContext"],
+            "metadata": {
+                "problemNumber": "2.14",
+                "referencedSources": [
+                    {"doc_id": "material-acme", "page": "98", "reason": "requested problem"}
+                ],
+            },
+        }
+    )
+
+    response = graph_module.pdf_rag_response_from_state(
+        {
+            "messages": [{"role": "user", "content": "problem 2.14"}],
+            "page_assets": [active_problem, referenced_setup],
+            "retrieved_pages": [active_problem, referenced_setup],
+            "retrieval_decision": {"needs_search": True, "retrieval_reason": "student_requested_problem"},
+            "tool_call_count": 2,
+            "search_queries": ["problem 2.14", "Exercise 2.13"],
+            "answer": answer,
+        },
+        answer,
+    )
+
+    assert [source["pageNumber"] for source in response["sources"]] == [98, 97]
+    assert [source["problemNumber"] for source in response["sources"]] == ["2.14", "2.13"]
+    assert response["sources"][1]["usedAs"] == "supporting_context"
+    assert "unpack the setup from Exercise 2.13" in response["content"]
+
+
+def test_exact_problem_diagnostic_trusts_problem_number_metadata() -> None:
+    diagnostic = graph_module.diagnose_search_result(
+        "Problem 2.14 ACME 1",
+        [
+            ocr_page(
+                chunk_text="Textbook method for rank-nullity theorem and linear maps.",
+                problem_numbers=["2.14"],
+                title="ACME VOL 1",
+            )
+        ],
+    )
+
+    assert diagnostic is None
+
+
+def test_reference_lookup_context_includes_referenced_ocr_text() -> None:
+    referenced_setup = ocr_page(
+        chunk_text="Exercise 2.13. Let K and L be linear transformations with the following setup.",
+        doc_id="material-acme",
+        page_start=97,
+        page_end=97,
+        printed_page_start=97,
+        problem_numbers=["2.13"],
+        title="ACME VOL 1",
+        lookup_role="reference_expansion",
+        reference_type="exercise",
+        reference_query="Exercise 2.13",
+        reference_why="Problem 2.14 explicitly depends on the setup of Exercise 2.13.",
+        reference_expansion_depth=1,
+        used_as="supporting_context",
+    )
+
+    lookups = graph_module.compact_reference_lookup_context({"page_assets": [referenced_setup]})
+
+    assert lookups[0]["pages"][0]["text"].startswith("Exercise 2.13. Let K and L")
+
+
+def test_reference_lookup_ocr_text_is_kept_even_with_attached_asset() -> None:
+    referenced_setup = ocr_page(
+        chunk_text="Exercise 2.13. Let K and L be linear transformations with the following setup.",
+        doc_id="material-acme",
+        page_start=97,
+        page_end=97,
+        problem_numbers=["2.13"],
+        lookup_role="reference_expansion",
+        reference_type="exercise",
+        reference_query="Exercise 2.13",
+        file_data_url="data:application/pdf;base64,abc",
+    )
+
+    serialized = json.dumps(graph_module.encoded_page_asset_content_parts([referenced_setup]))
+
+    assert "Exercise 2.13. Let K and L" in serialized
+    assert "OCR text omitted" not in serialized
+
+
+def test_reference_expansion_same_page_is_not_deduped_away() -> None:
+    active_problem = ocr_page(
+        chunk_text="Problem 2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+        doc_id="material-acme",
+        page_start=98,
+        page_end=98,
+        problem_numbers=["2.14"],
+    )
+    referenced_setup = ocr_page(
+        chunk_text="Exercise 2.13. Let K and L be linear transformations with the following setup.",
+        doc_id="material-acme",
+        page_start=98,
+        page_end=98,
+        problem_numbers=["2.13"],
+        lookup_role="reference_expansion",
+        reference_type="exercise",
+        reference_query="Exercise 2.13",
+    )
+
+    pages = graph_module.deduplicate_retrieved_windows([active_problem, referenced_setup])
+
+    assert [page.get("problem_numbers") for page in pages] == [["2.14"], ["2.13"]]
+
+
+def test_reference_lookup_source_context_is_not_removed_by_answer_leak_gate() -> None:
+    referenced_setup = ocr_page(
+        chunk_text="Exercise 2.13. Let V, W, X be finite-dimensional vector spaces and K, L be linear transformations.",
+        doc_id="material-acme",
+        page_start=97,
+        page_end=97,
+        printed_page_start=97,
+        problem_numbers=["2.13"],
+        title="ACME VOL 1",
+        lookup_role="reference_expansion",
+        reference_type="exercise",
+        reference_query="Exercise 2.13",
+        used_as="supporting_context",
+    )
+    state = {
+        "messages": [{"role": "user", "content": "problem 2.14"}],
+        "page_assets": [referenced_setup],
+        "retrieved_pages": [referenced_setup],
+        "tutor_plan": {
+            "answerSeekingAssessment": {
+                "risk": "medium",
+                "requestedArtifactType": "none",
+                "safeNextMove": "give_light_hint",
+            }
+        },
+    }
+    structured_output = {
+        "sections": {
+            "problem": "2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+            "sourceContext": "Exercise 2.13. Let V, W, X be finite-dimensional vector spaces and K, L be linear transformations.",
+        }
+    }
+
+    gate = graph_module.answer_leak_gate(
+        answer=graph_module.structured_output_to_text(structured_output),
+        structured_output=structured_output,
+        active_problem_context=None,
+        state=state,
+        sources=[],
+    )
+
+    assert gate["passed"] is True
+    assert "sourceContext" not in gate.get("leaking_sections", [])
+
+
+def test_reference_expansion_planner_prompt_requires_named_exercise_followup() -> None:
+    messages = graph_module.build_reference_expansion_planner_messages(
+        {
+            "messages": [{"role": "user", "content": "problem 2.14"}],
+            "retrieved_pages": [
+                ocr_page(
+                    chunk_text="2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+                    problem_numbers=["2.14"],
+                    title="ACME VOL 1",
+                )
+            ],
+            "search_queries": ["Problem 2.14 ACME VOL 1"],
+            "tool_call_count": 1,
+        },
+        limit=2,
+    )
+    prompt_text = json.dumps(messages)
+
+    assert "Given the setup of Exercise 2.13" in prompt_text
+    assert "return a followup_search for that named source item" in prompt_text
+    assert "unless it is already retrieved" in prompt_text
+
+
+def test_reference_expansion_duplicate_filter_does_not_treat_page_problem_numbers_as_fetched() -> None:
+    plan = {
+        "followup_searches": [
+            {
+                "query": "Exercise 2.13 ACME VOL 1",
+                "retrieval_reason": "student_requested_problem",
+                "reference_type": "exercise",
+                "why": "Problem 2.14 depends on Exercise 2.13.",
+            }
+        ]
+    }
+    state = {
+        "retrieved_pages": [
+            ocr_page(
+                chunk_text="2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+                page_start=98,
+                printed_page_start=98,
+                problem_numbers=["2.13", "2.14"],
+                title="ACME VOL 1",
+            )
+        ],
+        "search_queries": ["Problem 2.14 ACME VOL 1"],
+    }
+
+    filtered, skipped = graph_module.filter_reference_expansion_duplicate_targets(plan, state)
+
+    assert filtered["followup_searches"] == plan["followup_searches"]
+    assert skipped == []
+
+
+def test_reference_expansion_duplicate_filter_still_skips_same_page_lookup() -> None:
+    plan = {
+        "followup_searches": [
+            {
+                "query": "page 98 ACME VOL 1",
+                "retrieval_reason": "student_requested_problem",
+                "reference_type": "page",
+                "why": "Planner requested the already selected page.",
+            }
+        ]
+    }
+    state = {
+        "retrieved_pages": [
+            ocr_page(
+                chunk_text="2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+                page_start=98,
+                printed_page_start=98,
+                problem_numbers=["2.13", "2.14"],
+                title="ACME VOL 1",
+            )
+        ],
+        "search_queries": ["Problem 2.14 ACME VOL 1"],
+    }
+
+    filtered, skipped = graph_module.filter_reference_expansion_duplicate_targets(plan, state)
+
+    assert filtered["followup_searches"] == []
+    assert skipped[0]["target_key"] == "page:98"
+
+
+def test_reference_page_does_not_replace_active_problem_knowledge_id() -> None:
+    referenced_setup = ocr_page(
+        chunk_text="Exercise 2.13. Let K and L be linear transformations with the following setup.",
+        page_start=97,
+        printed_page_start=97,
+        problem_numbers=["2.13"],
+        lookup_role="reference_expansion",
+        used_as="supporting_context",
+    )
+    active_problem = ocr_page(
+        chunk_text="2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+        page_start=98,
+        printed_page_start=98,
+        problem_numbers=["2.14"],
+    )
+
+    items = knowledge_items_from_state(
+        {
+            "messages": [{"role": "user", "content": "problem 2.14"}],
+            "used_page_assets": [referenced_setup, active_problem],
+        },
+        active_problem_text="2.14. Given the setup of Exercise 2.13, prove the rank inequalities.",
+    )
+
+    active = next(item for item in items if item["kind"] == "problem" and item["usedAs"] == "active_problem")
+    reference = next(item for item in items if item.get("problemId") == "2.13")
+    assert active["problemId"] == "2.14"
+    assert active["content"].startswith("2.14.")
+    assert active["page"] == 98
+    assert reference["usedAs"] == "supporting_context"
+
+
 def test_uploaded_problem_image_without_numbers_does_not_get_fallback_position_choices() -> None:
     answer = "I can see multiple problems in the image, so I'm not sure which one you want help with."
     state = {
@@ -1673,7 +3245,7 @@ def test_uploaded_problem_image_without_numbers_does_not_get_fallback_position_c
     response = graph_module.pdf_rag_response_from_state(state, answer)
 
     assert "confusionChoices" not in response["structuredOutput"]
-    assert "why" not in response["structuredOutput"]["sections"]["mainChat"].lower()
+    assert "why" not in response["structuredOutput"]["sections"]["studentResponse"].lower()
 
 
 def test_example_request_model_no_search_decision_is_preserved() -> None:
@@ -1767,12 +3339,14 @@ def test_referenced_exercise_support_intent_uses_supporting_retrieval_terms() ->
     message = "Let's start with the first transformation from Exercise 2.3. look for class materials"
 
     assert graph_module.retrieval_reason_for_message(message, memory) == "needed_supporting_page"
-    query = graph_module.focused_ocr_search_query(message, memory)
-    assert query.startswith("textbook reading notes method OCR metadata Linear Algebra Text")
-    assert "find exact problem page" not in query
+    decision = graph_module.build_retrieval_decision(
+        {"chat_retrieval_memory": memory, "messages": [{"role": "user", "content": message}]}
+    )
+    assert decision["retrieval_reason"] == "needed_supporting_page"
+    assert decision["query"] == ""
 
 
-def test_referenced_exercise_support_intent_does_not_force_exact_initial_search() -> None:
+def test_referenced_exercise_support_intent_does_not_seed_exact_initial_search() -> None:
     state = {
         "chat_retrieval_memory": {
             "active_metadata": ocr_page(
@@ -1792,7 +3366,9 @@ def test_referenced_exercise_support_intent_does_not_force_exact_initial_search(
         ],
     }
 
-    assert graph_module.should_force_exact_problem_search(state) is False
+    decision = graph_module.build_retrieval_decision(state)
+    assert decision["retrieval_reason"] == "needed_supporting_page"
+    assert decision["query"] == ""
 
 
 def test_first_llm_prompt_owns_tutor_plan_and_state_updates() -> None:
@@ -2665,10 +4241,11 @@ def test_context_grounded_prompt_makes_lookup_found_and_not_found_mutually_exclu
     messages = graph_module.build_context_grounded_answer_messages(state)
     instruction_text = messages[0]["content"][1]["text"]
 
-    assert "choose exactly one outcome before writing JSON" in instruction_text
+    assert "choose exactly one student-visible outcome before writing JSON" in instruction_text
     assert "FOUND outcome" in instruction_text
     assert "NOT_FOUND outcome" in instruction_text
-    assert "These outcomes are mutually exclusive" in instruction_text
+    assert "These outcomes are mutually exclusive for student-visible sections only" in instruction_text
+    assert "do not prevent top-level additional_support_intents" in instruction_text
     assert "do not write any `couldn't find`" in instruction_text
     assert "do not include sections.problem at all" in instruction_text
     assert "fields stream as you generate them" in instruction_text
@@ -2721,8 +4298,8 @@ def test_context_grounded_continuation_does_not_overwrite_primary_response() -> 
     context_response = json.dumps(
         {
             "mainText": "From the worksheet page, this is about comparing image containment.",
-            "sections": {"sourceNote": "Rank Worksheet, printed page 80."},
-            "sectionOrder": ["mainText", "sourceNote"],
+            "sections": {"sourceContext": "Rank Worksheet, printed page 80."},
+            "sectionOrder": ["mainText", "sourceContext"],
             "metadata": {},
         }
     )
@@ -2756,9 +4333,9 @@ def test_problem_lookup_structured_output_allows_context_note_plus_problem() -> 
     )
 
     assert structured_output is not None
-    assert structured_output["sections"]["mainChat"].startswith("This is the exercise")
+    assert structured_output["sections"]["studentResponse"].startswith("This is the exercise")
     assert structured_output["sections"]["problem"] == "Problem 2.14. Prove rank(KL) <= rank(L)."
-    assert structured_output["sectionOrder"] == ["mainChat", "problem"]
+    assert structured_output["sectionOrder"] == ["studentResponse", "problem"]
 
 
 def test_primary_prompt_streams_problem_before_main_text_when_problem_section_is_present() -> None:
@@ -3086,7 +4663,7 @@ async def test_parallel_distinct_searches_execute_concurrently() -> None:
     assert retriever.max_active == 2
 
 
-def test_normalize_backend_structured_output_repairs_unhelpful_section_order() -> None:
+def test_normalize_backend_structured_output_respects_explicit_section_order() -> None:
     structured_output = graph_module.normalize_backend_structured_output(
         {
             "sections": {
@@ -3106,10 +4683,66 @@ def test_normalize_backend_structured_output_repairs_unhelpful_section_order() -
     )
 
     assert structured_output is not None
-    assert structured_output["sectionOrder"] == ["mainChat", "hint", "formula"]
-    assert structured_output["sections"]["mainChat"] == (
+    assert structured_output["sectionOrder"] == ["hint", "studentResponse", "rule"]
+    assert structured_output["sections"]["studentResponse"] == (
         "Let's work it step by step.\n\nSend the first transformation from Exercise 2.3."
     )
+    assert "formula" not in structured_output["sections"]
+    assert structured_output["sections"]["rule"] == "Matrix columns are transformed basis vectors."
+
+
+def test_normalize_backend_structured_output_accepts_generic_sections_in_order() -> None:
+    structured_output = graph_module.normalize_backend_structured_output(
+        {
+            "sections": {
+                "problem": "Question 4. What conclusion should you write after comparing the two lab results?",
+                "sourceContext": "The table reports average temperature by trial.",
+                "keyIdea": "An average summarizes repeated measurements.",
+                "rule": "Report units with each measured value.",
+                "method": "Compare one variable at a time.",
+                "example": "A different trial table can be checked by comparing the control row first.",
+                "checkWork": "Recheck which row you used as the baseline.",
+                "hint": "Which trial has the same setup as the control?",
+                "studentResponse": "Use the table before writing your claim.",
+            },
+            "sectionOrder": [
+                "problem",
+                "sourceContext",
+                "keyIdea",
+                "rule",
+                "method",
+                "example",
+                "checkWork",
+                "hint",
+                "studentResponse",
+            ],
+            "metadata": {"mode": "guided_problem_solving"},
+        }
+    )
+
+    assert structured_output is not None
+    assert structured_output["sectionOrder"] == [
+        "problem",
+        "sourceContext",
+        "keyIdea",
+        "rule",
+        "method",
+        "example",
+        "checkWork",
+        "hint",
+        "studentResponse",
+    ]
+    assert set(structured_output["sections"]) == {
+        "studentResponse",
+        "problem",
+        "hint",
+        "keyIdea",
+        "rule",
+        "method",
+        "example",
+        "sourceContext",
+        "checkWork",
+    }
 
 
 def test_normalize_backend_structured_output_folds_duplicate_legacy_action() -> None:
@@ -3131,7 +4764,7 @@ def test_normalize_backend_structured_output_folds_duplicate_legacy_action() -> 
 
     assert structured_output is not None
     assert structured_output["sections"] == {
-        "mainChat": (
+        "studentResponse": (
             "You are connecting the prompt to the rule that applies here.\n\n"
             "Focus on the condition in the prompt that tells you which rule applies."
         ),
@@ -3157,7 +4790,7 @@ def test_normalize_backend_structured_output_removes_hint_repeated_by_orientatio
 
     assert structured_output is not None
     assert structured_output["sections"] == {
-        "mainChat": (
+        "studentResponse": (
             "You are identifying the condition in the prompt that tells you which rule applies.\n\n"
             "Write down the one condition you found."
         ),
@@ -3328,17 +4961,17 @@ def test_problem_section_location_note_is_split_out() -> None:
 
     assert structured["sections"]["problem"].endswith("Exercise 2.3.")
     assert "printed page 80" not in structured["sections"]["problem"]
-    assert structured["sections"]["mainChat"] == "That's the exact Exercise 2.18 on printed page 80"
+    assert structured["sections"]["studentResponse"] == "That's the exact Exercise 2.18 on printed page 80"
 
 
 def test_lost_followup_suppresses_repeated_problem_section() -> None:
     structured = {
         "sections": {
             "problem": "1.7. For each set below, decide which sets span F[x;2].",
-            "answer": "You're working on a spanning problem.",
+            "studentResponse": "You're working on a spanning problem.",
             "hint": "Check whether the set can generate 1, x, and x^2.",
         },
-        "sectionOrder": ["problem", "answer", "hint"],
+        "sectionOrder": ["problem", "studentResponse", "hint"],
         "metadata": {},
     }
 
@@ -3348,16 +4981,16 @@ def test_lost_followup_suppresses_repeated_problem_section() -> None:
     )
 
     assert "problem" not in suppressed["sections"]
-    assert suppressed["sectionOrder"] == ["answer", "hint"]
+    assert suppressed["sectionOrder"] == ["studentResponse", "hint"]
 
 
 def test_help_on_this_followup_suppresses_repeated_problem_section() -> None:
     structured = {
         "sections": {
             "problem": "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
-            "mainChat": "This is about representing linear transformations in chosen bases.",
+            "studentResponse": "This is about representing linear transformations in chosen bases.",
         },
-        "sectionOrder": ["problem", "mainChat"],
+        "sectionOrder": ["problem", "studentResponse"],
         "metadata": {},
     }
 
@@ -3367,8 +5000,8 @@ def test_help_on_this_followup_suppresses_repeated_problem_section() -> None:
     )
 
     assert "problem" not in suppressed["sections"]
-    assert suppressed["sections"]["mainChat"] == "This is about representing linear transformations in chosen bases."
-    assert suppressed["sectionOrder"] == ["mainChat"]
+    assert suppressed["sections"]["studentResponse"] == "This is about representing linear transformations in chosen bases."
+    assert suppressed["sectionOrder"] == ["studentResponse"]
 
 
 DIRECT_VALIDATION_VERDICT_RE = re.compile(
@@ -3439,10 +5072,10 @@ def test_validation_request_neutralizes_near_correct_structured_output() -> None
             "page_assets": [],
             "structured_output_override": {
                 "sections": {
-                    "answer": "That is correct. Polish the notation around im L.",
+                    "studentResponse": "That is correct. Polish the notation around im L.",
                     "checkWork": "Looks right: tighten the notation around im L.",
                 },
-                "sectionOrder": ["answer", "checkWork"],
+                "sectionOrder": ["studentResponse", "checkWork"],
                 "metadata": {},
             },
         }
@@ -3561,7 +5194,7 @@ async def test_active_problem_metadata_reuses_context_without_search() -> None:
     )
 
     assert response["content"].startswith("Hint:")
-    assert len(client.calls) == 2
+    assert len(client.calls) == 1
     assert retriever.calls == []
     assert response["langGraphTrace"]["decisionSource"] == "chat_memory"
     assert response["langGraphTrace"]["memoryUsed"] is True
@@ -3569,7 +5202,7 @@ async def test_active_problem_metadata_reuses_context_without_search() -> None:
 
 
 @pytest.mark.asyncio
-async def test_final_prompt_obeys_first_llm_help_depth_without_state_revision() -> None:
+async def test_primary_memory_answer_obeys_first_llm_help_depth_without_state_revision() -> None:
     graph_module._CHAT_RETRIEVAL_MEMORY_CACHE["conv-final-plan"] = {
         "active_metadata": ocr_page(problem_numbers=["3.9"]),
     }
@@ -3603,14 +5236,6 @@ async def test_final_prompt_obeys_first_llm_help_depth_without_state_revision() 
                     }
                 )
             },
-            {
-                "content": (
-                    "Hint: Focus on the two columns of the rotation matrix. What are their lengths?\n\n"
-                    "Problem context:\n"
-                    "relation: same_problem\n"
-                    "confidence: medium"
-                )
-            },
         ]
     )
 
@@ -3625,10 +5250,8 @@ async def test_final_prompt_obeys_first_llm_help_depth_without_state_revision() 
         retriever=FakeRetriever([]),
     )
 
-    final_prompt = json.dumps(client.calls[1]["messages"][-1]["content"])
-    assert "TutorPlan for internal use only" in final_prompt
-    assert "do not revise those fields" in final_prompt
-    assert "Tutor state update" not in final_prompt
+    assert len(client.calls) == 1
+    assert response["content"] == "Hint: focus on the columns."
     assert response["langGraphTrace"]["tutorPlan"]["nextHelpDepth"] == 1
     assert response["langGraphTrace"]["problemUnderstandingState"]["understandingLevel"] == 1
     assert response["langGraphTrace"]["problemUnderstandingState"]["lastHelpDepth"] == 1
@@ -3782,16 +5405,18 @@ async def test_bare_decimal_problem_reference_is_framed_as_problem_lookup() -> N
 
 
 @pytest.mark.asyncio
-async def test_bare_decimal_problem_reference_forces_search_before_clarifying() -> None:
+async def test_bare_decimal_problem_reference_uses_model_authored_search() -> None:
     client = FakeOpenRouterClient(
         [
             {
                 "content": json.dumps(
                     {
-                        "can_answer_now": True,
+                        "can_answer_now": False,
                         "memory_used": False,
-                        "needs_search": False,
-                        "student_response": "Please share the page image or homework title.",
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "search_query": "Problem 2.16",
+                        "student_response": "I'm checking the class materials for that problem.",
                     }
                 )
             },
@@ -3814,7 +5439,7 @@ async def test_bare_decimal_problem_reference_forces_search_before_clarifying() 
         {
             "class_id": "class-linear",
             "professor_id": "teacher-1",
-            "query": "find exact task in assignment problem PDF worksheet lab prompt practice problems textbook section 2.16",
+            "query": "Problem 2.16",
             "top_k": 1,
         }
     ]
@@ -4071,16 +5696,18 @@ async def test_final_prompt_tells_model_to_extract_unlabeled_numbered_items() ->
 
 
 @pytest.mark.asyncio
-async def test_streaming_forced_problem_search_does_not_emit_page_image_request() -> None:
+async def test_streaming_model_authored_problem_search_does_not_emit_page_image_request() -> None:
     client = FakeOpenRouterClient(
         [
             {
                 "content": json.dumps(
                     {
-                        "can_answer_now": True,
+                        "can_answer_now": False,
                         "memory_used": False,
-                        "needs_search": False,
-                        "student_response": "Please share the page image or homework title.",
+                        "needs_search": True,
+                        "retrieval_reason": "student_requested_problem",
+                        "search_query": "Problem 2.16",
+                        "student_response": "I'm checking the class materials for that problem.",
                     }
                 )
             },
@@ -4120,8 +5747,8 @@ async def test_streaming_lookup_suppresses_raw_locator_echo_sections() -> None:
                         "search_query": "problem 2.18",
                         "student_response": "problem 2.18",
                         "structuredOutput": {
-                            "sections": {"mainChat": "problem 2.18"},
-                            "sectionOrder": ["mainChat"],
+                            "sections": {"studentResponse": "problem 2.18"},
+                            "sectionOrder": ["studentResponse"],
                         },
                     }
                 )
@@ -4130,10 +5757,10 @@ async def test_streaming_lookup_suppresses_raw_locator_echo_sections() -> None:
                 "content": json.dumps(
                     {
                         "sections": {
-                            "mainChat": "problem 2.18",
+                            "studentResponse": "problem 2.18",
                             "problem": "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
                         },
-                        "sectionOrder": ["mainChat", "problem"],
+                        "sectionOrder": ["studentResponse", "problem"],
                         "metadata": {
                             "hintLevel": "none",
                             "mode": "source_lookup",
@@ -4176,7 +5803,7 @@ async def test_streaming_lookup_suppresses_raw_locator_echo_sections() -> None:
 
     assert quick_messages == ["I'm checking the class materials for that problem."]
     assert raw_section_deltas == []
-    assert final_payload["structuredOutput"]["sections"]["mainChat"] == (
+    assert final_payload["structuredOutput"]["sections"]["studentResponse"] == (
         "I found the matching item in ACME VOL 1 on printed page 98."
     )
     assert final_payload["structuredOutput"]["sections"]["problem"].startswith("2.18. Assuming")
@@ -4186,8 +5813,8 @@ async def test_streaming_lookup_suppresses_raw_locator_echo_sections() -> None:
 async def test_streaming_lookup_never_emits_raw_primary_json_as_quick_response() -> None:
     raw_inner = json.dumps(
         {
-            "sections": {"mainChat": "I'm checking the class materials for that problem."},
-            "sectionOrder": ["mainChat"],
+            "sections": {"studentResponse": "I'm checking the class materials for that problem."},
+            "sectionOrder": ["studentResponse"],
             "metadata": {"problemNumber": "2.18", "problemSummary": "problem lookup"},
         }
     )
@@ -4197,8 +5824,8 @@ async def test_streaming_lookup_never_emits_raw_primary_json_as_quick_response()
                 "content": json.dumps(
                     {
                         "content": raw_inner,
-                        "sections": {"mainChat": "I'm checking the class materials for that problem."},
-                        "sectionOrder": ["mainChat"],
+                        "sections": {"studentResponse": "I'm checking the class materials for that problem."},
+                        "sectionOrder": ["studentResponse"],
                         "metadata": {"problemNumber": "2.18", "problemSummary": "problem lookup"},
                         "can_answer_now": False,
                         "needs_search": True,
@@ -4263,9 +5890,9 @@ async def test_streaming_failed_problem_search_does_not_finalize_quick_status() 
                 "content": json.dumps(
                     {
                         "sections": {
-                            "mainChat": "I could not find a matching problem in the class materials I searched."
+                            "studentResponse": "I could not find a matching problem in the class materials I searched."
                         },
-                        "sectionOrder": ["mainChat"],
+                        "sectionOrder": ["studentResponse"],
                         "metadata": {
                             "hintLevel": "none",
                             "mode": "source_lookup",
@@ -4429,7 +6056,7 @@ async def test_garbled_problem_lookup_still_sends_page_asset_to_context_grounded
 
 
 @pytest.mark.asyncio
-async def test_follow_up_reuses_saved_page_asset_context_without_broad_search() -> None:
+async def test_follow_up_uses_primary_answer_from_saved_page_context_without_broad_search() -> None:
     graph_module._CHAT_RETRIEVAL_MEMORY_CACHE["conv-follow-up"] = {
         "active_metadata": ocr_page(problem_numbers=["2.16"], retrieval_reason="student_requested_problem"),
         "retrieved_metadata": [ocr_page(problem_numbers=["2.16"], retrieval_reason="student_requested_problem")],
@@ -4446,7 +6073,6 @@ async def test_follow_up_reuses_saved_page_asset_context_without_broad_search() 
                     }
                 )
             },
-            {"content": "Hint: use the same selected page."},
         ]
     )
 
@@ -4467,7 +6093,8 @@ async def test_follow_up_reuses_saved_page_asset_context_without_broad_search() 
 
     assert response["langGraphTrace"]["memoryUsed"] is True
     assert response["langGraphTrace"]["searchQueries"] == []
-    assert any(part.get("type") == "file" for part in client.calls[1]["messages"][-1]["content"])
+    assert len(client.calls) == 1
+    assert response["content"] == "I can help with that same problem."
 
 
 @pytest.mark.asyncio
@@ -4506,7 +6133,6 @@ async def test_follow_up_does_not_force_referenced_exercise_search_after_llm_no_
                     }
                 )
             },
-            {"content": "Hint: use the selected basis vectors as inputs."},
         ]
     )
 
@@ -4527,9 +6153,8 @@ async def test_follow_up_does_not_force_referenced_exercise_search_after_llm_no_
     )
 
     assert retriever.calls == []
-    final_payload = json.dumps(client.calls[1]["messages"][-1]["content"])
-    assert "Exercise 2.18" in final_payload
-    assert "Exercise 2.3. Let T" not in final_payload
+    assert len(client.calls) == 1
+    assert response["content"] == "Start by applying each transformation to the basis vectors."
     assert response["langGraphTrace"]["memoryUsed"] is True
     assert response["langGraphTrace"]["searchQueries"] == []
 
@@ -4857,9 +6482,9 @@ async def test_streaming_help_followup_does_not_emit_repeated_problem_section() 
                         "student_response": "This is about representing a linear map using the chosen bases.",
                         "sections": {
                             "problem": "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
-                            "mainChat": "This is about representing a linear map using the chosen bases.",
+                            "studentResponse": "This is about representing a linear map using the chosen bases.",
                         },
-                        "sectionOrder": ["problem", "mainChat"],
+                        "sectionOrder": ["problem", "studentResponse"],
                         "metadata": {
                             "hintLevel": "small_hint",
                             "mode": "guided_problem_solving",
@@ -4961,3 +6586,35 @@ async def test_streaming_retries_primary_tutor_turn_with_double_tokens_after_len
 
     assert [call["max_tokens"] for call in client.calls] == [1800, 3600]
     assert events[-1]["payload"]["content"] == decision["student_response"]
+
+
+def test_primary_tutor_response_repairs_raw_json_with_literal_newlines() -> None:
+    response = {
+        "content": (
+            '{"response_mode":"answer_now","content":"","sections":{'
+            '"hint":"First write D(e^{ax}).\nThen do the product-rule cases.",'
+            '"problem":"Find the matrix representing D on S."'
+            '},"sectionOrder":["problem","hint"],"metadata":{"sourceConfidence":"low"},'
+            '"can_answer_now":true,"needs_search":false,"student_response":""}'
+        )
+    }
+
+    decision = graph_module.parse_primary_tutor_response(
+        response,
+        {
+            "can_answer_now": True,
+            "memory_used": False,
+            "needs_search": False,
+            "retrieval_reason": "",
+            "search_query": "",
+            "student_response": "",
+        },
+        state={"messages": [{"role": "user", "content": "help"}]},
+    )
+
+    assert decision["student_response"] == (
+        "Problem: Find the matrix representing D on S.\n\n"
+        "Hint: First write D(e^{ax}).\nThen do the product-rule cases."
+    )
+    assert decision["structuredOutput"]["sections"]["hint"] == "First write D(e^{ax}).\nThen do the product-rule cases."
+    assert decision["structuredOutput"]["sectionOrder"] == ["problem", "hint"]

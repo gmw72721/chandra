@@ -2,8 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { buildPdfPageAssetPayloads, PdfPageAssetPayloadTooLargeError } from "@/lib/pdf-page-assets-payload";
-import { searchPdfOcrMetadata, searchPdfOcrMetadataVectorOnly } from "@/lib/pdf-ocr-postgres";
-import { VertexEmbeddingError, createVertexEmbedding } from "@/lib/vertex-embeddings";
+import { searchPdfOcrMetadata } from "@/lib/pdf-ocr-postgres";
 
 export const runtime = "nodejs";
 
@@ -11,6 +10,8 @@ const requestSchema = z.object({
   classId: z.string().min(1).max(200),
   includeAssets: z.boolean().optional(),
   materialId: z.string().min(1).max(200).optional(),
+  pageBefore: z.number().int().min(2).max(100000).optional(),
+  page_before: z.number().int().min(2).max(100000).optional(),
   professorId: z.string().min(1).max(200),
   query: z.string().min(1).max(30000),
   topK: z.number().int().min(1).max(20).optional()
@@ -33,28 +34,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid internal PDF retrieval request." }, { status: 400 });
   }
 
-  let pages = await searchPdfOcrMetadata({
+  const pages = await searchPdfOcrMetadata({
     classId: parsed.data.classId,
     limit: parsed.data.topK ?? 5,
     materialId: parsed.data.materialId,
+    pageBefore: parsed.data.pageBefore ?? parsed.data.page_before,
     professorId: parsed.data.professorId,
     query: parsed.data.query
   });
-
-  if (!pages.length) {
-    const queryEmbedding = await createPdfSearchQueryEmbedding(parsed.data.query);
-
-    if (queryEmbedding?.values.length) {
-      pages = await searchPdfOcrMetadataVectorOnly({
-        classId: parsed.data.classId,
-        limit: parsed.data.topK ?? 5,
-        materialId: parsed.data.materialId,
-        professorId: parsed.data.professorId,
-        query: parsed.data.query,
-        queryVector: queryEmbedding.values
-      });
-    }
-  }
 
   const responsePayload: {
     assets?: Array<Record<string, unknown>>;
@@ -152,22 +139,6 @@ function assetRequestsFromSearchResults(pages: Awaited<ReturnType<typeof searchP
   }
 
   return requests;
-}
-
-async function createPdfSearchQueryEmbedding(query: string) {
-  try {
-    return await createVertexEmbedding({
-      taskType: "RETRIEVAL_QUERY",
-      text: query
-    });
-  } catch (caughtError) {
-    if (caughtError instanceof VertexEmbeddingError) {
-      console.warn("PDF OCR query embedding failed. Falling back to exact/full-text PostgreSQL OCR search.", caughtError);
-      return undefined;
-    }
-
-    throw caughtError;
-  }
 }
 
 function authorizeInternalRequest(request: Request) {

@@ -18,8 +18,11 @@ import {
 import {
   assertPdfOcrPostgresConfigured,
   deletePdfOcrMetadata,
+  getPdfOcrPool,
+  getPdfPageAssetRecords,
   replacePdfOcrMetadata
 } from "./pdf-ocr-postgres";
+import { syncPdfPagesToAgentSearch, type AgentSearchSyncSummary } from "./gemini-enterprise-sync";
 import {
   chunkTutorKnowledgeText,
   getTutorKnowledgeSourceMode,
@@ -801,22 +804,8 @@ async function savePdfTutorKnowledgeOcrMetadata({
   });
 
   await updateProgress({
-    completedChunks: 0,
-    detail: "Preparing Gemini embeddings for OCR page and problem metadata.",
-    percent: 60,
-    step: "embedding_chunks",
-    totalChunks: records.pages.length + records.problems.length
-  });
-  await attachPdfOcrEmbeddings({
-    pages: records.pages,
-    problems: records.problems,
-    title,
-    updateProgress
-  });
-
-  await updateProgress({
     detail: "Saving OCR page and problem metadata to PostgreSQL.",
-    percent: 75,
+    percent: 65,
     step: "saving_to_class",
     totalChunks: records.pages.length
   });
@@ -824,6 +813,15 @@ async function savePdfTutorKnowledgeOcrMetadata({
     material: records.material,
     pages: records.pages,
     problems: records.problems
+  });
+  const agentSearchSync = await syncSavedPdfPagesToAgentSearch({
+    classId,
+    pages: records.pages.map((page) => ({
+      materialId: page.materialId,
+      pageNumber: page.pageNumber
+    })),
+    teacherId,
+    updateProgress
   });
   await tryPostgresData("material.pdf.metadata.write", () =>
     upsertMaterial({
@@ -848,6 +846,10 @@ async function savePdfTutorKnowledgeOcrMetadata({
         ocrProvider: records.material.ocrProvider,
         ocrSource: records.material.ocrSource,
         pageCount: records.pageCount,
+        agentSearchImportedCount: agentSearchSync.importedCount,
+        agentSearchOperationNames: agentSearchSync.operationNames,
+        agentSearchSkippedReason: agentSearchSync.skippedReason || undefined,
+        agentSearchSyncStatus: agentSearchSync.status,
         professorName: professorName ?? "",
         sourceKind,
         textSource: pastedText || undefined,
@@ -893,8 +895,8 @@ async function savePdfTutorKnowledgeOcrMetadata({
     characterCount: records.characterCount + pastedText.length,
     chunkCount: 0,
     contentType: contentType || "application/pdf",
-    embeddingProvider: "vertex-ai",
-    embeddingStatus: isVertexEmbeddingConfigured() ? "ready" : "not-configured",
+    embeddingProvider: "none",
+    embeddingStatus: "not-configured",
     fileName,
     filePath: canonicalStoragePath,
     fileSize,
@@ -915,6 +917,10 @@ async function savePdfTutorKnowledgeOcrMetadata({
     ocrSource: records.material.ocrSource,
     ocrConfidence: records.material.ocrConfidence,
     pageCount: records.pageCount,
+    agentSearchImportedCount: agentSearchSync.importedCount,
+    agentSearchOperationNames: agentSearchSync.operationNames,
+    agentSearchSkippedReason: agentSearchSync.skippedReason || "",
+    agentSearchSyncStatus: agentSearchSync.status,
     searchMetadataSource: "postgres",
     sourceKind,
     sourceMode: getTutorKnowledgeSourceMode({
@@ -942,6 +948,91 @@ async function savePdfTutorKnowledgeOcrMetadata({
     characterCount: records.characterCount + pastedText.length,
     chunkCount: 0
   };
+}
+
+async function syncSavedPdfPagesToAgentSearch({
+  classId,
+  pages,
+  teacherId,
+  updateProgress
+}: {
+  classId: string;
+  pages: Array<{ materialId: string; pageNumber: number }>;
+  teacherId: string;
+  updateProgress: (progress: MaterialJobProgressUpdate) => Promise<void>;
+}): Promise<AgentSearchSyncSummary> {
+  const pageCount = pages.length;
+
+  await updateProgress({
+    completedChunks: 0,
+    detail: "Sending single-page PDFs to Gemini Agent Search.",
+    percent: 78,
+    step: "saving_to_class",
+    totalChunks: pageCount
+  });
+
+  try {
+    const persistedPages = await getPdfPageAssetRecords({
+      classId,
+      professorId: teacherId,
+      pages
+    });
+
+    const summary = await syncPdfPagesToAgentSearch({
+      pages: persistedPages,
+      pool: getPdfOcrPool()
+    });
+
+    await updateProgress({
+      completedChunks: pageCount,
+      detail: agentSearchSyncProgressDetail(summary),
+      percent: 85,
+      step: "saving_to_class",
+      totalChunks: pageCount
+    });
+
+    return summary;
+  } catch (caughtError) {
+    console.error("Gemini Agent Search PDF page sync failed.", caughtError);
+
+    const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
+
+    await updateProgress({
+      completedChunks: 0,
+      detail: "Gemini Agent Search sync failed; PostgreSQL OCR metadata remains available.",
+      error: message,
+      percent: 85,
+      step: "saving_to_class",
+      totalChunks: pageCount
+    });
+
+    return {
+      importedCount: 0,
+      operationNames: [],
+      skippedReason: message,
+      status: "failed"
+    };
+  }
+}
+
+function agentSearchSyncProgressDetail(summary: AgentSearchSyncSummary) {
+  if (summary.status === "import_requested") {
+    return `Requested Gemini Agent Search import for ${summary.importedCount} single-page PDF${summary.importedCount === 1 ? "" : "s"}.`;
+  }
+
+  if (summary.status === "skipped" && summary.skippedReason) {
+    return `Gemini Agent Search sync skipped: ${summary.skippedReason}.`;
+  }
+
+  if (summary.status === "disabled") {
+    return "Gemini Agent Search sync is disabled.";
+  }
+
+  if (summary.status === "not-configured") {
+    return `Gemini Agent Search sync is not configured: ${summary.skippedReason}.`;
+  }
+
+  return "Gemini Agent Search sync did not import new pages.";
 }
 
 async function saveCanonicalOriginalPdfAsset({
@@ -1053,102 +1144,6 @@ async function saveCanonicalPdfPageAssets({
     page.pageAssetSizeBytes = pageAsset.size;
     page.pageAssetChecksumSha256 = pageAsset.sha256;
   });
-}
-
-async function attachPdfOcrEmbeddings({
-  pages,
-  problems,
-  title,
-  updateProgress
-}: {
-  pages: Array<Parameters<typeof replacePdfOcrMetadata>[0]["pages"][number]>;
-  problems: Array<Parameters<typeof replacePdfOcrMetadata>[0]["problems"][number]>;
-  title: string;
-  updateProgress: (progress: MaterialJobProgressUpdate) => Promise<void>;
-}) {
-  const problemInputs = problems
-    .map((problem) => ({
-      label: `Problem ${problem.problemNumber}`,
-      target: problem,
-      text: problem.problemText
-    }))
-    .filter((input) => input.text.trim());
-  const pageInputs = pages
-    .map((page) => ({
-      label: `Page ${page.pageNumber}`,
-      target: page,
-      text: page.ocrText
-    }))
-    .filter((input) => input.text.trim());
-  const pageInputsByTextAndPage = new Map(
-    pageInputs.map((input) => [pdfEmbeddingReuseKey(input.target.pageNumber, input.text), input])
-  );
-  const problemInputsNeedingEmbeddings = problemInputs.filter(
-    (input) => !pageInputsByTextAndPage.has(pdfEmbeddingReuseKey(input.target.pageStart, input.text))
-  );
-  const embeddingInputs = [...pageInputs, ...problemInputsNeedingEmbeddings];
-
-  if (!embeddingInputs.length) {
-    return;
-  }
-
-  const embeddings = await createVertexEmbeddings(
-    embeddingInputs.map((input) => ({
-      taskType: "RETRIEVAL_DOCUMENT",
-      text: input.text,
-      title: `${title} ${input.label}`
-    })),
-    {
-      onProgress: async ({ completed, total }) => {
-        await updateProgress({
-          completedChunks: completed,
-          detail: `Preparing OCR metadata embedding ${completed} of ${total}.`,
-          percent: Math.min(74, 60 + Math.round((completed / Math.max(total, 1)) * 14)),
-          step: "embedding_chunks",
-          totalChunks: total
-        });
-      }
-    }
-  );
-  const embeddingCreatedAt = new Date().toISOString();
-
-  embeddings.forEach((embedding, index) => {
-    if (!embedding?.values.length) {
-      return;
-    }
-
-    const target = embeddingInputs[index].target;
-    target.embedding = embedding.values;
-    target.embeddingCreatedAt = embeddingCreatedAt;
-    target.embeddingDimensions = embedding.dimensions;
-    target.embeddingModel = embedding.model;
-    target.embeddingProvider = embedding.provider;
-    target.embeddingTaskType = embedding.taskType;
-  });
-
-  for (const problemInput of problemInputs) {
-    if (problemInput.target.embedding?.length) {
-      continue;
-    }
-
-    const pageInput = pageInputsByTextAndPage.get(pdfEmbeddingReuseKey(problemInput.target.pageStart, problemInput.text));
-    const pageEmbedding = pageInput?.target.embedding;
-
-    if (!pageInput || !pageEmbedding?.length) {
-      continue;
-    }
-
-    problemInput.target.embedding = pageEmbedding;
-    problemInput.target.embeddingCreatedAt = pageInput.target.embeddingCreatedAt;
-    problemInput.target.embeddingDimensions = pageInput.target.embeddingDimensions;
-    problemInput.target.embeddingModel = pageInput.target.embeddingModel;
-    problemInput.target.embeddingProvider = pageInput.target.embeddingProvider;
-    problemInput.target.embeddingTaskType = pageInput.target.embeddingTaskType;
-  }
-}
-
-function pdfEmbeddingReuseKey(pageNumber: number, text: string) {
-  return `${pageNumber}:${text.trim()}`;
 }
 
 export async function deleteTutorKnowledge({

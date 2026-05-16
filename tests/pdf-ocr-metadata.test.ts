@@ -6,7 +6,6 @@ import {
   buildPdfOcrMetadataRecords,
   parseDocumentAiPages
 } from "../frontend/lib/google-document-ai-ocr.ts";
-import { coercePdfOcrEmbeddingForPostgres } from "../frontend/lib/pdf-ocr-postgres.ts";
 
 const repoRoot = process.cwd();
 
@@ -86,38 +85,6 @@ test("Document AI page parser supports scanned PDF OCR output without embedded P
   assert.equal(offsetPages[0].pageNumber, 12);
 });
 
-test("PDF OCR metadata write drops embeddings that do not match the Postgres vector width", () => {
-  const validEmbedding = coercePdfOcrEmbeddingForPostgres({
-    createdAt: "2026-05-11T00:00:00.000Z",
-    dimensions: 768,
-    model: "gemini-embedding-2",
-    provider: "vertex-ai",
-    taskType: "RETRIEVAL_DOCUMENT",
-    values: Array.from({ length: 768 }, (_, index) => index / 768)
-  });
-
-  assert.equal(validEmbedding.dimensions, 768);
-  assert.match(validEmbedding.vector ?? "", /^\[/);
-
-  const mismatchedEmbedding = coercePdfOcrEmbeddingForPostgres({
-    createdAt: "2026-05-11T00:00:00.000Z",
-    dimensions: 3072,
-    model: "gemini-embedding-2",
-    provider: "vertex-ai",
-    taskType: "RETRIEVAL_DOCUMENT",
-    values: Array.from({ length: 3072 }, (_, index) => index / 3072)
-  });
-
-  assert.deepEqual(mismatchedEmbedding, {
-    createdAt: null,
-    dimensions: null,
-    model: null,
-    provider: null,
-    taskType: null,
-    vector: null
-  });
-});
-
 test("PDF ingestion uses Document AI and PostgreSQL instead of Firestore PDF slices for new uploads", () => {
   const source = readFileSync(join(repoRoot, "frontend/lib/tutor-knowledge-server.ts"), "utf8");
   const dbSource = readFileSync(join(repoRoot, "frontend/lib/pdf-ocr-postgres.ts"), "utf8");
@@ -130,11 +97,13 @@ test("PDF ingestion uses Document AI and PostgreSQL instead of Firestore PDF sli
 
   assert.match(source, /runGoogleDocumentAiPdfOcr/);
   assert.match(source, /replacePdfOcrMetadata/);
-  assert.match(source, /attachPdfOcrEmbeddings/);
-  assert.match(source, /createVertexEmbeddings/);
+  assert.match(source, /syncSavedPdfPagesToAgentSearch/);
+  assert.match(source, /syncPdfPagesToAgentSearch/);
   assert.match(source, /searchMetadataSource: "postgres"/);
   assert.match(source, /chunkCount: 0/);
-  assert.match(source, /embeddingStatus: isVertexEmbeddingConfigured\(\) \? "ready" : "not-configured"/);
+  assert.match(source, /embeddingProvider: "none"/);
+  assert.match(source, /embeddingStatus: "not-configured"/);
+  assert.match(source, /agentSearchSyncStatus/);
   assert.match(source, /filePath: storagePath/);
   assert.match(source, /storageBucket/);
   assert.match(source, /isPdfSource\(fileMetadata\.fileName \?\? sourceFile\?\.name \?\? ""/);
@@ -144,6 +113,8 @@ test("PDF ingestion uses Document AI and PostgreSQL instead of Firestore PDF sli
   assert.doesNotMatch(source, /attachPdfSlicesToChunks/);
   assert.doesNotMatch(pdfSaveFunction, /attachPdfSlicesToChunks/);
   assert.doesNotMatch(pdfSaveFunction, /writeChunks\(/);
+  assert.doesNotMatch(pdfSaveFunction, /attachPdfOcrEmbeddings\(/);
+  assert.doesNotMatch(pdfSaveFunction, /createVertexEmbeddings\(/);
   assert.doesNotMatch(pdfSaveFunction, /FieldValue\.vector/);
   assert.match(dbSource, /DATABASE_URL/);
   assert.match(dbSource, /CLOUD_SQL_POSTGRES_URL/);
@@ -156,14 +127,16 @@ test("PDF ingestion uses Document AI and PostgreSQL instead of Firestore PDF sli
   assert.match(source, /saveCanonicalPdfPageAssets/);
   assert.match(source, /canonicalPdfPageAssetPath/);
   assert.match(source, /copyPages\(sourcePdf, \[pageIndex\]\)/);
+  assert.match(source, /getPdfPageAssetRecords/);
   assert.match(gcsSource, /@google-cloud\/storage/);
   assert.match(gcsSource, /GCS_PDF_ASSETS_BUCKET/);
   assert.match(gcsSource, /chandra-f6e13-pdf-page-assets/);
   assert.match(gcsSource, /new Storage\(\)/);
   assert.doesNotMatch(gcsSource, /getSignedUrl/);
   assert.match(dbSource, /INSERT INTO pdf_detected_problems/);
-  assert.match(dbSource, /embedding/);
-  assert.match(dbSource, /::vector/);
+  assert.doesNotMatch(dbSource, /coercePdfOcrEmbeddingForPostgres/);
+  assert.doesNotMatch(dbSource, /embedding VECTOR/);
+  assert.doesNotMatch(dbSource, /::vector/);
   assert.match(ocrSource, /5d3fa32c2ebe2a90/);
   assert.match(ocrSource, /chandra-ocr/);
   assert.match(ocrSource, /defaultDocumentAiInputShardPageCount = 10/);
@@ -192,6 +165,7 @@ test("PDF extract route no longer uses pdf-parse as the uploaded PDF ingestion s
 
 test("PostgreSQL migration defines page, problem, confidence, source, and search indexes", () => {
   const migration = readFileSync(join(repoRoot, "migrations/001_pdf_ocr_metadata.sql"), "utf8");
+  const cleanupMigration = readFileSync(join(repoRoot, "migrations/005_drop_pdf_ocr_embeddings.sql"), "utf8");
 
   assert.match(migration, /CREATE TABLE IF NOT EXISTS pdf_materials/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS pdf_pages/);
@@ -212,28 +186,28 @@ test("PostgreSQL migration defines page, problem, confidence, source, and search
   assert.match(migration, /ocr_confidence NUMERIC/);
   assert.match(migration, /ocr_provider TEXT NOT NULL/);
   assert.match(migration, /ocr_source TEXT NOT NULL/);
-  assert.match(migration, /CREATE EXTENSION IF NOT EXISTS vector/);
-  assert.match(migration, /embedding VECTOR\(768\)/);
-  assert.match(migration, /embedding_model TEXT/);
-  assert.match(migration, /embedding_provider TEXT/);
-  assert.match(migration, /embedding_task_type TEXT/);
-  assert.match(migration, /embedding_created_at TIMESTAMPTZ/);
   assert.match(migration, /USING GIN \(text_search\)/);
-  assert.match(migration, /USING hnsw \(embedding vector_cosine_ops\)/);
   assert.match(migration, /idx_pdf_pages_material_page/);
-  assert.match(migration, /idx_pdf_pages_embedding_hnsw/);
   assert.match(migration, /idx_pdf_detected_problems_material_problem/);
-  assert.match(migration, /idx_pdf_detected_problems_embedding_hnsw/);
   assert.match(migration, /idx_pdf_materials_class_professor/);
+  assert.doesNotMatch(migration, /CREATE EXTENSION IF NOT EXISTS vector/);
+  assert.doesNotMatch(migration, /embedding VECTOR/);
+  assert.doesNotMatch(migration, /embedding_model TEXT/);
+  assert.doesNotMatch(migration, /USING hnsw \(embedding vector_cosine_ops\)/);
+  assert.match(cleanupMigration, /DROP INDEX IF EXISTS idx_pdf_pages_embedding_hnsw/);
+  assert.match(cleanupMigration, /DROP INDEX IF EXISTS idx_pdf_detected_problems_embedding_hnsw/);
+  assert.match(cleanupMigration, /ALTER TABLE IF EXISTS pdf_pages/);
+  assert.match(cleanupMigration, /DROP COLUMN IF EXISTS embedding/);
+  assert.match(cleanupMigration, /ALTER TABLE IF EXISTS pdf_detected_problems/);
 });
 
-test("PDF page search route uses PostgreSQL OCR metadata and Gemini retrieval query embeddings", () => {
+test("PDF page search route uses PostgreSQL OCR metadata without Gemini retrieval query embeddings", () => {
   const route = readFileSync(join(repoRoot, "frontend/app/api/internal/pdf-page-search/route.ts"), "utf8");
 
   assert.match(route, /searchPdfOcrMetadata/);
-  assert.match(route, /searchPdfOcrMetadataVectorOnly/);
-  assert.match(route, /createVertexEmbedding/);
-  assert.match(route, /taskType: "RETRIEVAL_QUERY"/);
+  assert.doesNotMatch(route, /searchPdfOcrMetadataVectorOnly/);
+  assert.doesNotMatch(route, /createVertexEmbedding/);
+  assert.doesNotMatch(route, /taskType: "RETRIEVAL_QUERY"/);
   assert.match(route, /retrievalMode/);
   assert.match(route, /ocrConfidence/);
   assert.match(route, /ocrProvider/);
@@ -248,7 +222,7 @@ test("PDF page search route uses PostgreSQL OCR metadata and Gemini retrieval qu
   assert.doesNotMatch(route, /retrieveCourseContext/);
 });
 
-test("PostgreSQL OCR retrieval prioritizes exact lookup before full text and vector search", () => {
+test("PostgreSQL OCR retrieval prioritizes exact lookup before full text search", () => {
   const dbSource = readFileSync(join(repoRoot, "frontend/lib/pdf-ocr-postgres.ts"), "utf8");
   const searchFunction = dbSource.slice(
     dbSource.indexOf("export async function searchPdfOcrMetadata"),
@@ -264,28 +238,26 @@ test("PostgreSQL OCR retrieval prioritizes exact lookup before full text and vec
   assert.match(searchFunction, /queryExactPages/);
   assert.match(searchFunction, /queryTitleMatches/);
   assert.match(searchFunction, /queryFullTextMatches/);
-  assert.match(searchFunction, /queryVectorMatches/);
   assert.ok(searchFunction.indexOf("queryExactProblems") < searchFunction.indexOf("queryExactPages"));
   assert.ok(searchFunction.indexOf("queryExactPages") < searchFunction.indexOf("queryTitleMatches"));
   assert.ok(searchFunction.indexOf("queryTitleMatches") < searchFunction.indexOf("queryFullTextMatches"));
-  assert.ok(searchFunction.indexOf("queryFullTextMatches") < searchFunction.indexOf("queryVectorMatches"));
-  assert.match(retrievalSource, /FROM pdf_pages p/);
-  assert.match(retrievalSource, /p\.ocr_text ~\* ANY\(\$3::text\[\]\)/);
+  assert.match(retrievalSource, /FROM pdf_detected_problems dp/);
+  assert.match(retrievalSource, /INNER JOIN pdf_pages p/);
+  assert.match(retrievalSource, /dp\.problem_number ~\* ANY\(\$3::text\[\]\)/);
   assert.match(retrievalSource, /rankPageSearchRows/);
-  assert.doesNotMatch(retrievalSource, /pdf_detected_problems/);
   assert.match(dbSource, /page_number = ANY\(\$3::int\[\]\)/);
   assert.match(dbSource, /text_search @@ plainto_tsquery/);
-  assert.match(dbSource, /embedding <=> \$3::vector/);
   assert.match(dbSource, /rankMaterialChunks/);
+  assert.doesNotMatch(dbSource, /queryVectorMatches/);
+  assert.doesNotMatch(dbSource, /embedding <=>/);
   assert.doesNotMatch(dbSource, /collectionGroup/);
   assert.doesNotMatch(dbSource, /findNearest/);
 });
 
-test("PDF page search route avoids repeating lexical SQL before vector fallback", () => {
+test("PDF page search route does not call vector fallback after lexical SQL", () => {
   const route = readFileSync(join(repoRoot, "frontend/app/api/internal/pdf-page-search/route.ts"), "utf8");
-  const fallbackCall = route.slice(route.indexOf("if (queryEmbedding?.values.length)"));
 
-  assert.match(fallbackCall, /searchPdfOcrMetadataVectorOnly/);
-  assert.match(fallbackCall, /query: parsed\.data\.query/);
-  assert.doesNotMatch(fallbackCall, /searchPdfOcrMetadata\(/);
+  assert.match(route, /query: parsed\.data\.query/);
+  assert.doesNotMatch(route, /queryEmbedding/);
+  assert.doesNotMatch(route, /searchPdfOcrMetadataVectorOnly/);
 });

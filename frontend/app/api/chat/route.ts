@@ -63,7 +63,7 @@ import {
   tutorModes,
   tutorStudentActions
 } from "@/lib/tutor-response";
-import type { ChatMessage, MessageAttachment, TutorApiResponse, TutorModelCallUsage } from "@/lib/types";
+import type { ChatMessage, KnowledgeItem, MessageAttachment, TutorApiResponse, TutorModelCallUsage } from "@/lib/types";
 
 const STUDENT_TUTOR_BACKEND_UNAVAILABLE_MESSAGE =
   "Chandra is having trouble connecting. Try again in a moment.";
@@ -77,7 +77,7 @@ const defaultMaxAttachmentFilePayloadBytes = 8 * 1024 * 1024;
 const maxDirectAttachmentDataUrlCharacters = Math.ceil(defaultMaxAttachmentFilePayloadBytes * 1.5);
 export const pdfToolRouterTemplate = [
   "LangGraph PDF retrieval:",
-  "Tool: search_pdf_pages({ query, retrieval_reason }) searches indexed PostgreSQL OCR metadata for class PDF pages/problems from homework, worksheets, assignments, textbook/readings, notes, and examples.",
+  "Tool: search_pdf_pages({ query, retrieval_reason }) searches Gemini Agent Search by default for class PDF pages/problems from homework, worksheets, assignments, textbook/readings, notes, and examples, then falls back to PostgreSQL OCR metadata when needed.",
   "",
   "Use search_pdf_pages before answering when class PDFs could help solve, explain, or locate the student's question:",
   "{{source_priority_rules}}",
@@ -97,6 +97,7 @@ export const pdfToolRouterTemplate = [
   "- For find-similar-example requests, do not search only the assigned problem number. Build example searches from topic/method words, distinctive symbols, class source type, and section/chapter context.",
   "- Similar-example search queries should prefer terms such as `worked example`, `example`, `textbook reading`, `lecture notes`, `method`, and the concept name; avoid `problem 2.14`/page locators unless the search is only trying to identify the surrounding section.",
   "- For textbook section/chapter requests, use `textbook reading`, the exact marker, and topic words; use a title only if the student or prior citation named it.",
+  "- For method, concept, definition, theorem, or example support on an active textbook problem, prefer earlier pages from the same textbook/source before later pages or generic reasoning.",
   "- For solving help tied to a specific source, search both the exact task and method support if needed; for location-only requests, find the task page and stop.",
   "- Reuse already-retrieved relevant OCR metadata records and prior citations; follow-up searches should target only the missing support.",
   "- If multiple searches help, keep them complementary and run one per distinct need: task/page, method/concept, and maybe one nearby worked example. For find-example requests, prefer method/concept plus worked-example searches before exact task lookup.",
@@ -116,7 +117,7 @@ export const pdfToolRouterAnsweringRulesTemplate = [
   "- If the student asks to see, locate, read, copy, quote, restate, identify, or ask what a specific source item says, treat it as source-text lookup: retrieve the exact source and provide the visible text when quoting is allowed, without solving it or requiring an attempt first. Source items include problems, exercises, questions, prompts, passages, lemmas, theorems, definitions, propositions, corollaries, examples, rubrics, tables, captions, and pages.",
   "- For source-text lookup, the lookup exception wins over attempt-first and direct-answer restrictions as long as you only provide the visible source wording and do not solve, prove, apply, or complete the task.",
   "- Retrieval does not override attempt-first. For exact graded-looking tasks without student work, orient with sources, then ask what they tried or where they are stuck.",
-  "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short and prefer a single `Hint:`. Add mainChat only for necessary non-hint context or a distinct request for the student's attempted step.",
+  "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short and prefer a single `Hint:`. Add studentResponse only for necessary non-hint context or a distinct request for the student's attempted step.",
   "- In that first reply, do not provide task-specific starts, intermediate values, thesis claims, code, structure, exact next steps, or other work that begins completing the task unless the student asked for concept explanation, source lookup, or a similar example.",
   "- Before an attempt on math/proof tasks, do not write the exact setup, expand the assigned expressions, list the formulas to plug in, or tell the student to perform the specific computation. Use one conceptual nudge or ask for one tiny entry, definition, or comparison they can supply.",
   "- If the student asks Chandra to check/review their work, inspect the visible attempt or ask for the attempted step; do not search class materials just because the request says `check my work`. Search only if the student explicitly asks to compare their work against a source, rubric, answer key, textbook page, class note, or other class material.",
@@ -301,6 +302,8 @@ const chatRequestSchema = z.object({
             })
             .optional(),
           answerSeekingAssessment: z.record(z.unknown()).optional(),
+          retrievalDiagnostics: z.array(z.record(z.unknown())).optional(),
+          referenceExpansionDiagnostics: z.array(z.record(z.unknown())).optional(),
           searchQueries: z.array(z.string()),
           selectedPages: z.array(
             z.object({
@@ -312,6 +315,8 @@ const chatRequestSchema = z.object({
               printedPageEnd: z.number().optional(),
               printedPageStart: z.number().optional(),
               problemNumbers: z.array(z.string()).optional(),
+              retrievalMode: z.string().optional(),
+              retrievalReason: z.string().optional(),
               title: z.string().optional()
             })
           ),
@@ -353,28 +358,32 @@ const chatRequestSchema = z.object({
         .union([
           z.object({
             sections: z.object({
+              studentResponse: z.string().optional(),
               mainChat: z.string().optional(),
               answer: z.string().optional(),
               problem: z.string().optional(),
               hint: z.string().optional(),
-              explanation: z.string().optional(),
-              formula: z.string().optional(),
+              keyIdea: z.string().optional(),
+              rule: z.string().optional(),
+              method: z.string().optional(),
               example: z.string().optional(),
               checkWork: z.string().optional(),
-              sourceNote: z.string().optional()
+              sourceContext: z.string().optional()
             }),
             sectionOrder: z
               .array(
                 z.enum([
+                  "studentResponse",
                   "mainChat",
                   "answer",
                   "problem",
                   "hint",
-                  "explanation",
-                  "formula",
+                  "keyIdea",
+                  "rule",
+                  "method",
                   "example",
                   "checkWork",
-                  "sourceNote"
+                  "sourceContext"
                 ])
               )
               .optional(),
@@ -382,7 +391,7 @@ const chatRequestSchema = z.object({
             confusionChoices: tutorConfusionChoicesSchema.optional(),
             metadata: z.object({
               hintLevel: z.enum(tutorHintLevels),
-              choiceDisplay: z.enum(["problem_selection"]).optional(),
+              choiceDisplay: z.enum(["problem_selection", "support_path_uncertainty"]).optional(),
               problemNumber: z.string().optional(),
               problemSummary: z.string().optional(),
               sourceConfidence: z.enum(["high", "medium", "low"]),
@@ -823,6 +832,7 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
       },
       studentLearningProfileContext: privateBackendLearningProfileContext(studentLearningProfileContext),
       studentAttachmentFiles,
+      priorKnowledgeItems: priorKnowledgeItemsForBackend(messages),
       messages: providerMessages
     },
     debugOptions: {
@@ -837,6 +847,35 @@ async function buildBackendChatRequest(request: Request, data: ParsedChatRequest
     persistence,
     scope
   };
+}
+
+function priorKnowledgeItemsForBackend(messages: ChatMessage[]) {
+  const items: KnowledgeItem[] = [];
+  const seen = new Set<string>();
+
+  for (const message of [...messages].reverse()) {
+    const knowledgeItems = message.langGraphTrace?.knowledgeItems ?? [];
+    for (const item of [...knowledgeItems].reverse()) {
+      const key = item.id || [
+        item.kind,
+        item.sourceId,
+        item.pdfId,
+        item.page,
+        item.problemId,
+        item.usedAs
+      ].filter(Boolean).join(":");
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      items.push(item);
+      if (items.length >= 12) {
+        return items.reverse();
+      }
+    }
+  }
+
+  return items.reverse();
 }
 
 async function loadConversationMessagesForTutor({
@@ -2409,7 +2448,7 @@ async function buildPdfToolChoosingTutorSystemPrompt(
 
 	  const localPrompt = [
     "LangGraph PDF retrieval:",
-    "Tool: search_pdf_pages({ query, retrieval_reason }) searches indexed PostgreSQL OCR metadata for class PDF pages/problems from homework, worksheets, assignments, textbook/readings, notes, and examples.",
+    "Tool: search_pdf_pages({ query, retrieval_reason }) searches Gemini Agent Search by default for class PDF pages/problems from homework, worksheets, assignments, textbook/readings, notes, and examples, then falls back to PostgreSQL OCR metadata when needed.",
     "",
     "Use search_pdf_pages before answering when class PDFs could help solve, explain, or locate the student's question:",
     ...sourcePriorityRules,
@@ -2428,6 +2467,7 @@ async function buildPdfToolChoosingTutorSystemPrompt(
     "- For find-similar-example requests, do not search only the assigned problem number. Build example searches from topic/method words, distinctive symbols, class source type, and section/chapter context.",
     "- Similar-example search queries should prefer terms such as `worked example`, `example`, `textbook reading`, `lecture notes`, `method`, and the concept name; avoid `problem 2.14`/page locators unless the search is only trying to identify the surrounding section.",
     "- For textbook section/chapter requests, use `textbook reading`, the exact marker, and topic words; use a title only if the student or prior citation named it.",
+    "- For method, concept, definition, theorem, or example support on an active textbook problem, prefer earlier pages from the same textbook/source before later pages or generic reasoning.",
     "- For solving help tied to a specific source, search both the exact task and method support if needed; for location-only requests, find the task page and stop.",
     "- Reuse already-retrieved relevant OCR metadata records and prior citations; follow-up searches should target only the missing support.",
     "- If multiple searches help, keep them complementary and run one per distinct need: task/page, method/concept, and maybe one nearby worked example. For find-example requests, prefer method/concept plus worked-example searches before exact task lookup.",
@@ -2436,14 +2476,14 @@ async function buildPdfToolChoosingTutorSystemPrompt(
     "",
     "Answering rules:",
     "- If retrieval is needed, first call search_pdf_pages. Before the search runs, you may give a useful immediate response with appropriate sections from the student message, active source context, or chat history, then say briefly what class-material item you are checking next. Do not invent source facts before retrieval.",
-    "- For a bare problem, exercise, question, page, or section number such as `2.20`, do not ask the student for a page photo, textbook title, full problem text, or source name before searching available class OCR metadata. Treat it as a source lookup, call search_pdf_pages, and keep visible output to a brief mainChat status while the lookup runs.",
+    "- For a bare problem, exercise, question, page, or section number such as `2.20`, do not ask the student for a page photo, textbook title, full problem text, or source name before searching available class OCR metadata. Treat it as a source lookup, call search_pdf_pages, and keep visible output to a brief studentResponse status while the lookup runs.",
     "- If retrieval is not needed, answer directly.",
     unclearSourceRule,
     ...directAnswerRules.slice(1),
     "- If the student asks to see, locate, read, copy, quote, restate, identify, or ask what a specific source item says, treat it as source-text lookup: retrieve the exact source and provide the visible text when quoting is allowed, without solving it or requiring an attempt first. Source items include problems, exercises, questions, prompts, passages, lemmas, theorems, definitions, propositions, corollaries, examples, rubrics, tables, captions, and pages.",
     "- For source-text lookup, the lookup exception wins over attempt-first and direct-answer restrictions as long as you only provide the visible source wording and do not solve, prove, apply, or complete the task.",
     "- Retrieval does not override attempt-first. For exact graded-looking tasks without student work, orient with sources, then ask what they tried or where they are stuck.",
-    "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short and prefer a single `Hint:`. Add mainChat only for necessary non-hint context or a distinct request for the student's attempted step.",
+    "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short and prefer a single `Hint:`. Add studentResponse only for necessary non-hint context or a distinct request for the student's attempted step.",
     "- In that first reply, do not provide task-specific starts, intermediate values, thesis claims, code, structure, exact next steps, or other work that begins completing the task unless the student asked for concept explanation, source lookup, or a similar example.",
     "- Before an attempt on math/proof tasks, do not write the exact setup, expand the assigned expressions, list the formulas to plug in, or tell the student to perform the specific computation. Use one conceptual nudge or ask for one tiny entry, definition, or comparison they can supply.",
     "- If the student asks Chandra to check/review their work, inspect the visible attempt or ask for the attempted step; do not search class materials just because the request says `check my work`. Search only if the student explicitly asks to compare their work against a source, rubric, answer key, textbook page, class note, or other class material.",
@@ -2460,48 +2500,50 @@ async function buildPdfToolChoosingTutorSystemPrompt(
     "",
     "Student-facing section guidance:",
     "- For substantive tutoring replies, use optional sections only when they add new value; never output sections just because the schema supports them.",
-    "- A strong early/light-help reply, including vague stuck messages like `I am lost` or explicit requests for a hint, is often just one short `Hint:` or one clear question; use at most one nudge plus one question. If `Hint:` carries the nudge, omit mainChat unless it adds necessary non-hint context.",
-    "- When guided help genuinely needs structure, keep the tutoring nudge in `Hint:`. Add mainChat only when a brief non-hint orientation, source/context note, or concrete immediate action is necessary and distinct.",
+    "- A strong early/light-help reply, including vague stuck messages like `I am lost` or explicit requests for a hint, is often just one short `Hint:` or one clear question; use at most one nudge plus one question. If `Hint:` carries the nudge, omit studentResponse unless it adds necessary non-hint context.",
+    "- When guided help genuinely needs structure, keep the tutoring nudge in `Hint:`. Add studentResponse only when a brief non-hint orientation, source/context note, or concrete immediate action is necessary and distinct.",
     "- Orientation names the kind of task or thinking move the student is doing; it should not repeat the hint, announce that a hint is coming, or begin solving the task.",
     "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
     "- The immediate action asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
-    "- Do not repeat the same advice in the orientation, hint, explanation, and immediate action; each included section must add distinct value.",
+    "- Do not repeat the same advice in the orientation, hint, optional source-backed method, and immediate action; each included section must add distinct value.",
     "- If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, treat that as a repeated-stuck signal: do not restate the prior hint. Add one new concrete distinction, prerequisite idea, or smaller sub-question within the same allowed help depth.",
     "- If recent help already named a broad method, the next hint should narrow to the specific missing object, definition, target space, assumption, comparison, representation, or notation choice rather than naming the method again.",
-    "- Before returning, run a distinct-value audit: if mainChat already gives the key clue, equation, theorem, or method, omit `Hint:`. If `Hint:` gives the clue or action, do not restate or paraphrase it in mainChat. If `Hint:` already gives the action, do not repeat it in mainChat. Never use filler like `I can give you a hint` when a `Hint:` section is present.",
-    "- For broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`. Do not add `Hint:` just to restate a definition, fact list, or summary already in mainChat.",
-    "- If the only possible mainChat would repeat `Hint:` with different wording, omit mainChat. A single useful `Hint:` is better than duplicated mainChat plus `Hint:`.",
+    "- Before returning, run a distinct-value audit: if studentResponse already gives the key clue, equation, theorem, or method, omit `Hint:`. If `Hint:` gives the clue or action, do not restate or paraphrase it in studentResponse. If `Hint:` already gives the action, do not repeat it in studentResponse. Never use filler like `I can give you a hint` when a `Hint:` section is present.",
+    "- For broad concept explanations or topic overviews, usually answer in plain prose without `Hint:`. Do not add `Hint:` just to restate a definition, fact list, or summary already in studentResponse.",
+    "- If the only possible studentResponse would repeat `Hint:` with different wording, omit studentResponse. A single useful `Hint:` is better than duplicated studentResponse plus `Hint:`.",
     "- If the configured help level or attempt-first rule allows only limited help, make the immediate action a request for the student's attempt or the exact place they are stuck.",
     "- Default to one clean answer plus useful optional sections when they improve scanability or learning.",
     "- Do not fill every section. Leave unused structured fields empty; each section should support the answer because that format is genuinely helpful for this turn.",
-    "- Be deliberate about structure. Reorganize content into the section where it belongs instead of preserving draft order: normal conversational text in `mainChat`, problem text in `Problem:`, formulas/rules in `Formula:`, conceptual commentary in `Why this works:`, examples in `Example:`, conceptual nudges or leading questions in `Hint:`, checks of student work in `Check your work:`, source/context notes in `sourceNote`, and the student's immediate action or offer at the end of `mainChat`. When the response is only a hint, use `Hint:` only.",
-    "- Choose the student-facing order of the sections. Decide what the student needs first and why: a short relevant context note in `mainChat` may come before found task text, then the direct reply, then the supporting rule, concept, example, or work check that makes the reply clearer, and the immediate action last inside `mainChat`. When returning structured output, include `sectionOrder` with the keys in the exact order they should render, such as [`mainChat`, `problem`] for a lookup note followed by found task text, [`problem`, `mainChat`, `hint`, `formula`], or [`mainChat`, `formula`, `example`]. Include only keys that have content.",
-    "- If content does not fit a labeled section's narrow purpose, keep it in `mainChat` instead of forcing it into a labeled section.",
-    "- Do not duplicate the same idea across sections. If `Problem:` is present, `mainChat` must not restate, summarize, prefix, label, or quote the same problem. Never write `Problem: ...` in `mainChat` when the problem is already in the `Problem:` section; omit `mainChat` unless it adds genuinely new context.",
-    "- Allowed labels are only `Problem:`, `Hint:`, `Why this works:`, `Formula:`, `Example:`, and `Check your work:`.",
-    "- Before using `Problem:`, classify the candidate text: it must be the exact academic exercise/question/task statement the student is working on, either supplied by the student or found in selected class material. Do not use `Problem:` for an issue/error, `You said...` recap, lookup/checking status, clarification, request for a page/title/textbook, source note, offer, hint, next step, or commentary; put those in `mainChat` or leave them out.",
-    "- If you use `Problem:`, put only the problem statement there. Never put prompts like `send me your work`, `what have you tried`, offers, hints, next steps, source context, or commentary inside `Problem:`. Any `mainChat` text must add information not already in the problem, such as a short location note; do not use it to repeat `Problem: 2.18...`.",
+    "- Be deliberate about structure. Choose sections by the role of information, not by subject area: unlabeled conversational text, orientation, final direct request, or ordinary conceptual reasoning in `studentResponse`; exact academic task statement only in `Problem:`; smallest useful nudge or diagnostic question in `Hint:`; definitions, vocabulary, notation, concepts, misconception fixes, or prerequisite ideas in `Key idea:`; formulas, theorems, laws, grammar rules, rubric criteria, syntax rules, and procedure rules in `Rule:`; source-backed textbook/instructor method descriptions in `Method:`; similar-but-different models in `Example:`; diagrams, tables, referenced exercise setup, nearby source context, page notes, and source context in `Source context:`; and neutral student-work review in `Check your work:`. Keep ordinary source notes concise; when the active problem references another retrieved source item, include the full visible referenced item text available in selected class context. When the response is only a hint, use `Hint:` only.",
+    "- Choose the student-facing order of the sections. Decide what the student needs first and why: a short relevant context note in `studentResponse` may come before found task text, then the direct reply, then the supporting rule, concept, example, or work check that makes the reply clearer, and the immediate action last inside `studentResponse`. When returning structured output, include `sectionOrder` with only non-empty keys in the exact order they should render, such as [`studentResponse`, `problem`] for a lookup note followed by found task text, [`problem`, `studentResponse`, `hint`, `rule`], or [`studentResponse`, `rule`, `example`].",
+    "- If content does not fit a labeled section's narrow purpose, keep it in `studentResponse` instead of forcing it into a labeled section.",
+    "- Do not duplicate the same idea across sections. If `Problem:` is present, `studentResponse` must not restate, summarize, prefix, label, or quote the same problem. Never write `Problem: ...` in `studentResponse` when the problem is already in the `Problem:` section; omit `studentResponse` unless it adds genuinely new context.",
+    "- Allowed labels are only `Problem:`, `Hint:`, `Key idea:`, `Rule:`, `Method:`, `Example:`, `Source context:`, and `Check your work:`. Keep `answer` only as a legacy input alias/fallback; do not include it as a preferred output section. Do not emit an `Explanation:` section.",
+    "- Before using `Problem:`, classify the candidate text: it must be the exact academic exercise/question/task statement the student is working on, either supplied by the student or found in selected class material. Do not use `Problem:` for an issue/error, `You said...` recap, lookup/checking status, clarification, request for a page/title/textbook, source note, offer, hint, next step, or commentary; put those in `studentResponse` or leave them out.",
+    "- If you use `Problem:`, put only the problem statement there. Never put prompts like `send me your work`, `what have you tried`, offers, hints, next steps, source context, or commentary inside `Problem:`. Any `studentResponse` text must add information not already in the problem, such as a short location note; do not use it to repeat `Problem: 2.18...`.",
     "- Final visible sections must not contain workflow/status text such as `checking class materials`, `looking up`, `searching`, `locating`, `please wait`, `send me the page`, or `send me the textbook`. If a procedural note is needed before retrieval, it belongs only in an interim quick response/progress event, not final structured sections.",
     "- If you use `Problem:`, also set structured metadata `problemNumber` when visible and `problemSummary` to a short noun phrase of at most 12 words describing the task, without solving it.",
     "- If the student is following up after a problem statement was already shown and asks for help, says they are lost/confused/stuck, asks for a hint, or asks what to try, do not restate the problem statement or include a `Problem:` section again.",
-    "- For that bare stuck follow-up, prefer a single `Hint:`. Add mainChat only for a distinct action request, and do not repeat an action or nudge already included in `Hint:`.",
+    "- For that bare stuck follow-up, prefer a single `Hint:`. Add studentResponse only for a distinct action request, and do not repeat an action or nudge already included in `Hint:`.",
     "- Use `Hint:` when the student is stuck or asks how to start: give one small nudge or leading question. Keep it short, direct, and usually one sentence. If the previous hint did not help, make this hint narrower instead of repeating it. Do not put citations, definitions, commentary, offers, or multiple bullet-like ideas in `Hint:`.",
     "- For first help on an exact task with no shown attempt, keep the hint conceptual: ask about the relevant objects, definitions, constraints, evidence, or relationship to compare. Do not name the specific method, structure, or first executable move.",
-    "- Use `Why this works:` for calm conceptual explanation. Prefer 1-2 short paragraphs or a few compact bullets when it clarifies the reasoning. Do not include offers, workflow prompts, attempt requests, or `If you want...`; put those in `mainChat`.",
-    "- Use `Formula:` only when there is one main rule, theorem, identity, or equation worth isolating. Put only formulas, equations, symbolic rules, or a very short rule name there. Do not include sentences that explain when to use it, why it matters, source/page notes, examples, filled-in task values, hints, or commentary such as `this is the key idea`. Move surrounding prose to `mainChat`, `Hint:`, or `Why this works:`.",
-    "- If a formula has a special-case version, keep both lines in `Formula:` only if both lines are formulas/rules. Put the words explaining the special case outside `Formula:`.",
+    "- Use `Key idea:` for retrieved definitions, vocabulary, notation, concepts, background ideas, misconception fixes, and prerequisites, not for formulas or rules.",
+    "- Use `Rule:` for formulas, theorems, laws, grammar rules, rubric criteria, syntax rules, procedure rules, identities, or compact rule names. Do not include long explanatory prose, source/page notes, examples, filled-in task values, hints, or commentary such as `this is the key idea`.",
+    "- Use `Method:` only when selected class source material itself describes the strategy, process, algorithm, proof-plan category, reading approach, writing move, lab method, coding pattern, problem-solving pattern, or textbook/source method. Do not invent a generic `Method:` section from your own reasoning.",
+    "- Use `Source context:` for relevant class-source context, nearby reading, referenced exercise/setup, quote/passage context, diagram/table/caption interpretation, page/source note, or dependency context. Keep ordinary source notes concise and do not use it as a dumping ground; when the active problem references another retrieved exercise, theorem, definition, example, page, setup, diagram, table, or caption, include the full visible referenced item text available in selected class context.",
+    "- Put calm conceptual explanation or why something works in `studentResponse` unless it belongs in a narrower allowed section.",
     "- Use `Example:` when giving or discussing a genuinely similar example. Make the example visibly different from the student's exact task; when useful, separate it into `Setup:` and `Move:` lines.",
     "- Use `Check your work:` only when the student shows work or asks for validation. Keep it neutral and process-focused: name the idea being used, identify the step to inspect, and ask for justification or a targeted revision. Avoid verdict labels such as `Looks right:`, `First issue:`, `What to fix:`, or direct correctness words unless teacher policy explicitly allows answer checking.",
-    "- Put the student's most immediate action or an offer/request for their work at the end of `mainChat`. Do not create a separate action section. Keep it one clear command or question, not a hint, explanation, formula, or method nudge. A leading question about the idea belongs in `Hint:`, while a request to complete one small checkable piece and send it back belongs in `mainChat`.",
+    "- Put the student's most immediate action or an offer/request for their work at the end of `studentResponse`. Do not create a separate action section. Keep it one clear command or question, not a hint, explanation, rule, or method nudge. A leading question about the idea belongs in `Hint:`, while a request to complete one small checkable piece and send it back belongs in `studentResponse`.",
     "- Never use `Example:` for homework-ready wording, proof paragraphs, or a submittable version of the exact task.",
-    "- Before returning, audit the sections: no duplicated `Hint:` text in `mainChat`, no prose commentary inside `Formula:`, no offers inside `Why this works:`, and no source chips or page citations inside optional section text unless the source detail is the student's direct request.",
+    "- Before returning, audit the sections: no duplicated `Hint:` text in `studentResponse`, no rules/formulas/theorems in `Key idea:`, no prose commentary inside `Rule:`, no generic tutor reasoning inside `Method:`, and no source chips or page citations inside optional section text unless the source detail is the student's direct request.",
     "- Do not write `Source:`, `Sources:`, `Answer:`, `Question:`, or an action label. Cite sources naturally and end with one direct question.",
     "- Do not write `Answer:`, `Question:` as visible labels.",
-    "- Do not force labels into greetings, clarifications, refusals, or already-clear replies. For substantive tutoring replies, freely use helpful labeled sections; 1-2 is often enough, and 3-4 is fine when the student asks for multiple kinds of help or the reply naturally has a problem, hint, formula, example, explanation, or next action.",
+    "- Do not force labels into greetings, clarifications, refusals, or already-clear replies. For substantive tutoring replies, freely use helpful labeled sections; 1-2 is often enough, and 3-4 is fine when the student asks for multiple kinds of help or the reply naturally has a problem, hint, rule, example, source context, or next action.",
     "- Do not bold optional section content; put math in `$...$` or `$$...$$`.",
     "- Internal render indexes are not student-facing page numbers.",
     "- For task-location answers, use `That item is Problem/Question N in Section X, on printed page P of Title.`",
-    "- For source-text lookup without solving help, quote the requested visible source item exactly. For problem/exercise/prompt lookup, first identify the visible task statement, then put only that statement in a `Problem:` section. Put a short relevant context/location note outside `Problem:` in `mainChat` only when it adds information not already present in the problem. When returning task text, keep the task directly in that section; do not include `You said...`, lookup/checking status, requests for page/title/textbook, location/source context, offers, hints, next steps, attempt requests, or commentary inside `Problem:`. Do not repeat the task text again in `mainChat`, and never write `Problem: ...` in `mainChat` when the `Problem:` section is present.",
+    "- For source-text lookup without solving help, quote the requested visible source item exactly. For problem/exercise/prompt lookup, first identify the visible task statement, then put only that statement in a `Problem:` section. Put a short relevant context/location note outside `Problem:` in `studentResponse` only when it adds information not already present in the problem. When returning task text, keep the task directly in that section; do not include `You said...`, lookup/checking status, requests for page/title/textbook, location/source context, offers, hints, next steps, attempt requests, or commentary inside `Problem:`. Do not repeat the task text again in `studentResponse`, and never write `Problem: ...` in `studentResponse` when the `Problem:` section is present.",
     "- Format `Problem:` for readability without changing meaning: preserve source line breaks when visible; if extracted text is flattened, use best-effort markdown line breaks by putting headings like `PROBLEM`, `EXERCISE`, `THEOREM`, or `DEFINITION` on their own line, the problem number and main statement after a blank line, and obvious enumerated parts such as `(i)`, `(ii)`, `(a)`, or `(b)` on separate lines.",
     "- Do not invent labels, split uncertain clauses, or alter mathematical notation while formatting `Problem:`. Only add line breaks around clear structural markers.",
     "- Keep source attributions short and natural instead of repeating long source identifiers.",
@@ -2517,8 +2559,8 @@ function pdfToolSourceUseInstruction(sourceUsage: SourceUsageSettings) {
     : "mention source titles when helpful";
 
   if (!sourceUsage.quoteSourcePassages) {
-    return `- For solving help and method teaching, use the textbook/readings/examples directly: ${citationPhrase}, include at most one short quote of 20 words or fewer when useful, then paraphrase the idea. Do not only say to refer to pages.`;
+    return `- For solving help and method teaching, use the textbook/readings/examples directly: ${citationPhrase}, explicitly connect textbook problems to the earlier definition, theorem, example, or method in the selected context, include at most one short quote of 20 words or fewer when useful, then paraphrase the idea. Do not only say to refer to pages.`;
   }
 
-  return `- For solving help, method teaching, or source-text lookup, use selected uploaded class materials directly: ${citationPhrase}, quote the requested visible text exactly when the student asks to see/pull up/read/copy/quote/recite/identify/locate/restate a specific source item, asks what it says, or only supplies a specific source-item reference without asking for solving help. Source items include problems, exercises, questions, prompts, passages, lemmas, theorems, definitions, propositions, corollaries, examples, rubrics, tables, captions, and pages. For source-text lookup, the lookup exception wins over attempt-first and direct-answer restrictions as long as you only provide the visible source wording and do not solve, prove, apply, or complete the task. For problem/exercise/prompt lookup, give only the visible task text in the Problem section; do not repeat it in mainChat or write a second \`Problem: ...\` line. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words.`;
+  return `- For solving help, method teaching, or source-text lookup, use selected uploaded class materials directly: ${citationPhrase}, explicitly connect textbook problems to the earlier definition, theorem, example, or method in the selected context, quote the requested visible text exactly when the student asks to see/pull up/read/copy/quote/recite/identify/locate/restate a specific source item, asks what it says, or only supplies a specific source-item reference without asking for solving help. Source items include problems, exercises, questions, prompts, passages, lemmas, theorems, definitions, propositions, corollaries, examples, rubrics, tables, captions, and pages. For source-text lookup, the lookup exception wins over attempt-first and direct-answer restrictions as long as you only provide the visible source wording and do not solve, prove, apply, or complete the task. For problem/exercise/prompt lookup, give only the visible task text in the Problem section; do not repeat it in studentResponse or write a second \`Problem: ...\` line. Do not refuse on generic copyright grounds for selected class materials, and do not invent missing words.`;
 }

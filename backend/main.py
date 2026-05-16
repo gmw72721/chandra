@@ -212,6 +212,7 @@ class LangGraphChatRequest(BaseModel):
     debugOptions: Optional[dict[str, Any]] = None
     studentLearningProfileContext: Optional[dict[str, Any]] = None
     studentAttachmentFiles: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
+    priorKnowledgeItems: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
     messages: list[dict[str, Any]] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES_PER_REQUEST)
 
 
@@ -394,6 +395,7 @@ async def langgraph_chat(
             debug_options=request.debugOptions,
             student_profile_context=request.studentLearningProfileContext,
             student_attachment_files=request.studentAttachmentFiles,
+            prior_knowledge_items=request.priorKnowledgeItems,
             professor_id=request.professorId,
             professor_name=request.professorName,
             conversation_id=request.conversationId,
@@ -450,6 +452,7 @@ async def langgraph_chat_stream(
                 debug_options=request.debugOptions,
                 student_profile_context=request.studentLearningProfileContext,
                 student_attachment_files=request.studentAttachmentFiles,
+                prior_knowledge_items=request.priorKnowledgeItems,
                 professor_id=request.professorId,
                 professor_name=request.professorName,
                 conversation_id=request.conversationId,
@@ -1502,8 +1505,8 @@ def normalize_verbose(value: Any) -> str:
 def tutoring_response_shape_lines() -> list[str]:
     return [
         "- For substantive tutoring replies, use optional sections only when they add new value; never output sections just because the schema supports them.",
-        "- A strong early/light-help reply, including vague stuck messages like `I am lost` or explicit requests for a hint, is often just one short `Hint:` or one clear question: one short orientation or nudge plus one clear question at most. If `Hint:` carries the nudge, omit mainChat unless it adds necessary non-hint context.",
-        "- When guided help genuinely needs structure, keep the tutoring nudge in `Hint:`. Add mainChat only when a brief non-hint orientation, source/context note, or concrete immediate action is necessary and distinct.",
+        "- A strong early/light-help reply, including vague stuck messages like `I am lost` or explicit requests for a hint, is often just one short `Hint:` or one clear question: one short orientation or nudge plus one clear question at most. If `Hint:` carries the nudge, omit studentResponse unless it adds necessary non-hint context.",
+        "- When guided help genuinely needs structure, keep the tutoring nudge in `Hint:`. Add studentResponse only when a brief non-hint orientation, source/context note, or concrete immediate action is necessary and distinct.",
         "- Orientation names the kind of task or thinking move the student is doing; it should not repeat the hint, announce that a hint is coming, or begin solving the task.",
         "- Hint gives the single key idea needed next and connects it to the exact student task, without completing the full problem or artifact.",
         "- The immediate action asks for one small, checkable student action, such as completing one part, choosing one option, revising one line, or sharing one attempted step.",
@@ -1511,9 +1514,9 @@ def tutoring_response_shape_lines() -> list[str]:
         "- Do not repeat the same advice in the orientation, hint, explanation, and immediate action; each included section must add distinct value.",
         "- If the student says a previous hint was unhelpful, repetitive, too vague, or did not add more, treat that as a repeated-stuck signal: do not restate the prior hint. Add one new concrete distinction, prerequisite idea, or smaller sub-question within the same allowed help depth.",
         "- If recent help already named a broad method, the next hint should narrow to the specific missing object, definition, target space, assumption, comparison, representation, or notation choice rather than naming the method again.",
-        "- Before returning, run a distinct-value audit: if mainChat already gives the key clue, equation, theorem, or method, omit Hint. If Hint gives the clue or action, do not restate or paraphrase it in mainChat. If Hint already gives the action, do not repeat it in mainChat. If `Hint:` already gives the action, do not repeat it in mainChat. Never use filler like `I can give you a hint` when a `Hint:` section is present.",
-        "- For broad concept explanations or topic overviews, usually answer in plain prose without Hint. Do not add Hint just to restate a definition, fact list, or summary already in mainChat.",
-        "- If the only possible mainChat would repeat `Hint:` with different wording, omit mainChat. A single useful `Hint:` is better than duplicated mainChat plus Hint.",
+        "- Before returning, run a distinct-value audit: if studentResponse already gives the key clue, equation, theorem, or method, omit Hint. If Hint gives the clue or action, do not restate or paraphrase it in studentResponse. If Hint already gives the action, do not repeat it in studentResponse. If `Hint:` already gives the action, do not repeat it in studentResponse. Never use filler like `I can give you a hint` when a `Hint:` section is present.",
+        "- For broad concept explanations or topic overviews, usually answer in plain prose without Hint. Do not add Hint just to restate a definition, fact list, or summary already in studentResponse.",
+        "- If the only possible studentResponse would repeat `Hint:` with different wording, omit studentResponse. A single useful `Hint:` is better than duplicated studentResponse plus Hint.",
         "- If the configured help level or attempt-first rule allows only limited help, make the immediate action a request for the student's attempt or the exact place they are stuck.",
     ]
 
@@ -1577,7 +1580,7 @@ def answer_policy_lines(answer_policy: dict[str, Any]) -> list[str]:
                 "- Require a student attempt before substantial help on graded-looking work.",
                 "- If the student asks to see, read, pull up, copy, quote, recite, identify, or locate the wording of a specific problem, exercise, question, passage, or page, or only supplies a specific problem/exercise/page/title reference such as `2.20` without asking for solving help, treat that as source lookup, not solving help: retrieve the exact source and provide the visible task text when quotation is allowed, without solving it, asking for an attempt, or asking for a page photo, textbook title, full problem text, or source name before retrieval.",
                 "- If a student asks for help with a specific assignment, exercise, question, prompt, worksheet, lab, code task, essay, problem number, or graded-looking task and has not shown work, first ask what they have tried or where they are stuck.",
-                "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short and prefer a single `Hint:`. Add mainChat only for necessary non-hint context or a distinct request for the student's attempted step.",
+                "- For a bare stuck/start follow-up after the problem statement was already shown, keep the whole reply short and prefer a single `Hint:`. Add studentResponse only for necessary non-hint context or a distinct request for the student's attempted step.",
                 "- In that first attempt-request reply, do not provide task-specific starting points, intermediate values, thesis claims, code, solution structure, exact next steps, or other work that begins completing the task unless the student explicitly asks for a concept explanation, source location, passage lookup, or similar example.",
                 "- Treat requests like `write the proof`, `write this for my homework`, `give me an example of what I can say`, `make it student-style`, sentence starters, fill-in-the-blank solutions, outlines, proof scaffolds, or all-parts breakdowns as requests for the student's exact final artifact when they target the assigned task.",
                 "- Concept explanations and similar examples are not exceptions for completing the exact assigned task. A similar example must use meaningfully different facts, data, prompt details, or requirements so it does not complete any part of the assigned response.",
@@ -1663,7 +1666,7 @@ def source_usage_lines(source_usage: dict[str, Any], answer_policy: Optional[dic
 def source_quote_instruction(source_usage: dict[str, Any]) -> str:
     if not source_usage["quoteSourcePassages"]:
         return "- When using textbook/readings/examples, include at most one short quote of 20 words or fewer when useful, then paraphrase the idea."
-    return "- For source-text lookup from selected class material, quote the requested visible text exactly with source/page context, then explain or paraphrase only if helpful. If the student asks for a specific problem, page, or passage, treat it as source lookup. If they only send a bare numbered locator such as `2.20`, also treat it as source lookup before asking for source details. Source-text lookup includes requests to see, read, copy, quote, restate, identify, locate, or ask what a specific problem, exercise, question, prompt, passage, lemma, theorem, definition, proposition, corollary, example, rubric, table, caption, or page says. For source-text lookup, the lookup exception wins over attempt-first and direct-answer restrictions as long as you only provide the visible source wording and do not solve, prove, apply, or complete the task. For problem-statement lookup, first identify the exact academic exercise/question/task statement, then give that text but do not solve it or ask for an attempt first. For problem/exercise/prompt lookup, give only the visible task text in the Problem section; do not include `You said...`, lookup/checking status, requests for page/title/textbook, location/source context, offers, hints, next steps, or commentary in that section, and do not solve it or ask for an attempt first. Do not repeat the same task text in mainChat, and never write a second `Problem: ...` line outside the Problem section. When a problem/page is found through retrieved class material, call it class material or name the source/page; do not say it was on a page the student shared, uploaded, pasted, or provided unless the latest student turn actually included that attachment or pasted text. Preserve visible line breaks when available; if the extracted text is flattened, add best-effort markdown line breaks only around clear structure such as headings, item numbers, and enumerated parts. Do not invent missing words."
+    return "- For source-text lookup from selected class material, quote the requested visible text exactly with source/page context, then explain or paraphrase only if helpful. If the student asks for a specific problem, page, or passage, treat it as source lookup. If they only send a bare numbered locator such as `2.20`, also treat it as source lookup before asking for source details. Source-text lookup includes requests to see, read, copy, quote, restate, identify, locate, or ask what a specific problem, exercise, question, prompt, passage, lemma, theorem, definition, proposition, corollary, example, rubric, table, caption, or page says. For source-text lookup, the lookup exception wins over attempt-first and direct-answer restrictions as long as you only provide the visible source wording and do not solve, prove, apply, or complete the task. For problem-statement lookup, first identify the exact academic exercise/question/task statement, then give that text but do not solve it or ask for an attempt first. For problem/exercise/prompt lookup, give only the visible task text in the Problem section; do not include `You said...`, lookup/checking status, requests for page/title/textbook, location/source context, offers, hints, next steps, or commentary in that section, and do not solve it or ask for an attempt first. Do not repeat the same task text in studentResponse, and never write a second `Problem: ...` line outside the Problem section. When a problem/page is found through retrieved class material, call it class material or name the source/page; do not say it was on a page the student shared, uploaded, pasted, or provided unless the latest student turn actually included that attachment or pasted text. Preserve visible line breaks when available; if the extracted text is flattened, add best-effort markdown line breaks only around clear structure such as headings, item numbers, and enumerated parts. Do not invent missing words."
 
 
 def response_format_lines(response_format: dict[str, Any]) -> list[str]:

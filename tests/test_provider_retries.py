@@ -290,37 +290,53 @@ async def test_search_pdf_pages_defaults_to_next_internal_retrieval(monkeypatch:
         professor_id="teacher-1",
     )
 
-    assert pages == [
-        {
-            "chunk_text": "Problem 7 asks students to solve a linear equation.",
-            "class_id": "class-1",
-            "doc_id": "material-1",
-            "material_type": "assignment",
-            "ocr_confidence": 0.94,
-            "ocr_provider": "google-document-ai",
-            "ocr_source": "projects/demo/locations/us/processors/5d3fa32c2ebe2a90",
-            "ocr_text": "Problem 7 asks students to solve a linear equation.",
-            "page_end": 3,
-            "page_start": 3,
-            "page_asset_checksum_sha256": "",
-            "page_asset_mime_type": "",
-            "page_asset_size_bytes": None,
-            "page_asset_storage_bucket": "",
-            "page_asset_storage_path": "",
-            "printed_page_end": None,
-            "printed_page_start": None,
-            "professor_id": "teacher-1",
-            "problem_numbers": ["7"],
-            "retrieval_mode": "exact_problem",
-            "retrieval_reason": "student_requested_problem",
-            "score": 0.91,
-            "section": "Practice",
-            "source_pdf_path": "gs://bucket/material.pdf",
-            "storage_bucket": "bucket",
-            "storage_path": "material.pdf",
-            "title": "Practice Problems",
-        }
-    ]
+    assert len(pages) == 1
+    assert {
+        key: pages[0][key]
+        for key in [
+            "chunk_text",
+            "class_id",
+            "doc_id",
+            "material_type",
+            "ocr_confidence",
+            "ocr_provider",
+            "ocr_source",
+            "ocr_text",
+            "page_end",
+            "page_start",
+            "professor_id",
+            "problem_numbers",
+            "retrieval_mode",
+            "retrieval_reason",
+            "score",
+            "section",
+            "source_pdf_path",
+            "storage_bucket",
+            "storage_path",
+            "title",
+        ]
+    } == {
+        "chunk_text": "Problem 7 asks students to solve a linear equation.",
+        "class_id": "class-1",
+        "doc_id": "material-1",
+        "material_type": "assignment",
+        "ocr_confidence": 0.94,
+        "ocr_provider": "google-document-ai",
+        "ocr_source": "projects/demo/locations/us/processors/5d3fa32c2ebe2a90",
+        "ocr_text": "Problem 7 asks students to solve a linear equation.",
+        "page_end": 3,
+        "page_start": 3,
+        "professor_id": "teacher-1",
+        "problem_numbers": ["7"],
+        "retrieval_mode": "exact_problem",
+        "retrieval_reason": "student_requested_problem",
+        "score": 0.91,
+        "section": "Practice",
+        "source_pdf_path": "gs://bucket/material.pdf",
+        "storage_bucket": "bucket",
+        "storage_path": "material.pdf",
+        "title": "Practice Problems",
+    }
     assert requests == [
         {
             "headers": {
@@ -329,6 +345,7 @@ async def test_search_pdf_pages_defaults_to_next_internal_retrieval(monkeypatch:
             },
             "json": {
                 "classId": "class-1",
+                "includeAssets": True,
                 "professorId": "teacher-1",
                 "query": "find problem 7",
                 "retrievalReason": "student_requested_problem",

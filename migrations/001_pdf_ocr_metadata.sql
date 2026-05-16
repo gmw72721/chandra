@@ -1,5 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS vector;
-
 CREATE TABLE IF NOT EXISTS pdf_materials (
   material_id TEXT PRIMARY KEY,
   class_id TEXT NOT NULL,
@@ -48,12 +46,6 @@ CREATE TABLE IF NOT EXISTS pdf_pages (
   ocr_provider TEXT NOT NULL,
   ocr_source TEXT NOT NULL,
   ocr_confidence NUMERIC,
-  embedding VECTOR(768),
-  embedding_dimensions INTEGER,
-  embedding_model TEXT,
-  embedding_provider TEXT,
-  embedding_task_type TEXT,
-  embedding_created_at TIMESTAMPTZ,
   storage_bucket TEXT NOT NULL,
   storage_path TEXT NOT NULL,
   full_pdf_bucket TEXT,
@@ -122,12 +114,6 @@ CREATE TABLE IF NOT EXISTS pdf_detected_problems (
   confidence NUMERIC,
   ocr_provider TEXT NOT NULL,
   ocr_source TEXT NOT NULL,
-  embedding VECTOR(768),
-  embedding_dimensions INTEGER,
-  embedding_model TEXT,
-  embedding_provider TEXT,
-  embedding_task_type TEXT,
-  embedding_created_at TIMESTAMPTZ,
   storage_bucket TEXT NOT NULL,
   storage_path TEXT NOT NULL,
   text_search TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', coalesce(problem_text, ''))) STORED,
@@ -168,10 +154,6 @@ CREATE INDEX IF NOT EXISTS idx_pdf_pages_class_professor
 CREATE INDEX IF NOT EXISTS idx_pdf_pages_text_search
   ON pdf_pages USING GIN (text_search);
 
-CREATE INDEX IF NOT EXISTS idx_pdf_pages_embedding_hnsw
-  ON pdf_pages USING hnsw (embedding vector_cosine_ops)
-  WHERE embedding IS NOT NULL;
-
 CREATE INDEX IF NOT EXISTS idx_pdf_detected_problems_material_problem
   ON pdf_detected_problems (material_id, problem_number);
 
@@ -183,7 +165,3 @@ CREATE INDEX IF NOT EXISTS idx_pdf_detected_problems_page_range
 
 CREATE INDEX IF NOT EXISTS idx_pdf_detected_problems_text_search
   ON pdf_detected_problems USING GIN (text_search);
-
-CREATE INDEX IF NOT EXISTS idx_pdf_detected_problems_embedding_hnsw
-  ON pdf_detected_problems USING hnsw (embedding vector_cosine_ops)
-  WHERE embedding IS NOT NULL;

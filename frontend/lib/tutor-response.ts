@@ -22,15 +22,15 @@ export const tutorModes = [
   "off_topic_redirect"
 ] as const;
 const tutorStructuredSectionKeys = [
-  "mainChat",
-  "answer",
+  "studentResponse",
   "problem",
   "hint",
-  "explanation",
-  "formula",
+  "keyIdea",
+  "rule",
+  "method",
   "example",
   "checkWork",
-  "sourceNote"
+  "sourceContext"
 ] as const;
 
 export function normalizeTutorResponse(payload: Partial<TutorApiResponse>): TutorApiResponse {
@@ -64,11 +64,24 @@ export function normalizeStructuredTutorOutput(
   const record = value as Record<string, unknown>;
   const sectionsRecord = isRecord(record.sections) ? record.sections : record;
   const metadataRecord = isRecord(record.metadata) ? record.metadata : record;
-  const explicitMainChat = optionalStringValue(sectionsRecord.mainChat ?? record.mainChat ?? record.mainText ?? record.main_text);
+  const explicitMainChat = optionalStringValue(
+    sectionsRecord.studentResponse ??
+      record.studentResponse ??
+      sectionsRecord.mainChat ??
+      record.mainChat ??
+      record.mainText ??
+      record.main_text
+  );
   const explicitSectionAnswer = optionalStringValue(sectionsRecord.answer);
   const explicitLegacyAnswer = optionalStringValue(record.answer);
+  const explicitLegacyExplanation = optionalStringValue(sectionsRecord.explanation);
   const hasExplicitStructuredSection = tutorStructuredSectionKeys.some((key) => Boolean(optionalStringValue(sectionsRecord[key])));
-  const baseAnswer = explicitMainChat ?? explicitSectionAnswer ?? explicitLegacyAnswer ?? (hasExplicitStructuredSection ? "" : fallbackAnswer);
+  const baseAnswer =
+    explicitMainChat ??
+    explicitSectionAnswer ??
+    explicitLegacyAnswer ??
+    explicitLegacyExplanation ??
+    (hasExplicitStructuredSection ? "" : fallbackAnswer);
   const rawLegacyAction = stringValue(sectionsRecord[["next", "Step"].join("")]) || stringValue(record.nextQuestion);
   const sanitizedBaseAnswer = looksLikeWorkflowStatusText(baseAnswer) ? "" : baseAnswer;
   const rawHint = finalSectionValue("hint", sectionsRecord.hint);
@@ -81,27 +94,32 @@ export function normalizeStructuredTutorOutput(
   const splitProblem = splitProblemSectionFollowup(rawProblem);
   const problem = finalSectionValue("problem", splitProblem.problem);
   const misplacedProblemStatus = problem ? "" : statusLineFromProblemSection(rawProblem);
-  const mainChatCandidate = normalizeWrappedReferenceNumbers(
+  const studentResponseCandidate = normalizeWrappedReferenceNumbers(
     [sanitizedBaseAnswer || misplacedProblemStatus, splitProblem.followup, legacyAction].filter(Boolean).join("\n\n")
   );
-  const mainChat = problem && duplicatesProblemSection(mainChatCandidate, problem) ? "" : mainChatCandidate;
-  const hint = rawHint && sectionRepeatsEarlierContent(rawHint, [mainChat]) ? "" : rawHint;
-  const explanation = finalSectionValue("explanation", sectionsRecord.explanation);
-  const formula = finalSectionValue("formula", sectionsRecord.formula);
+  const studentResponse = problem && duplicatesProblemSection(studentResponseCandidate, problem) ? "" : studentResponseCandidate;
+  const hint = rawHint && sectionRepeatsEarlierContent(rawHint, [studentResponse]) ? "" : rawHint;
+  const keyIdea = finalSectionValue("keyIdea", sectionsRecord.keyIdea);
+  const rule = finalSectionValue("rule", sectionsRecord.rule ?? sectionsRecord.formula);
+  const method = finalSectionValue("method", sectionsRecord.method);
   const example = finalSectionValue("example", sectionsRecord.example);
   const checkWork = finalSectionValue("checkWork", sectionsRecord.checkWork);
-  const sourceNote = finalSectionValue("sourceNote", sectionsRecord.sourceNote);
+  const sourceContext = finalSectionValue("sourceContext", sectionsRecord.sourceContext ?? sectionsRecord.sourceNote);
   const mode = includesString(tutorModes, metadataRecord.mode) ? metadataRecord.mode : "guided_problem_solving";
-  const choiceDisplay = metadataRecord.choiceDisplay === "problem_selection" ? "problem_selection" : undefined;
+  const choiceDisplay =
+    metadataRecord.choiceDisplay === "problem_selection" || metadataRecord.choiceDisplay === "support_path_uncertainty"
+      ? metadataRecord.choiceDisplay
+      : undefined;
   const sections = {
-    ...(mainChat ? { mainChat } : {}),
+    ...(studentResponse ? { studentResponse } : {}),
     ...(problem ? { problem } : {}),
     ...(hint ? { hint } : {}),
-    ...(explanation ? { explanation } : {}),
-    ...(formula ? { formula } : {}),
+    ...(keyIdea ? { keyIdea } : {}),
+    ...(rule ? { rule } : {}),
+    ...(method ? { method } : {}),
     ...(example ? { example } : {}),
     ...(checkWork ? { checkWork } : {}),
-    ...(sourceNote ? { sourceNote } : {})
+    ...(sourceContext ? { sourceContext } : {})
   };
   const sectionOrder = normalizeSectionOrder(record.sectionOrder ?? sectionsRecord.sectionOrder).filter(
     (key) => key in sections
@@ -156,16 +174,65 @@ function parseJsonObjectFromText(value: string): Record<string, unknown> | undef
 }
 
 function parseJsonObjectCandidate(candidate: string): Record<string, unknown> | undefined {
-  try {
-    const parsed = JSON.parse(candidate) as unknown;
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
+  for (const jsonCandidate of jsonRepairCandidates(candidate)) {
+    try {
+      const parsed = JSON.parse(jsonCandidate) as unknown;
+      return isRecord(parsed) ? parsed : undefined;
+    } catch {
+      // Try the next repair candidate.
+    }
   }
+
+  return undefined;
 }
 
 function escapeInvalidJsonBackslashes(candidate: string) {
   return candidate.replace(/\\(?!["\\/bfnrtu])/g, "\\\\");
+}
+
+function jsonRepairCandidates(candidate: string) {
+  const repairedBackslashes = escapeInvalidJsonBackslashes(candidate);
+  const repairedControlCharacters = escapeJsonStringControlCharacters(candidate);
+  const repairedBoth = escapeInvalidJsonBackslashes(repairedControlCharacters);
+
+  return Array.from(new Set([candidate, repairedBackslashes, repairedControlCharacters, repairedBoth]));
+}
+
+function escapeJsonStringControlCharacters(candidate: string) {
+  let output = "";
+  let inString = false;
+  let escaping = false;
+
+  for (const character of candidate) {
+    if (escaping) {
+      output += character;
+      escaping = false;
+      continue;
+    }
+
+    if (character === "\\") {
+      output += character;
+      if (inString) {
+        escaping = true;
+      }
+      continue;
+    }
+
+    if (character === "\"") {
+      output += character;
+      inString = !inString;
+      continue;
+    }
+
+    if (inString && character < " ") {
+      output += JSON.stringify(character).slice(1, -1);
+      continue;
+    }
+
+    output += character;
+  }
+
+  return output;
 }
 
 function unwrapNestedTutorJsonPayload(value: Record<string, unknown>): Record<string, unknown> {
@@ -188,6 +255,7 @@ function looksLikeTutorStructuredPayload(value: Record<string, unknown>) {
     isRecord(value.sections) ||
     isRecord(value.metadata) ||
     tutorStructuredSectionKeys.some((key) => typeof value[key] === "string") ||
+    typeof value.mainChat === "string" ||
     typeof value.mainText === "string" ||
     typeof value.main_text === "string"
   );
@@ -196,10 +264,9 @@ function looksLikeTutorStructuredPayload(value: Record<string, unknown>) {
 function visibleTextFromStructuredOutput(value: TutorStructuredOutput) {
   const sections = value.sections;
   return (
-    sections.mainChat?.trim() ||
+    sections.studentResponse?.trim() ||
     sections.answer?.trim() ||
     sections.hint?.trim() ||
-    sections.explanation?.trim() ||
     sections.problem?.trim() ||
     value.confusionPrompt?.trim() ||
     ""
@@ -246,8 +313,14 @@ function normalizeSectionOrder(value: unknown) {
 }
 
 function sectionOrderAlias(value: unknown) {
-  if (value === "answer" || value === "mainText" || value === "main_text") {
-    return "mainChat";
+  if (value === "answer" || value === "mainChat" || value === "mainText" || value === "main_text") {
+    return "studentResponse";
+  }
+  if (value === "formula" || value === "formulas") {
+    return "rule";
+  }
+  if (value === "sourceNote" || value === "source_note") {
+    return "sourceContext";
   }
   return value;
 }
@@ -393,7 +466,7 @@ function meaningfulTokens(value: string) {
 
 function normalizeComparableSectionText(value: string) {
   return value
-    .replace(/^(?:\*\*)?(?:answer|hint|source note|your next step|next step|main chat)(?:\*\*)?\s*:\s*/i, "")
+    .replace(/^(?:\*\*)?(?:answer|hint|key idea|rule|method|source context|source note|explanation|your next step|next step|main chat)(?:\*\*)?\s*:\s*/i, "")
     .replace(/\s+/g, " ")
     .replace(/[.!?]+$/g, "")
     .trim()

@@ -4,9 +4,7 @@ import type { PdfDetectedProblemMetadata, PdfMaterialMetadata, PdfOcrPageMetadat
 
 const { Pool } = pg;
 const defaultPoolMax = 5;
-const defaultPdfOcrVectorDimensions = 768;
 let pool: pg.Pool | null = null;
-let warnedAboutPdfOcrVectorDimensions = false;
 
 export class PdfOcrMetadataDatabaseError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -15,7 +13,7 @@ export class PdfOcrMetadataDatabaseError extends Error {
   }
 }
 
-export type PdfOcrRetrievalMode = "exact_problem" | "exact_page" | "exact_title" | "full_text" | "vector";
+export type PdfOcrRetrievalMode = "exact_problem" | "exact_page" | "exact_title" | "full_text";
 
 export type PdfOcrSearchResult = {
   chunkText: string;
@@ -104,16 +102,16 @@ export async function searchPdfOcrMetadata({
   classId,
   limit,
   materialId,
+  pageBefore,
   professorId,
-  query,
-  queryVector
+  query
 }: {
   classId: string;
   limit: number;
   materialId?: string;
+  pageBefore?: number;
   professorId: string;
   query: string;
-  queryVector?: number[];
 }) {
   const client = await getPdfOcrPool().connect();
 
@@ -128,6 +126,7 @@ export async function searchPdfOcrMetadata({
         client,
         limit: normalizedLimit,
         materialId,
+        pageBefore,
         problemNumbers,
         professorId
       });
@@ -143,6 +142,7 @@ export async function searchPdfOcrMetadata({
         client,
         limit: normalizedLimit,
         materialId,
+        pageBefore,
         pageNumbers,
         professorId
       });
@@ -157,6 +157,7 @@ export async function searchPdfOcrMetadata({
       client,
       limit: normalizedLimit,
       materialId,
+      pageBefore,
       professorId,
       query
     });
@@ -170,6 +171,7 @@ export async function searchPdfOcrMetadata({
       client,
       limit: normalizedLimit,
       materialId,
+      pageBefore,
       professorId,
       query
     });
@@ -178,63 +180,9 @@ export async function searchPdfOcrMetadata({
       return fullTextMatches;
     }
 
-    if (!queryVector?.length) {
-      return [];
-    }
-
-    return await queryVectorMatches({
-      classId,
-      client,
-      limit: normalizedLimit,
-      materialId,
-      professorId,
-      query,
-      queryVector
-    });
+    return [];
   } catch (caughtError) {
     throw new PdfOcrMetadataDatabaseError("PDF OCR metadata search failed.", {
-      cause: caughtError instanceof Error ? caughtError : undefined
-    });
-  } finally {
-    client.release();
-  }
-}
-
-export async function searchPdfOcrMetadataVectorOnly({
-  classId,
-  limit,
-  materialId,
-  professorId,
-  query,
-  queryVector
-}: {
-  classId: string;
-  limit: number;
-  materialId?: string;
-  professorId: string;
-  query: string;
-  queryVector: number[];
-}) {
-  if (!queryVector.length) {
-    return [];
-  }
-
-  const client = await getPdfOcrPool().connect();
-
-  try {
-    const normalizedLimit = Math.max(1, Math.min(limit, 20));
-
-    return await queryVectorMatches({
-      classId,
-      client,
-      limit: normalizedLimit,
-      materialId,
-      professorId,
-      query,
-      queryVector
-    });
-  } catch (caughtError) {
-    throw new PdfOcrMetadataDatabaseError("PDF OCR metadata vector search failed.", {
       cause: caughtError instanceof Error ? caughtError : undefined
     });
   } finally {
@@ -261,20 +209,11 @@ export async function replacePdfOcrMetadata({
     const pageIds = new Map<number, number>();
 
     for (const page of pages) {
-      const embedding = coercePdfOcrEmbeddingForPostgres({
-        createdAt: page.embeddingCreatedAt,
-        dimensions: page.embeddingDimensions,
-        model: page.embeddingModel,
-        provider: page.embeddingProvider,
-        taskType: page.embeddingTaskType,
-        values: page.embedding
-      });
       const result = await client.query<{ id: number }>(
         `INSERT INTO pdf_pages (
           material_id, class_id, course_id, professor_id, teacher_id, title, material_type,
           page_number, page_start, page_end, ocr_text, ocr_provider, ocr_source,
-          ocr_confidence, embedding, embedding_dimensions, embedding_model,
-          embedding_provider, embedding_task_type, embedding_created_at, storage_bucket, storage_path,
+          ocr_confidence, storage_bucket, storage_path,
           full_pdf_bucket, full_pdf_path, full_pdf_uri, full_pdf_mime_type,
           full_pdf_size, full_pdf_sha256, page_asset_bucket, page_asset_path,
           page_asset_uri, page_asset_size, page_asset_sha256,
@@ -283,12 +222,11 @@ export async function replacePdfOcrMetadata({
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7,
           $8, $9, $10, $11, $12, $13,
-          $14, $15::vector, $16, $17,
-          $18, $19, $20, $21, $22,
-          $23, $24, $25, $26,
-          $27, $28, $29, $30,
-          $31, $32, $33,
-          $34, $35, $36, $37, $38
+          $14, $15, $16,
+          $17, $18, $19, $20,
+          $21, $22, $23, $24,
+          $25, $26, $27,
+          $28, $29, $30, $31, $32
         )
         RETURNING id`,
         [
@@ -306,12 +244,6 @@ export async function replacePdfOcrMetadata({
           page.ocrProvider,
           page.ocrSource,
           page.ocrConfidence ?? null,
-          embedding.vector,
-          embedding.dimensions,
-          embedding.model,
-          embedding.provider,
-          embedding.taskType,
-          embedding.createdAt,
           page.storageBucket,
           page.storagePath,
           page.fullPdfBucket ?? page.storageBucket,
@@ -351,28 +283,15 @@ export async function replacePdfOcrMetadata({
         continue;
       }
 
-      const embedding = coercePdfOcrEmbeddingForPostgres({
-        createdAt: problem.embeddingCreatedAt,
-        dimensions: problem.embeddingDimensions,
-        model: problem.embeddingModel,
-        provider: problem.embeddingProvider,
-        taskType: problem.embeddingTaskType,
-        values: problem.embedding
-      });
-
       await client.query(
         `INSERT INTO pdf_detected_problems (
           material_id, page_id, class_id, course_id, professor_id, teacher_id, title,
           material_type, problem_number, page_start, page_end, problem_text,
-          source, confidence, ocr_provider, ocr_source, embedding, embedding_dimensions,
-          embedding_model, embedding_provider, embedding_task_type, embedding_created_at,
-          storage_bucket, storage_path
+          source, confidence, ocr_provider, ocr_source, storage_bucket, storage_path
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7,
           $8, $9, $10, $11, $12,
-          $13, $14, $15, $16, $17::vector, $18,
-          $19, $20, $21, $22,
-          $23, $24
+          $13, $14, $15, $16, $17, $18
         )`,
         [
           problem.materialId,
@@ -391,12 +310,6 @@ export async function replacePdfOcrMetadata({
           problem.confidence ?? null,
           problem.ocrProvider,
           problem.ocrSource,
-          embedding.vector,
-          embedding.dimensions,
-          embedding.model,
-          embedding.provider,
-          embedding.taskType,
-          embedding.createdAt,
           problem.storageBucket,
           problem.storagePath
         ]
@@ -419,6 +332,7 @@ async function queryExactProblems({
   client,
   limit,
   materialId,
+  pageBefore,
   problemNumbers,
   professorId
 }: {
@@ -426,6 +340,7 @@ async function queryExactProblems({
   client: PoolClient;
   limit: number;
   materialId?: string;
+  pageBefore?: number;
   problemNumbers: string[];
   professorId: string;
 }) {
@@ -444,10 +359,10 @@ async function queryExactProblems({
       p.professor_id,
       p.title,
       p.material_type,
-      NULL AS problem_number,
+      dp.problem_number,
       p.page_start,
       p.page_end,
-      p.ocr_text,
+      COALESCE(NULLIF(btrim(dp.problem_text), ''), p.ocr_text) AS ocr_text,
       p.ocr_confidence,
       p.ocr_provider,
       p.ocr_source,
@@ -470,14 +385,17 @@ async function queryExactProblems({
       p.page_asset_size_bytes,
       p.page_asset_checksum_sha256,
       100.0 AS score
-    FROM pdf_pages p
-    WHERE p.class_id = $1
-      AND p.professor_id = $2
-      AND p.ocr_text ~* ANY($3::text[])
-      AND ($4::text IS NULL OR p.material_id = $4)
-    ORDER BY p.page_start ASC
-    LIMIT $5`,
-    [classId, professorId, problemPatterns, materialId ?? null, candidateLimit]
+    FROM pdf_detected_problems dp
+    INNER JOIN pdf_pages p
+      ON p.id = dp.page_id
+    WHERE dp.class_id = $1
+      AND dp.professor_id = $2
+      AND dp.problem_number ~* ANY($3::text[])
+      AND ($4::text IS NULL OR dp.material_id = $4)
+      AND ($5::int IS NULL OR dp.page_start < $5)
+    ORDER BY dp.page_start ASC
+    LIMIT $6`,
+    [classId, professorId, problemPatterns, materialId ?? null, normalizedPageBefore(pageBefore), candidateLimit]
   );
 
   return rankPageSearchRows({
@@ -493,6 +411,7 @@ async function queryExactPages({
   client,
   limit,
   materialId,
+  pageBefore,
   pageNumbers,
   professorId
 }: {
@@ -500,6 +419,7 @@ async function queryExactPages({
   client: PoolClient;
   limit: number;
   materialId?: string;
+  pageBefore?: number;
   pageNumbers: number[];
   professorId: string;
 }) {
@@ -540,9 +460,10 @@ async function queryExactPages({
       AND professor_id = $2
       AND page_number = ANY($3::int[])
       AND ($4::text IS NULL OR material_id = $4)
+      AND ($5::int IS NULL OR page_start < $5)
     ORDER BY page_number ASC
-    LIMIT $5`,
-    [classId, professorId, pageNumbers, materialId ?? null, limit]
+    LIMIT $6`,
+    [classId, professorId, pageNumbers, materialId ?? null, normalizedPageBefore(pageBefore), limit]
   );
 
   return result.rows.map((row) => rowToSearchResult(row, "exact_page"));
@@ -572,6 +493,7 @@ async function queryTitleMatches({
   client,
   limit,
   materialId,
+  pageBefore,
   professorId,
   query
 }: {
@@ -579,6 +501,7 @@ async function queryTitleMatches({
   client: PoolClient;
   limit: number;
   materialId?: string;
+  pageBefore?: number;
   professorId: string;
   query: string;
 }) {
@@ -619,9 +542,10 @@ async function queryTitleMatches({
       AND p.professor_id = $2
       AND to_tsvector('english', coalesce(p.title, '')) @@ plainto_tsquery('english', $3)
       AND ($4::text IS NULL OR p.material_id = $4)
+      AND ($5::int IS NULL OR p.page_start < $5)
     ORDER BY score DESC, p.page_start ASC
-    LIMIT $5`,
-    [classId, professorId, query, materialId ?? null, limit]
+    LIMIT $6`,
+    [classId, professorId, query, materialId ?? null, normalizedPageBefore(pageBefore), limit]
   );
 
   return result.rows.map((row) => rowToSearchResult(row, "exact_title"));
@@ -632,6 +556,7 @@ async function queryFullTextMatches({
   client,
   limit,
   materialId,
+  pageBefore,
   professorId,
   query
 }: {
@@ -639,6 +564,7 @@ async function queryFullTextMatches({
   client: PoolClient;
   limit: number;
   materialId?: string;
+  pageBefore?: number;
   professorId: string;
   query: string;
 }) {
@@ -681,9 +607,10 @@ async function queryFullTextMatches({
       AND professor_id = $2
       AND text_search @@ plainto_tsquery('english', $3)
       AND ($4::text IS NULL OR material_id = $4)
+      AND ($5::int IS NULL OR page_start < $5)
     ORDER BY score DESC, page_start ASC
-    LIMIT $5`,
-    [classId, professorId, query, materialId ?? null, limit]
+    LIMIT $6`,
+    [classId, professorId, query, materialId ?? null, normalizedPageBefore(pageBefore), limit]
   );
 
   return rankPageSearchRows({
@@ -694,135 +621,26 @@ async function queryFullTextMatches({
   });
 }
 
-async function queryVectorMatches({
-  classId,
-  client,
-  limit,
-  materialId,
-  professorId,
-  query,
-  queryVector
-}: {
-  classId: string;
-  client: PoolClient;
-  limit: number;
-  materialId?: string;
-  professorId: string;
-  query: string;
-  queryVector: number[];
-}) {
-  const queryVectorLiteral = vectorLiteral(queryVector, { warn: false });
-
-  if (!queryVectorLiteral) {
-    return [];
-  }
-
-  const candidateLimit = Math.max(limit * 10, 50);
-  const result = await client.query(
-    `SELECT
-      p.id::text AS row_id,
-      'page' AS source_kind,
-      p.material_id,
-      p.class_id,
-      p.professor_id,
-      p.title,
-      p.material_type,
-      NULL AS problem_number,
-      p.page_start,
-      p.page_end,
-      p.ocr_text,
-      p.ocr_confidence,
-      p.ocr_provider,
-      p.ocr_source,
-      p.storage_bucket,
-      p.storage_path,
-      p.full_pdf_bucket,
-      p.full_pdf_path,
-      p.full_pdf_uri,
-      p.full_pdf_mime_type,
-      p.full_pdf_size,
-      p.full_pdf_sha256,
-      p.page_asset_bucket,
-      p.page_asset_path,
-      p.page_asset_uri,
-      p.page_asset_size,
-      p.page_asset_sha256,
-      p.page_asset_storage_bucket,
-      p.page_asset_storage_path,
-      p.page_asset_mime_type,
-      p.page_asset_size_bytes,
-      p.page_asset_checksum_sha256,
-      1.0 - (p.embedding <=> $3::vector) AS score,
-      p.embedding <=> $3::vector AS vector_distance,
-      p.embedding::text AS embedding_text
-    FROM pdf_pages p
-    WHERE p.class_id = $1
-      AND p.professor_id = $2
-      AND p.embedding IS NOT NULL
-      AND ($4::text IS NULL OR p.material_id = $4)
-    ORDER BY p.embedding <=> $3::vector
-    LIMIT $5`,
-    [classId, professorId, queryVectorLiteral, materialId ?? null, candidateLimit]
-  );
-
-  return rankVectorSearchRows({
-    limit,
-    query,
-    queryVector,
-    rows: result.rows
-  });
-}
-
-function rankVectorSearchRows({
-  limit,
-  query,
-  queryVector,
-  rows
-}: {
-  limit: number;
-  query: string;
-  queryVector: number[];
-  rows: QueryResultRow[];
-}) {
-  return rankPageSearchRows({
-    limit,
-    query,
-    queryVector,
-    retrievalMode: "vector",
-    rows
-  });
-}
-
 function rankPageSearchRows({
   limit,
   query,
-  queryVector,
   retrievalMode,
   rows
 }: {
   limit: number;
   query: string;
-  queryVector?: number[];
   retrievalMode: PdfOcrRetrievalMode;
   rows: QueryResultRow[];
 }) {
   const resultByCandidateId = new Map<string, PdfOcrSearchResult>();
   const candidates = rows.flatMap((row, index) => {
-    const vector = vectorFromPostgresText(row.embedding_text);
-
-    if (queryVector?.length && !vector.length) {
-      return [];
-    }
-
     const result = rowToSearchResult(row, retrievalMode);
     const candidateId = pageCandidateId(row, index);
     resultByCandidateId.set(candidateId, result);
 
     return [rowToRankableCandidate({
       candidateId,
-      result,
-      vector,
-      vectorDistance: readNullableNumber(row.vector_distance) ?? undefined
+      result
     })];
   });
 
@@ -833,8 +651,7 @@ function rankPageSearchRows({
   const ranked = rankMaterialChunks({
     candidates,
     limit,
-    query,
-    queryVector
+    query
   });
 
   if (!ranked.hits.length) {
@@ -858,14 +675,10 @@ function rankPageSearchRows({
 
 function rowToRankableCandidate({
   candidateId,
-  result,
-  vector,
-  vectorDistance
+  result
 }: {
   candidateId: string;
   result: PdfOcrSearchResult;
-  vector?: number[];
-  vectorDistance?: number;
 }): RankableChunk {
   const materialType = result.materialType || "reading";
 
@@ -884,9 +697,7 @@ function rowToRankableCandidate({
       problemNumbers: result.problemNumbers,
       professorId: result.professorId,
       teacherId: result.professorId,
-      title: result.title,
-      ...(vector?.length ? { vector } : {}),
-      vectorDistance
+      title: result.title
     },
     document: {
       chunks: [],
@@ -922,15 +733,19 @@ function sourceDocumentKind(materialType: string): RankableChunk["document"]["ki
   return "lecture-notes";
 }
 
-function vectorCandidateId(row: QueryResultRow) {
+function rowCandidateId(row: QueryResultRow) {
   return `${String(row.source_kind ?? "row")}:${String(row.row_id ?? "")}`;
+}
+
+function normalizedPageBefore(value: number | undefined) {
+  return typeof value === "number" && Number.isInteger(value) && value > 1 ? value : null;
 }
 
 function pageCandidateId(row: QueryResultRow, index: number) {
   const rowId = String(row.row_id ?? "").trim();
 
   if (rowId) {
-    return vectorCandidateId(row);
+    return rowCandidateId(row);
   }
 
   return [
@@ -938,20 +753,6 @@ function pageCandidateId(row: QueryResultRow, index: number) {
     String(row.page_start ?? "page"),
     index
   ].join(":");
-}
-
-function vectorFromPostgresText(value: unknown) {
-  if (Array.isArray(value)) {
-    return value.map(Number).filter(Number.isFinite);
-  }
-
-  const text = String(value ?? "").trim();
-
-  if (!text.startsWith("[") || !text.endsWith("]")) {
-    return [];
-  }
-
-  return text.slice(1, -1).split(",").map(Number).filter(Number.isFinite);
 }
 
 function rowToSearchResult(row: QueryResultRow, retrievalMode: PdfOcrRetrievalMode): PdfOcrSearchResult {
@@ -1054,8 +855,10 @@ export async function getPdfPageAssetRecords({
     const result = await client.query(
       `WITH requested(material_id, page_number) AS (VALUES ${values.join(", ")})
       SELECT
+        p.id,
         p.material_id,
         p.class_id,
+        p.teacher_id,
         p.professor_id,
         p.title,
         p.material_type,
@@ -1081,8 +884,14 @@ export async function getPdfPageAssetRecords({
         p.page_asset_storage_path,
         p.page_asset_mime_type,
         p.page_asset_size_bytes,
-        p.page_asset_checksum_sha256
+        p.page_asset_checksum_sha256,
+        dp.problem_numbers
       FROM pdf_pages p
+      LEFT JOIN LATERAL (
+        SELECT string_agg(DISTINCT problem_number, ',') AS problem_numbers
+        FROM pdf_detected_problems
+        WHERE page_id = p.id
+      ) dp ON TRUE
       JOIN requested r
         ON r.material_id = p.material_id
        AND r.page_number = p.page_number
@@ -1229,76 +1038,6 @@ function readNullableNumber(value: unknown) {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-export function coercePdfOcrEmbeddingForPostgres({
-  createdAt,
-  dimensions,
-  model,
-  provider,
-  taskType,
-  values
-}: {
-  createdAt?: string;
-  dimensions?: number;
-  model?: string;
-  provider?: string;
-  taskType?: string;
-  values?: number[];
-}) {
-  const vector = vectorLiteral(values);
-
-  if (!vector) {
-    return {
-      createdAt: null,
-      dimensions: null,
-      model: null,
-      provider: null,
-      taskType: null,
-      vector: null
-    };
-  }
-
-  return {
-    createdAt: createdAt ?? null,
-    dimensions: values?.length ?? dimensions ?? null,
-    model: model ?? null,
-    provider: provider ?? null,
-    taskType: taskType ?? null,
-    vector
-  };
-}
-
-function vectorLiteral(values: number[] | undefined, options: { warn?: boolean } = {}) {
-  if (!values?.length) {
-    return null;
-  }
-
-  const expectedDimensions = pdfOcrVectorDimensions();
-
-  if (values.length !== expectedDimensions) {
-    if (options.warn !== false) {
-      warnAboutPdfOcrVectorDimensionMismatch(values.length, expectedDimensions);
-    }
-    return null;
-  }
-
-  return `[${values.map((value) => Number(value).toString()).join(",")}]`;
-}
-
-function pdfOcrVectorDimensions() {
-  return readPositiveInteger(process.env.PDF_OCR_VECTOR_DIMENSIONS) ?? defaultPdfOcrVectorDimensions;
-}
-
-function warnAboutPdfOcrVectorDimensionMismatch(actualDimensions: number, expectedDimensions: number) {
-  if (warnedAboutPdfOcrVectorDimensions) {
-    return;
-  }
-
-  warnedAboutPdfOcrVectorDimensions = true;
-  console.warn(
-    `PDF OCR embedding dimension mismatch: got ${actualDimensions}, expected ${expectedDimensions}. Saving OCR metadata without vector embeddings.`
-  );
 }
 
 export type PdfOcrMetadataRow = QueryResultRow;

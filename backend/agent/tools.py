@@ -10,6 +10,7 @@ import httpx
 
 from backend.internal_next import internal_next_base_url, reusable_async_client
 from backend.retrieval.pdf_page_assets import merge_page_asset_payloads
+from backend.retrieval.gemini_enterprise_search import GeminiEnterpriseSearchClient
 
 logger = logging.getLogger(__name__)
 _NEXT_SEARCH_CLIENT: httpx.AsyncClient | None = None
@@ -52,6 +53,25 @@ class PdfRetriever(Protocol):
         top_k: int = 5,
         class_id: str | None = None,
         professor_id: str | None = None,
+        material_id: str | None = None,
+        page_before: int | None = None,
+    ) -> list[dict[str, Any]]:
+        ...
+
+
+class CourseMaterialBroadRetriever(Protocol):
+    async def search(
+        self,
+        *,
+        query: str,
+        intent: str,
+        top_k: int = 5,
+        class_id: str | None = None,
+        professor_id: str | None = None,
+        active_material_id: str | None = None,
+        active_page_number: int | None = None,
+        active_page_before: int | None = None,
+        preferred_chunk_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         ...
 
@@ -61,8 +81,9 @@ SEARCH_PDF_PAGES_TOOL: dict[str, Any] = {
     "function": {
         "name": "search_pdf_pages",
         "description": (
-            "Search PostgreSQL-indexed OCR metadata for class PDF pages/problems from worksheets, assignments, "
-            "textbook/readings, notes, examples, page numbers, sections, problem numbers, or prior source-backed context."
+            "Search Gemini Agent Search by default for class PDF pages/problems from worksheets, assignments, "
+            "textbook/readings, notes, examples, page numbers, sections, problem numbers, or prior source-backed context; "
+            "falls back to PostgreSQL OCR metadata when Gemini has no usable result."
         ),
         "parameters": {
             "type": "object",
@@ -85,11 +106,42 @@ SEARCH_PDF_PAGES_TOOL: dict[str, Any] = {
                     "type": "string",
                     "enum": sorted(ALLOWED_RETRIEVAL_REASONS),
                     "description": (
-                        "Internal reason for searching indexed OCR metadata. Must be one of the allowed values."
+                        "Internal reason for searching indexed course material. Must be one of the allowed values."
                     ),
                 },
             },
             "required": ["query", "retrieval_reason"],
+        },
+    },
+}
+
+SEARCH_COURSE_MATERIAL_BROAD_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "search_course_material_broad",
+        "description": (
+            "Search Gemini Enterprise Search / Agent Search Standard Edition for broad semantic matches across "
+            "course materials: similar worked examples, methods, concepts, definitions, formulas, tables, "
+            "captions, sections, and env-gated exact problem/page lookup."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "intent": {
+                    "type": "string",
+                    "description": "Broad search intent such as similar_example, similar_method, concept, definition, formula, table, caption, or section.",
+                },
+                "top_k": {"type": "integer", "default": 5},
+                "preferred_chunk_types": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["caption", "definition", "example", "formula", "paragraph", "section", "table"],
+                    },
+                },
+            },
+            "required": ["query", "intent"],
         },
     },
 }
@@ -172,18 +224,48 @@ async def search_pdf_pages(
     class_id: str | None = None,
     professor_id: str | None = None,
     retrieval_reason: str | None = None,
+    material_id: str | None = None,
+    page_before: int | None = None,
+    try_gemini: bool = True,
 ) -> list[dict[str, Any]]:
-    """Search indexed PostgreSQL OCR metadata and return metadata, not whole PDFs."""
+    """Search indexed PDF metadata and return metadata, not whole PDFs."""
 
     normalized_reason = normalize_retrieval_reason(retrieval_reason, query=query)
     normalized_query = normalize_query_for_retrieval_reason(query, normalized_reason)
 
+    if try_gemini and not retriever:
+        gemini_pages = await search_course_material_broad(
+            query=normalized_query,
+            intent=normalized_reason,
+            top_k=top_k,
+            class_id=class_id,
+            professor_id=professor_id,
+            active_material_id=material_id,
+            active_page_before=page_before,
+            preferred_chunk_types=preferred_chunk_types_for_pdf_tool_search(normalized_query, normalized_reason),
+        )
+        if gemini_pages:
+            return [
+                {
+                    **page,
+                    "class_id": str(class_id or page.get("class_id") or ""),
+                    "professor_id": str(professor_id or page.get("professor_id") or ""),
+                    "retrieval_reason": normalized_reason,
+                }
+                for page in gemini_pages
+            ]
+
     if retriever:
+        scoped_kwargs = {
+            **({"material_id": material_id} if material_id else {}),
+            **({"page_before": page_before} if page_before else {}),
+        }
         pages = await retriever.search(
             query=normalized_query,
             top_k=top_k,
             class_id=class_id,
             professor_id=professor_id,
+            **scoped_kwargs,
         )
     else:
         pages = await search_pdf_pages_via_next(
@@ -192,9 +274,16 @@ async def search_pdf_pages(
             class_id=class_id,
             professor_id=professor_id,
             retrieval_reason=normalized_reason,
+            material_id=material_id,
+            page_before=page_before,
         )
 
     normalized_pages = [normalize_pdf_page_result(page) for page in pages]
+    normalized_pages = filter_pages_before_material(
+        normalized_pages,
+        material_id=material_id,
+        page_before=page_before,
+    )
     return [
         {
             **page,
@@ -206,6 +295,173 @@ async def search_pdf_pages(
     ]
 
 
+def preferred_chunk_types_for_pdf_tool_search(query: str, retrieval_reason: str) -> list[str] | None:
+    normalized = query.lower()
+    chunk_types: list[str] = []
+
+    if retrieval_reason == "needed_example_page" or re.search(r"\bexamples?\b", normalized):
+        chunk_types.append("example")
+    if re.search(r"\bdefinitions?|define|means?\b", normalized):
+        chunk_types.append("definition")
+    if re.search(r"\bformula|equation\b", normalized):
+        chunk_types.append("formula")
+    if re.search(r"\btable\b", normalized):
+        chunk_types.append("table")
+    if re.search(r"\bcaption|figure|diagram\b", normalized):
+        chunk_types.append("caption")
+    if re.search(r"\bsection|notes?|concept|method|theorem|rule\b", normalized):
+        chunk_types.extend(["paragraph", "section"])
+
+    return sorted(set(chunk_types)) or None
+
+
+async def search_course_material_broad(
+    *,
+    query: str,
+    intent: str,
+    top_k: int = 5,
+    class_id: str | None = None,
+    professor_id: str | None = None,
+    active_material_id: str | None = None,
+    active_page_number: int | None = None,
+    active_page_before: int | None = None,
+    preferred_chunk_types: list[str] | None = None,
+    broad_retriever: CourseMaterialBroadRetriever | None = None,
+) -> list[dict[str, Any]]:
+    """Search broad course-material context with Gemini Enterprise Search.
+
+    This function intentionally returns no results when disabled or misconfigured so callers can safely
+    fall back to PostgreSQL OCR retrieval.
+    """
+
+    normalized_query = " ".join(str(query or "").split())
+    if not normalized_query or not class_id or not professor_id:
+        return []
+
+    try:
+        if broad_retriever:
+            pages = await broad_retriever.search(
+                query=normalized_query,
+                intent=intent,
+                top_k=top_k,
+                class_id=class_id,
+                professor_id=professor_id,
+                active_material_id=active_material_id,
+                active_page_number=active_page_number,
+                active_page_before=active_page_before,
+                preferred_chunk_types=preferred_chunk_types,
+            )
+        else:
+            pages = await GeminiEnterpriseSearchClient().search(
+                query=normalized_query,
+                intent=intent,
+                top_k=top_k,
+                class_id=class_id,
+                professor_id=professor_id,
+                active_material_id=active_material_id,
+                active_page_number=active_page_number,
+                active_page_before=active_page_before,
+                preferred_chunk_types=preferred_chunk_types,
+            )
+    except Exception as error:
+        logger.warning(
+            "Broad course-material retrieval failed; falling back to PostgreSQL OCR retrieval.",
+            extra={
+                "class_id": class_id,
+                "error": str(error),
+                "intent": intent,
+                "professor_id": professor_id,
+            },
+        )
+        return []
+
+    normalized_pages = [
+        {
+            **normalize_pdf_page_result(page),
+            "chunk_type": str(page.get("chunk_type") or page.get("chunkType") or ""),
+            "gemini_chunk_id": str(page.get("gemini_chunk_id") or page.get("geminiChunkId") or ""),
+            "gemini_document_id": str(page.get("gemini_document_id") or page.get("geminiDocumentId") or ""),
+            "gemini_rank": page.get("gemini_rank") or page.get("geminiRank"),
+            "layout_json": page.get("layout_json") or page.get("layoutJson"),
+            "parent_chunk_id": str(page.get("parent_chunk_id") or page.get("parentChunkId") or ""),
+            "previous_chunk_id": str(page.get("previous_chunk_id") or page.get("previousChunkId") or ""),
+            "next_chunk_id": str(page.get("next_chunk_id") or page.get("nextChunkId") or ""),
+            "retrieval_mode": "gemini_enterprise",
+            "retrieval_reason": intent or "needed_example_page",
+        }
+        for page in pages
+        if isinstance(page, dict)
+    ]
+    normalized_pages = filter_pages_before_material(
+        normalized_pages,
+        material_id=active_material_id,
+        page_before=active_page_before,
+    )
+
+    return await expand_broad_results_with_page_context(
+        normalized_pages,
+        class_id=class_id,
+        professor_id=professor_id,
+        retrieval_reason=intent or "needed_example_page",
+    )
+
+
+async def expand_broad_results_with_page_context(
+    pages: list[dict[str, Any]],
+    *,
+    class_id: str,
+    professor_id: str,
+    retrieval_reason: str,
+) -> list[dict[str, Any]]:
+    expanded_pages: list[dict[str, Any]] = []
+
+    for page in pages:
+        material_id = str(page.get("doc_id") or page.get("material_id") or "")
+        page_number = int(page.get("page_number") or page.get("page_start") or 0)
+        context_pages: list[dict[str, Any]] = []
+
+        if material_id and page_number:
+            context_pages = await search_pdf_pages_via_next(
+                query=f"page {page_number}",
+                top_k=1,
+                class_id=class_id,
+                professor_id=professor_id,
+                retrieval_reason=retrieval_reason,
+                material_id=material_id,
+            )
+
+        if context_pages:
+            context = normalize_pdf_page_result(context_pages[0])
+            expanded_pages.append(
+                {
+                    **context,
+                    "chunk_text": page.get("chunk_text") or context.get("chunk_text") or "",
+                    "gemini_chunk_id": page.get("gemini_chunk_id") or "",
+                    "gemini_document_id": page.get("gemini_document_id") or "",
+                    "gemini_rank": page.get("gemini_rank"),
+                    "chunk_type": page.get("chunk_type") or "",
+                    "layout_json": page.get("layout_json"),
+                    "parent_chunk_id": page.get("parent_chunk_id") or "",
+                    "previous_chunk_id": page.get("previous_chunk_id") or "",
+                    "next_chunk_id": page.get("next_chunk_id") or "",
+                    "retrieval_mode": "gemini_enterprise",
+                    "retrieval_reason": retrieval_reason,
+                    "score": score_from_gemini_page(page),
+                }
+            )
+        else:
+            expanded_pages.append(page)
+
+    return expanded_pages
+
+
+def score_from_gemini_page(page: dict[str, Any]) -> float:
+    try:
+        return float(page["score"])
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+
+
 async def search_pdf_pages_via_next(
     *,
     query: str,
@@ -213,6 +469,8 @@ async def search_pdf_pages_via_next(
     class_id: str | None,
     professor_id: str | None,
     retrieval_reason: str,
+    material_id: str | None = None,
+    page_before: int | None = None,
 ) -> list[dict[str, Any]]:
     if not class_id or not professor_id:
         return []
@@ -235,6 +493,8 @@ async def search_pdf_pages_via_next(
             json={
                 "classId": class_id,
                 "includeAssets": True,
+                **({"materialId": material_id} if material_id else {}),
+                **({"pageBefore": int(page_before)} if page_before else {}),
                 "professorId": professor_id,
                 "query": query,
                 "retrievalReason": retrieval_reason,
@@ -268,6 +528,32 @@ async def search_pdf_pages_via_next(
         )
 
     return normalized_pages
+
+
+def filter_pages_before_material(
+    pages: list[dict[str, Any]],
+    *,
+    material_id: str | None,
+    page_before: int | None,
+) -> list[dict[str, Any]]:
+    normalized_material_id = str(material_id or "").strip()
+    try:
+        before = int(page_before or 0)
+    except (TypeError, ValueError):
+        before = 0
+    if not normalized_material_id or before <= 1:
+        return pages
+
+    filtered: list[dict[str, Any]] = []
+    for page in pages:
+        page_material_id = str(page.get("doc_id") or page.get("docId") or page.get("material_id") or page.get("materialId") or "")
+        try:
+            page_start = int(page.get("page_start") or page.get("pageStart") or page.get("page_number") or page.get("pageNumber") or 0)
+        except (TypeError, ValueError):
+            page_start = 0
+        if page_material_id == normalized_material_id and page_start and page_start < before:
+            filtered.append(page)
+    return filtered
 
 
 def next_search_http_client() -> httpx.AsyncClient:

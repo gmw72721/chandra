@@ -164,7 +164,15 @@ def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
         "printed_page_start": printed_page_start,
         "professor_id": str(page.get("professor_id") or page.get("professorId") or ""),
         "problem_numbers": page.get("problem_numbers") or page.get("problemNumbers") or [],
+        "lookup_role": str(page.get("lookup_role") or page.get("lookupRole") or ""),
+        "reference_type": str(page.get("reference_type") or page.get("referenceType") or ""),
+        "reference_query": str(page.get("reference_query") or page.get("referenceQuery") or ""),
+        "reference_why": str(page.get("reference_why") or page.get("referenceWhy") or ""),
+        "reference_expansion_depth": page.get("reference_expansion_depth") or page.get("referenceExpansionDepth"),
+        "search_query": str(page.get("search_query") or page.get("searchQuery") or ""),
+        "used_as": str(page.get("used_as") or page.get("usedAs") or ""),
         "retrieval_mode": str(page.get("retrieval_mode") or page.get("retrievalMode") or ""),
+        "retrieval_reason": str(page.get("retrieval_reason") or page.get("retrievalReason") or ""),
         "score": float(page.get("score") or 0.0),
         "source_pdf_path": str(page.get("source_pdf_path") or page.get("sourcePdfPath") or ""),
         "storage_bucket": str(page.get("storage_bucket") or page.get("storageBucket") or ""),
@@ -294,10 +302,10 @@ def select_metadata_pages(
     """Select narrow OCR metadata records without merging or opening PDFs."""
 
     selected: list[dict[str, Any]] = []
-    seen: set[tuple[str, int, int, str, str]] = set()
+    seen: set[tuple[str, int, int, str, str, str, str]] = set()
     pages_used = 0
 
-    for page in sorted(retrieved_pages, key=lambda item: float(item.get("score") or 0.0), reverse=True):
+    for page in sorted(retrieved_pages, key=retrieved_page_sort_key):
         page_start = int(page.get("page_start") or page.get("pageStart") or page.get("pageNumber") or 1)
         page_end = int(page.get("page_end") or page.get("pageEnd") or page_start)
         normalized_page_start = max(1, min(page_start, page_end))
@@ -312,6 +320,8 @@ def select_metadata_pages(
             normalized_page_start,
             normalized_page_end,
             str(page.get("retrieval_mode") or page.get("retrievalMode") or ""),
+            str(page.get("lookup_role") or page.get("lookupRole") or ""),
+            str(page.get("reference_query") or page.get("referenceQuery") or ""),
             str(page.get("chunk_text") or page.get("chunkText") or page.get("ocr_text") or page.get("ocrText") or "")[:160],
         )
 
@@ -331,6 +341,14 @@ def select_metadata_pages(
         pages_used += page_count
 
     return selected
+
+
+def retrieved_page_sort_key(page: dict[str, Any]) -> tuple[int, float]:
+    rank = page.get("gemini_rank") if page.get("retrieval_mode") == "gemini_enterprise" else None
+    if isinstance(rank, int) and rank > 0:
+        return rank, 0.0
+
+    return 1_000_000, -float(page.get("score") or 0.0)
 
 
 def citation_label(title: str, page_start: int, page_end: int) -> str:

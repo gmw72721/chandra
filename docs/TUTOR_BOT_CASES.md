@@ -62,8 +62,14 @@ Search is preferred for:
 Graph path:
 
 ```text
-primary_tutor_turn -> search_ocr_metadata -> prepare_metadata_context -> context_grounded_answer -> save_chat_retrieval_memory
+primary_tutor_turn -> search_ocr_metadata -> [expand_referenced_sources] -> prepare_metadata_context -> context_grounded_answer -> save_chat_retrieval_memory
 ```
+
+`expand_referenced_sources` only runs when `GEMINI_ENTERPRISE_REFERENCE_EXPANSION_ENABLED=true`. It makes a small internal LLM planning call that returns JSON in the shape `{ "followup_searches": [...] }`, then can run up to two bounded follow-up passes for references such as another exercise, example, theorem, section, method, or page. Follow-up searches are deduped against earlier queries and remain within the graph's total search-call limit.
+
+By default, PDF search tries Gemini Enterprise Search / Agent Search first for exact problem/page lookup, examples, textbook/readings, notes, and supporting material. If Gemini is disabled, unconfigured, fails, or returns no usable match, the search falls back to the existing PostgreSQL OCR metadata path.
+
+For newly uploaded PDFs, Document AI OCR still writes page/problem metadata to PostgreSQL, but the upload path no longer creates Vertex document embeddings for those OCR rows. When `GEMINI_ENTERPRISE_SEARCH_ENABLED=true`, Chandra requests Gemini Agent Search imports for the saved single-page PDF assets and records the import status on the material; PostgreSQL OCR exact/full-text search remains the fallback.
 
 While search is pending, visible output is intentionally minimal, such as "I'm checking the class materials for that problem." It should not ask the student to paste/upload the problem before available OCR metadata has been searched.
 
@@ -79,7 +85,7 @@ This call handles:
 - Responding to selected upload content.
 - Explaining when selected sources are insufficient or mismatched.
 
-The context-grounded call cannot search again. If the selected records do not contain the needed item, it should say what exact source/page/problem/text is missing.
+The context-grounded call cannot search again. Any recursive source lookup must happen in `expand_referenced_sources` before selected context is prepared. If the selected records still do not contain the needed item, it should say what exact source/page/problem/text is missing.
 
 ### 5. Save chat retrieval memory
 
@@ -390,15 +396,16 @@ The structured output schema supports these section keys:
 
 | Key | Rendered label | UI kind/class | Purpose | Important constraints |
 | --- | --- | --- | --- | --- |
-| `mainText` | None | `answer` bubble | Unlabeled answer text, including the student's immediate action or direct request when one is needed. | Do not duplicate section text here, especially problem statements. |
-| `answer` | Usually none, or `Answer` when separate from main text | `answer` or `section-answer` | Direct response when a separate answer section is useful, including any immediate action if it naturally belongs with the answer. | Do not force a visible `Answer:` label in prose. |
+| `studentResponse` | None | `answer` bubble | Unlabeled student-facing response text, including the student's immediate action or direct request when one is needed. | Do not duplicate section text here, especially problem statements. |
 | `problem` | `Problem` | `problem` | Exact academic exercise/question/task statement. | Extraction only. No hints, offers, source notes, lookup status, attempt requests, or next steps. |
 | `hint` | `Hint` | `hint` | One short nudge or leading question. | No citations, definitions, offers, or multiple ideas. Avoid repeating the main answer. |
-| `explanation` | `Why this works` | `explanation` | Conceptual reasoning. | No offers, workflow prompts, or attempt requests. |
-| `formula` | `Formula` | `formula` | One rule, theorem, identity, equation, or symbolic statement. | No explanatory prose, examples, filled-in task values, hints, source notes, or why/when commentary. |
+| `keyIdea` | `Key idea` | `key-idea` | Definition, vocabulary, notation, concept, misconception fix, or prerequisite idea. | No formulas, procedures, source notes, or broad explanation. |
+| `rule` | `Rule` | `rule` | One rule, theorem, identity, equation, symbolic statement, rubric criterion, or procedure rule. | No explanatory prose, examples, filled-in task values, hints, source notes, or why/when commentary. |
+| `method` | `Method` | `method` | Strategy, algorithm, proof plan, reading move, writing move, lab method, coding pattern, or source method. | No full solution path for the exact task unless policy allows it. |
 | `example` | `Similar example` | `example` | Similar but different example. | Must not be a submittable version of the exact task. |
+| `sourceContext` | `Source context` | `source-context` | Source/context note when source detail is the student's direct request or adds needed context. | Do not invent titles, page numbers, quotes, citations, or source facts. |
 | `checkWork` | `Check your work` | `check-work` | Neutral feedback on shown work. | No direct verdict labels unless policy allows answer checking. |
-| `sourceNote` | `Source` | `source-note` | Source/context note when source detail is the student's direct request or adds needed context. | Do not invent titles, page numbers, quotes, citations, or source facts. |
+| `explanation` | `Explanation` | `explanation` | Conceptual reasoning broader than a hint. | No offers, workflow prompts, or attempt requests. |
 
 The UI also renders:
 
@@ -410,22 +417,22 @@ The UI also renders:
 
 - `sectionOrder` chooses the render order.
 - Include only non-empty keys.
-- Include `mainText` when the unlabeled message body is non-empty.
+- Include `studentResponse` when the unlabeled message body is non-empty.
 - If `problem` is present, put it first.
-- Put the student's immediate action or direct request at the end of `mainText` or `answer` when it is needed.
+- Put the student's immediate action or direct request at the end of `studentResponse` when it is needed.
 - Use sections only when they add distinct value.
 - A strong early/light-help reply is often just one short answer or question with no labeled sections.
-- Do not repeat the same idea across `answer`, `hint`, and `explanation`.
+- Do not repeat the same idea across `studentResponse`, `hint`, and `explanation`.
 
 Common useful orders:
 
 ```json
-["problem", "answer"]
-["problem", "answer", "sourceNote"]
-["answer", "hint"]
-["answer", "formula", "example"]
-["checkWork", "answer"]
-["answer", "explanation"]
+["problem", "studentResponse"]
+["problem", "studentResponse", "sourceContext"]
+["studentResponse", "hint"]
+["studentResponse", "rule", "example"]
+["checkWork", "studentResponse"]
+["studentResponse", "explanation"]
 ```
 
 ## Structured Metadata Types
@@ -498,11 +505,11 @@ Before the UI receives the reply, the backend and frontend normalize it:
 
 - Unknown section keys are dropped.
 - Empty sections are omitted.
-- Duplicated problem text is suppressed from `mainText`.
+- Duplicated problem text is suppressed from `studentResponse`.
 - Misplaced problem/status text can be repaired or removed.
 - Duplicate advice across sections can be suppressed.
 - `Problem` sections are validated to look like academic task text.
-- Legacy separate-action content is normalized away when it contains retrieval status or duplicated hint text; new responses should place immediate actions in `mainText` or `answer`.
+- Legacy separate-action content is normalized away when it contains retrieval status or duplicated hint text; new responses should place immediate actions in `studentResponse`.
 - Choice prompts replace answer text when choice buttons are being displayed.
 - Validation verdicts are neutralized in structured output when needed.
 
@@ -510,17 +517,17 @@ Before the UI receives the reply, the backend and frontend normalize it:
 
 | Student says/does | Runtime case | Likely mode | Likely sections |
 | --- | --- | --- | --- |
-| "Hi" | Direct primary answer | `guided_problem_solving` | `mainText` only |
-| "I'm lost" | Direct primary answer, light help | `guided_problem_solving` or `socratic` | `mainText` or `hint` |
-| "Can you pull up 2.20?" | Retrieval, exact source lookup | `source_lookup` | `problem`, maybe `answer`/`sourceNote` |
-| "What page is problem 4 on?" | Retrieval or memory lookup | `source_lookup` | `mainText` or `sourceNote` |
-| Uploaded page with many numbered problems | Problem selection choices | `clarification` | `answer` plus `confusionChoices` |
-| "Help me with problem 2.14 from this upload" | Direct upload inspection, maybe no retrieval | `guided_problem_solving` | `problem`, then limited `answer`/`hint` if solving help is asked |
-| "Just give me the answer" | Refusal | `direct_answer_refusal` | `mainText` only or `answer` |
-| Student shows work | Check work | `check_work` | `checkWork`, maybe `answer` with the immediate action |
-| "Show me an example" | Example retrieval | `guided_problem_solving` | `example`, maybe `answer` |
-| "Explain why this works" | Direct or source-grounded explanation | `reading_helper` or `guided_problem_solving` | `answer`, `explanation`, maybe `formula` |
-| Unrelated personal image | Redirect | `off_topic_redirect` | `mainText` only |
-| Source mismatch/not found | Context-grounded not-found | `clarification` or `source_lookup` | `mainText` or `sourceNote` |
+| "Hi" | Direct primary answer | `guided_problem_solving` | `studentResponse` only |
+| "I'm lost" | Direct primary answer, light help | `guided_problem_solving` or `socratic` | `studentResponse` or `hint` |
+| "Can you pull up 2.20?" | Retrieval, exact source lookup | `source_lookup` | `problem`, maybe `studentResponse`/`sourceContext` |
+| "What page is problem 4 on?" | Retrieval or memory lookup | `source_lookup` | `studentResponse` or `sourceContext` |
+| Uploaded page with many numbered problems | Problem selection choices | `clarification` | `studentResponse` plus `confusionChoices` |
+| "Help me with problem 2.14 from this upload" | Direct upload inspection, maybe no retrieval | `guided_problem_solving` | `problem`, then limited `studentResponse`/`hint` if solving help is asked |
+| "Just give me the answer" | Refusal | `direct_answer_refusal` | `studentResponse` only |
+| Student shows work | Check work | `check_work` | `checkWork`, maybe `studentResponse` with the immediate action |
+| "Show me an example" | Example retrieval | `guided_problem_solving` | `example`, maybe `studentResponse` |
+| "Explain why this works" | Direct or source-grounded explanation | `reading_helper` or `guided_problem_solving` | `studentResponse`, `explanation`, maybe `rule` |
+| Unrelated personal image | Redirect | `off_topic_redirect` | `studentResponse` only |
+| Source mismatch/not found | Context-grounded not-found | `clarification` or `source_lookup` | `studentResponse` or `sourceContext` |
 | Debug force retrieval | Forced retrieval branch | Depends on result | Minimal status, then normal final sections |
-| Debug force choices | Forced uncertainty choices | `clarification` | `answer` plus `confusionChoices` |
+| Debug force choices | Forced uncertainty choices | `clarification` | `studentResponse` plus `confusionChoices` |

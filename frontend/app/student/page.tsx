@@ -2,7 +2,20 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ChangeEvent, DragEvent, FocusEvent, FormEvent, KeyboardEvent, Suspense, memo, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  DragEvent,
+  FocusEvent,
+  FormEvent,
+  KeyboardEvent,
+  Suspense,
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties
+} from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
@@ -40,7 +53,7 @@ import {
   normalizeMarkdownMath,
   normalizeStructuredSectionMarkdown
 } from "@/lib/chat-message-format";
-import { buildChatContextMemory, hasChatContextMemory } from "@/lib/chat-context-memory";
+import { buildChatContextMemory, hasChatContextMemory, mergeChatContextMemory } from "@/lib/chat-context-memory";
 import { subscribeToClass, type TeacherClass } from "@/lib/classes";
 import { capitalizeLabel, coerceDate, formatConversationDate } from "@/lib/display-format";
 import { knowledgeUiColorToken } from "@/lib/knowledge-memory";
@@ -80,15 +93,15 @@ type ChatProgressSearch = {
 
 const streamedSectionKeys = [
   "mainText",
-  "mainChat",
+  "studentResponse",
   "problem",
-  "answer",
   "hint",
-  "explanation",
-  "formula",
+  "keyIdea",
+  "rule",
+  "method",
   "example",
   "checkWork",
-  "sourceNote"
+  "sourceContext"
 ] as const;
 type StreamedSectionKey = (typeof streamedSectionKeys)[number];
 type StructuredStreamedSectionKey = Exclude<StreamedSectionKey, "mainText">;
@@ -186,6 +199,12 @@ type KnowledgeAnimationLine = {
   colorToken: KnowledgeUiColorToken;
   delayMs: number;
   id: string;
+};
+type BackgroundKnowledgeJob = {
+  id: string;
+  status?: string;
+  topic?: string;
+  type?: string;
 };
 type FeedbackModalState = {
   conversationId?: string;
@@ -522,6 +541,18 @@ export function StudentWorkspace() {
   );
   const showUsageHeader = !isTeacherPreview || (isTeacherDebugMode && Boolean(debugAiUsageStatus));
   const usageSummary = useMemo(() => usageSummaryFromStatus(displayedAiUsageStatus), [displayedAiUsageStatus]);
+  const usageHeaderState = displayedAiUsageStatus?.blocked
+    ? "blocked"
+    : displayedAiUsageStatus?.nearLimit
+      ? "near-limit"
+      : displayedAiUsageStatus
+        ? "available"
+        : aiUsageError
+          ? "error"
+          : "loading";
+  const usageHeaderStyle = {
+    "--student-usage-left": `${usageSummary.todayPercentLeft}%`
+  } as CSSProperties;
   const tutoringTimeHeaderText = displayedAiUsageStatus
     ? `Tutoring time · ${usageSummary.todayPercentLeft}% left`
     : aiUsageError
@@ -532,8 +563,20 @@ export function StudentWorkspace() {
     : aiUsageError
       ? `Tutoring time unavailable: ${aiUsageError}`
       : "Loading tutoring time";
-  const chatContextMemory = useMemo(() => buildChatContextMemory(messages), [messages]);
+  const activeConversationSummary = useMemo(
+    () => visibleConversationSummaries.find((conversation) => conversation.id === activeSelectedConversationId) ?? null,
+    [activeSelectedConversationId, visibleConversationSummaries]
+  );
+  const chatContextMemory = useMemo(
+    () => mergeChatContextMemory(buildChatContextMemory(messages), activeConversationSummary?.contextMemory),
+    [activeConversationSummary?.contextMemory, messages]
+  );
   const knowledgeLines = useMemo(() => buildKnowledgeLines(messages), [messages]);
+  const backgroundKnowledgeJobs = useMemo(() => latestBackgroundKnowledgeJobs(messages), [messages]);
+  const backgroundKnowledgeJobKey = backgroundKnowledgeJobs.map((job) => `${job.id}:${job.status}`).join("|");
+  const [isBackgroundKnowledgeRunning, setIsBackgroundKnowledgeRunning] = useState(false);
+  const isForegroundKnowledgeRunning = Boolean(isSending && chatProgress && chatProgressDisplay(chatProgress).isSearching);
+  const isKnowledgeRunning = isForegroundKnowledgeRunning || isBackgroundKnowledgeRunning;
   const understandingState = useMemo(() => buildUnderstandingState(messages), [messages]);
   const latestKnowledgeMessageId = useMemo(() => latestKnowledgeAssistantMessageId(messages), [messages]);
   const previousKnowledgeKeysRef = useRef<string[] | null>(null);
@@ -583,6 +626,64 @@ export function StudentWorkspace() {
 
     return () => window.clearTimeout(timeout);
   }, [knowledgeLines]);
+
+  useEffect(() => {
+    const hasScheduledJob = backgroundKnowledgeJobs.some((job) => (job.status || "scheduled") === "scheduled");
+
+    if (!hasScheduledJob) {
+      setIsBackgroundKnowledgeRunning(false);
+      return;
+    }
+
+    setIsBackgroundKnowledgeRunning(true);
+    const timeout = window.setTimeout(() => setIsBackgroundKnowledgeRunning(false), 6000);
+
+    return () => window.clearTimeout(timeout);
+  }, [backgroundKnowledgeJobKey, backgroundKnowledgeJobs]);
+
+  useEffect(() => {
+    const hasScheduledJob = backgroundKnowledgeJobs.some((job) => (job.status || "scheduled") === "scheduled");
+
+    if (!hasScheduledJob || !activeCourseId || !user || profile?.role !== "student" || isTeacherPreview) {
+      return;
+    }
+
+    let isCancelled = false;
+    let pollCount = 0;
+    let timeoutId: number | undefined;
+
+    const refreshConversations = () => {
+      pollCount += 1;
+      user
+        .getIdToken()
+        .then((token) => fetchStudentConversationSummaries({ classId: activeCourseId, token }))
+        .then((nextConversations) => {
+          if (!isCancelled) {
+            setConversationSummaries(nextConversations);
+            setConversationLoadError("");
+          }
+        })
+        .catch((caughtError) => {
+          if (!isCancelled) {
+            setConversationLoadError(describeStudentConversationLoadError(caughtError));
+          }
+        })
+        .finally(() => {
+          if (!isCancelled && pollCount < 5) {
+            timeoutId = window.setTimeout(refreshConversations, 2500);
+          }
+        });
+    };
+
+    timeoutId = window.setTimeout(refreshConversations, 1800);
+
+    return () => {
+      isCancelled = true;
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [activeCourseId, backgroundKnowledgeJobKey, backgroundKnowledgeJobs, isTeacherPreview, profile?.role, user]);
 
   const canSendMessage = Boolean(
     activeCourseId &&
@@ -2010,6 +2111,29 @@ export function StudentWorkspace() {
                 </h1>
               </div>
               <div className="student-main-header-actions" ref={headerActionsRef}>
+                <div className="student-header-control-wrap">
+                  <KnowledgeIconButton
+                    animationLines={knowledgeAnimationLines}
+                    isActive={knowledgeLines.length > 0}
+                    isExpanded={openHeaderDropdown === "context"}
+                    isRunning={isKnowledgeRunning}
+                    recentItems={knowledgeLines.slice(-5)}
+                    onClick={() =>
+                      setOpenHeaderDropdown((currentDropdown) =>
+                        currentDropdown === "context" ? null : "context"
+                      )
+                    }
+                  />
+                  {openHeaderDropdown === "context" ? (
+                    <StudentContextPopover
+                      backgroundJobs={backgroundKnowledgeJobs}
+                      classId={activeCourseId}
+                      contextMemory={chatContextMemory}
+                      conversationId={activeSelectedConversationId}
+                      id="student-context-popover"
+                    />
+                  ) : null}
+                </div>
                 {showUsageHeader ? (
                   <div className="student-header-control-wrap">
                     <button
@@ -2017,6 +2141,8 @@ export function StudentWorkspace() {
                       aria-controls="student-usage-popover"
                       aria-expanded={openHeaderDropdown === "usage"}
                       className="student-header-control student-usage-header-control"
+                      data-usage-state={usageHeaderState}
+                      style={usageHeaderStyle}
                       title={tutoringTimeHeaderLabel}
                       type="button"
                       onClick={() =>
@@ -2024,13 +2150,7 @@ export function StudentWorkspace() {
                       }
                     >
                       <HeaderControlIcon kind="tutoringTime" />
-                      {displayedAiUsageStatus ? (
-                        <span className="student-header-control-label is-always-visible">
-                          {usageSummary.todayPercentLeft}% left
-                        </span>
-                      ) : (
-                        <span className="student-header-control-label is-always-visible">{tutoringTimeHeaderText}</span>
-                      )}
+                      <span className="sr-only">{tutoringTimeHeaderText}</span>
                     </button>
                     {openHeaderDropdown === "usage" ? (
                       <StudentUsagePopover
@@ -2045,27 +2165,6 @@ export function StudentWorkspace() {
                     ) : null}
                   </div>
                 ) : null}
-                <div className="student-header-control-wrap">
-                  <KnowledgeIconButton
-                    animationLines={knowledgeAnimationLines}
-                    isActive={knowledgeLines.length > 0}
-                    isExpanded={openHeaderDropdown === "context"}
-                    recentItems={knowledgeLines.slice(-5)}
-                    onClick={() =>
-                      setOpenHeaderDropdown((currentDropdown) =>
-                        currentDropdown === "context" ? null : "context"
-                      )
-                    }
-                  />
-                  {openHeaderDropdown === "context" ? (
-                    <StudentContextPopover
-                      classId={activeCourseId}
-                      contextMemory={chatContextMemory}
-                      conversationId={activeSelectedConversationId}
-                      id="student-context-popover"
-                    />
-                  ) : null}
-                </div>
                 <div className="student-header-control-wrap">
                   <UnderstandingLevelButton
                     isExpanded={openHeaderDropdown === "understanding"}
@@ -2571,7 +2670,9 @@ const StudentChatMessage = memo(function StudentChatMessage({
   const sourceChips = message.sources?.length ? sourceChipDetails(message) : [];
   const confusionChoices = message.structuredOutput?.confusionChoices;
   const confusionPrompt = message.structuredOutput?.confusionPrompt?.trim();
-  const isProblemSelectionPrompt = message.structuredOutput?.metadata.choiceDisplay === "problem_selection";
+  const choiceDisplay = message.structuredOutput?.metadata.choiceDisplay;
+  const isProblemSelectionPrompt = choiceDisplay === "problem_selection";
+  const isSupportPathPrompt = choiceDisplay === "support_path_uncertainty";
   const visibleConfusionPrompt =
     confusionPrompt && !messageBlocks.some((block) => sameDisplayedText(block.content, confusionPrompt))
       ? confusionPrompt
@@ -2625,7 +2726,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
               key={block.kind}
             >
               <strong>
-                {block.kind === "problem" || block.kind === "example" || block.kind === "formula" ? (
+                {block.kind === "problem" || block.kind === "example" || block.kind === "rule" || block.kind === "key-idea" || block.kind === "source-context" ? (
                   <KnowledgeItemTypeIcon
                     isEmphasized={isLatestKnowledgeMessage}
                     role={knowledgeRoleFromSectionKind(block.kind)}
@@ -2649,6 +2750,7 @@ const StudentChatMessage = memo(function StudentChatMessage({
             choices={confusionChoices}
             disabled={isSending}
             isProblemSelection={isProblemSelectionPrompt}
+            isSupportPath={isSupportPathPrompt}
             prompt={visibleConfusionPrompt}
             onChoiceSelect={onChoiceSelect}
           />
@@ -2725,27 +2827,20 @@ function streamingPlaceholderBlockForSection(
   streamingState: StreamingAssistantState
 ): AssistantMessageBlock | undefined {
   const content = streamingSectionText(message, section);
-  if (section === "mainText" || section === "mainChat") {
+  if (section === "mainText" || section === "studentResponse") {
     return { content, kind: "answer" };
   }
 
-  if (section === "answer") {
-    const hasMainTextBlock = streamingState.sectionOrder.includes("mainText") || streamingState.sectionOrder.includes("mainChat") || Boolean(message.content);
-    return hasMainTextBlock
-      ? { content, kind: "section-answer", label: "Answer" }
-      : { content, kind: "answer" };
-  }
-
   const labels: Record<StructuredStreamedSectionKey, { kind: string; label: string }> = {
-    answer: { kind: "section-answer", label: "Answer" },
     checkWork: { kind: "check-work", label: "Check your work" },
     example: { kind: "example", label: "Similar example" },
-    explanation: { kind: "explanation", label: "Why this works" },
-    formula: { kind: "formula", label: "Formula" },
     hint: { kind: "hint", label: "Hint" },
-    mainChat: { kind: "section-answer", label: "Answer" },
+    keyIdea: { kind: "key-idea", label: "Key idea" },
+    studentResponse: { kind: "section-answer", label: "Answer" },
+    method: { kind: "method", label: "Method" },
     problem: { kind: "problem", label: "Problem" },
-    sourceNote: { kind: "source-note", label: "Source" }
+    rule: { kind: "rule", label: "Rule" },
+    sourceContext: { kind: "source-context", label: "Source context" }
   };
   return { content, ...labels[section] };
 }
@@ -2763,18 +2858,19 @@ function streamedSectionKeyFromBlock(kind: string, streamingState?: StreamingAss
     if (streamingState?.activeSections.mainText || streamingState?.completedSections.mainText) {
       return "mainText";
     }
-    return streamingState?.activeSections.mainChat || streamingState?.completedSections.mainChat ? "mainChat" : "answer";
+    return streamingState?.activeSections.studentResponse || streamingState?.completedSections.studentResponse ? "studentResponse" : undefined;
   }
 
   const blockToSection: Record<string, StructuredStreamedSectionKey> = {
     "check-work": "checkWork",
     example: "example",
-    explanation: "explanation",
-    formula: "formula",
-    "section-answer": "mainChat",
+    "section-answer": "studentResponse",
     hint: "hint",
+    "key-idea": "keyIdea",
+    method: "method",
     problem: "problem",
-    "source-note": "sourceNote"
+    rule: "rule",
+    "source-context": "sourceContext"
   };
   return blockToSection[kind];
 }
@@ -2783,18 +2879,22 @@ function TutorConfusionChoices({
   choices,
   disabled,
   isProblemSelection,
+  isSupportPath,
   prompt,
   onChoiceSelect
 }: {
   choices: TutorConfusionChoice[];
   disabled: boolean;
   isProblemSelection?: boolean;
+  isSupportPath?: boolean;
   prompt?: string;
   onChoiceSelect: (message: string) => void;
 }) {
   return (
     <div
-      className={`assistant-confusion-choice-panel${isProblemSelection ? " problem-selection" : ""}`}
+      className={`assistant-confusion-choice-panel${isProblemSelection ? " problem-selection" : ""}${
+        isSupportPath ? " support-path" : ""
+      }`}
     >
       {prompt ? <p>{prompt}</p> : null}
       <div className="assistant-confusion-choice-grid" aria-label="Choose what Chandra should focus on">
@@ -2825,13 +2925,18 @@ type SourceChipDetail = {
 };
 
 function sourceChipDetails(message: ChatMessage): SourceChipDetail[] {
-  const sources = message.sources ?? [];
+  const structuredProblemNumber = structuredProblemNumberForSourceDisplay(message);
+  const rawSources = message.sources ?? [];
+  const sources = rawSources.map((source) =>
+    sourceWithDisplayedProblemNumber(source, structuredProblemNumber, rawSources.length)
+  );
   const groupedSources = new Map<string, { pages: Set<number>; source: TutorSource }>();
 
   for (const source of sources) {
     const key = [
       source.sourceId ?? source.pdfId ?? source.id ?? source.title,
       source.materialType,
+      source.sourceItemLabel ?? "",
       source.problemNumber ?? source.problemNumbers?.join(",") ?? ""
     ].join("|");
     const existing = groupedSources.get(key) ?? { pages: new Set<number>(), source };
@@ -2874,6 +2979,56 @@ function sourceChipDetails(message: ChatMessage): SourceChipDetail[] {
   ];
 }
 
+function sourceWithDisplayedProblemNumber(
+  source: TutorSource,
+  structuredProblemNumber: string,
+  sourceCount: number
+): TutorSource {
+  if (
+    source.sourceItemLabel ||
+    !structuredProblemNumber ||
+    !shouldUseStructuredProblemNumberForSource(source, structuredProblemNumber, sourceCount)
+  ) {
+    return source;
+  }
+
+  return { ...source, problemNumber: structuredProblemNumber };
+}
+
+function shouldUseStructuredProblemNumberForSource(
+  source: TutorSource,
+  structuredProblemNumber: string,
+  sourceCount: number
+) {
+  if (source.problemNumbers?.map((number) => number.trim()).includes(structuredProblemNumber)) {
+    return true;
+  }
+
+  if (source.usedAs === "active_problem" || source.usedAs === "problem_source") {
+    return true;
+  }
+
+  if (source.retrievalReason === "student_requested_problem" || source.retrievalReason === "student_changed_problem") {
+    return true;
+  }
+
+  return sourceCount === 1 && Boolean(source.problemNumber || source.problemNumbers?.length);
+}
+
+function structuredProblemNumberForSourceDisplay(message: ChatMessage) {
+  const metadataNumber = String(message.structuredOutput?.metadata?.problemNumber ?? "").trim();
+  if (metadataNumber) {
+    return metadataNumber;
+  }
+
+  return firstProblemNumberFromText(String(message.structuredOutput?.sections?.problem ?? ""));
+}
+
+function firstProblemNumberFromText(text: string) {
+  const match = text.match(/\b(?:problem|exercise|question|#)?\s*(\d{1,3})\s*\.\s*(\d{1,3}[a-z]?)\b/i);
+  return match ? `${match[1]}.${match[2]}` : "";
+}
+
 function matchingKnowledgeItemForSource(source: TutorSource, items: KnowledgeItem[]) {
   return items.find((item) => {
     const sourceIds = [source.sourceId, source.pdfId, source.id].filter(Boolean);
@@ -2891,7 +3046,7 @@ function matchingKnowledgeItemForSource(source: TutorSource, items: KnowledgeIte
 function formatTutorSourceLabel(source: TutorSource) {
   return [
     source.title,
-    source.problemNumber ? `problem ${source.problemNumber}` : "",
+    source.sourceItemLabel || (source.problemNumber ? `problem ${source.problemNumber}` : ""),
     source.pageNumber ? `p. ${source.pageNumber}` : ""
   ].filter(Boolean).join(" · ");
 }
@@ -2930,7 +3085,7 @@ function formatSourceWhat(source: TutorSource, pages: number[], knowledgeItem?: 
     ""
   );
   const problemText = source.problemNumber
-    ? `Problem ${source.problemNumber}`
+    ? source.sourceItemLabel || `Problem ${source.problemNumber}`
     : source.problemNumbers?.length
       ? `Problems ${source.problemNumbers.join(", ")}`
       : knowledgeItem?.problemId
@@ -3010,10 +3165,8 @@ function MessageDebugDetails({ message, options }: { message: ChatMessage; optio
     debug.inputTokenBreakdown.find((section) => section.id === selectedInputSectionId) ??
     debug.inputTokenBreakdown[0];
 
-  const revealTraceDebug = message.role === "assistant" && hasEnabledTutorTraceDebugOption(options);
-
   return (
-    <details className="message-debug-details" open={revealTraceDebug ? true : undefined}>
+    <details className="message-debug-details">
       <summary aria-label={`Show debug details for ${message.role} message`}>
         Debug · {debug.summary}
       </summary>
@@ -3115,10 +3268,20 @@ function TutorTraceDebugSections({ message, options }: { message: ChatMessage; o
   const sections = [
     options.showExactSearches
       ? {
-          content: trace.searchQueries?.length
-            ? trace.searchQueries.map((query, index) => `${index + 1}. ${query}`).join("\n")
-            : "No retrieval queries were recorded for this message.",
-          label: "Exact searches"
+          content: buildRetrievalSearchDebugContent(trace),
+          label: "Retrieval searches"
+        }
+      : null,
+    options.showExactSearches
+      ? {
+          content: buildReferenceExpansionDebugContent(trace),
+          label: "Reference expansion"
+        }
+      : null,
+    options.showExactSearches
+      ? {
+          content: buildRetrievalDiagnosticsDebugContent(trace),
+          label: "Retrieval diagnostics"
         }
       : null,
     options.showTutorDecision
@@ -3127,6 +3290,18 @@ function TutorTraceDebugSections({ message, options }: { message: ChatMessage; o
             ? formatDebugJson(trace.retrievalDecision)
             : "No primary tutor turn was recorded for this message.",
           label: "Primary tutor turn"
+        }
+      : null,
+    options.showTutorDecision
+      ? {
+          content: buildSecondTutorTurnDebugContent(trace),
+          label: "Second tutor turn"
+        }
+      : null,
+    options.showTutorDecision
+      ? {
+          content: buildSupportRetrievalDebugContent(trace),
+          label: "Support retrieval"
         }
       : null,
     options.showTutorPlan
@@ -3145,7 +3320,7 @@ function TutorTraceDebugSections({ message, options }: { message: ChatMessage; o
       : null,
     options.showSelectedSources
       ? {
-          content: trace.selectedPages?.length ? formatDebugJson(trace.selectedPages) : "No selected source pages were recorded for this message.",
+          content: buildSelectedPagesDebugContent(trace),
           label: "Selected pages"
         }
       : null,
@@ -3173,6 +3348,175 @@ function TutorTraceDebugSections({ message, options }: { message: ChatMessage; o
       ))}
     </div>
   );
+}
+
+function buildRetrievalSearchDebugContent(trace: NonNullable<ChatMessage["langGraphTrace"]>) {
+  const queries = trace.searchQueries ?? [];
+  const expansionDiagnostics = trace.referenceExpansionDiagnostics ?? [];
+
+  if (!queries.length) {
+    return "No retrieval searches ran for this message.";
+  }
+
+  return queries
+    .map((query, index) => {
+      const expansion = expansionDiagnostics.find((item) => stringDebugValue(item.query) === query);
+      const label = expansion ? `LLM reference expansion, depth ${stringDebugValue(expansion.depth) || "?"}` : "Initial tutor search";
+      const reason = stringDebugValue(expansion?.retrieval_reason) || stringDebugValue(trace.retrievalReason) || "not recorded";
+      const resultCount = stringDebugValue(expansion?.result_count);
+      const details = [
+        `Reason: ${reason}`,
+        resultCount ? `Results: ${resultCount}` : "",
+        expansion?.reference_type ? `Reference: ${stringDebugValue(expansion.reference_type)}` : "",
+        expansion?.why ? `Why: ${stringDebugValue(expansion.why)}` : "",
+        expansion?.planner_source ? `Planner: ${stringDebugValue(expansion.planner_source)}` : ""
+      ].filter(Boolean);
+
+      return [`${index + 1}. ${query}`, `   ${label}`, ...details.map((detail) => `   ${detail}`)].join("\n");
+    })
+    .join("\n\n");
+}
+
+function buildReferenceExpansionDebugContent(trace: NonNullable<ChatMessage["langGraphTrace"]>) {
+  const diagnostics = trace.referenceExpansionDiagnostics ?? [];
+
+  if (!diagnostics.length) {
+    return trace.stages?.includes("expand_referenced_sources")
+      ? "Reference expansion ran, but no follow-up searches were recorded."
+      : "Reference expansion did not run for this message.";
+  }
+
+  return diagnostics
+    .map((item, index) =>
+      [
+        `${index + 1}. ${stringDebugValue(item.query) || "Unnamed follow-up search"}`,
+        `   Reference: ${stringDebugValue(item.reference_type) || "not recorded"}`,
+        `   Depth: ${stringDebugValue(item.depth) || "not recorded"}`,
+        `   Results: ${stringDebugValue(item.result_count) || "0"}`,
+        `   Planner: ${stringDebugValue(item.planner_source) || "not recorded"}`,
+        item.why ? `   Why: ${stringDebugValue(item.why)}` : "",
+        item.reason ? `   Note: ${stringDebugValue(item.reason)}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n")
+    )
+    .join("\n\n");
+}
+
+function buildRetrievalDiagnosticsDebugContent(trace: NonNullable<ChatMessage["langGraphTrace"]>) {
+  const diagnostics = trace.retrievalDiagnostics ?? [];
+
+  if (!diagnostics.length) {
+    return "No retrieval warnings or mismatch diagnostics were recorded.";
+  }
+
+  return diagnostics
+    .map((item, index) =>
+      [
+        `${index + 1}. ${stringDebugValue(item.issue) || "Retrieval diagnostic"}`,
+        `   Query: ${stringDebugValue(item.query) || "not recorded"}`,
+        item.reason ? `   Reason: ${stringDebugValue(item.reason)}` : "",
+        item.suggested_next_query ? `   Suggested next query: ${stringDebugValue(item.suggested_next_query)}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n")
+    )
+    .join("\n\n");
+}
+
+function buildSupportRetrievalDebugContent(trace: NonNullable<ChatMessage["langGraphTrace"]>) {
+  const sections = [
+    {
+      label: "Response mode",
+      value: trace.responseMode || stringDebugValue(trace.retrievalDecision?.response_mode) || "not recorded"
+    },
+    {
+      label: "LLM 1 support intents",
+      value: formatDebugArray(trace.supportIntents)
+    },
+    {
+      label: "LLM 2 additional support intents",
+      value: formatDebugArray(trace.additionalSupportIntents)
+    },
+    {
+      label: "Scheduled background jobs",
+      value: formatDebugArray(trace.scheduledBackgroundJobs)
+    },
+    {
+      label: "Search ledger",
+      value: formatDebugArray(trace.searchLedger)
+    }
+  ];
+
+  return sections
+    .map((section) => `${section.label}:\n${section.value}`)
+    .join("\n\n");
+}
+
+function formatDebugArray(value: Array<Record<string, unknown>> | undefined) {
+  return value?.length ? formatDebugJson(value) : "None recorded.";
+}
+
+function buildSecondTutorTurnDebugContent(trace: NonNullable<ChatMessage["langGraphTrace"]>) {
+  const rawResponse = trace.contextGroundedResponse?.trim();
+
+  if (!rawResponse) {
+    return trace.stages?.includes("context_grounded_answer")
+      ? "The second tutor turn ran, but no raw response was recorded."
+      : "The second tutor turn did not run for this message.";
+  }
+
+  try {
+    return formatDebugJson(JSON.parse(rawResponse));
+  } catch {
+    return rawResponse;
+  }
+}
+
+function buildSelectedPagesDebugContent(trace: NonNullable<ChatMessage["langGraphTrace"]>) {
+  const pages = trace.selectedPages ?? [];
+
+  if (!pages.length) {
+    return "No selected source pages were recorded for this message.";
+  }
+
+  return pages
+    .map((page, index) => {
+      const pageLabel =
+        page.printedPageStart && page.printedPageEnd && page.printedPageStart !== page.printedPageEnd
+          ? `printed pages ${page.printedPageStart}-${page.printedPageEnd}`
+          : page.printedPageStart
+            ? `printed page ${page.printedPageStart}`
+            : page.pageStart && page.pageEnd && page.pageStart !== page.pageEnd
+              ? `pages ${page.pageStart}-${page.pageEnd}`
+              : page.pageStart
+                ? `page ${page.pageStart}`
+                : "page not recorded";
+      return [
+        `${index + 1}. ${page.title || "Untitled source"} (${pageLabel})`,
+        page.materialType ? `   Type: ${page.materialType}` : "",
+        page.retrievalMode ? `   Retrieval mode: ${page.retrievalMode}` : "",
+        page.retrievalReason ? `   Retrieval reason: ${page.retrievalReason}` : "",
+        page.problemNumbers?.length ? `   Problems: ${page.problemNumbers.join(", ")}` : "",
+        page.docId ? `   Doc ID: ${page.docId}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n\n");
+}
+
+function stringDebugValue(value: unknown) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return formatDebugJson(value);
 }
 
 function hasEnabledTutorTraceDebugOption(options: TutorDebugOptions) {
@@ -3220,6 +3564,10 @@ function buildMessageDebugDisplay(message: ChatMessage) {
       { label: "Model requests", value: formatInteger(debugInfo?.providerRequestCount ?? inferProviderRequestCount(message)) },
       { label: "Tool calls", value: formatInteger(debugInfo?.toolCallCount ?? message.langGraphTrace?.toolCallCount ?? 0) },
       { label: "Search queries", value: formatInteger(debugInfo?.searchQueryCount ?? message.langGraphTrace?.searchQueries?.length ?? 0) },
+      { label: "Response mode", value: message.langGraphTrace?.responseMode || "Not recorded" },
+      { label: "Support intents", value: formatInteger(message.langGraphTrace?.supportIntents?.length ?? 0) },
+      { label: "Background jobs", value: formatInteger(message.langGraphTrace?.scheduledBackgroundJobs?.length ?? 0) },
+      { label: "Search ledger entries", value: formatInteger(message.langGraphTrace?.searchLedger?.length ?? 0) },
       { label: "Selected pages", value: formatInteger(debugInfo?.selectedPageCount ?? message.langGraphTrace?.selectedPages?.length ?? 0) },
       { label: "Input breakdown sections", value: formatInteger(inputTokenBreakdown.length) },
       { label: "Input breakdown estimate", value: formatInteger(inputBreakdownTotal) },
@@ -3232,6 +3580,7 @@ function buildMessageDebugDisplay(message: ChatMessage) {
     const featuredRows = [
       { label: "Tokens", value: formatInteger(displayTokens) },
       { label: "Requests", value: formatInteger(requestCount) },
+      { label: "Mode", value: message.langGraphTrace?.responseMode || "Not recorded" },
       { label: "Duration", value: debugInfo ? formatDuration(debugInfo.durationMs) : "Not recorded" },
       { label: "Model", value: debugInfo?.modelId || modelCallUsage[0]?.model || "Not recorded" }
     ];
@@ -4167,7 +4516,10 @@ const ChatProgressMessage = memo(function ChatProgressMessage({ progress }: { pr
   const display = chatProgressDisplay(progress);
 
   return (
-    <article className="student-workspace-message assistant progress-message" aria-live="polite">
+    <article
+      className={`student-workspace-message assistant progress-message${display.isSearching ? " is-searching" : ""}`}
+      aria-live="polite"
+    >
       <span className="chandra-message-avatar" aria-hidden="true">
         C
       </span>
@@ -4182,8 +4534,16 @@ const ChatProgressMessage = memo(function ChatProgressMessage({ progress }: { pr
           </div>
           {display.searchRows.length ? (
             <ul className="progress-search-list" aria-label="Class material checks">
-              {display.searchRows.map((row) => (
-                <li key={row.key} className="progress-search-item">
+              {display.searchRows.map((row, index) => (
+                <li
+                  key={row.key}
+                  className="progress-search-item"
+                  style={
+                    {
+                      "--progress-search-delay": `${index * 90}ms`
+                    } as CSSProperties
+                  }
+                >
                   <span className="progress-search-dot" aria-hidden="true" />
                   <span>{row.label}</span>
                 </li>
@@ -4233,29 +4593,39 @@ function KnowledgeIconButton({
   animationLines,
   isActive,
   isExpanded,
+  isRunning,
   recentItems,
   onClick
 }: {
   animationLines: KnowledgeAnimationLine[];
   isActive: boolean;
   isExpanded: boolean;
+  isRunning: boolean;
   recentItems: KnowledgeLine[];
   onClick: () => void;
 }) {
+  const label = isRunning ? "Knowledge search running" : "Knowledge";
+
   return (
     <button
-      aria-label="Knowledge"
+      aria-label={label}
       aria-controls="student-context-popover"
       aria-expanded={isExpanded}
       className={`student-header-control student-knowledge-control${isActive ? " is-active" : ""}${
         animationLines.length ? " is-inserting" : ""
-      }`}
-      title="Knowledge"
+      }${isRunning ? " is-running" : ""}`}
+      title={label}
       type="button"
       onClick={onClick}
     >
-      <KnowledgeStackIcon animationLines={animationLines} isActive={isActive} recentItems={recentItems} />
+      <KnowledgeStackIcon
+        animationLines={animationLines}
+        isActive={isActive || isRunning}
+        isRunning={isRunning}
+        recentItems={recentItems}
+      />
       <span className="student-header-control-label">Knowledge</span>
+      {isRunning ? <span className="sr-only">Checking class materials</span> : null}
     </button>
   );
 }
@@ -4263,10 +4633,12 @@ function KnowledgeIconButton({
 function KnowledgeStackIcon({
   animationLines,
   isActive,
+  isRunning,
   recentItems
 }: {
   animationLines: KnowledgeAnimationLine[];
   isActive: boolean;
+  isRunning: boolean;
   recentItems: KnowledgeLine[];
 }) {
   const visibleItems = recentItems.slice(-5);
@@ -4276,6 +4648,7 @@ function KnowledgeStackIcon({
       aria-hidden="true"
       className="student-header-control-icon knowledge-stack-icon"
       data-active={isActive ? "true" : "false"}
+      data-running={isRunning ? "true" : "false"}
       viewBox="0 0 32 32"
     >
       <g className="knowledge-stack-pages">
@@ -4407,8 +4780,16 @@ function knowledgeRoleFromSectionKind(kind: string): KnowledgeItemRole {
     return "example";
   }
 
-  if (kind === "formula") {
+  if (kind === "key-idea") {
+    return "definition";
+  }
+
+  if (kind === "rule") {
     return "theorem";
+  }
+
+  if (kind === "source-context") {
+    return "source";
   }
 
   return "problem";
@@ -4479,11 +4860,13 @@ function HeaderControlIcon({ kind }: { kind: "feedback" | "tutoringTime" }) {
 }
 
 const StudentContextPopover = memo(function StudentContextPopover({
+  backgroundJobs,
   classId,
   contextMemory,
   conversationId,
   id
 }: {
+  backgroundJobs: BackgroundKnowledgeJob[];
   classId?: string;
   contextMemory: ChatContextMemory;
   conversationId?: string;
@@ -4496,6 +4879,9 @@ const StudentContextPopover = memo(function StudentContextPopover({
       ? [contextMemory.currentProblem]
       : [];
   const sourceCount = contextMemory.sourcesUsed?.length ?? 0;
+  const unconfirmedSourceCount = contextMemory.unconfirmedSources?.length ?? 0;
+  const totalSourceCount = sourceCount + unconfirmedSourceCount;
+  const searchResults = contextMemory.searchResults ?? [];
 
   return (
     <section className="student-header-popover student-context-popover" id={id} role="region" aria-label="Knowledge">
@@ -4503,8 +4889,8 @@ const StudentContextPopover = memo(function StudentContextPopover({
         <h2>Knowledge</h2>
         {hasContext ? (
           <span>
-            {savedProblems.length} {savedProblems.length === 1 ? "problem" : "problems"} · {sourceCount}{" "}
-            {sourceCount === 1 ? "source" : "sources"}
+            {savedProblems.length} {savedProblems.length === 1 ? "problem" : "problems"} · {totalSourceCount}{" "}
+            {totalSourceCount === 1 ? "source" : "sources"}
           </span>
         ) : null}
       </div>
@@ -4553,16 +4939,37 @@ const StudentContextPopover = memo(function StudentContextPopover({
             </div>
           ) : null}
 
-          {contextMemory.sourcesUsed?.length ? (
+          {searchResults.length ? (
+            <div className="student-popover-section">
+              <h3>Searches</h3>
+              <div className="student-context-search-list">
+                {searchResults.map((search, index) => (
+                  <StudentContextSearchResultItem index={index} key={`${search.query}-${index}`} search={search} />
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {contextMemory.sourcesUsed?.length || contextMemory.unconfirmedSources?.length ? (
             <div className="student-popover-section">
               <h3>Sources</h3>
               <ul className="student-context-source-list">
-                {contextMemory.sourcesUsed.map((source, index) => (
+                {(contextMemory.sourcesUsed ?? []).map((source, index) => (
                   <StudentContextSourceItem
                     classId={classId}
                     conversationId={conversationId}
                     index={index}
                     key={`${source.id ?? source.sourceName ?? "source"}-${source.pageNumber ?? index}`}
+                    source={source}
+                  />
+                ))}
+                {(contextMemory.unconfirmedSources ?? []).map((source, index) => (
+                  <StudentContextSourceItem
+                    classId={classId}
+                    conversationId={conversationId}
+                    index={index}
+                    isUnconfirmed
+                    key={`unconfirmed-${source.id ?? source.sourceName ?? "source"}-${source.pageNumber ?? index}`}
                     source={source}
                   />
                 ))}
@@ -4589,22 +4996,57 @@ const StudentContextPopover = memo(function StudentContextPopover({
   );
 });
 
+function StudentContextSearchResultItem({
+  index,
+  search
+}: {
+  index: number;
+  search: NonNullable<ChatContextMemory["searchResults"]>[number];
+}) {
+  const resultCount = search.resultCount ?? search.pages.length;
+
+  return (
+    <details className="student-context-search-card" open={index === 0}>
+      <summary>
+        <span>
+          <strong>{search.query}</strong>
+          <small>{formatSearchResultMeta(search.retrievalReason, resultCount)}</small>
+        </span>
+      </summary>
+      {search.pages.length ? (
+        <ul className="student-context-search-pages">
+          {search.pages.map((page, pageIndex) => (
+            <li key={`${page.sourceName ?? "source"}-${page.pageNumber ?? pageIndex}-${page.problemNumbers?.join("-") ?? ""}`}>
+              <span>{formatSearchResultPageLabel(page)}</span>
+              {page.materialType ? <small>{readableSourceType(page.materialType)}</small> : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="student-context-search-empty">No useful page found yet.</p>
+      )}
+    </details>
+  );
+}
+
 function StudentContextSourceItem({
   classId,
   conversationId,
   index,
+  isUnconfirmed = false,
   source
 }: {
   classId?: string;
   conversationId?: string;
   index: number;
+  isUnconfirmed?: boolean;
   source: NonNullable<ChatContextMemory["sourcesUsed"]>[number];
 }) {
   const sourceLabel = formatKnowledgeSourceListLabel(source);
   const shouldShowImage = source.sourceType === "student_upload" && isImageContextSource(source);
 
   return (
-    <li className={shouldShowImage ? "is-image-source" : undefined}>
+    <li className={`${shouldShowImage ? "is-image-source" : ""}${isUnconfirmed ? " is-unconfirmed" : ""}`.trim()}>
       {shouldShowImage ? (
         <span className="student-context-source-image" title={sourceLabel}>
           <AttachmentVisual
@@ -4625,6 +5067,7 @@ function StudentContextSourceItem({
         <strong>{formatPageNumber(source.pageNumber)}</strong>
       ) : null}
       {!source.label && source.problemNumber ? <small>Problem {source.problemNumber}</small> : null}
+      {isUnconfirmed ? <small>{source.supportType || "Unconfirmed"}</small> : null}
       {source.sourceType === "student_upload" || source.sourceType === "pasted_problem" ? (
         <small>{studentProvidedSourceLabel(source.sourceType)}</small>
       ) : null}
@@ -4851,6 +5294,66 @@ function forcedTutorDebugAiUsageStatus(options: TutorDebugOptions): StudentAiUsa
   return null;
 }
 
+function latestBackgroundKnowledgeJobs(messages: ChatMessage[]): BackgroundKnowledgeJob[] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const jobs = messages[index]?.langGraphTrace?.scheduledBackgroundJobs;
+
+    if (!jobs?.length) {
+      continue;
+    }
+
+    return jobs
+      .map((job, jobIndex) => backgroundKnowledgeJobFromTrace(job, jobIndex))
+      .filter((job): job is BackgroundKnowledgeJob => Boolean(job))
+      .slice(0, 3);
+  }
+
+  return [];
+}
+
+function backgroundKnowledgeJobFromTrace(value: Record<string, unknown>, index: number): BackgroundKnowledgeJob | null {
+  const id = stringFromUnknown(value.job_id) || stringFromUnknown(value.idempotency_key) || `background-knowledge-${index}`;
+  const topic = stringFromUnknown(value.topic);
+
+  if (!id && !topic) {
+    return null;
+  }
+
+  return {
+    id,
+    status: stringFromUnknown(value.status),
+    topic,
+    type: readableBackgroundSupportType(stringFromUnknown(value.intent_type) || stringFromUnknown(value.source))
+  };
+}
+
+function stringFromUnknown(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readableBackgroundSupportType(value?: string) {
+  const normalized = (value ?? "").replace(/_/g, " ").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.includes("example")) {
+    return "Example search";
+  }
+  if (normalized.includes("definition")) {
+    return "Definition search";
+  }
+  if (normalized.includes("theorem")) {
+    return "Theorem search";
+  }
+  if (normalized.includes("formula")) {
+    return "Formula search";
+  }
+  if (normalized.includes("nearby")) {
+    return "Nearby context";
+  }
+  return "Supporting search";
+}
+
 function buildKnowledgeLines(messages: ChatMessage[]): KnowledgeLine[] {
   const lines: KnowledgeLine[] = [];
   const seen = new Set<string>();
@@ -4951,7 +5454,7 @@ function formatKnowledgeSourceListLabel(source: NonNullable<ChatContextMemory["s
   return (
     [
       formatPageNumber(source.pageNumber),
-      source.problemNumber ? `Problem ${source.problemNumber}` : undefined
+      source.sourceItemLabel || (source.problemNumber ? `Problem ${source.problemNumber}` : undefined)
     ]
       .filter(Boolean)
       .join(" · ") ||
@@ -4963,6 +5466,28 @@ function formatKnowledgeSourceListLabel(source: NonNullable<ChatContextMemory["s
 
 function stripStudentUploadLabelPrefix(label: string) {
   return label.replace(/^Student upload\s*[\u00b7\u2022-]\s*/i, "") || label;
+}
+
+function formatSearchResultMeta(retrievalReason: string | undefined, resultCount: number) {
+  return [
+    studentSearchPurposeLabel(retrievalReason, ""),
+    `${resultCount} ${resultCount === 1 ? "page" : "pages"} found`
+  ].filter(Boolean).join(" · ");
+}
+
+function formatSearchResultPageLabel(page: NonNullable<NonNullable<ChatContextMemory["searchResults"]>[number]["pages"]>[number]) {
+  const pageLabel = formatSearchResultPageNumber(page.pageNumber, page.pageEnd);
+  return [page.sourceName || page.citationLabel || "Class material", pageLabel].filter(Boolean).join(" · ");
+}
+
+function formatSearchResultPageNumber(pageNumber?: number, pageEnd?: number) {
+  if (!pageNumber) {
+    return "";
+  }
+  if (pageEnd && pageEnd !== pageNumber) {
+    return `pp. ${pageNumber}-${pageEnd}`;
+  }
+  return `p. ${pageNumber}`;
 }
 
 function formatRetrievalReason(reason: string) {
@@ -5096,7 +5621,7 @@ function upsertStreamedAssistantSection({
   const currentContent = existing?.content ?? "";
   const structuredSection = section === "mainText" ? undefined : section;
   const currentSectionText =
-    section === "mainText" || section === "mainChat" ? currentContent : structuredSectionText(existingSections, structuredSection);
+    section === "mainText" || section === "studentResponse" ? currentContent : structuredSectionText(existingSections, structuredSection);
   const nextText =
     event.type === "section_delta" ? `${currentSectionText}${event.delta}` : currentSectionText;
   const activeSections = {
@@ -5110,7 +5635,7 @@ function upsertStreamedAssistantSection({
   const nextMessage: StreamingChatMessage = {
     id: messageId,
     role: "assistant",
-    content: section === "mainText" || section === "mainChat" ? nextText : currentContent,
+    content: section === "mainText" || section === "studentResponse" ? nextText : currentContent,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     debugInfo: existing?.debugInfo,
     langGraphTrace: existing?.langGraphTrace,
@@ -5143,6 +5668,15 @@ function upsertStreamedAssistantSection({
 }
 
 function normalizeStreamedSectionKey(section: string): StreamedSectionKey | undefined {
+  if (section === "answer" || section === "mainChat") {
+    return "studentResponse";
+  }
+  if (section === "formula" || section === "formulas") {
+    return "rule";
+  }
+  if (section === "sourceNote" || section === "source_note") {
+    return "sourceContext";
+  }
   return streamedSectionKeys.find((candidate) => candidate === section);
 }
 
@@ -5851,7 +6385,7 @@ function appendProgressSearches(
 }
 
 function quickResponseContent(event: Extract<ChatStreamEvent, { type: "quick_response" }>) {
-  const answer = event.structuredOutput?.sections?.mainChat?.trim() || event.structuredOutput?.sections?.answer?.trim();
+  const answer = event.structuredOutput?.sections?.studentResponse?.trim() || event.structuredOutput?.sections?.answer?.trim();
 
   if (answer) {
     return answer;

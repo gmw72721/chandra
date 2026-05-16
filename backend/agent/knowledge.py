@@ -144,14 +144,22 @@ def problem_request_reason(messages: list[dict[str, Any]]) -> str:
 
 
 def first_problem_number_from_text(text: str) -> str | None:
-    match = PROBLEM_NUMBER_RE.search(text or "")
+    normalized = str(text or "").strip()
+    leading_match = re.match(r"^\s*(\d{1,3}(?:\.\d{1,3})+[a-z]?)\s*(?:[.)]|:|-)?\s+", normalized, re.I)
+    if leading_match:
+        return leading_match.group(1)
+
+    match = PROBLEM_NUMBER_RE.search(normalized)
     return match.group(1) if match else None
 
 
 def infer_pdf_page_used_as(page: dict[str, Any], *, reason: str = "") -> KnowledgeUse:
-    explicit = normalize_knowledge_use(page.get("used_as") or page.get("usedAs"))
-    if explicit != "supporting_context":
+    explicit_value = page.get("used_as") or page.get("usedAs")
+    explicit = normalize_knowledge_use(explicit_value)
+    if str(explicit_value or "").strip():
         return explicit
+    if page.get("lookup_role") == "reference_expansion" or page.get("lookupRole") == "reference_expansion":
+        return "supporting_context"
 
     haystack = " ".join(
         str(value or "")
@@ -453,14 +461,15 @@ def knowledge_items_from_state(
     previous = [item for item in (normalize_knowledge_item(value) for value in previous_items or []) if item]
     page_assets = state.get("used_page_assets") or state.get("page_assets", []) or []
     student_uploads = state.get("student_attachment_files", []) or []
-    primary_page = first_page_asset_from_pages(page_assets)
     resolved_active_problem_text = active_problem_text
+    active_problem_number = first_problem_number_from_text(resolved_active_problem_text)
+    primary_page = active_problem_page_from_pages(page_assets, active_problem_number)
 
     if resolved_active_problem_text:
         previous_active = matching_previous_active_problem(
             previous,
             problem_text=resolved_active_problem_text,
-            problem_id=first_problem_id(primary_page or {}) or first_problem_number_from_text(resolved_active_problem_text),
+            problem_id=active_problem_number or first_problem_id(primary_page or {}),
         )
         active_source_name = source_name or str((primary_page or {}).get("title") or "")
         if not active_source_name and previous_active:
@@ -473,8 +482,8 @@ def knowledge_items_from_state(
             (primary_page or {}).get("page_start"),
         ) or first_positive_int((previous_active or {}).get("page"))
         problem_id = (
-            first_problem_id(primary_page or {})
-            or first_problem_number_from_text(resolved_active_problem_text)
+            active_problem_number
+            or first_problem_id(primary_page or {})
             or str((previous_active or {}).get("problemId") or "")
             or None
         )
@@ -499,7 +508,7 @@ def knowledge_items_from_state(
             if item:
                 items.append(item)
 
-    linked_problem_id = first_problem_id(primary_page or {}) or first_problem_number_from_text(resolved_active_problem_text)
+    linked_problem_id = active_problem_number or first_problem_id(primary_page or {})
     for upload in student_uploads:
         if isinstance(upload, dict):
             item = student_upload_source_knowledge_item(upload, state, linked_problem_id=linked_problem_id)
@@ -545,6 +554,23 @@ def first_page_asset_from_pages(pages: list[Any]) -> dict[str, Any] | None:
         if isinstance(page, dict):
             return page
     return None
+
+
+def active_problem_page_from_pages(pages: list[Any], problem_id: str | None) -> dict[str, Any] | None:
+    if problem_id:
+        normalized_problem_id = str(problem_id).strip()
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            page_numbers = page.get("problem_numbers") or page.get("problemNumbers") or []
+            if isinstance(page_numbers, list) and normalized_problem_id in {str(item).strip() for item in page_numbers}:
+                return page
+
+    for page in pages:
+        if isinstance(page, dict) and page.get("lookup_role") != "reference_expansion":
+            return page
+
+    return first_page_asset_from_pages(pages)
 
 
 def first_problem_id(page: dict[str, Any]) -> str | None:

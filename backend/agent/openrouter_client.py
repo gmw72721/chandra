@@ -53,6 +53,7 @@ class OpenRouterClient:
         temperature: float = 0.4,
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY is required for LangGraph tutor chat.")
@@ -68,6 +69,9 @@ class OpenRouterClient:
 
         if reasoning_effort and model_supports_reasoning_effort(model):
             payload["reasoning"] = {"effort": reasoning_effort}
+
+        if response_format:
+            payload["response_format"] = response_format
 
         if tools:
             payload["tools"] = tools
@@ -114,6 +118,7 @@ class OpenRouterClient:
         temperature: float = 0.4,
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        response_format: dict[str, Any] | None = None,
     ):
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY is required for LangGraph tutor chat.")
@@ -131,6 +136,9 @@ class OpenRouterClient:
 
         if reasoning_effort and model_supports_reasoning_effort(model):
             payload["reasoning"] = {"effort": reasoning_effort}
+
+        if response_format:
+            payload["response_format"] = response_format
 
         if tools:
             payload["tools"] = tools

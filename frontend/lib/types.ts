@@ -108,12 +108,6 @@ export type PdfOcrPageMetadata = {
   ocrProvider: string;
   ocrSource: string;
   ocrConfidence?: number | null;
-  embedding?: number[];
-  embeddingCreatedAt?: string;
-  embeddingDimensions?: number;
-  embeddingModel?: string;
-  embeddingProvider?: string;
-  embeddingTaskType?: string;
   storageBucket: string;
   storagePath: string;
   fullPdfBucket?: string | null;
@@ -150,12 +144,6 @@ export type PdfDetectedProblemMetadata = {
   confidence?: number | null;
   ocrProvider: string;
   ocrSource: string;
-  embedding?: number[];
-  embeddingCreatedAt?: string;
-  embeddingDimensions?: number;
-  embeddingModel?: string;
-  embeddingProvider?: string;
-  embeddingTaskType?: string;
   storageBucket: string;
   storagePath: string;
 };
@@ -268,31 +256,39 @@ export type RetrievalHit = {
 export type RetrievalConfidence = "high" | "medium" | "low";
 
 export type TutorStructuredSections = {
+  studentResponse?: string;
   mainChat?: string;
   answer?: string;
   problem?: string;
   hint?: string;
+  keyIdea?: string;
+  rule?: string;
+  method?: string;
+  /**
+   * Legacy input only. New tutor responses should put conceptual reasoning in
+   * studentResponse, keyIdea, rule, sourceContext, or hint instead of rendering
+   * a separate Explanation section.
+   */
   explanation?: string;
-  formula?: string;
   example?: string;
+  sourceContext?: string;
   checkWork?: string;
-  sourceNote?: string;
 };
 
 export type TutorStructuredSectionKey =
-  | "mainChat"
-  | "answer"
+  | "studentResponse"
   | "problem"
   | "hint"
-  | "explanation"
-  | "formula"
+  | "keyIdea"
+  | "rule"
+  | "method"
   | "example"
-  | "checkWork"
-  | "sourceNote";
+  | "sourceContext"
+  | "checkWork";
 
 export type TutorStructuredMetadata = {
   hintLevel: "none" | "small_hint" | "guided_step" | "worked_example" | "refusal";
-  choiceDisplay?: "problem_selection";
+  choiceDisplay?: "problem_selection" | "support_path_uncertainty";
   problemNumber?: string;
   problemSummary?: string;
   sourceConfidence: "high" | "medium" | "low";
@@ -343,6 +339,7 @@ export type TutorSource = {
   printedPageEnd?: number;
   printedPageNumber?: number;
   printedPageStart?: number;
+  sourceItemLabel?: string;
   problemNumber?: string;
   problemNumbers?: string[];
   reason?: string;
@@ -529,10 +526,21 @@ export type TutorTrace = {
   knowledgeItems?: KnowledgeItem[];
   memoryUsed?: boolean;
   modelCallUsage?: TutorModelCallUsage[];
+  primaryStudentResponse?: string;
+  contextGroundedResponse?: string;
   problemUnderstandingState?: TutorProblemUnderstandingState;
+  responseMode?: string;
   retrievalDecision?: Record<string, unknown>;
+  retrievalDiagnostics?: Array<Record<string, unknown>>;
   retrievalReason?: string;
+  referenceExpansionDiagnostics?: Array<Record<string, unknown>>;
   answerSeekingAssessment?: Record<string, unknown>;
+  supportIntents?: Array<Record<string, unknown>>;
+  additionalSupportIntents?: Array<Record<string, unknown>>;
+  readySupportBundle?: Record<string, unknown>;
+  scheduledBackgroundJobs?: Array<Record<string, unknown>>;
+  supportBundleAction?: Record<string, unknown>;
+  searchLedger?: Array<Record<string, unknown>>;
   searchQueries: string[];
   selectedMetadataRecords?: Array<Record<string, unknown>>;
   selectedPages: Array<{
@@ -544,6 +552,9 @@ export type TutorTrace = {
     printedPageEnd?: number;
     printedPageStart?: number;
     problemNumbers?: string[];
+    retrievalMode?: string;
+    retrievalReason?: string;
+    searchQuery?: string;
     title?: string;
   }>;
   stages: string[];
@@ -701,13 +712,39 @@ export type ChatContextMemory = {
     sourceType?: "class_material" | "pasted_problem" | "student_upload";
     fileType?: "image" | "pdf";
     pageNumber?: number;
+    sourceItemLabel?: string;
     problemNumber?: string;
     label?: string;
+    supportType?: string;
+  }>;
+  unconfirmedSources?: Array<{
+    id?: string;
+    sourceName?: string;
+    sourceType?: "class_material" | "pasted_problem" | "student_upload";
+    fileType?: "image" | "pdf";
+    pageNumber?: number;
+    sourceItemLabel?: string;
+    problemNumber?: string;
+    label?: string;
+    supportType?: string;
   }>;
   failedSearches?: Array<{
     query: string;
     reason?: string;
     timestamp?: string;
+  }>;
+  searchResults?: Array<{
+    query: string;
+    retrievalReason?: string;
+    resultCount?: number;
+    pages: Array<{
+      citationLabel?: string;
+      materialType?: string;
+      pageEnd?: number;
+      pageNumber?: number;
+      problemNumbers?: string[];
+      sourceName?: string;
+    }>;
   }>;
   retrievalReason?: string;
   rawSourceIds?: string[];
