@@ -6,15 +6,20 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ProviderAccountLinkingRequiredError,
   completeEmailMagicLinkSignIn,
+  createBackupPasswordForCurrentUser,
   createRoleProfile,
+  deleteCurrentAccountFromCurrentSession,
   getPendingMagicLinkEmail,
   isEmailMagicLink,
   linkProviderToEmailPasswordAccount,
   requestPasswordReset,
+  refreshGoogleAuthentication,
   sendEmailMagicLink,
   signInWithEmail,
   signInWithProviderAuth,
   signUpWithRole,
+  updateStudentClass,
+  userNeedsBackupPassword,
   type AccountRole,
   type AuthProviderKey,
   type PendingProviderCredential
@@ -57,6 +62,7 @@ export function AuthForm() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [emailLinkUrl] = useState(() => {
     if (typeof window === "undefined") {
       return "";
@@ -66,6 +72,9 @@ export function AuthForm() {
   });
   const [linkingRequest, setLinkingRequest] = useState<PendingProviderCredential | null>(null);
   const [linkingPassword, setLinkingPassword] = useState("");
+  const [backupPassword, setBackupPassword] = useState("");
+  const [backupPasswordConfirmation, setBackupPasswordConfirmation] = useState("");
+  const [savedBackupPasswordUid, setSavedBackupPasswordUid] = useState("");
   const hasCheckedEmailLinkRef = useRef(false);
   const isRepairingProfileRef = useRef(false);
   const { firebaseReady, isLoading, profile, profileError, sessionError, user } = useAuth();
@@ -122,6 +131,11 @@ export function AuthForm() {
     })
       .then((nextProfile) => {
         window.localStorage.removeItem(pendingProfileStorageKey);
+        if (userNeedsBackupPassword(user)) {
+          setNotice("You have successfully signed in. Create a backup password just in case.");
+          return;
+        }
+
         router.push(nextProfile.role === "teacher" ? "/teacher" : "/student");
       })
       .catch((caughtError) => {
@@ -140,6 +154,7 @@ export function AuthForm() {
 
     try {
       if (mode === "signup") {
+        assertStudentClassCodeIsPresent();
         savePendingProfile(buildPendingProfile());
         await signUpWithRole({
           displayName: displayName.trim(),
@@ -179,6 +194,7 @@ export function AuthForm() {
 
     try {
       if (mode === "signup") {
+        assertStudentClassCodeIsPresent();
         savePendingProfile(buildPendingProfile());
       } else {
         clearPendingProfile();
@@ -188,6 +204,10 @@ export function AuthForm() {
 
       if (mode === "signup") {
         updatePendingProfileFromProvider(credential.user);
+      }
+
+      if (userNeedsBackupPassword(credential.user)) {
+        setNotice("You have successfully signed in. Create a backup password just in case.");
       }
     } catch (caughtError) {
       if (caughtError instanceof ProviderAccountLinkingRequiredError) {
@@ -216,6 +236,7 @@ export function AuthForm() {
       }
 
       if (mode === "signup") {
+        assertStudentClassCodeIsPresent();
         savePendingProfile(buildPendingProfile());
       } else {
         clearPendingProfile();
@@ -256,6 +277,52 @@ export function AuthForm() {
     }
   }
 
+  async function submitBackupPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!user) {
+      return;
+    }
+
+    setError("");
+    setNotice("");
+    setIsSubmitting(true);
+
+    try {
+      if (backupPassword !== backupPasswordConfirmation) {
+        throw new Error("Backup passwords do not match.");
+      }
+
+      await createBackupPasswordForCurrentUser({
+        password: backupPassword,
+        uid: user.uid
+      });
+      setBackupPassword("");
+      setBackupPasswordConfirmation("");
+      setSavedBackupPasswordUid(user.uid);
+      setNotice("Backup password saved. You can now sign in with Google or with email and password.");
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Backup password setup failed.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function reauthenticateGoogleForBackupPassword() {
+    setError("");
+    setNotice("");
+    setIsSubmitting(true);
+
+    try {
+      await refreshGoogleAuthentication();
+      setNotice("Google sign-in refreshed. Create your backup password now.");
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Google sign-in refresh failed.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
   function buildPendingProfile(): PendingProfile {
     return {
       classId: role === "student" ? classId.trim() : "",
@@ -264,6 +331,58 @@ export function AuthForm() {
       role,
       username: username.trim().toLowerCase()
     };
+  }
+
+  function assertStudentClassCodeIsPresent() {
+    if (mode === "signup" && role === "student" && !classId.trim()) {
+      throw new Error("Enter your class code to create a student account.");
+    }
+  }
+
+  async function submitMissingStudentClassCode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!user) {
+      return;
+    }
+
+    setError("");
+    setNotice("");
+    setIsSubmitting(true);
+
+    try {
+      await updateStudentClass({ classId: classId.trim(), uid: user.uid });
+      router.push("/student");
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Class join failed.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function deleteIncompleteStudentAccount() {
+    if (!user) {
+      return;
+    }
+
+    const confirmed = window.confirm("Delete this student account permanently? This cannot be undone.");
+
+    if (!confirmed) {
+      return;
+    }
+
+    setError("");
+    setNotice("");
+    setIsDeletingAccount(true);
+
+    try {
+      await deleteCurrentAccountFromCurrentSession({ uid: user.uid });
+      router.push("/auth?mode=signup&role=student");
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Account deletion failed.");
+    } finally {
+      setIsDeletingAccount(false);
+    }
   }
 
   if (!firebaseReady) {
@@ -355,6 +474,10 @@ export function AuthForm() {
               setIsSubmitting(true);
 
               try {
+                if (role === "student" && !classId.trim()) {
+                  throw new Error("Enter your class code to create a student account.");
+                }
+
                 const nextProfile = await createRoleProfile({
                   classId: role === "student" ? classId.trim() : "",
                   displayName: displayName.trim() || user.displayName || user.email || "",
@@ -419,10 +542,111 @@ export function AuthForm() {
       );
     }
 
+    if (profile.role === "student" && !hasStudentClassEnrollment(profile)) {
+      return (
+        <section className="auth-card">
+          <h1>Enter class code to continue.</h1>
+          <p>
+            This student account is not connected to a class yet. Enter your teacher&apos;s class code
+            to continue, or delete this account.
+          </p>
+
+          <form className="auth-form" onSubmit={submitMissingStudentClassCode}>
+            <label className="field-label" htmlFor="missing-class-id">
+              Class code
+            </label>
+            <input
+              id="missing-class-id"
+              required
+              value={classId}
+              maxLength={CLASS_CODE_LENGTH}
+              onChange={(event) => setClassId(formatClassCodeInput(event.target.value))}
+              placeholder="ABCDEF"
+            />
+
+            {error ? <p className="form-error">{error}</p> : null}
+            {notice ? <p className="form-notice">{notice}</p> : null}
+
+            <button className="primary-button" disabled={isSubmitting || isDeletingAccount} type="submit">
+              {isSubmitting ? "Joining class" : "Continue"}
+            </button>
+            <button
+              className="auth-danger-button"
+              disabled={isSubmitting || isDeletingAccount}
+              type="button"
+              onClick={() => void deleteIncompleteStudentAccount()}
+            >
+              {isDeletingAccount ? "Deleting account" : "Delete account"}
+            </button>
+          </form>
+        </section>
+      );
+    }
+
+    if (savedBackupPasswordUid !== user.uid && userNeedsBackupPassword(user)) {
+      return (
+        <section className="auth-card">
+          <h1>You have successfully signed in.</h1>
+          <p>Create a backup password just in case. After this, you can sign in with Google or with your email and password.</p>
+
+          <form className="auth-form" onSubmit={submitBackupPassword}>
+            <label className="field-label" htmlFor="backup-email">
+              Email
+            </label>
+            <input id="backup-email" value={user.email ?? profile.email} readOnly />
+
+            <label className="field-label" htmlFor="backup-password">
+              Backup password
+            </label>
+            <input
+              id="backup-password"
+              required
+              minLength={6}
+              autoComplete="new-password"
+              type="password"
+              value={backupPassword}
+              onChange={(event) => setBackupPassword(event.target.value)}
+              placeholder="At least 6 characters"
+            />
+
+            <label className="field-label" htmlFor="backup-password-confirmation">
+              Confirm backup password
+            </label>
+            <input
+              id="backup-password-confirmation"
+              required
+              minLength={6}
+              autoComplete="new-password"
+              type="password"
+              value={backupPasswordConfirmation}
+              onChange={(event) => setBackupPasswordConfirmation(event.target.value)}
+              placeholder="Repeat backup password"
+            />
+
+            {error ? <p className="form-error">{error}</p> : null}
+            {notice ? <p className="form-notice">{notice}</p> : null}
+
+            <button className="primary-button" disabled={isSubmitting} type="submit">
+              {isSubmitting ? "Saving password" : "Save backup password"}
+            </button>
+            <button
+              className="auth-secondary-button"
+              disabled={isSubmitting}
+              type="button"
+              onClick={() => void reauthenticateGoogleForBackupPassword()}
+            >
+              Sign in with Google again
+            </button>
+          </form>
+        </section>
+      );
+    }
+
     return (
       <section className="auth-card">
         <h1>{profile?.displayName ?? user.email}</h1>
         <p>You are signed in as a {profile?.role ?? "Chandra"} account.</p>
+        {notice ? <p className="form-notice">{notice}</p> : null}
         <Link className="primary-button" href={destination}>
           Continue
         </Link>
@@ -683,6 +907,13 @@ function clearPendingProfile() {
   }
 
   window.localStorage.removeItem(pendingProfileStorageKey);
+}
+
+function hasStudentClassEnrollment(profile: { classId?: string; classIds?: string[] }) {
+  return Boolean(
+    profile.classId?.trim() ||
+      (Array.isArray(profile.classIds) && profile.classIds.some((classId) => classId.trim()))
+  );
 }
 
 function ProviderIcon({ provider }: { provider: AuthProviderKey }) {

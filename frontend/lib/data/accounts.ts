@@ -134,7 +134,7 @@ export async function getAccountByLoginIdentifier(identifier: string, client?: P
     client,
     `SELECT *
     FROM accounts
-    WHERE email_normalized = $1 OR lower(username) = $1
+    WHERE status != 'deleted' AND (email_normalized = $1 OR lower(username) = $1)
     ORDER BY CASE WHEN email_normalized = $1 THEN 0 ELSE 1 END
     LIMIT 1`,
     [cleanIdentifier]
@@ -194,6 +194,10 @@ function rowToAccount(row: AccountRow): AccountRecord {
 }
 
 export function accountToProfile(account: AccountRecord): AccountProfileShape | null {
+  if (account.status === "deleted") {
+    return null;
+  }
+
   if (account.role !== "student" && account.role !== "teacher") {
     return null;
   }

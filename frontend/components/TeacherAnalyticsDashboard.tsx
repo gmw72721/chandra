@@ -68,6 +68,7 @@ type TeacherAnalyticsDashboardContentProps = {
   reviewRows?: AnalyticsConversationRow[];
   selectedDate?: string;
   joinCode?: string;
+  isLoadingClassDetails?: boolean;
   sourceCount?: number;
   studentCount?: number;
   onAddSource?: () => void;
@@ -122,6 +123,7 @@ export function TeacherAnalyticsDashboardContent({
   reviewRows = [],
   selectedDate,
   joinCode,
+  isLoadingClassDetails = false,
   sourceCount = 0,
   studentCount = 0,
   onAddSource,
@@ -174,7 +176,14 @@ export function TeacherAnalyticsDashboardContent({
     <div className="analytics-dashboard-content">
       <header className="analytics-page-header" aria-label="Dashboard overview">
         <div className="analytics-page-title">
-          <h1>{selectedDateIsToday ? "Today" : "Daily overview"}</h1>
+          <div className="analytics-page-title-row">
+            <h1>{selectedDateIsToday ? "Today" : "Daily overview"}</h1>
+            {isLoadingClassDetails ? (
+              <span className="analytics-title-loader" role="status" aria-label="Loading class details">
+                <span className="sr-only">Loading class details</span>
+              </span>
+            ) : null}
+          </div>
           <p>{classLabel}</p>
         </div>
         <div className="analytics-header-actions">

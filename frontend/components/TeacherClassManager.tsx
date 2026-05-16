@@ -4288,13 +4288,6 @@ export function TeacherClassManager({
 
             {selectedClass ? (
               <>
-                {isLoadingClassDetails ? (
-                  <div className="empty-state detail-loading">
-                    <strong>Loading class details</strong>
-                    <span>Fetching roster and tutor knowledge.</span>
-                  </div>
-                ) : null}
-
                 {studentProfileRoute ? (
                   <StudentProfilePage
                     embedded
@@ -4311,6 +4304,7 @@ export function TeacherClassManager({
                     overview={classOverview}
                     priorityRows={classOverview?.priorityRows ?? []}
                     reviewRows={conversationReviewRows}
+                    isLoadingClassDetails={isLoadingClassDetails}
                     selectedDate={overviewDate}
                     sourceCount={overviewReadySourceCount}
                     studentCount={rosterRows.length || students.length}

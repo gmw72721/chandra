@@ -6,6 +6,7 @@ import {
   getAccountById,
   getAccountByLoginIdentifier,
   getAccountByUsername,
+  markAccountDeleted,
   upsertAccount,
   type AccountProfileShape,
   type UpsertAccountInput
@@ -178,6 +179,10 @@ export async function upsertAccountProfile(
   }
 
   return profile;
+}
+
+export async function markAccountProfileDeleted(uid: string) {
+  return tryPostgresData("account.profile.delete", () => markAccountDeleted(uid));
 }
 
 export async function assertAccountUsernameAvailable(username: string, uid: string) {

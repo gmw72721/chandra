@@ -4638,6 +4638,29 @@ button.student-row[aria-pressed="true"] {
   background: var(--auth-green-strong);
 }
 
+.auth-danger-button {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 12px;
+  border: 1px solid rgba(185, 78, 85, 0.42);
+  border-radius: 6px;
+  background: rgba(185, 78, 85, 0.1);
+  color: var(--rose);
+  font-size: 0.94rem;
+  font-weight: 800;
+}
+
+.auth-danger-button:hover,
+.auth-danger-button:focus-visible {
+  border-color: var(--rose);
+  background: rgba(185, 78, 85, 0.16);
+}
+
+.auth-danger-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .form-error {
   border-left: 3px solid var(--rose);
   background: rgba(185, 78, 85, 0.1);
@@ -21754,6 +21777,13 @@ button.student-row[aria-pressed="true"] {
   min-width: 0;
 }
 
+.teacher-dashboard[data-active-tab="overview"] .analytics-page-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
 .teacher-dashboard[data-active-tab="overview"] .analytics-page-title h1 {
   margin: 0;
   color: var(--text-primary);
@@ -21762,6 +21792,37 @@ button.student-row[aria-pressed="true"] {
   font-weight: 700;
   line-height: 1.15;
   letter-spacing: 0;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-title-loader {
+  position: relative;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at center, var(--card-bg-strong) 48%, transparent 50%),
+    conic-gradient(from 90deg, var(--theme-primary), rgba(192, 75, 88, 0.28), rgba(192, 75, 88, 0));
+  box-shadow: 0 0 0 1px rgba(192, 75, 88, 0.16), 0 8px 18px rgba(32, 41, 59, 0.08);
+  animation: analytics-title-loader-spin 0.9s linear infinite;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-title-loader::after {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--theme-primary);
+  box-shadow: 0 0 0 3px rgba(192, 75, 88, 0.12);
+  content: "";
+}
+
+@keyframes analytics-title-loader-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .teacher-dashboard[data-active-tab="overview"] .analytics-page-title p {

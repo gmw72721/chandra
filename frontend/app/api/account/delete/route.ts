@@ -3,6 +3,7 @@ import { FieldValue, type DocumentReference, type QueryDocumentSnapshot } from "
 import { NextResponse } from "next/server";
 import { writeAuditLog } from "@/lib/audit-log";
 import { anonymizeStudentConversations } from "@/lib/data/conversations";
+import { getAccountProfile, markAccountProfileDeleted } from "@/lib/data/server";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
@@ -26,12 +27,13 @@ export async function POST(request: Request) {
 
     const userReference = adminDb!.collection("users").doc(decodedToken.uid);
     const userSnapshot = await userReference.get();
-    const profile = userSnapshot.data() ?? {};
+    const postgresProfile = await getAccountProfile(decodedToken.uid);
+    const profile = postgresProfile ?? userSnapshot.data() ?? {};
     const role = String(profile.role ?? "").trim();
     const email = normalizeEmail(profile.email || decodedToken.email);
     const displayName = String(profile.displayName ?? decodedToken.name ?? "").trim();
 
-    if (!userSnapshot.exists || !["student", "teacher"].includes(role)) {
+    if ((!postgresProfile && !userSnapshot.exists) || !["student", "teacher"].includes(role)) {
       return NextResponse.json({ error: "Account profile was not found." }, { status: 404 });
     }
 
@@ -66,6 +68,7 @@ export async function POST(request: Request) {
       });
     }
 
+    await markAccountProfileDeleted(decodedToken.uid);
     await userReference.delete();
     await adminDb!.collection("userPresence").doc(decodedToken.uid).delete().catch(() => undefined);
     await adminAuth!.revokeRefreshTokens(decodedToken.uid);

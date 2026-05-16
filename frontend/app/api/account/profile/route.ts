@@ -61,6 +61,11 @@ export async function POST(request: Request) {
       ? body.classIds.map(String).map((classId) => classId.trim()).filter(Boolean)
       : [];
     const classId = String(body.classId ?? "").trim();
+
+    if (role === "student" && !classId && !classIds.length) {
+      return NextResponse.json({ error: "Enter your class code to create a student account." }, { status: 400 });
+    }
+
     const profile = await upsertAccountProfile({
       id: decodedToken.uid,
       firebaseUid: decodedToken.uid,

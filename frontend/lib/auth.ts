@@ -9,6 +9,7 @@ import {
   isSignInWithEmailLink,
   linkWithCredential,
   onAuthStateChanged,
+  reauthenticateWithPopup,
   reauthenticateWithCredential,
   sendSignInLinkToEmail,
   sendPasswordResetEmail,
@@ -168,6 +169,7 @@ export async function signUpWithRole({
   assertFirebaseReady();
 
   const cleanEmail = email.trim().toLowerCase();
+  const cleanClassCode = role === "student" ? requireStudentClassCode(classId) : "";
   const cleanUsername = normalizeAccountUsername(username, cleanEmail);
   assertAccountUsernameIsValid(cleanUsername, cleanEmail);
   await assertUsernameIsAvailable(cleanUsername);
@@ -192,24 +194,20 @@ export async function signUpWithRole({
     createdAt: serverTimestamp()
   };
 
-  await createAccountProfile(profile, credential.user);
+  const cleanClassId = await joinStudentClass({
+    classCode: cleanClassCode,
+    displayName,
+    email: cleanEmail,
+    syncProfile: true,
+    user: credential.user
+  });
 
-  if (role === "student" && classId?.trim()) {
-    const cleanClassId = await joinStudentClass({
-      classCode: classId,
-      displayName,
-      email: cleanEmail,
-      syncProfile: true,
-      user: credential.user
-    });
-
-    if (cleanClassId) {
-      return {
-        ...profile,
-        classId: cleanClassId,
-        classIds: [cleanClassId]
-      };
-    }
+  if (cleanClassId) {
+    return {
+      ...profile,
+      classId: cleanClassId,
+      classIds: [cleanClassId]
+    };
   }
 
   return profile;
@@ -232,6 +230,7 @@ export async function createRoleProfile({
 
   const cleanDisplayName = displayName.trim() || user.displayName || user.email || "Chandra user";
   const cleanEmail = String(user.email ?? "").trim().toLowerCase();
+  const cleanClassCode = role === "student" ? requireStudentClassCode(classId) : "";
   const cleanUsername = normalizeAccountUsername(username, cleanEmail);
   assertAccountUsernameIsValid(cleanUsername, cleanEmail);
   await updateProfile(user, { displayName: cleanDisplayName });
@@ -253,24 +252,20 @@ export async function createRoleProfile({
     createdAt: serverTimestamp()
   };
 
-  await createAccountProfile(profile, user);
+  const cleanClassId = await joinStudentClass({
+    classCode: cleanClassCode,
+    displayName: cleanDisplayName,
+    email: cleanEmail,
+    syncProfile: true,
+    user
+  });
 
-  if (role === "student" && classId?.trim()) {
-    const cleanClassId = await joinStudentClass({
-      classCode: classId,
-      displayName: cleanDisplayName,
-      email: cleanEmail,
-      syncProfile: true,
-      user
-    });
-
-    if (cleanClassId) {
-      return {
-        ...profile,
-        classId: cleanClassId,
-        classIds: [cleanClassId]
-      };
-    }
+  if (cleanClassId) {
+    return {
+      ...profile,
+      classId: cleanClassId,
+      classIds: [cleanClassId]
+    };
   }
 
   return profile;
@@ -352,6 +347,63 @@ export async function linkProviderToEmailPasswordAccount({
     return await linkWithCredential(emailCredential.user, pendingCredential.credential);
   } catch (caughtError) {
     throw normalizeProviderAuthError(caughtError, pendingCredential.providerLabel);
+  }
+}
+
+export function userNeedsBackupPassword(user: User | null) {
+  if (!user) {
+    return false;
+  }
+
+  const providerIds = new Set(user.providerData.map((provider) => provider.providerId));
+  return providerIds.has(GoogleAuthProvider.PROVIDER_ID) && !providerIds.has(EmailAuthProvider.PROVIDER_ID);
+}
+
+export async function createBackupPasswordForCurrentUser({
+  password,
+  uid
+}: {
+  password: string;
+  uid: string;
+}) {
+  assertFirebaseReady();
+  const currentUser = auth!.currentUser;
+
+  if (currentUser?.uid !== uid) {
+    throw new Error("Sign in with Google before creating a backup password.");
+  }
+
+  const cleanPassword = String(password ?? "");
+
+  if (cleanPassword.length < 6) {
+    throw new Error("Backup password must be at least 6 characters.");
+  }
+
+  try {
+    await updatePassword(currentUser, cleanPassword);
+    await currentUser.reload();
+  } catch (caughtError) {
+    if (getAuthErrorCode(caughtError) === "auth/requires-recent-login") {
+      throw new Error("Sign in with Google again, then create your backup password.");
+    }
+
+    throw normalizeBackupPasswordError(caughtError);
+  }
+}
+
+export async function refreshGoogleAuthentication() {
+  assertFirebaseReady();
+  const currentUser = auth!.currentUser;
+
+  if (!currentUser) {
+    throw new Error("Sign in with Google before creating a backup password.");
+  }
+
+  try {
+    await reauthenticateWithPopup(currentUser, providerDefinitions.google.createProvider());
+    await currentUser.reload();
+  } catch (caughtError) {
+    throw normalizeProviderAuthError(caughtError, providerDefinitions.google.label);
   }
 }
 
@@ -487,6 +539,30 @@ export async function deleteCurrentAccount({
     currentUser,
     EmailAuthProvider.credential(currentEmail, cleanCurrentPassword)
   );
+
+  const token = await currentUser.getIdToken(true);
+  const response = await fetch("/api/account/delete", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+  const data = (await response.json().catch(() => ({}))) as { deleted?: boolean; error?: string };
+
+  if (!response.ok || !data.deleted) {
+    throw new Error(data.error ?? "Account deletion failed.");
+  }
+
+  return data.deleted;
+}
+
+export async function deleteCurrentAccountFromCurrentSession({ uid }: { uid: string }) {
+  assertFirebaseReady();
+  const currentUser = auth!.currentUser;
+
+  if (currentUser?.uid !== uid) {
+    throw new Error("Sign in before deleting your account.");
+  }
 
   const token = await currentUser.getIdToken(true);
   const response = await fetch("/api/account/delete", {
@@ -781,6 +857,20 @@ function normalizeEmailLinkAuthError(error: unknown) {
   return new Error("Magic-link sign-in failed.");
 }
 
+function normalizeBackupPasswordError(error: unknown) {
+  const code = getAuthErrorCode(error);
+
+  if (code === "auth/weak-password") {
+    return new Error("Backup password must be at least 6 characters.");
+  }
+
+  if (error instanceof Error) {
+    return error;
+  }
+
+  return new Error("Backup password setup failed.");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -816,6 +906,16 @@ function normalizeUserProfile(data: Record<string, unknown>): UserProfile {
     email,
     username: normalizeAccountUsername(data.username, email)
   };
+}
+
+function requireStudentClassCode(classId: string | undefined) {
+  const cleanClassCode = normalizeClassCode(classId ?? "");
+
+  if (!cleanClassCode) {
+    throw new Error("Enter your class code to create a student account.");
+  }
+
+  return cleanClassCode;
 }
 
 async function resolveLoginEmail(emailOrUsername: string) {
@@ -922,21 +1022,11 @@ async function joinStudentClass({
   const cleanClassCode = normalizeClassCode(classCode);
 
   if (!cleanClassCode) {
-    if (!syncProfile) {
-      return "";
-    }
-
-    if (!user) {
-      throw new Error("Sign in before joining a class.");
-    }
+    throw new Error("Enter your class code to continue.");
   }
 
   if (!user) {
     throw new Error("Sign in before joining a class.");
-  }
-
-  if (!cleanClassCode && !syncProfile) {
-    return "";
   }
 
   const token = await user.getIdToken();

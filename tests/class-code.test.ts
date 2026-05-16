@@ -38,9 +38,11 @@ test("student-entered join codes enroll the student through the server route", (
 
   assert.match(authSource, /fetch\("\/api\/classes\/join"/);
   assert.match(authSource, /Authorization: `Bearer \$\{token\}`/);
-  assert.match(authSource, /createAccountProfile\(profile, credential\.user\)/);
+  assert.match(authSource, /requireStudentClassCode\(classId\)/);
   assert.match(authSource, /syncProfile: true/);
+  assert.ok(authSource.indexOf("requireStudentClassCode(classId)") < authSource.indexOf("const credential = await createUserWithEmailAndPassword"));
   assert.match(joinSource, /resolveClassCodePostgresFirst\(classCode\)/);
+  assert.match(joinSource, /Enter your class code to continue\./);
   assert.match(joinSource, /firstString\(userData\.email, decodedToken\.email, decodedToken\.firebase\?\.identities\?\.email\?\.\[0\], body\.email\)/);
   assert.match(joinSource, /collection\("classes"\)\.doc\(nextClassId\)\.collection\("students"\)/);
   assert.match(joinSource, /enrollStudentPostgresFirst/);

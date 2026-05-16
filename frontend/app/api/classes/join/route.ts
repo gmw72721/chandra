@@ -54,15 +54,7 @@ export async function POST(request: Request) {
       firstString(userData.displayName, body.displayName, decodedToken.name, email) || "Chandra student";
 
     if (!classCode) {
-      await updateStudentEnrollment({
-        displayName,
-        email,
-        nextClassId: "",
-        syncProfile: body.syncProfile === true,
-        uid: decodedToken.uid
-      });
-
-      return NextResponse.json({ classId: "" });
+      return NextResponse.json({ error: "Enter your class code to continue." }, { status: 400 });
     }
 
     const abuseScope = {
