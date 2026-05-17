@@ -186,17 +186,55 @@ async function assertStudentChatAccess({
         .doc(supportDocumentId)
         .get()
     : null;
-  const chatBlocked =
-    supportSnapshot?.data()?.chatBlocked === true ||
-    rosterSnapshot?.data()?.chatBlocked === true;
+  const chatBlock = activeStudentChatBlock([supportSnapshot?.data(), rosterSnapshot?.data()]);
 
-  if (chatBlocked) {
-    throw new TutorChatHttpError("Chat is paused for this account.", 403, {
+  if (chatBlock.blocked) {
+    throw new TutorChatHttpError(chatBlock.message, 403, {
       classId,
       decision: "student_chat_blocked",
       userId: uid
     });
   }
+}
+
+function activeStudentChatBlock(records: Array<Record<string, unknown> | undefined>) {
+  const now = Date.now();
+
+  for (const record of records) {
+    if (!record || record.chatBlocked !== true) {
+      continue;
+    }
+
+    const pausedUntil = parseTimestampMillis(record.chatBlockedUntil);
+
+    if (pausedUntil && pausedUntil > now) {
+      return {
+        blocked: true,
+        message: `Chat is paused for this account until ${new Date(pausedUntil).toISOString()}.`
+      };
+    }
+
+    if (!pausedUntil) {
+      return {
+        blocked: true,
+        message: "Chat is paused for this account. Ask your teacher to turn it back on."
+      };
+    }
+  }
+
+  return { blocked: false, message: "" };
+}
+
+function parseTimestampMillis(value: unknown) {
+  const serialized =
+    typeof value === "string"
+      ? value
+      : value && typeof value === "object" && "toDate" in value && typeof value.toDate === "function"
+        ? (value.toDate() as Date).toISOString()
+        : "";
+  const timestamp = serialized ? new Date(serialized).getTime() : 0;
+
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function readCoTeacherAccess(coTeachers: unknown): Record<string, Record<string, unknown>> {

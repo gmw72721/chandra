@@ -11,6 +11,8 @@ export const runtime = "nodejs";
 type StudentClassSummary = {
   appearance: string;
   chatBlocked: boolean;
+  chatBlockedReason?: string;
+  chatBlockedUntil?: string | null;
   id: string;
   joinCode?: string;
   name: string;
@@ -156,11 +158,13 @@ async function getStudentClassSummary(
   }
 
   const classData = classSnapshot.data;
-  const chatBlocked = await getStudentChatBlocked(classId, studentIdentity);
+  const chatBlock = await getStudentChatBlock(classId, studentIdentity);
 
   return {
     appearance: normalizeTeacherClassAppearance(classData.appearance),
-    chatBlocked,
+    chatBlocked: chatBlock.chatBlocked,
+    chatBlockedReason: chatBlock.chatBlockedReason,
+    chatBlockedUntil: chatBlock.chatBlockedUntil,
     id: classSnapshot.id,
     ...(String(classData.joinCode ?? "").trim() ? { joinCode: String(classData.joinCode ?? "").trim() } : {}),
     name: String(classData.name ?? "Saved class").trim() || "Saved class",
@@ -176,7 +180,7 @@ async function getStudentClassSummary(
   };
 }
 
-async function getStudentChatBlocked(classId: string, { email, uid }: { email: string; uid: string }) {
+async function getStudentChatBlock(classId: string, { email, uid }: { email: string; uid: string }) {
   const supportDocumentId = email ? encodeURIComponent(email) : "";
   const [supportSnapshot, rosterSnapshot, uidRosterSnapshot] = await Promise.all([
     supportDocumentId
@@ -204,12 +208,51 @@ async function getStudentChatBlocked(classId: string, { email, uid }: { email: s
       .get()
   ]);
   const uidRosterDoc = uidRosterSnapshot.docs[0] ?? null;
+  const block = activeStudentChatBlock([supportSnapshot?.data(), rosterSnapshot?.data(), uidRosterDoc?.data()]);
 
-  return (
-    supportSnapshot?.data()?.chatBlocked === true ||
-    rosterSnapshot?.data()?.chatBlocked === true ||
-    uidRosterDoc?.data()?.chatBlocked === true
-  );
+  return block;
+}
+
+function activeStudentChatBlock(records: Array<Record<string, unknown> | undefined>) {
+  const now = Date.now();
+
+  for (const record of records) {
+    if (!record || record.chatBlocked !== true) {
+      continue;
+    }
+
+    const pausedUntil = parseTimestampMillis(record.chatBlockedUntil);
+
+    if (pausedUntil && pausedUntil > now) {
+      return {
+        chatBlocked: true,
+        chatBlockedReason: String(record.chatBlockedReason ?? ""),
+        chatBlockedUntil: new Date(pausedUntil).toISOString()
+      };
+    }
+
+    if (!pausedUntil) {
+      return {
+        chatBlocked: true,
+        chatBlockedReason: String(record.chatBlockedReason ?? ""),
+        chatBlockedUntil: null
+      };
+    }
+  }
+
+  return { chatBlocked: false, chatBlockedReason: "", chatBlockedUntil: null };
+}
+
+function parseTimestampMillis(value: unknown) {
+  const serialized =
+    typeof value === "string"
+      ? value
+      : value && typeof value === "object" && "toDate" in value && typeof value.toDate === "function"
+        ? (value.toDate() as Date).toISOString()
+        : "";
+  const timestamp = serialized ? new Date(serialized).getTime() : 0;
+
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function readTutorAccessEnabled(value: unknown) {

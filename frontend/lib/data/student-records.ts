@@ -208,6 +208,7 @@ export async function upsertConversationReview(input: {
   conversationId: string;
   flags?: string[];
   followUpDueAt?: string | null;
+  metadata?: Record<string, unknown>;
   privateNote?: string;
   reviewedBy?: string;
   studentVisibleNote?: string;
@@ -237,6 +238,7 @@ export async function upsertConversationReview(input: {
       JSON.stringify({
         flags: input.flags ?? [],
         followUpDueAt: input.followUpDueAt ?? null,
+        ...(input.metadata ?? {}),
         ...(input.studentVisibleNote === undefined ? {} : { studentVisibleNote: input.studentVisibleNote }),
         ...(input.studentVisibleNoteSentAt === undefined
           ? {}
@@ -280,8 +282,8 @@ export async function upsertStudentSupport(input: {
       student_id = coalesce(EXCLUDED.student_id, student_support.student_id),
       student_email = EXCLUDED.student_email,
       display_name = coalesce(nullif(EXCLUDED.display_name, ''), student_support.display_name),
-      chat_blocked = EXCLUDED.chat_blocked,
-      support_notes = EXCLUDED.support_notes,
+      chat_blocked = CASE WHEN $9::boolean THEN EXCLUDED.chat_blocked ELSE student_support.chat_blocked END,
+      support_notes = CASE WHEN $10::boolean THEN EXCLUDED.support_notes ELSE student_support.support_notes END,
       metadata = student_support.metadata || EXCLUDED.metadata
     RETURNING *`,
     [
@@ -292,7 +294,9 @@ export async function upsertStudentSupport(input: {
       input.displayName ?? "",
       input.chatBlocked ?? false,
       input.supportNotes ?? "",
-      JSON.stringify(input.metadata ?? {})
+      JSON.stringify(input.metadata ?? {}),
+      Object.prototype.hasOwnProperty.call(input, "chatBlocked") && input.chatBlocked !== undefined,
+      Object.prototype.hasOwnProperty.call(input, "supportNotes") && input.supportNotes !== undefined
     ]
   );
 

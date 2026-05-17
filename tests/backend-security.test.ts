@@ -223,8 +223,9 @@ test("teacher controls can pause class chat and one student without exposing con
   assert.match(supportRoute, /chatBlocked/);
   assert.match(chatAccessRoute, /updateTeacherStudentChatAccess/);
   assert.match(chatAccessRoute, /typeof data\.chatBlocked !== "boolean"/);
-  assert.match(authSource, /supportSnapshot\?\.data\(\)\?\.chatBlocked === true/);
-  assert.match(authSource, /rosterSnapshot\?\.data\(\)\?\.chatBlocked === true/);
+  assert.match(authSource, /activeStudentChatBlock\(\[supportSnapshot\?\.data\(\), rosterSnapshot\?\.data\(\)\]\)/);
+  assert.match(authSource, /record\.chatBlocked !== true/);
+  assert.match(authSource, /chatBlockedUntil/);
 });
 
 test("Firestore class list rules match the owned and co-teacher live queries", () => {

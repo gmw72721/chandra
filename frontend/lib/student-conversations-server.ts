@@ -41,6 +41,7 @@ import type {
   MessageAttachment,
   RetrievalConfidence,
   StudentConversationSummary,
+  StudentChatSafetyReview,
   StudentFeedbackSummary,
   StudentRosterActivitySummary,
   TeacherConversationLearningSignalSummary,
@@ -336,11 +337,16 @@ export async function listTeacherClassConversations({
         conversation,
         conversationId: conversationRecord.id
       });
-      const review = reviewsByConversationId.get(conversationRecord.id) ?? defaultTeacherConversationReview({
+      const safetyReview = normalizeStudentChatSafetyReview(conversationRecord.metadata.safetyReview);
+      const baseReview = reviewsByConversationId.get(conversationRecord.id) ?? defaultTeacherConversationReview({
         classId,
         conversationId: conversationRecord.id,
         teacherId: conversationRecord.teacherId ?? ""
       });
+      const review = {
+        ...baseReview,
+        safetyReview: baseReview.safetyReview ?? safetyReview
+      };
       const feedback = postgresFeedbackByConversationId.get(conversationRecord.id) ?? [];
       const learningSignals = {
         ...sourceAudit.learningSignals,
@@ -606,6 +612,19 @@ function studentRepliedAfterTeacherNote({
   return latestStudentMessageAt > noteSentAt && (!reviewedAt || latestStudentMessageAt > reviewedAt);
 }
 
+function activeStudentSupportChatBlocked(chatBlocked: boolean, metadata: Record<string, unknown>) {
+  if (!chatBlocked) {
+    return false;
+  }
+
+  const directPauseUntil = timestampMillis(metadata.chatBlockedUntil);
+  const safetyChatPause = isRecord(metadata.safetyChatPause) ? metadata.safetyChatPause : {};
+  const metadataPauseUntil = timestampMillis(safetyChatPause.pauseUntil);
+  const pauseUntil = directPauseUntil || metadataPauseUntil;
+
+  return !pauseUntil || pauseUntil > Date.now();
+}
+
 export async function updateTeacherConversationReview({
   classId,
   conversationId,
@@ -731,7 +750,7 @@ export async function listTeacherRosterActivity({
       ? postgresSupport.map((support) => ({
           id: support.id,
           studentEmail: support.studentEmail,
-          chatBlocked: support.chatBlocked,
+          chatBlocked: activeStudentSupportChatBlocked(support.chatBlocked, support.metadata),
           teacherNotes: support.supportNotes
         }))
       : supportSnapshot.docs.map((supportDoc) => {
@@ -739,7 +758,7 @@ export async function listTeacherRosterActivity({
           return {
             id: supportDoc.id,
             studentEmail: String(support.studentEmail ?? decodeURIComponent(supportDoc.id)).trim().toLowerCase(),
-            chatBlocked: support.chatBlocked === true,
+            chatBlocked: activeStudentSupportChatBlocked(support.chatBlocked === true, support),
             teacherNotes: String(support.teacherNotes ?? support.notes ?? "")
           };
         }))
@@ -1036,7 +1055,12 @@ export async function updateTeacherStudentChatAccess({
       studentId: rosterStudentSnapshot.exists
         ? rosterStudentUid || null
         : String(postgresRosterStudent?.uid ?? "") || null,
-      metadata: { updatedBy: teacherId }
+      metadata: {
+        safetyChatPause: chatBlocked
+          ? { action: "manual_pause", updatedBy: teacherId }
+          : { action: "teacher_reenabled", updatedBy: teacherId, reenabledAt: new Date().toISOString() },
+        updatedBy: teacherId
+      }
     })
   );
 
@@ -1045,6 +1069,9 @@ export async function updateTeacherStudentChatAccess({
       rosterStudentReference,
       {
         chatBlocked,
+        chatBlockedReason: chatBlocked ? "teacher" : FieldValue.delete(),
+        chatBlockedUntil: FieldValue.delete(),
+        safetyChatPause: chatBlocked ? { action: "manual_pause", updatedBy: teacherId } : FieldValue.delete(),
         updatedAt: FieldValue.serverTimestamp()
       },
       { merge: true }
@@ -1053,6 +1080,9 @@ export async function updateTeacherStudentChatAccess({
       classReference.collection("studentSupport").doc(supportDocumentId),
       {
         chatBlocked,
+        chatBlockedReason: chatBlocked ? "teacher" : FieldValue.delete(),
+        chatBlockedUntil: FieldValue.delete(),
+        safetyChatPause: chatBlocked ? { action: "manual_pause", updatedBy: teacherId } : FieldValue.delete(),
         studentEmail: normalizedEmail,
         updatedAt: FieldValue.serverTimestamp(),
         updatedBy: teacherId
@@ -1305,6 +1335,7 @@ function conversationRecordToFirestoreData(conversation: Parameters<typeof conve
     lastMessageAt: conversation.lastMessageAt?.toISOString() ?? conversation.updatedAt.toISOString(),
     messageCount: conversation.messageCount,
     modelId: conversation.modelId,
+    safetyReview: normalizeStudentChatSafetyReview(conversation.metadata.safetyReview),
     ...problemMetadata,
     studentEmail: conversation.studentEmail,
     studentId: conversation.studentId ?? "",
@@ -1372,11 +1403,42 @@ function reviewRecordToTeacherReview(review: Awaited<ReturnType<typeof listConve
     followUpDueAt: normalizeConversationFollowUpDueAt(review.metadata.followUpDueAt),
     privateNote: review.teacherNote,
     reviewedAt: review.reviewedAt?.toISOString() ?? null,
+    safetyReview: normalizeStudentChatSafetyReview(review.metadata.safetyReview),
     status: normalizeConversationReviewStatus(review.status),
     studentVisibleNote: String(review.metadata.studentVisibleNote ?? "").slice(0, maxTeacherReviewNoteLength),
     studentVisibleNoteSentAt: normalizeConversationFollowUpDueAt(review.metadata.studentVisibleNoteSentAt),
     teacherId: String(review.metadata.teacherId ?? review.reviewedBy ?? ""),
     updatedAt: review.updatedAt.toISOString()
+  };
+}
+
+function normalizeStudentChatSafetyReview(value: unknown): StudentChatSafetyReview | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const blockedMessageText = String(value.blockedMessageText ?? "").slice(0, 4000);
+
+  if (!blockedMessageText) {
+    return undefined;
+  }
+
+  const riskLevel = String(value.riskLevel ?? "general");
+  const pauseAction = String(value.pauseAction ?? "none");
+
+  return {
+    blockedMessageText,
+    categories: Array.isArray(value.categories) ? value.categories.map(String) : [],
+    count: nonnegativeInteger(value.count),
+    createdAt: serializeFirestoreValue(value.createdAt),
+    label: "Flagged blocked message",
+    messageHash: String(value.messageHash ?? ""),
+    pauseAction:
+      pauseAction === "temporary_pause" || pauseAction === "permanent_pause" ? pauseAction : "none",
+    pauseUntil: serializeFirestoreValue(value.pauseUntil),
+    primaryReason: String(value.primaryReason ?? "moderation_flag"),
+    riskLevel: riskLevel === "urgent" || riskLevel === "none" ? riskLevel : "general",
+    urgentCount: nonnegativeInteger(value.urgentCount)
   };
 }
 
@@ -1969,6 +2031,7 @@ function defaultTeacherConversationReview({
     followUpDueAt: null,
     privateNote: "",
     reviewedAt: "",
+    safetyReview: undefined,
     status: "new",
     studentVisibleNote: "",
     studentVisibleNoteSentAt: "",
@@ -1987,6 +2050,7 @@ function reviewDocToTeacherReview(conversationId: string, data: Record<string, u
     followUpDueAt: normalizeConversationFollowUpDueAt(data.followUpDueAt),
     privateNote: String(data.privateNote ?? "").slice(0, maxTeacherReviewNoteLength),
     reviewedAt: serializeFirestoreValue(data.reviewedAt),
+    safetyReview: normalizeStudentChatSafetyReview(data.safetyReview),
     status,
     studentVisibleNote: String(data.studentVisibleNote ?? "").slice(0, maxTeacherReviewNoteLength),
     studentVisibleNoteSentAt: serializeFirestoreValue(data.studentVisibleNoteSentAt),
@@ -2267,6 +2331,11 @@ function timestampMillis(value: unknown) {
   }
 
   return 0;
+}
+
+function nonnegativeInteger(value: unknown) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue > 0 ? Math.floor(numberValue) : 0;
 }
 
 function assertSafeDocumentId(value: string, label: string) {

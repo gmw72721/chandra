@@ -15,6 +15,10 @@ from backend.agent.graph import run_pdf_rag_agent, run_pdf_rag_agent_stream
 LEGACY_ACTION_SECTION_KEY = "".join(["next", "Step"])
 
 
+def main_chat_output(text: str) -> dict[str, Any]:
+    return {"sections": {"mainChat": text}, "sectionOrder": ["mainChat"]}
+
+
 class FakeOpenRouterClient:
     def __init__(self, responses: list[dict[str, Any]]) -> None:
         self.responses = responses
@@ -309,7 +313,7 @@ def test_ambiguous_student_upload_clarification_overrides_search_decision() -> N
                     "top_k": 1,
                 }
             ],
-            "student_response": "I'm checking the class materials for that problem.",
+            "structuredOutput": main_chat_output("I'm checking the class materials for that problem."),
         },
         {
             "chat_retrieval_memory": {},
@@ -341,7 +345,7 @@ def test_ambiguous_student_upload_clarification_overrides_search_decision() -> N
     assert decision["decision_source"] == "student_upload"
     assert decision["searches"] == []
     assert decision["query"] == ""
-    assert decision["student_response"] == "Pick the problem you want help with."
+    assert graph_module.decision_visible_response_text(decision) == "Pick the problem you want help with."
 
 
 def test_ambiguous_student_upload_clarification_keeps_search_when_problem_is_named() -> None:
@@ -357,7 +361,7 @@ def test_ambiguous_student_upload_clarification_keeps_search_when_problem_is_nam
                 "top_k": 1,
             }
         ],
-        "student_response": "I'm checking the class materials for that problem.",
+        "structuredOutput": main_chat_output("I'm checking the class materials for that problem."),
     }
 
     decision = graph_module.enforce_ambiguous_student_upload_clarification(
@@ -392,7 +396,6 @@ def test_terminal_upload_problem_selection_strips_late_search_decision() -> None
                 "top_k": 1,
             }
         ],
-        "student_response": "I can see more than one problem here. Pick the one you want help with.",
         "structuredOutput": {
             "sections": {"answer": "I can see more than one problem here. Pick the one you want help with."},
             "confusionPrompt": "I can see more than one problem here. Pick the one you want help with.",
@@ -573,7 +576,7 @@ def test_primary_tutor_turn_can_return_one_search_per_distinct_need() -> None:
                             "retrieval_reason": "needed_example_page",
                         },
                     ],
-                    "student_response": "I'm checking the class materials.",
+                    "structuredOutput": main_chat_output("I'm checking the class materials."),
                 }
             )
         },
@@ -591,6 +594,22 @@ def test_primary_tutor_turn_can_return_one_search_per_distinct_need() -> None:
     assert len(graph_module.retrieval_decision_tool_calls(decision)) == 3
 
 
+def test_unparseable_primary_tutor_json_is_not_surfaced_to_student() -> None:
+    raw_model_payload = '{"outcome":"answer_now" "mainChat":"this malformed payload should not render"}'
+
+    decision = graph_module.parse_primary_tutor_response(
+        {"content": raw_model_payload},
+        {},
+    )
+
+    assert decision["needs_search"] is False
+    assert decision["can_answer_now"] is True
+    assert graph_module.decision_visible_response_text(decision) == (
+        "Something went wrong while formatting my response. Please try sending that again."
+    )
+    assert raw_model_payload not in graph_module.decision_visible_response_text(decision)
+
+
 def test_primary_lookup_replaces_locator_echo_with_status_sentence() -> None:
     decision = graph_module.parse_primary_tutor_response(
         {
@@ -600,7 +619,6 @@ def test_primary_lookup_replaces_locator_echo_with_status_sentence() -> None:
                     "needs_search": True,
                     "retrieval_reason": "student_requested_problem",
                     "search_query": "problem 2.18",
-                    "student_response": "problem 2.18",
                     "structuredOutput": {
                         "sections": {"mainChat": "problem 2.18"},
                         "sectionOrder": ["mainChat"],
@@ -612,7 +630,7 @@ def test_primary_lookup_replaces_locator_echo_with_status_sentence() -> None:
     )
 
     assert decision["needs_search"] is True
-    assert decision["student_response"] == "I'm checking the class materials for that problem."
+    assert graph_module.decision_visible_response_text(decision) == "I'm checking the class materials for that problem."
     assert decision["structuredOutput"]["sections"] == {
         "mainChat": "I'm checking the class materials for that problem."
     }
@@ -650,9 +668,9 @@ def test_primary_lookup_unwraps_json_string_inside_visible_content() -> None:
     )
 
     assert decision["needs_search"] is True
-    assert decision["student_response"] == "I'm checking the class materials for that problem."
-    assert decision["structuredOutput"] is None
-    assert "{" not in decision["student_response"]
+    assert graph_module.decision_visible_response_text(decision) == "I'm checking the class materials for that problem."
+    assert decision["structuredOutput"]["sections"]["mainChat"] == "I'm checking the class materials for that problem."
+    assert "{" not in graph_module.decision_visible_response_text(decision)
 
 
 def test_decision_json_with_latex_backslashes_is_parsed_not_surfaced() -> None:
@@ -664,13 +682,15 @@ def test_decision_json_with_latex_backslashes_is_parsed_not_surfaced() -> None:
             "search_query": "",
             "searches": [],
             "help_level": "guiding_question",
-            "student_response": "Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2].",
             "memory_used": True,
             "structuredOutput": {
-                "hint": "Use $\\operatorname{span}(S)$, not the raw list.",
-                LEGACY_ACTION_SECTION_KEY: "Can you make $1$, $x$, and $x^2$?",
+                "sections": {
+                    "mainChat": "Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2].",
+                    "hint": "Use $\\operatorname{span}(S)$, not the raw list.",
+                    LEGACY_ACTION_SECTION_KEY: "Can you make $1$, $x$, and $x^2$?",
+                },
+                "sectionOrder": ["mainChat", "hint", LEGACY_ACTION_SECTION_KEY],
             },
-            "sectionOrder": ["hint", LEGACY_ACTION_SECTION_KEY],
             "metadata": {"problem": "1.7"},
         },
         separators=(",", ":"),
@@ -682,9 +702,12 @@ def test_decision_json_with_latex_backslashes_is_parsed_not_surfaced() -> None:
     )
 
     assert decision["needs_search"] is False
-    assert decision["student_response"] == "Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2]."
+    assert graph_module.decision_visible_response_text(decision) == (
+        "Start with part (i): compare $\\operatorname{span}(S)$ with $F[x;2].\n\n"
+        "Can you make $1$, $x$, and $x^2$?"
+    )
     assert decision["structuredOutput"]["sections"]["hint"] == "Use $\\operatorname{span}(S)$, not the raw list."
-    assert not decision["student_response"].startswith("{")
+    assert not graph_module.decision_visible_response_text(decision).startswith("{")
 
 
 def test_primary_tutor_turn_preserves_two_to_six_valid_confusion_choices() -> None:
@@ -694,7 +717,6 @@ def test_primary_tutor_turn_preserves_two_to_six_valid_confusion_choices() -> No
                 {
                     "can_answer_now": True,
                     "needs_search": False,
-                    "student_response": "I see a few possible starting points for this rank problem. Pick one and I'll focus there.",
                     "structuredOutput": {
                         "sections": {
                             "answer": "I see a few possible starting points for this rank problem. Pick one and I'll focus there."
@@ -737,7 +759,6 @@ def test_primary_tutor_problem_selection_json_cancels_search() -> None:
                             "top_k": 1,
                         }
                     ],
-                    "student_response": "Pick the problem you want help with.",
                     "structuredOutput": {
                         "sections": {"answer": "Pick the problem you want help with."},
                         "confusionPrompt": "Pick the problem you want help with.",
@@ -803,7 +824,7 @@ def test_generic_upload_problem_pick_prompt_cancels_search() -> None:
                 "top_k": 1,
             }
         ],
-        "student_response": "Pick the problem you want help with.",
+        "structuredOutput": main_chat_output("Pick the problem you want help with."),
         "top_k": 1,
     }
     state = {
@@ -823,7 +844,7 @@ def test_generic_upload_problem_pick_prompt_cancels_search() -> None:
     assert fixed["needs_search"] is False
     assert fixed["searches"] == []
     assert graph_module.retrieval_decision_tool_calls(fixed) == []
-    assert fixed["student_response"] == "Pick the problem you want help with."
+    assert graph_module.decision_visible_response_text(fixed) == "Pick the problem you want help with."
     assert "confusionChoices" not in fixed["structuredOutput"]
 
 
@@ -858,7 +879,7 @@ def test_existing_problem_selection_json_choices_are_preserved() -> None:
                 "top_k": 1,
             }
         ],
-        "student_response": "This page has several exercises. Which one should we start with?",
+        "structuredOutput": main_chat_output("This page has several exercises. Which one should we start with?"),
         "structuredOutput": graph_module.normalize_backend_structured_output(structured_output),
         "top_k": 1,
     }
@@ -896,7 +917,7 @@ def test_selected_upload_problem_number_cancels_search_and_sets_problem_section(
                 "top_k": 1,
             }
         ],
-        "student_response": "I'm checking the class materials for that problem.",
+        "structuredOutput": main_chat_output("I'm checking the class materials for that problem."),
         "top_k": 1,
     }
     state = {
@@ -936,7 +957,7 @@ def test_selected_upload_problem_without_problem_evidence_keeps_search_decision(
                 "top_k": 1,
             }
         ],
-        "student_response": "For 2.14, compare images and use rank-nullity.",
+        "structuredOutput": main_chat_output("For 2.14, compare images and use rank-nullity."),
         "top_k": 1,
     }
     state = {
@@ -1003,7 +1024,7 @@ def test_bare_problem_number_after_upload_problem_selection_uses_upload_context(
 
 
 def test_forced_initial_search_skips_selected_upload_problem_number() -> None:
-    decision = {"needs_search": False, "student_response": "Use the uploaded problem text."}
+    decision = {"needs_search": False, "structuredOutput": main_chat_output("Use the uploaded problem text.")}
     state = {
         "messages": [{"role": "user", "content": "Help me with problem 2.14 from this upload."}],
         "student_attachment_files": [
@@ -1047,8 +1068,13 @@ def test_decision_prompt_says_choices_are_not_triggered_by_student_confusion_key
 
     system_prompt = messages[0]["content"]
     assert "Uncertainty choices" in system_prompt
-    assert "Do not trigger them just because the student says they are lost/confused/stuck" in system_prompt
-    assert "prefer a normal nudge or focused question" in system_prompt
+    assert "treat support-path buttons as a last resort" in system_prompt
+    assert "asking the student to choose will materially help the student more than answering normally" in system_prompt
+    assert "Before using choices, first try the simpler response" in system_prompt
+    assert "Do not use choices just because" in system_prompt
+    assert "If a useful next move is inferable, take that move instead" in system_prompt
+    assert "previously offered support-path choices" in system_prompt
+    assert "do not ask another support-path choice on this turn" in system_prompt
 
 
 def test_decision_prompt_can_force_real_confusion_choices_for_teacher_debug() -> None:
@@ -1119,7 +1145,7 @@ def test_debug_force_retrieval_overrides_chat_memory_decision() -> None:
             "decision_source": "chat_memory",
             "memory_used": True,
             "needs_search": False,
-            "student_response": "Use rank-nullity here.",
+            "structuredOutput": main_chat_output("Use rank-nullity here."),
         },
         {
             "chat_retrieval_memory": {},
@@ -1150,7 +1176,7 @@ def test_debug_force_no_retrieval_overrides_search_decision() -> None:
                     "top_k": 1,
                 }
             ],
-            "student_response": "I'm checking the class materials for that problem.",
+            "structuredOutput": main_chat_output("I'm checking the class materials for that problem."),
         },
         {
             "debug_options": {"forceNoRetrieval": True},
@@ -1161,7 +1187,7 @@ def test_debug_force_no_retrieval_overrides_search_decision() -> None:
     assert decision["needs_search"] is False
     assert decision["searches"] == []
     assert decision["query"] == ""
-    assert "debug mode" in decision["student_response"]
+    assert "debug mode" in graph_module.decision_visible_response_text(decision)
 
 
 @pytest.mark.asyncio
@@ -1182,7 +1208,7 @@ async def test_ambiguous_student_upload_does_not_search_class_materials() -> Non
                                 "top_k": 1,
                             }
                         ],
-                        "student_response": "I'm checking the class materials for that problem.",
+                        "structuredOutput": main_chat_output("I'm checking the class materials for that problem."),
                     }
                 )
             }
@@ -1247,7 +1273,6 @@ async def test_streaming_upload_problem_selection_ends_after_first_model_call() 
                                 "top_k": 1,
                             }
                         ],
-                        "student_response": selection_text,
                         "structuredOutput": {
                             "sections": {"answer": "This page has several exercises. Which one do you want to work on?"},
                             "confusionPrompt": "This page has several exercises. Which one do you want to work on?",
@@ -1332,7 +1357,6 @@ async def test_debug_forced_confusion_choices_become_the_response() -> None:
                         "can_answer_now": True,
                         "memory_used": False,
                         "needs_search": False,
-                        "student_response": "I can help with Problem 2.14, but I need to know which part you want to start with.",
                         "structuredOutput": {
                             "sections": {
                                 "answer": "I can help with Problem 2.14, but I need to know which part you want to start with.",
@@ -1412,7 +1436,6 @@ def test_retrieval_needed_decision_does_not_preserve_confusion_choices() -> None
                     "needs_search": True,
                     "retrieval_reason": "student_requested_problem",
                     "search_query": "find exact problem page OCR metadata problem 2.14",
-                    "student_response": "Pick a direction.",
                     "structuredOutput": {
                         "sections": {"answer": "Pick a direction."},
                         "confusionPrompt": "Pick one.",
@@ -1430,8 +1453,7 @@ def test_retrieval_needed_decision_does_not_preserve_confusion_choices() -> None
     )
 
     assert decision["needs_search"] is True
-    assert decision["structuredOutput"] is None
-    assert decision["student_response"] == "Pick a direction."
+    assert decision["structuredOutput"]["sections"]["mainChat"] == "I'm checking the class materials for that problem."
 
 
 def test_debug_forced_confusion_choices_preserves_same_call_llm_choices() -> None:
@@ -1450,7 +1472,6 @@ def test_debug_forced_confusion_choices_preserves_same_call_llm_choices() -> Non
                             "top_k": 1,
                         }
                     ],
-                    "student_response": "What would help most with problem 2.18?",
                     "structuredOutput": {
                         "sections": {"mainChat": "What would help most with problem 2.18?"},
                         "confusionPrompt": "What would help most with problem 2.18?",
@@ -1479,7 +1500,7 @@ def test_debug_forced_confusion_choices_preserves_same_call_llm_choices() -> Non
     assert decision["needs_search"] is False
     assert decision["searches"] == []
     assert decision["search_query"] == ""
-    assert decision["student_response"] == "What would help most with problem 2.18?"
+    assert graph_module.decision_visible_response_text(decision) == "What would help most with problem 2.18?"
     assert [choice["label"] for choice in decision["structuredOutput"]["confusionChoices"]] == [
         "Show your attempt",
         "Help with setup",
@@ -1693,7 +1714,7 @@ def test_example_request_model_no_search_decision_is_preserved() -> None:
                     "can_answer_now": True,
                     "needs_search": False,
                     "help_level": "refusal_with_hint",
-                    "student_response": "I can't give a worked example here.",
+                    "structuredOutput": main_chat_output("I can't give a worked example here."),
                 }
             )
         },
@@ -1703,7 +1724,7 @@ def test_example_request_model_no_search_decision_is_preserved() -> None:
     assert decision["needs_search"] is False
     assert decision["can_answer_now"] is True
     assert decision["retrieval_reason"] == ""
-    assert decision["student_response"] == "I can't give a worked example here."
+    assert graph_module.decision_visible_response_text(decision) == "I can't give a worked example here."
     assert decision["searches"] == []
 
 
@@ -1966,7 +1987,6 @@ def test_answer_leak_gate_blocks_fake_llm_full_answer_for_high_risk_request() ->
                 {
                     "can_answer_now": True,
                     "needs_search": False,
-                    "student_response": "Solution: Step 1 use rank-nullity. Step 2 compute the image. Step 3 final answer.",
                     "structuredOutput": {
                         "sections": {
                             "answer": "Solution: Step 1 use rank-nullity.\nStep 2 compute the image.\nStep 3 final answer."
@@ -1987,7 +2007,7 @@ def test_answer_leak_gate_blocks_fake_llm_full_answer_for_high_risk_request() ->
     state["tutor_plan"] = decision["tutorPlan"]
     structured_output = decision["structuredOutput"]
     gate = graph_module.answer_leak_gate(
-        answer=decision["student_response"],
+        answer=graph_module.decision_visible_response_text(decision),
         structured_output=structured_output,
         active_problem_context={"problem_text": "Problem 2.14. Prove rank(KL) <= rank(L)."},
         state=state,
@@ -2035,7 +2055,7 @@ def test_first_vague_help_plan_depth_one_updates_understanding_state() -> None:
                     "can_answer_now": True,
                     "memory_used": True,
                     "needs_search": False,
-                    "student_response": (
+                    "structuredOutput": main_chat_output(
                         "To prove the rotation is orthonormal, focus on the columns of the rotation matrix. "
                         "What are the two columns of the rotation matrix in (2.17), and what are their lengths?"
                     ),
@@ -2077,8 +2097,8 @@ def test_first_vague_help_plan_depth_one_updates_understanding_state() -> None:
     assert understanding["lastHelpDepth"] == 1
     assert understanding["hintsGiven"] == 1
     assert "columns" in understanding["lastHintSummary"]
-    assert "directly verify" not in decision["student_response"]
-    assert "<Ru" not in decision["student_response"]
+    assert "directly verify" not in graph_module.decision_visible_response_text(decision)
+    assert "<Ru" not in graph_module.decision_visible_response_text(decision)
 
 
 def test_repeated_stuck_plan_can_escalate_help_without_increasing_understanding() -> None:
@@ -2688,7 +2708,7 @@ def test_context_grounded_prompt_receives_primary_response_context() -> None:
         "answer_policy": {"refuseAnswerOnlyRequests": True},
         "messages": [{"role": "user", "content": "Find problem 2.20."}],
         "page_assets": [ocr_page(problem_numbers=["2.20"])],
-        "primary_student_response": "This looks like the same section we were using.",
+        "primary_visible_response": "This looks like the same section we were using.",
         "primary_structured_output": {
             "sections": {"answer": "This looks like the same section we were using."},
             "sectionOrder": ["answer"],
@@ -2716,7 +2736,7 @@ def test_context_grounded_prompt_receives_primary_response_context() -> None:
 
 def test_context_grounded_continuation_does_not_overwrite_primary_response() -> None:
     state = {
-        "primary_student_response": "Start by identifying which space the image lands in.",
+        "primary_visible_response": "Start by identifying which space the image lands in.",
     }
     context_response = json.dumps(
         {
@@ -2736,7 +2756,7 @@ def test_context_grounded_continuation_does_not_overwrite_primary_response() -> 
 
 def test_context_grounded_continuation_uses_grounded_answer_when_primary_was_only_status() -> None:
     state = {
-        "primary_student_response": "I'm checking the class materials for that problem.",
+        "primary_visible_response": "I'm checking the class materials for that problem.",
     }
     context_response = "Problem:\nProblem 2.20. Prove the rank identity."
 
@@ -3229,8 +3249,8 @@ def test_retrieval_decision_drops_status_next_step() -> None:
         },
     )
 
-    assert decision["structuredOutput"] is None
-    assert "Action:" not in decision["student_response"]
+    assert decision["structuredOutput"]["sections"]["mainChat"] == "I'm checking the class materials for that problem."
+    assert "Action:" not in graph_module.decision_visible_response_text(decision)
 
 
 def test_retrieval_decision_suppresses_source_request_while_searching() -> None:
@@ -3241,7 +3261,7 @@ def test_retrieval_decision_suppresses_source_request_while_searching() -> None:
                     "needs_search": True,
                     "retrieval_reason": "student_requested_problem",
                     "search_query": "Problem 2.18",
-                    "student_response": (
+                    "structuredOutput": main_chat_output(
                         "I'm checking which exact 2.18 problem this refers to. "
                         "If you can, send the textbook/homework title or a photo of the page."
                     ),
@@ -3255,7 +3275,7 @@ def test_retrieval_decision_suppresses_source_request_while_searching() -> None:
         },
     )
 
-    assert decision["student_response"] == "I'm checking the class materials for that problem."
+    assert graph_module.decision_visible_response_text(decision) == "I'm checking the class materials for that problem."
 
 
 def test_retrieval_decision_removes_page_photo_next_step_while_searching() -> None:
@@ -3283,8 +3303,8 @@ def test_retrieval_decision_removes_page_photo_next_step_while_searching() -> No
         },
     )
 
-    assert decision["student_response"] == "I'm checking the class materials for that problem."
-    assert decision["structuredOutput"] is None
+    assert graph_module.decision_visible_response_text(decision) == "I'm checking the class materials for that problem."
+    assert decision["structuredOutput"]["sections"]["mainChat"] == "I'm checking the class materials for that problem."
 
 
 def test_decision_prompt_forbids_source_request_while_searching() -> None:
@@ -3540,7 +3560,7 @@ async def test_active_problem_metadata_reuses_context_without_search() -> None:
                         "can_answer_now": True,
                         "memory_used": True,
                         "needs_search": False,
-                        "student_response": "Hint: focus on the image of L before K acts.",
+                        "structuredOutput": main_chat_output("Hint: focus on the image of L before K acts."),
                     }
                 ),
                 "usage": {"prompt_tokens": 10, "completion_tokens": 6, "total_tokens": 16},
@@ -3581,7 +3601,7 @@ async def test_final_prompt_obeys_first_llm_help_depth_without_state_revision() 
                         "can_answer_now": True,
                         "memory_used": True,
                         "needs_search": False,
-                        "student_response": "Hint: focus on the columns.",
+                        "structuredOutput": main_chat_output("Hint: focus on the columns."),
                         "tutorPlan": {
                             "activeProblemId": graph_module.active_problem_id_from_record(ocr_page(problem_numbers=["3.9"])),
                             "studentIntent": "vague_help",
@@ -3646,7 +3666,7 @@ async def test_final_response_uses_clamped_help_limit_depth() -> None:
                         "needs_search": True,
                         "retrieval_reason": "needed_supporting_page",
                         "search_query": "rank theorem",
-                        "student_response": "",
+                        "structuredOutput": main_chat_output(""),
                         "tutorPlan": {
                             "activeProblemId": "rank-problem",
                             "studentIntent": "asks_for_explanation",
@@ -3706,7 +3726,7 @@ async def test_specific_problem_lookup_uses_two_llm_calls_and_only_exact_problem
                         "needs_search": True,
                         "retrieval_reason": "student_requested_problem",
                         "search_query": "Problem 2.14",
-                        "student_response": "",
+                        "structuredOutput": main_chat_output(""),
                     }
                 )
             },
@@ -3751,7 +3771,7 @@ async def test_bare_decimal_problem_reference_is_framed_as_problem_lookup() -> N
                         "needs_search": True,
                         "retrieval_reason": "student_requested_problem",
                         "search_query": "find exact problem page OCR metadata 2.14",
-                        "student_response": "",
+                        "structuredOutput": main_chat_output(""),
                     }
                 )
             },
@@ -3793,7 +3813,7 @@ async def test_exact_problem_lookup_filters_reference_mentions_to_actual_heading
                         "needs_search": True,
                         "retrieval_reason": "student_requested_problem",
                         "search_query": "problem 2.20",
-                        "student_response": "",
+                        "structuredOutput": main_chat_output(""),
                     }
                 )
             },
@@ -3848,7 +3868,7 @@ async def test_bare_decimal_problem_reference_forces_search_before_clarifying() 
                         "can_answer_now": True,
                         "memory_used": False,
                         "needs_search": False,
-                        "student_response": "Please share the page image or homework title.",
+                        "structuredOutput": main_chat_output("Please share the page image or homework title."),
                     }
                 )
             },
@@ -3923,7 +3943,7 @@ async def test_problem_lookup_without_detected_problem_suppresses_understanding_
                         "needs_search": True,
                         "retrieval_reason": "student_requested_problem",
                         "search_query": "Problem 2.20",
-                        "student_response": "I'm checking the class materials for that problem.",
+                        "structuredOutput": main_chat_output("I'm checking the class materials for that problem."),
                         "tutorPlan": {
                             "activeProblemId": "requested-problem-2-20",
                             "needsRetrieval": True,
@@ -4137,7 +4157,7 @@ async def test_streaming_forced_problem_search_does_not_emit_page_image_request(
                         "can_answer_now": True,
                         "memory_used": False,
                         "needs_search": False,
-                        "student_response": "Please share the page image or homework title.",
+                        "structuredOutput": main_chat_output("Please share the page image or homework title."),
                     }
                 )
             },
@@ -4175,7 +4195,6 @@ async def test_streaming_lookup_suppresses_raw_locator_echo_sections() -> None:
                         "needs_search": True,
                         "retrieval_reason": "student_requested_problem",
                         "search_query": "problem 2.18",
-                        "student_response": "problem 2.18",
                         "structuredOutput": {
                             "sections": {"mainChat": "problem 2.18"},
                             "sectionOrder": ["mainChat"],
@@ -4268,7 +4287,7 @@ async def test_streaming_lookup_never_emits_raw_primary_json_as_quick_response()
                                 "top_k": 1,
                             }
                         ],
-                        "student_response": raw_inner,
+                        "structuredOutput": main_chat_output(raw_inner),
                     }
                 )
             },
@@ -4312,7 +4331,7 @@ async def test_streaming_failed_problem_search_does_not_finalize_quick_status() 
                         "needs_search": True,
                         "retrieval_reason": "student_requested_problem",
                         "search_query": "Problem 2.20",
-                        "student_response": "I'm checking the class materials for that problem.",
+                        "structuredOutput": main_chat_output("I'm checking the class materials for that problem."),
                     }
                 )
             },
@@ -4370,7 +4389,7 @@ async def test_failed_search_memory_skips_repeated_query() -> None:
                         "needs_search": True,
                         "retrieval_reason": "student_requested_problem",
                         "search_query": "Problem 9.99",
-                        "student_response": "",
+                        "structuredOutput": main_chat_output(""),
                     }
                 )
             }
@@ -4499,7 +4518,7 @@ async def test_follow_up_reuses_saved_page_asset_context_without_broad_search() 
                         "can_answer_now": True,
                         "memory_used": True,
                         "needs_search": False,
-                        "student_response": "I can help with that same problem.",
+                        "structuredOutput": main_chat_output("I can help with that same problem."),
                     }
                 )
             },
@@ -4559,7 +4578,7 @@ async def test_follow_up_does_not_force_referenced_exercise_search_after_llm_no_
                         "can_answer_now": True,
                         "memory_used": True,
                         "needs_search": False,
-                        "student_response": "Start by applying each transformation to the basis vectors.",
+                        "structuredOutput": main_chat_output("Start by applying each transformation to the basis vectors."),
                     }
                 )
             },
@@ -4601,7 +4620,7 @@ async def test_student_uploaded_pdf_file_is_sent_to_primary_tutor_model() -> Non
                         "can_answer_now": True,
                         "memory_used": False,
                         "needs_search": False,
-                        "student_response": "I can use the uploaded PDF.",
+                        "structuredOutput": main_chat_output("I can use the uploaded PDF."),
                     }
                 )
             },
@@ -4650,7 +4669,7 @@ async def test_student_upload_can_still_search_class_pdf_problem_context() -> No
                                 "top_k": 1,
                             }
                         ],
-                        "student_response": "I'm checking the class materials for that problem.",
+                        "structuredOutput": main_chat_output("I'm checking the class materials for that problem."),
                     }
                 )
             },
@@ -4701,7 +4720,7 @@ async def test_student_uploaded_pdf_extracted_text_without_file_is_sent_to_prima
                         "can_answer_now": True,
                         "memory_used": False,
                         "needs_search": False,
-                        "student_response": "I can use the uploaded PDF text.",
+                        "structuredOutput": main_chat_output("I can use the uploaded PDF text."),
                     }
                 )
             },
@@ -4753,7 +4772,7 @@ async def test_student_uploaded_pdf_extracted_problem_is_saved_to_knowledge() ->
                         "can_answer_now": True,
                         "memory_used": False,
                         "needs_search": False,
-                        "student_response": "I can use the uploaded PDF text.",
+                        "structuredOutput": main_chat_output("I can use the uploaded PDF text."),
                     }
                 )
             },
@@ -4798,7 +4817,7 @@ async def test_student_uploaded_pdf_problem_text_requires_llm_active_problem_dec
                         "can_answer_now": True,
                         "memory_used": False,
                         "needs_search": False,
-                        "student_response": "I can use the uploaded PDF text.",
+                        "structuredOutput": main_chat_output("I can use the uploaded PDF text."),
                     }
                 )
             },
@@ -4839,7 +4858,7 @@ async def test_student_uploaded_image_is_sent_to_primary_tutor_model_without_fol
                         "can_answer_now": True,
                         "memory_used": False,
                         "needs_search": False,
-                        "student_response": "I can inspect the uploaded image.",
+                        "structuredOutput": main_chat_output("I can inspect the uploaded image."),
                     }
                 )
             },
@@ -4880,7 +4899,7 @@ async def test_streaming_matches_non_streaming_retrieval_decision() -> None:
         "can_answer_now": True,
         "memory_used": False,
         "needs_search": False,
-        "student_response": "Try naming what the inequality is comparing.",
+        "structuredOutput": main_chat_output("Try naming what the inequality is comparing."),
     }
     client = FakeOpenRouterClient([{"content": json.dumps(decision)}])
     events = [
@@ -4911,7 +4930,7 @@ async def test_streaming_help_followup_does_not_emit_repeated_problem_section() 
                         "can_answer_now": True,
                         "memory_used": True,
                         "needs_search": False,
-                        "student_response": "This is about representing a linear map using the chosen bases.",
+                        "structuredOutput": main_chat_output("This is about representing a linear map using the chosen bases."),
                         "sections": {
                             "problem": "2.18. Assuming the polynomial bases [1,x,x^2], find the matrix representations.",
                             "mainChat": "This is about representing a linear map using the chosen bases.",
@@ -4958,12 +4977,12 @@ async def test_retries_primary_tutor_turn_with_double_tokens_after_length_stop()
         "can_answer_now": True,
         "memory_used": False,
         "needs_search": False,
-        "student_response": "Use the image of the composed map: every output of KL is K(something).",
+        "structuredOutput": main_chat_output("Use the image of the composed map: every output of KL is K(something)."),
     }
     client = FakeOpenRouterClient(
         [
             {
-                "content": '{"can_answer_now":true,"needs_search":false,"student_response":"Use',
+                "content": '{"can_answer_now":true,"needs_search":false,"structuredOutput":{"sections":{"mainChat":"Use',
                 "finish_reason": "length",
                 "usage": {"completion_tokens": 397},
             },
@@ -4982,7 +5001,7 @@ async def test_retries_primary_tutor_turn_with_double_tokens_after_length_stop()
     )
 
     assert [call["max_tokens"] for call in client.calls] == [1800, 3600]
-    assert response["content"] == decision["student_response"]
+    assert response["content"] == graph_module.decision_visible_response_text(decision)
 
 
 @pytest.mark.asyncio
@@ -4991,12 +5010,12 @@ async def test_streaming_retries_primary_tutor_turn_with_double_tokens_after_len
         "can_answer_now": True,
         "memory_used": False,
         "needs_search": False,
-        "student_response": "Use the image of the composed map: every output of KL is K(something).",
+        "structuredOutput": main_chat_output("Use the image of the composed map: every output of KL is K(something)."),
     }
     client = FakeOpenRouterClient(
         [
             {
-                "content": '{"can_answer_now":true,"needs_search":false,"student_response":"Use',
+                "content": '{"can_answer_now":true,"needs_search":false,"structuredOutput":{"sections":{"mainChat":"Use',
                 "finish_reason": "length",
                 "usage": {"completion_tokens": 397},
             },
@@ -5017,4 +5036,4 @@ async def test_streaming_retries_primary_tutor_turn_with_double_tokens_after_len
     ]
 
     assert [call["max_tokens"] for call in client.calls] == [1800, 3600]
-    assert events[-1]["payload"]["content"] == decision["student_response"]
+    assert events[-1]["payload"]["content"] == graph_module.decision_visible_response_text(decision)

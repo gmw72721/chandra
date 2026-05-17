@@ -124,6 +124,29 @@ test("conversation review can send student-visible teacher notes for follow-up c
   assert.match(studentSource, /conversationId: activeSelectedConversationId/);
 });
 
+test("safety review shows blocked message text only in teacher safety review data", () => {
+  const helperSource = readFileSync(join(repoRoot, "frontend/lib/student-chat-safety.ts"), "utf8");
+  const serverSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
+  const typeSource = readFileSync(join(repoRoot, "frontend/lib/types.ts"), "utf8");
+  const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+  const messagePersistenceSource = serverSource.slice(
+    serverSource.indexOf("async function saveConversationMessage"),
+    serverSource.indexOf("async function saveConversationCurrentContext")
+  );
+
+  assert.match(typeSource, /export type StudentChatSafetyReview/);
+  assert.match(typeSource, /blockedMessageText: string/);
+  assert.match(helperSource, /function safetyReviewMetadata/);
+  assert.match(helperSource, /blockedMessageText: event\.blockedMessageText/);
+  assert.match(helperSource, /metadata: \{\s*safetyReview/s);
+  assert.match(serverSource, /normalizeStudentChatSafetyReview/);
+  assert.match(serverSource, /conversation\.metadata\.safetyReview/);
+  assert.match(componentSource, /<h3 id="safety-review-title">Safety Review<\/h3>/);
+  assert.match(componentSource, /Flagged blocked message/);
+  assert.match(componentSource, /blockedMessageText/);
+  assert.doesNotMatch(messagePersistenceSource, /blockedMessageText|safetyReview/);
+});
+
 test("conversation review has separate all conversations and needs review subtabs", () => {
   const componentSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 

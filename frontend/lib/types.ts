@@ -452,6 +452,23 @@ export type TeacherConversationReview = {
   reviewedAt: unknown;
   updatedAt: unknown;
   flags: string[];
+  safetyReview?: StudentChatSafetyReview;
+};
+
+export type StudentChatSafetyPauseAction = "none" | "temporary_pause" | "permanent_pause";
+
+export type StudentChatSafetyReview = {
+  blockedMessageText: string;
+  categories: string[];
+  count: number;
+  createdAt: unknown;
+  label: "Flagged blocked message";
+  messageHash: string;
+  pauseAction: StudentChatSafetyPauseAction;
+  pauseUntil?: unknown;
+  primaryReason: string;
+  riskLevel: "none" | "general" | "urgent";
+  urgentCount: number;
 };
 
 export type TeacherConversationSourceAuditSummary = {

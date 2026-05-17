@@ -107,6 +107,7 @@ import type {
   StudentFeedback,
   StudentFeedbackStatus,
   StudentFeedbackSummary,
+  StudentChatSafetyReview,
   StudentLearningProfileDocument,
   StudentRosterActivitySummary,
   TeacherClassOverview,
@@ -6784,6 +6785,57 @@ export function TeacherClassManager({
                       </section>
 
                       <aside className="conversation-review-side" aria-label="Teacher review and metadata">
+                        <section className="review-side-panel" aria-labelledby="safety-review-title">
+                          <div className="conversation-panel-heading">
+                            <h3 id="safety-review-title">Safety Review</h3>
+                            <span>
+                              {selectedConversationReviewRow?.review.safetyReview
+                                ? selectedConversationReviewRow.review.safetyReview.riskLevel
+                                : "No safety block"}
+                            </span>
+                          </div>
+                          {selectedConversationReviewRow?.review.safetyReview ? (
+                            <div className="safety-review-card">
+                              <div className="student-feedback-card-heading">
+                                <strong>Flagged blocked message</strong>
+                                <span className="conversation-status-pill ai-review">
+                                  {formatSafetyPauseAction(selectedConversationReviewRow.review.safetyReview.pauseAction)}
+                                </span>
+                              </div>
+                              <p>{selectedConversationReviewRow.review.safetyReview.blockedMessageText}</p>
+                              <dl className="safety-review-meta">
+                                <div>
+                                  <dt>Reason</dt>
+                                  <dd>{selectedConversationReviewRow.review.safetyReview.primaryReason}</dd>
+                                </div>
+                                <div>
+                                  <dt>Categories</dt>
+                                  <dd>{selectedConversationReviewRow.review.safetyReview.categories.join(", ") || "Not recorded"}</dd>
+                                </div>
+                                <div>
+                                  <dt>Flagged</dt>
+                                  <dd>{formatConversationDate(selectedConversationReviewRow.review.safetyReview.createdAt) || "No date"}</dd>
+                                </div>
+                                <div>
+                                  <dt>Daily count</dt>
+                                  <dd>
+                                    {selectedConversationReviewRow.review.safetyReview.count} total /{" "}
+                                    {selectedConversationReviewRow.review.safetyReview.urgentCount} urgent
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt>Access</dt>
+                                  <dd>{formatSafetyPauseDetail(selectedConversationReviewRow.review.safetyReview)}</dd>
+                                </div>
+                              </dl>
+                            </div>
+                          ) : (
+                            <p className="review-panel-empty-copy">
+                              Safety-blocked messages for the selected conversation will appear here.
+                            </p>
+                          )}
+                        </section>
+
                         <section className="review-side-panel" aria-labelledby="student-feedback-title">
                           <div className="conversation-panel-heading">
                             <h3 id="student-feedback-title">Student Feedback</h3>
@@ -10332,6 +10384,30 @@ function conversationStatusClass(status: ConversationReviewStatus) {
 
 function formatConversationStatus(status: ConversationReviewStatus) {
   return conversationStatusLabels[status];
+}
+
+function formatSafetyPauseAction(action: StudentChatSafetyReview["pauseAction"]) {
+  if (action === "temporary_pause") {
+    return "Temporary pause";
+  }
+
+  if (action === "permanent_pause") {
+    return "Teacher re-enable required";
+  }
+
+  return "Blocked only";
+}
+
+function formatSafetyPauseDetail(review: StudentChatSafetyReview) {
+  if (review.pauseAction === "temporary_pause") {
+    return review.pauseUntil ? `Paused until ${formatConversationDate(review.pauseUntil)}` : "Paused for 1 hour";
+  }
+
+  if (review.pauseAction === "permanent_pause") {
+    return "Paused until a teacher turns chat back on";
+  }
+
+  return "No chat pause taken";
 }
 
 function formatStudentFeedbackRating(rating: StudentFeedback["rating"]) {

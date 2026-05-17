@@ -57,6 +57,8 @@ export type TeacherClass = {
   studentPromptPlaceholder?: string;
   studentFacingInstructions?: string;
   studentChatEnabled?: boolean;
+  chatBlockedReason?: string;
+  chatBlockedUntil?: string | null;
   tutorAccess?: TutorAccessSettings;
   createdAt?: unknown;
 };

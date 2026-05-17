@@ -138,6 +138,7 @@ test("student chat safety blocked payloads avoid raw text and use fixed support 
   const routeSource = readFileSync(join(repoRoot, "frontend/app/api/chat/route.ts"), "utf8");
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
   const sendMessageSource = studentSource.slice(studentSource.indexOf("async function sendStudentMessage"));
+  const auditMetadataSource = helperSource.slice(helperSource.indexOf("function auditSafetyMetadata"));
 
   assert.match(helperSource, /selfHarmStudentSafetyMessage = \[/);
   assert.match(helperSource, /call or text 988/);
@@ -151,7 +152,8 @@ test("student chat safety blocked payloads avoid raw text and use fixed support 
   assert.match(helperSource, /CHAT_SAFETY_BLOCKED/);
   assert.match(helperSource, /createHash\("sha256"\)/);
   assert.match(helperSource, /messageHash/);
-  assert.doesNotMatch(helperSource, /rawMessage|messageText|messageContent:\s*event|content:\s*messageContent/);
+  assert.match(helperSource, /blockedMessageText: event\.blockedMessageText/);
+  assert.doesNotMatch(auditMetadataSource, /blockedMessageText|messageContent/);
   assert.ok(sendMessageSource.indexOf("const response = await fetch") < sendMessageSource.indexOf("setMessages(nextMessages);"));
 });
 
@@ -174,22 +176,45 @@ test("student chat safety counts trigger teacher review and urgent escalation me
   const helperSource = readFileSync(join(repoRoot, "frontend/lib/student-chat-safety.ts"), "utf8");
   const backendSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");
 
-  assert.match(helperSource, /dailyReviewThreshold = 5/);
-  assert.match(helperSource, /event\.count > dailyReviewThreshold/);
+  assert.match(helperSource, /studentChatSafetyPermanentTotalPauseThreshold = 5/);
+  assert.match(helperSource, /studentChatSafetyTemporaryPauseThreshold = 2/);
+  assert.match(helperSource, /studentChatSafetyTemporaryPauseDurationMs = 60 \* 60 \* 1000/);
+  assert.match(helperSource, /event\.count >= 1/);
   assert.match(helperSource, /upsertConversationReview/);
   assert.match(helperSource, /getConversationById/);
   assert.match(helperSource, /upsertConversation/);
   assert.match(helperSource, /title: "Safety review needed"/);
   assert.match(helperSource, /status: "needs_follow_up"/);
-  assert.match(helperSource, /urgentDailyReviewThreshold = 3/);
-  assert.match(helperSource, /event\.urgentCount > urgentDailyReviewThreshold/);
+  assert.match(helperSource, /studentChatSafetyPermanentUrgentPauseThreshold = 3/);
+  assert.match(helperSource, /urgentCount >= studentChatSafetyPermanentUrgentPauseThreshold/);
+  assert.match(helperSource, /count >= studentChatSafetyPermanentTotalPauseThreshold/);
   assert.match(helperSource, /student_chat\.safety_urgent_escalation/);
   assert.match(helperSource, /writeSecurityLog/);
   assert.match(helperSource, /studentChatSafetyDailyCounts/);
   assert.match(helperSource, /studentChatSafetyEvents/);
+  assert.match(helperSource, /hashStudentMessageContent\(\[classId, studentId, date\]\.join\("\|"\)\)/);
   assert.match(backendSource, /reject_safety_blocked_payload\(request\)/);
   assert.match(backendSource, /CHAT_SAFETY_BLOCKED/);
   assert.match(backendSource, /Safety-blocked chat payloads must not reach the tutor backend/);
+});
+
+test("student chat safety escalates pauses without pausing the first blocked message", () => {
+  const helperSource = readFileSync(join(repoRoot, "frontend/lib/student-chat-safety.ts"), "utf8");
+  const authSource = readFileSync(join(repoRoot, "frontend/lib/tutor-chat-auth.ts"), "utf8");
+  const studentClassesRouteSource = readFileSync(join(repoRoot, "frontend/app/api/student/classes/route.ts"), "utf8");
+  const teacherServerSource = readFileSync(join(repoRoot, "frontend/lib/student-conversations-server.ts"), "utf8");
+
+  assert.match(helperSource, /return \{ pauseAction: "none" \}/);
+  assert.match(helperSource, /if \(count >= studentChatSafetyTemporaryPauseThreshold\)/);
+  assert.match(helperSource, /pauseAction: "temporary_pause"/);
+  assert.match(helperSource, /pauseAction: "permanent_pause"/);
+  assert.match(helperSource, /applyStudentChatSafetyPause\(event\)/);
+  assert.match(helperSource, /chatBlockedUntil/);
+  assert.match(authSource, /activeStudentChatBlock/);
+  assert.match(authSource, /pausedUntil && pausedUntil > now/);
+  assert.match(authSource, /Ask your teacher to turn it back on/);
+  assert.match(studentClassesRouteSource, /chatBlockedUntil/);
+  assert.match(teacherServerSource, /chatBlockedUntil: FieldValue\.delete\(\)/);
 });
 
 test("teacher preview accepts co-teachers and does not load student-only history", () => {
@@ -1511,6 +1536,36 @@ test("provider messages keep assistant source context for follow-ups", () => {
   assert.match(providerContent, /material type reading/);
 });
 
+test("provider messages keep prior choice context so follow-ups do not ask again", () => {
+  const providerContent = assistantContentWithSources({
+    createdAt: "2026-05-06T00:00:01.000Z",
+    id: "assistant-choices",
+    role: "assistant",
+    content: "What kind of resume help do you want?",
+    structuredOutput: {
+      sections: {
+        mainChat: "What kind of resume help do you want?"
+      },
+      confusionPrompt: "What kind of resume help do you want?",
+      confusionChoices: [
+        { id: "review", label: "Review my resume", message: "Please review my resume and point out what to improve." },
+        { id: "tailor", label: "Tailor it to a job", message: "Please tailor my resume to this job posting." }
+      ],
+      metadata: {
+        choiceDisplay: "support_path_choice",
+        hintLevel: "small_hint",
+        mode: "clarification",
+        sourceConfidence: "low",
+        studentActionNeeded: "answer_question"
+      }
+    }
+  });
+
+  assert.match(providerContent, /Previously offered support-path choices/);
+  assert.match(providerContent, /Review my resume: Please review my resume/);
+  assert.match(providerContent, /do not ask another support-path choice/);
+});
+
 test("show my work mode marks student attempts for provider feedback", () => {
   const promptSource = readFileSync(join(repoRoot, "frontend/lib/prompts.ts"), "utf8");
   const studentSource = readFileSync(join(repoRoot, "frontend/app/student/page.tsx"), "utf8");
@@ -1930,13 +1985,20 @@ test("student UI renders confusion choice buttons and drafts the selected messag
   assert.match(source, /sameDisplayedText\(block\.content, confusionPrompt\)/);
   assert.match(source, /assistant-confusion-choice-description/);
   assert.match(source, /isProblemSelection/);
-  assert.match(source, /onChoiceSelect\(choice\.message\)/);
+  assert.match(source, /selectedTutorChoiceByMessageId/);
+  assert.match(source, /choicesLocked[\s\S]*messages\.slice\(messageIndex \+ 1\)\.some/);
+  assert.match(source, /disabled=\{isSending \|\| choicesLocked\}/);
+  assert.match(source, /onChoiceSelect\(sourceMessageId, choice\)/);
   assert.match(source, /function loadChoiceMessageIntoComposer/);
+  assert.match(source, /\[messageId\]: choice\.id/);
   assert.match(source, /setDraft\(choiceMessage\)/);
   assert.doesNotMatch(source, /void sendStudentMessage\(choiceMessage\)/);
   assert.match(source, /aria-label=\{`Use: \$\{choice\.message\}`\}/);
+  assert.match(source, /aria-pressed=\{selectedChoiceId === choice\.id\}/);
   assert.match(styles, /\.assistant-confusion-choice-grid\s*\{\s*display: grid;/);
   assert.match(styles, /grid-template-columns: minmax\(0, 1fr\);/);
+  assert.match(styles, /\.assistant-confusion-choice-grid button\[aria-pressed="true"\]/);
+  assert.match(styles, /\.assistant-confusion-choice-grid button\[aria-pressed="true"\]:disabled/);
   assert.match(styles, /\.assistant-confusion-choice-panel\.problem-selection \.assistant-confusion-choice-grid\s*\{\s*display: flex;/);
   assert.match(styles, /flex-wrap: wrap;/);
 });
@@ -2178,7 +2240,8 @@ test("paused student accounts can read saved conversations but cannot compose", 
   );
 
   assert.match(classesRouteSource, /chatBlocked: boolean/);
-  assert.match(classesRouteSource, /getStudentChatBlocked/);
+  assert.match(classesRouteSource, /getStudentChatBlock/);
+  assert.match(classesRouteSource, /chatBlockedUntil/);
   assert.match(aiUsageRouteSource, /enforceStudentChatAccess: false/);
   assert.match(conversationsRouteSource, /enforceStudentChatAccess: false/);
   assert.match(messagesRouteSource, /enforceStudentChatAccess: false/);

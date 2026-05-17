@@ -65,6 +65,9 @@ ANSWER_LEAK_FALLBACK_RESPONSE = (
     "I can't give the full answer here, but I can help you take the next step. "
     "Show me what you tried first, or tell me which part feels confusing."
 )
+MODEL_RESPONSE_PARSE_FALLBACK_RESPONSE = (
+    "Something went wrong while formatting my response. Please try sending that again."
+)
 PROBLEM_CONTEXT_RELATIONS = {"same_problem", "different_problem", "unknown"}
 PROBLEM_CONTEXT_SOURCE_TYPES = {"assignment_question", "pdf", "uploaded_image", "conversation_extracted", "unknown"}
 PROBLEM_CONTEXT_CONFIDENCE = {"low", "medium", "high"}
@@ -336,8 +339,8 @@ def build_pdf_rag_graph(
         decision = enforce_student_upload_direct_inspection(decision, state)
         decision = clamp_decision_to_help_limits(decision, state)
         decision = enforce_terminal_upload_problem_selection(decision, state)
-        primary_student_response = str(decision.get("student_response") or "").strip()
-        answer = primary_student_response if not decision.get("needs_search") else ""
+        primary_visible_response = decision_visible_response_text(decision)
+        answer = primary_visible_response if not decision.get("needs_search") else ""
         return {
             "answer": answer,
             "failed_searches_skipped": decision.get("failed_searches_skipped") or [],
@@ -345,7 +348,7 @@ def build_pdf_rag_graph(
             "problem_understanding_state": state_after_tutor_plan(state, decision.get("tutorPlan")),
             "retrieval_decision": decision,
             "retrieval_reason": decision.get("retrieval_reason") or "",
-            "primary_student_response": primary_student_response,
+            "primary_visible_response": primary_visible_response,
             "primary_structured_output": decision.get("structuredOutput") if isinstance(decision.get("structuredOutput"), dict) else {},
             "stage_history": append_stage(state, "primary_tutor_turn"),
             "structured_output_override": decision.get("structuredOutput") if not decision.get("needs_search") else None,
@@ -756,7 +759,7 @@ def build_primary_tutor_messages(state: PdfRagState, heuristic: dict[str, Any]) 
             "This is a hard same-call output requirement for the primary tutor call. "
             "Do not answer the academic question normally. Do not retrieve, and do not use a bare locator echo. "
             "Return needs_search false, searches [], search_query \"\", and can_answer_now true. "
-            "Set student_response to the same brief context-specific uncertainty line used in structuredOutput.confusionPrompt. "
+            "Set structuredOutput.sections.mainChat to the same brief context-specific uncertainty line used in structuredOutput.confusionPrompt. "
             "Include structuredOutput.confusionPrompt plus 2 to 6 context-specific structuredOutput.confusionChoices in this same JSON response. "
             "Each choice must be generated from the current context, with label as a short title, optional description explaining how the tutor can help, and message as the exact editable student-sendable draft. "
             "This override intentionally ignores normal uncertainty gating, retrieval gating, currentStep, student work, concept questions, and inferred best next moves."
@@ -834,17 +837,17 @@ def build_primary_tutor_system_prompt(state: PdfRagState) -> str:
             " When the student asks Chandra to check/review their work, inspect the visible attempt or ask for the attempted step; do not search class materials just because the request says `check my work`. Search only if the student explicitly asks to compare their work against a source, rubric, answer key, textbook page, class note, or other class material."
         ),
         (
-            "Uncertainty choices and support-path choices: when the student has not chosen what kind of help they want and retrieval is not needed, you may ask them to choose a support path instead of guessing. Return outcome ask_support_path_choice, needs_search false, metadata.choiceDisplay support_path_choice, a brief confusionPrompt, and 2 to 6 choices such as hint, concept explanation, similar example, or check my work. Each choice should have label as a short title, optional description as how Chandra can help, and message as the exact editable student-sendable draft to place in the chat box; do not write tutor-voice text in message, and do not promise final answers, full solutions, or policy bypasses. Do not trigger them just because the student says they are lost/confused/stuck; prefer a normal nudge or focused question when a useful next move is inferable."
+            "Uncertainty choices and support-path choices: treat support-path buttons as a last resort, not the default response to a broad request. Use them only when your confidence is high that asking the student to choose will materially help the student more than answering normally, and only when there are multiple genuinely plausible next support paths that would lead to meaningfully different tutor responses. Before using choices, first try the simpler response that fits the turn: answer directly when safe, ask one concise clarification question, request the missing source/work/resume/job posting, give one normal nudge or focused question, or inspect shown work. Do not use choices just because the student has not specified a preferred help style, asks a broad but answerable request, says they are lost/confused/stuck, or has not chosen between hint/explanation/example/check. If a useful next move is inferable, take that move instead of asking the student to choose. If prior chat context says Chandra previously offered support-path choices and the latest student message matches, selects, or edits one of those choices, do not ask another support-path choice on this turn; follow that selected direction or ask for the single missing input needed for it. Return outcome ask_support_path_choice, needs_search false, metadata.choiceDisplay support_path_choice, a brief confusionPrompt, and 2 to 6 choices only after passing that high-benefit test. Each choice should have label as a short title, optional description as how Chandra can help, and message as the exact editable student-sendable draft to place in the chat box; do not write tutor-voice text in message, and do not promise final answers, full solutions, or policy bypasses."
         ),
         (
-            "Structured output: Use structuredOutput.sections for student-visible content. Include only useful non-empty sections. Allowed section keys: mainChat, problem, answer, hint, explanation, formula, example, checkWork, sourceNote. Put each idea in one place; do not duplicate text across sections. For stuck/help/hint requests, put the tutoring nudge in sections.hint and omit sections.mainChat unless it adds necessary non-hint context or a distinct action request; never paraphrase the hint or write filler like `I can give you a hint` in mainChat. sections.problem must contain only the exact academic task statement, never hints, lookup status, source notes, or next actions. For pure source/problem lookup, omit hint; if problem is present, set metadata.problemNumber when visible and metadata.problemSummary to a short non-solving noun phrase. If needs_search is true, keep visible output to one short natural mainChat/status sentence about checking the relevant class material, and do not invent source facts. Never use a bare locator echo like `problem 2.18` as mainChat or student_response."
+            "Structured output: Use structuredOutput.sections for student-visible content. Include only useful non-empty sections. Allowed section keys: mainChat, problem, answer, hint, explanation, formula, example, checkWork, sourceNote. Put each idea in one place; do not duplicate text across sections. For stuck/help/hint requests, put the tutoring nudge in sections.hint and omit sections.mainChat unless it adds necessary non-hint context or a distinct action request; never paraphrase the hint or write filler like `I can give you a hint` in mainChat. sections.problem must contain only the exact academic task statement, never hints, lookup status, source notes, or next actions. For pure source/problem lookup, omit hint; if problem is present, set metadata.problemNumber when visible and metadata.problemSummary to a short non-solving noun phrase. If needs_search is true, keep visible output to one short natural mainChat/status sentence about checking the relevant class material, and do not invent source facts. Never use a bare locator echo like `problem 2.18` as mainChat."
             " For requested problem lookup, an acceptable status sentence is: I'm checking the class materials for that problem."
         ),
         (
-            "Streaming order matters: emit structuredOutput.sections in the exact student-visible order. sectionOrder must match that order. Put problem first when it should render first. Emit sections before legacy content/message fields. JSON schema: {\"outcome\": \"answer_now\"|\"retrieve_then_answer\"|\"ask_problem_selection\"|\"ask_support_path_choice\", \"content\": string, \"sections\": object, \"sectionOrder\": string[], \"metadata\": object, \"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, \"search_query\": string, \"searches\": [{\"query\": string, \"retrieval_reason\": string, \"top_k\": number}], \"help_level\": string, \"student_response\": string, \"memory_used\": boolean, \"activeProblemDecision\": object, \"answerSeekingAssessment\": object, \"tutorPlan\": object, \"structuredOutput\": {\"sections\": object, \"sectionOrder\": array, \"confusionPrompt\": string, \"confusionChoices\": [{\"id\": string, \"label\": string, \"description\": string, \"message\": string}], \"metadata\": {\"choiceDisplay\"?: \"problem_selection\"|\"support_path_choice\"}}}."
+            "Streaming order matters: emit structuredOutput.sections in the exact student-visible order. sectionOrder must match that order. Put problem first when it should render first. Emit sections before legacy content/message fields. JSON schema: {\"outcome\": \"answer_now\"|\"retrieve_then_answer\"|\"ask_problem_selection\"|\"ask_support_path_choice\", \"content\": string, \"sections\": object, \"sectionOrder\": string[], \"metadata\": object, \"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, \"search_query\": string, \"searches\": [{\"query\": string, \"retrieval_reason\": string, \"top_k\": number}], \"help_level\": string, \"memory_used\": boolean, \"activeProblemDecision\": object, \"answerSeekingAssessment\": object, \"tutorPlan\": object, \"structuredOutput\": {\"sections\": object, \"sectionOrder\": array, \"confusionPrompt\": string, \"confusionChoices\": [{\"id\": string, \"label\": string, \"description\": string, \"message\": string}], \"metadata\": {\"choiceDisplay\"?: \"problem_selection\"|\"support_path_choice\"}}}."
         ),
         (
-            "Set needs_search according to the whole context: uploads, active metadata, and available class PDF/OCR search. A context-grounded answer call should only be needed after retrieval, active selected source context, or if this primary call cannot produce a student_response. When needs_search is false, structuredOutput is the complete student-facing reply. For follow-ups that depend on active_metadata or prior selected source context, set memory_used true."
+            "Set needs_search according to the whole context: uploads, active metadata, and available class PDF/OCR search. A context-grounded answer call should only be needed after retrieval, active selected source context, or if this primary call cannot produce useful structuredOutput.sections.mainChat/answer content. When needs_search is false, structuredOutput is the complete student-facing reply. For follow-ups that depend on active_metadata or prior selected source context, set memory_used true."
         ),
     ]
     if has_student_upload_for_latest_turn(state):
@@ -1183,7 +1186,6 @@ def parse_primary_tutor_response(
                 "retrieval_reason": first_search["retrieval_reason"],
                 "search_query": first_search["query"],
                 "searches": searches,
-                "student_response": "",
                 "top_k": first_search["top_k"],
             }
         elif content:
@@ -1193,7 +1195,7 @@ def parse_primary_tutor_response(
                 "needs_search": False,
                 "retrieval_reason": "",
                 "search_query": "",
-                "student_response": content,
+                "structuredOutput": {"sections": {"mainChat": MODEL_RESPONSE_PARSE_FALLBACK_RESPONSE}, "sectionOrder": ["mainChat"]},
             }
         else:
             parsed = dict(fallback)
@@ -1292,25 +1294,18 @@ def parse_primary_tutor_response(
                 structured_output,
                 retrieval_reason=retrieval_reason,
             )
-    student_response = jsonish_visible_text(str(parsed.get("student_response") or "").strip()) or str(parsed.get("student_response") or "").strip()
-    if not student_response:
-        parsed_sections = parsed.get("sections") if isinstance(parsed.get("sections"), dict) else {}
-        student_response = coerce_structured_section_text(
-            parsed_sections.get("mainChat")
-            or parsed_sections.get("answer")
-            or parsed.get("mainText")
-            or parsed.get("main_text")
+    visible_response = visible_response_text_from_parsed_payload(parsed, structured_output)
+    if needs_search and looks_like_source_lookup_echo(visible_response):
+        visible_response = ""
+    if needs_search and asks_for_pasted_problem_or_source(visible_response):
+        visible_response = ""
+    if needs_search and not visible_response:
+        visible_response = fallback_quick_retrieval_response(retrieval_reason)
+        structured_output = main_chat_structured_output(visible_response)
+    elif visible_response and not structured_output:
+        structured_output = main_chat_structured_output(visible_response) if needs_search else normalize_backend_structured_output(
+            {"sections": {"mainChat": visible_response}, "sectionOrder": ["mainChat"]}
         )
-    if structured_output and structured_output.get("confusionChoices"):
-        student_response = normalize_confusion_choice_student_response(structured_output)
-    if structured_output and not student_response:
-        student_response = structured_output_to_text(structured_output)
-    if needs_search and looks_like_source_lookup_echo(student_response):
-        student_response = ""
-    if needs_search and asks_for_pasted_problem_or_source(student_response):
-        student_response = ""
-    if needs_search and not student_response:
-        student_response = fallback_quick_retrieval_response(retrieval_reason)
     outcome = normalize_router_outcome(parsed.get("outcome"), needs_search=needs_search, structured_output=structured_output)
 
     return {
@@ -1330,7 +1325,6 @@ def parse_primary_tutor_response(
         "search_query": query,
         "searches": searches if needs_search else [],
         "structuredOutput": structured_output,
-        "student_response": student_response,
         "tutorPlan": tutor_plan,
         "answerSeekingAssessment": merged_assessment,
         "activeProblemDecision": active_problem_decision,
@@ -2128,22 +2122,69 @@ def fallback_quick_retrieval_response(retrieval_reason: str) -> str:
 
 
 def retrieval_quick_response_text(decision: dict[str, Any]) -> str:
+    text = decision_visible_response_text(decision)
+    if text and not looks_like_json_object_text(text):
+        return text
+
+    return fallback_quick_retrieval_response(str(decision.get("retrieval_reason") or ""))
+
+
+def main_chat_structured_output(text: str) -> dict[str, Any]:
+    return {
+        "sections": {"mainChat": text},
+        "sectionOrder": ["mainChat"],
+        "metadata": {
+            "hintLevel": "none",
+            "mode": "clarification",
+            "sourceConfidence": "low",
+            "studentActionNeeded": "none",
+        },
+    }
+
+
+def decision_visible_response_text(decision: dict[str, Any]) -> str:
     structured_output = decision.get("structuredOutput") if isinstance(decision.get("structuredOutput"), dict) else {}
+    text = visible_response_text_from_structured_output(structured_output)
+    if text and not looks_like_json_object_text(text):
+        return text
+
+    return visible_response_text_from_parsed_payload(decision, structured_output)
+
+
+def visible_response_text_from_structured_output(structured_output: dict[str, Any] | None) -> str:
+    if not isinstance(structured_output, dict):
+        return ""
+
+    if structured_output.get("confusionChoices"):
+        return normalize_confusion_choice_visible_response(structured_output)
+
     sections = structured_output.get("sections") if isinstance(structured_output.get("sections"), dict) else {}
     for key in ("mainChat", "answer"):
         text = coerce_structured_section_text(sections.get(key))
         if text and not looks_like_json_object_text(text):
             return text
 
-    text = jsonish_visible_text(str(decision.get("student_response") or "").strip())
-    if text and not looks_like_json_object_text(text):
+    return structured_output_to_text(structured_output)
+
+
+def visible_response_text_from_parsed_payload(
+    parsed: dict[str, Any],
+    structured_output: dict[str, Any] | None = None,
+) -> str:
+    text = visible_response_text_from_structured_output(structured_output)
+    if text:
         return text
 
-    text = str(decision.get("student_response") or "").strip()
-    if text and not looks_like_json_object_text(text):
-        return text
-
-    return fallback_quick_retrieval_response(str(decision.get("retrieval_reason") or ""))
+    parsed_sections = parsed.get("sections") if isinstance(parsed.get("sections"), dict) else {}
+    text = coerce_structured_section_text(
+        parsed_sections.get("mainChat")
+        or parsed_sections.get("answer")
+        or parsed.get("mainText")
+        or parsed.get("main_text")
+        or parsed.get("content")
+        or parsed.get("message")
+    )
+    return jsonish_visible_text(text) or text
 
 
 def looks_like_json_object_text(value: str) -> bool:
@@ -2372,7 +2413,7 @@ def visible_text_from_ordered_json_output(answer: str) -> str:
 
 def answer_with_context_grounded_continuation(state: PdfRagState, context_grounded_response: str) -> str:
     context_text = str(context_grounded_response or "").strip()
-    primary_text = str(state.get("primary_student_response") or "").strip()
+    primary_text = str(state.get("primary_visible_response") or "").strip()
     visible_context_text = full_visible_text_from_ordered_json_output(context_text) or context_text
     visible_primary_text = full_visible_text_from_ordered_json_output(primary_text) or primary_text
 
@@ -2404,7 +2445,7 @@ def full_visible_text_from_ordered_json_output(answer: str) -> str:
     return "\n\n".join([main_text, section_text])
 
 
-def normalize_confusion_choice_student_response(structured_output: dict[str, Any]) -> str:
+def normalize_confusion_choice_visible_response(structured_output: dict[str, Any]) -> str:
     prompt = coerce_structured_section_text(structured_output.get("confusionPrompt"))
     sections = structured_output.get("sections")
     answer = coerce_structured_section_text(sections.get("mainChat") or sections.get("answer")) if isinstance(sections, dict) else ""
@@ -2835,8 +2876,8 @@ def suppress_repeated_failed_search_decision(decision: dict[str, Any], state: Pd
         "retrieval_reason": "previous_search_failed",
         "search_query": "",
         "searches": [],
-        "student_response": (
-            str(decision.get("student_response") or "").strip()
+        "structuredOutput": main_chat_structured_output(
+            decision_visible_response_text(decision)
             or "I could not find that exact source in the class OCR metadata yet. Paste the text or share the exact worksheet/page, and I can help from there."
         ),
         "tool_calls": [],
@@ -2911,7 +2952,6 @@ def exact_problem_selection_update_after_search(state: PdfRagState, pages: list[
             "retrieval_reason": "",
             "search_query": "",
             "searches": [],
-            "student_response": prompt,
             "structuredOutput": structured_output,
             "tool_calls": [],
         },
@@ -3075,7 +3115,6 @@ def enforce_ambiguous_student_upload_clarification(decision: dict[str, Any], sta
         "retrieval_reason": "",
         "search_query": "",
         "searches": [],
-        "student_response": prompt,
         "structuredOutput": structured_output,
         "tool_calls": [],
         "top_k": 1,
@@ -3128,15 +3167,24 @@ def enforce_selected_upload_problem_response(decision: dict[str, Any], state: Pd
             problem_number=selected_numbers[0],
         )
 
-    student_response = str(decision.get("student_response") or "").strip()
+    visible_response = decision_visible_response_text(decision)
     has_problem = bool(structured_output_problem_text(structured_output))
 
     if not (problem_text or has_problem):
         return decision
 
-    if not student_response or looks_like_retrieval_status_text(student_response):
-        student_response = structured_output_to_text(structured_output or {}) or (
+    if not visible_response or looks_like_retrieval_status_text(visible_response):
+        visible_response = structured_output_to_text(structured_output or {}) or (
             f"I found problem {selected_numbers[0]} in the upload."
+        )
+        structured_output = normalize_backend_structured_output(
+            {
+                **(structured_output or {}),
+                "sections": {
+                    **((structured_output or {}).get("sections") if isinstance((structured_output or {}).get("sections"), dict) else {}),
+                    "mainChat": visible_response,
+                },
+            }
         )
 
     return {
@@ -3148,7 +3196,6 @@ def enforce_selected_upload_problem_response(decision: dict[str, Any], state: Pd
         "retrieval_reason": "",
         "search_query": "",
         "searches": [],
-        "student_response": student_response,
         "structuredOutput": structured_output,
         "tool_calls": [],
     }
@@ -3281,7 +3328,7 @@ def decision_asks_upload_problem_selection(decision: dict[str, Any], state: PdfR
 
 def upload_problem_selection_text_from_decision(decision: dict[str, Any]) -> str:
     text_parts = [
-        str(decision.get("student_response") or ""),
+        decision_visible_response_text(decision),
         structured_output_to_text(decision.get("structuredOutput") or {}),
     ]
     return " ".join(part for part in text_parts if part).strip()
@@ -3378,9 +3425,11 @@ def enforce_initial_source_lookup_search(decision: dict[str, Any], state: PdfRag
     except Exception:
         return decision
 
-    student_response = str(decision.get("student_response") or "").strip()
-    if asks_for_pasted_problem_or_source(student_response):
-        student_response = ""
+    visible_response = decision_visible_response_text(decision)
+    if asks_for_pasted_problem_or_source(visible_response):
+        visible_response = ""
+    if not visible_response:
+        visible_response = fallback_quick_retrieval_response(retrieval_reason)
 
     return {
         **decision,
@@ -3391,8 +3440,7 @@ def enforce_initial_source_lookup_search(decision: dict[str, Any], state: PdfRag
         "query": query,
         "retrieval_reason": retrieval_reason,
         "search_query": query,
-        "student_response": student_response or fallback_quick_retrieval_response(retrieval_reason),
-        "structuredOutput": None,
+        "structuredOutput": main_chat_structured_output(visible_response),
         "top_k": top_k,
     }
 
@@ -3407,10 +3455,6 @@ def enforce_student_upload_direct_inspection(decision: dict[str, Any], state: Pd
     if normalize_debug_options(state.get("debug_options")).get("forceRetrieval"):
         return decision
 
-    student_response = str(decision.get("student_response") or "").strip()
-    if looks_like_retrieval_status_text(student_response):
-        student_response = ""
-
     structured_output = normalize_backend_structured_output(
         decision.get("structuredOutput") or decision.get("structured_output")
     )
@@ -3424,7 +3468,6 @@ def enforce_student_upload_direct_inspection(decision: dict[str, Any], state: Pd
         "retrieval_reason": "",
         "search_query": "",
         "searches": [],
-        "student_response": student_response,
         "structuredOutput": structured_output,
         "tool_calls": [],
     }
@@ -3474,9 +3517,15 @@ def enforce_debug_retrieval_options(decision: dict[str, Any], state: PdfRagState
             "retrieval_reason": retrieval_reason,
             "search_query": query,
             "searches": searches,
-            "student_response": str(decision.get("student_response") or "").strip()
-            or fallback_quick_retrieval_response(retrieval_reason),
-            "structuredOutput": None if (decision.get("structuredOutput") or {}).get("confusionChoices") else decision.get("structuredOutput"),
+            "structuredOutput": None
+            if (decision.get("structuredOutput") or {}).get("confusionChoices")
+            else (
+                decision.get("structuredOutput")
+                or main_chat_structured_output(
+                    decision_visible_response_text(decision)
+                    or fallback_quick_retrieval_response(retrieval_reason)
+                )
+            ),
             "top_k": max(1, min(int(decision.get("top_k") or MAX_RETRIEVED_WINDOWS), MAX_RETRIEVED_WINDOWS)),
         }
 
@@ -3484,17 +3533,16 @@ def enforce_debug_retrieval_options(decision: dict[str, Any], state: PdfRagState
         structured_output = normalize_backend_structured_output(
             decision.get("structuredOutput") or decision.get("structured_output")
         )
-        student_response = str(decision.get("student_response") or "").strip()
-        if looks_like_retrieval_status_text(student_response):
-            student_response = ""
-        if not student_response and structured_output:
-            student_response = structured_output_to_text(structured_output)
-        if looks_like_retrieval_status_text(student_response):
-            student_response = ""
-        if not student_response:
-            student_response = (
+        visible_response = decision_visible_response_text({**decision, "structuredOutput": structured_output})
+        if looks_like_retrieval_status_text(visible_response):
+            visible_response = ""
+        if not visible_response:
+            visible_response = (
                 "I do not have enough visible source context to search in this debug mode. "
                 "I can still help from what is already in the chat; what part should we focus on?"
+            )
+            structured_output = normalize_backend_structured_output(
+                {"sections": {"mainChat": visible_response}, "sectionOrder": ["mainChat"]}
             )
         return {
             **decision,
@@ -3505,7 +3553,6 @@ def enforce_debug_retrieval_options(decision: dict[str, Any], state: PdfRagState
             "retrieval_reason": "",
             "search_query": "",
             "searches": [],
-            "student_response": student_response,
             "structuredOutput": structured_output,
             "tool_calls": [],
         }
@@ -3564,7 +3611,7 @@ def jsonish_visible_text(text: str, *, depth: int = 0) -> str:
 
     parsed = unwrap_nested_model_json_payload(parsed)
     sections = parsed.get("sections") if isinstance(parsed.get("sections"), dict) else {}
-    for key in ("mainChat", "answer", FINAL_JSON_MAIN_TEXT_KEY, "main_text", "student_response", "content", "message"):
+    for key in ("mainChat", "answer", FINAL_JSON_MAIN_TEXT_KEY, "main_text", "content", "message"):
         candidate = sections.get(key) if key in {"mainChat", "answer"} else parsed.get(key)
         candidate_text = coerce_structured_section_text(candidate)
         if not candidate_text:
@@ -5019,7 +5066,7 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
     has_student_attachment_files = bool(state.get("student_attachment_files"))
     decision = state.get("retrieval_decision") or {}
     primary_visible_context = {
-        "student_response": state.get("primary_student_response") or decision.get("student_response") or "",
+        "primaryMainChat": state.get("primary_visible_response") or decision_visible_response_text(decision),
         "structuredOutput": state.get("primary_structured_output") or decision.get("structuredOutput") or {},
         "tutorPlan": state.get("tutor_plan") or decision.get("tutorPlan") or {},
         "retrievalDecision": {
@@ -6635,7 +6682,7 @@ async def run_pdf_rag_agent(
         "structured_output_override": {},
         "tutor_plan": {},
         "problem_understanding_state": {},
-        "primary_student_response": "",
+        "primary_visible_response": "",
         "primary_structured_output": {},
         "context_grounded_response": "",
         "token_usage": empty_token_usage(),
@@ -6801,9 +6848,9 @@ async def run_pdf_rag_agent_stream(
         state["problem_understanding_state"] = state_after_tutor_plan(state, state.get("tutor_plan"))
         state["retrieval_reason"] = decision.get("retrieval_reason") or ""
         state["failed_searches_skipped"] = decision.get("failed_searches_skipped") or []
-        state["primary_student_response"] = str(decision.get("student_response") or "").strip()
+        state["primary_visible_response"] = decision_visible_response_text(decision)
         state["primary_structured_output"] = decision.get("structuredOutput") if isinstance(decision.get("structuredOutput"), dict) else {}
-        state["answer"] = str(decision.get("student_response") or "").strip() if not decision.get("needs_search") else ""
+        state["answer"] = state["primary_visible_response"] if not decision.get("needs_search") else ""
         if decision.get("structuredOutput") and not decision.get("needs_search"):
             state["structured_output_override"] = decision.get("structuredOutput")
         state["finish_reason"] = response.get("finish_reason") or ""
@@ -6970,7 +7017,7 @@ async def run_pdf_rag_agent_stream(
                 reasoning_effort=final_reasoning_effort,
             )
         else:
-            state["answer"] = str(decision.get("student_response") or state.get("answer") or "").strip()
+            state["answer"] = decision_visible_response_text(decision) or str(state.get("answer") or "").strip()
 
         preliminary_sources = sources_for_answer(state, state.get("answer") or "")
         problem_context = parse_problem_context_from_answer(state.get("answer") or "", state, preliminary_sources)

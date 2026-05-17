@@ -41,8 +41,10 @@ const violenceSafetyCategories = new Set([
   "hate/threatening",
   "illicit/violent"
 ]);
-const dailyReviewThreshold = 5;
-const urgentDailyReviewThreshold = 3;
+export const studentChatSafetyTemporaryPauseThreshold = 2;
+export const studentChatSafetyPermanentUrgentPauseThreshold = 3;
+export const studentChatSafetyPermanentTotalPauseThreshold = 5;
+export const studentChatSafetyTemporaryPauseDurationMs = 60 * 60 * 1000;
 
 export type StudentChatSafetyDecision = {
   blocked: boolean;
@@ -54,6 +56,7 @@ export type StudentChatSafetyDecision = {
 };
 
 export type StudentChatSafetyBlockedEvent = StudentChatSafetyDecision & {
+  blockedMessageText: string;
   classId: string;
   conversationId: string;
   count: number;
@@ -61,6 +64,8 @@ export type StudentChatSafetyBlockedEvent = StudentChatSafetyDecision & {
   messageHash: string;
   messageId: string;
   model: string;
+  pauseAction: "none" | "temporary_pause" | "permanent_pause";
+  pauseUntil?: string;
   requestId: string;
   studentId: string;
   urgentCount: number;
@@ -146,6 +151,8 @@ export function studentChatSafetyBlockedPayload(event: StudentChatSafetyBlockedE
       categories: event.categories,
       code: studentChatSafetyBlockedCode,
       count: event.count,
+      pauseAction: event.pauseAction,
+      pauseUntil: event.pauseUntil,
       reason: event.primaryReason,
       supportMessage: event.supportMessage
     }
@@ -395,8 +402,10 @@ async function recordStudentChatSafetyBlockedEvent({
       studentId: scope.uid
     }));
   }
+  const pauseDecision = safetyPauseDecision(countSnapshot);
   const event: StudentChatSafetyBlockedEvent = {
     ...decision,
+    blockedMessageText: messageContent,
     classId: scope.classId,
     conversationId: resolvedConversationId,
     count: countSnapshot.count,
@@ -404,6 +413,8 @@ async function recordStudentChatSafetyBlockedEvent({
     messageHash,
     messageId,
     model: studentChatSafetyModerationModel,
+    pauseAction: pauseDecision.pauseAction,
+    pauseUntil: pauseDecision.pauseUntil,
     requestId,
     studentId: scope.uid,
     urgentCount: countSnapshot.urgentCount
@@ -428,10 +439,10 @@ async function recordStudentChatSafetyBlockedEvent({
     }));
   });
 
-  if (event.count > dailyReviewThreshold) {
+  if (event.count >= 1) {
     await markConversationForSafetyReview({
       event,
-      urgent: false
+      urgent: event.pauseAction === "permanent_pause" || event.riskLevel === "urgent"
     }).catch((caughtError) => {
       console.error("Student chat safety review write failed.", JSON.stringify({
         classId: event.classId,
@@ -443,12 +454,9 @@ async function recordStudentChatSafetyBlockedEvent({
     });
   }
 
-  if (event.urgentCount > urgentDailyReviewThreshold) {
-    await markConversationForSafetyReview({
-      event,
-      urgent: true
-    }).catch((caughtError) => {
-      console.error("Student chat urgent safety review write failed.", JSON.stringify({
+  if (event.pauseAction !== "none") {
+    await applyStudentChatSafetyPause(event).catch((caughtError) => {
+      console.error("Student chat safety pause write failed.", JSON.stringify({
         classId: event.classId,
         conversationId: event.conversationId,
         message: caughtError instanceof Error ? caughtError.message : String(caughtError),
@@ -456,8 +464,14 @@ async function recordStudentChatSafetyBlockedEvent({
         studentId: event.studentId
       }));
     });
+  }
+
+  if (event.pauseAction === "permanent_pause") {
     await writeSecurityLog({
-      eventType: "student_chat.safety_urgent_escalation",
+      eventType:
+        event.urgentCount >= studentChatSafetyPermanentUrgentPauseThreshold
+          ? "student_chat.safety_urgent_escalation"
+          : "student_chat.safety_permanent_pause",
       metadata: auditSafetyMetadata(event),
       route: "/api/chat"
     }).catch((caughtError) => {
@@ -472,6 +486,30 @@ async function recordStudentChatSafetyBlockedEvent({
   }
 
   return event;
+}
+
+function safetyPauseDecision({
+  count,
+  urgentCount
+}: {
+  count: number;
+  urgentCount: number;
+}): Pick<StudentChatSafetyBlockedEvent, "pauseAction" | "pauseUntil"> {
+  if (
+    urgentCount >= studentChatSafetyPermanentUrgentPauseThreshold ||
+    count >= studentChatSafetyPermanentTotalPauseThreshold
+  ) {
+    return { pauseAction: "permanent_pause" };
+  }
+
+  if (count >= studentChatSafetyTemporaryPauseThreshold) {
+    return {
+      pauseAction: "temporary_pause",
+      pauseUntil: new Date(Date.now() + studentChatSafetyTemporaryPauseDurationMs).toISOString()
+    };
+  }
+
+  return { pauseAction: "none" };
 }
 
 async function ensureSafetyReviewConversation({
@@ -578,7 +616,7 @@ async function incrementDailySafetyCount({
     .doc(classId)
     .collection("studentChatSafetyEvents")
     .doc(randomUUID());
-  const dailyCountId = hashStudentMessageContent([classId, conversationId, studentId, date].join("|"));
+  const dailyCountId = hashStudentMessageContent([classId, studentId, date].join("|"));
   const dailyCountRef = adminDb
     .collection("classes")
     .doc(classId)
@@ -640,14 +678,27 @@ async function markConversationForSafetyReview({
     ? ["student_chat_safety", "urgent_safety_escalation"]
     : ["student_chat_safety"];
   const privateNote = urgent
-    ? "Urgent safety review: repeated self-harm or violence-risk blocked chat events today. No raw student message text is stored."
-    : "Safety review: repeated blocked chat events today. No raw student message text is stored.";
+    ? "Urgent safety review: repeated self-harm or violence-risk blocked chat events today. The flagged blocked message is stored in the scoped safety review field."
+    : "Safety review: blocked chat event. The flagged blocked message is stored in the scoped safety review field.";
+  const safetyReview = safetyReviewMetadata(event);
+
+  await tryPostgresData("student_chat.safety.conversation_metadata.write", () =>
+    updateConversationMetadata({
+      id: event.conversationId,
+      metadata: {
+        safetyReview
+      }
+    })
+  );
 
   await tryPostgresData("student_chat.safety.review.write", () =>
     upsertConversationReview({
       classId: event.classId,
       conversationId: event.conversationId,
       flags,
+      metadata: {
+        safetyReview
+      },
       privateNote,
       status: "needs_follow_up"
     })
@@ -665,6 +716,8 @@ async function markConversationForSafetyReview({
           date: event.date,
           primaryReason: event.primaryReason,
           riskLevel: event.riskLevel,
+          pauseAction: event.pauseAction,
+          pauseUntil: event.pauseUntil,
           urgent,
           urgentCount: event.urgentCount
         }
@@ -693,15 +746,86 @@ async function markConversationForSafetyReview({
       status: "needs_follow_up",
       updatedAt: FieldValue.serverTimestamp(),
       safetyReview: {
-        categories: event.categories,
-        count: event.count,
-        date: event.date,
-        primaryReason: event.primaryReason,
-        riskLevel: event.riskLevel,
+        ...safetyReview,
         urgent,
-        urgentCount: event.urgentCount
       }
     }, { merge: true });
+}
+
+async function applyStudentChatSafetyPause(event: StudentChatSafetyBlockedEvent) {
+  const profile = await getAccountProfile(event.studentId).catch(() => null);
+  const studentEmail = String(profile?.email ?? "").trim().toLowerCase();
+
+  if (!studentEmail) {
+    return;
+  }
+
+  const supportDocumentId = encodeURIComponent(studentEmail);
+  const chatBlockedUntil = event.pauseAction === "temporary_pause" ? event.pauseUntil ?? "" : null;
+  const metadata = {
+    safetyChatPause: {
+      action: event.pauseAction,
+      conversationId: event.conversationId,
+      count: event.count,
+      date: event.date,
+      messageHash: event.messageHash,
+      pausedAt: new Date().toISOString(),
+      pauseUntil: chatBlockedUntil,
+      primaryReason: event.primaryReason,
+      riskLevel: event.riskLevel,
+      urgentCount: event.urgentCount
+    }
+  };
+
+  await tryPostgresData("student_chat.safety.pause.write", () =>
+    upsertStudentSupport({
+      chatBlocked: true,
+      classId: event.classId,
+      displayName: String(profile?.displayName ?? profile?.email ?? ""),
+      id: `${event.classId}:${supportDocumentId}`,
+      metadata,
+      studentEmail,
+      studentId: event.studentId
+    })
+  );
+
+  if (!adminDb) {
+    return;
+  }
+  const db = adminDb;
+
+  await db.runTransaction(async (transaction) => {
+    const classReference = db.collection("classes").doc(event.classId);
+    const supportReference = classReference.collection("studentSupport").doc(supportDocumentId);
+    const rosterReference = classReference.collection("students").doc(supportDocumentId);
+    const pauseFields = {
+      chatBlocked: true,
+      chatBlockedReason: "student_chat_safety",
+      chatBlockedUntil,
+      safetyChatPause: metadata.safetyChatPause,
+      studentEmail,
+      updatedAt: FieldValue.serverTimestamp()
+    };
+
+    transaction.set(supportReference, pauseFields, { merge: true });
+    transaction.set(rosterReference, pauseFields, { merge: true });
+  });
+}
+
+function safetyReviewMetadata(event: StudentChatSafetyBlockedEvent) {
+  return {
+    blockedMessageText: event.blockedMessageText,
+    categories: event.categories,
+    count: event.count,
+    createdAt: new Date().toISOString(),
+    label: "Flagged blocked message",
+    messageHash: event.messageHash,
+    pauseAction: event.pauseAction,
+    pauseUntil: event.pauseUntil,
+    primaryReason: event.primaryReason,
+    riskLevel: event.riskLevel,
+    urgentCount: event.urgentCount
+  };
 }
 
 function primarySafetyReason(categories: string[]) {

@@ -13,7 +13,7 @@ class PdfRagState(TypedDict):
     retrieved_pages: list[dict[str, Any]]
     page_assets: list[dict[str, Any]]
     answer: str
-    primary_student_response: NotRequired[str]
+    primary_visible_response: NotRequired[str]
     primary_structured_output: NotRequired[dict[str, Any]]
     context_grounded_response: NotRequired[str]
     finish_reason: NotRequired[str]

@@ -212,6 +212,22 @@ test("PostgreSQL migration defines page, problem, confidence, source, and search
   assert.match(migration, /ocr_confidence NUMERIC/);
   assert.match(migration, /ocr_provider TEXT NOT NULL/);
   assert.match(migration, /ocr_source TEXT NOT NULL/);
+  assert.match(
+    migration,
+    /ALTER TABLE pdf_materials[\s\S]*ADD COLUMN IF NOT EXISTS ocr_provider TEXT NOT NULL DEFAULT ''/
+  );
+  assert.match(
+    migration,
+    /ALTER TABLE pdf_materials[\s\S]*ADD COLUMN IF NOT EXISTS search_metadata_source TEXT NOT NULL DEFAULT 'postgres'/
+  );
+  assert.match(
+    migration,
+    /ALTER TABLE pdf_pages[\s\S]*ADD COLUMN IF NOT EXISTS ocr_provider TEXT NOT NULL DEFAULT ''/
+  );
+  assert.match(
+    migration,
+    /ALTER TABLE pdf_detected_problems[\s\S]*ADD COLUMN IF NOT EXISTS ocr_provider TEXT NOT NULL DEFAULT ''/
+  );
   assert.match(migration, /CREATE EXTENSION IF NOT EXISTS vector/);
   assert.match(migration, /embedding VECTOR\(768\)/);
   assert.match(migration, /embedding_model TEXT/);

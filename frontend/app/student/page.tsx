@@ -142,6 +142,8 @@ type ChatStreamEvent =
 type StudentVisibleClass = {
   appearance?: TeacherClassAppearance;
   chatBlocked?: boolean;
+  chatBlockedReason?: string;
+  chatBlockedUntil?: string | null;
   id: string;
   joinCode?: string;
   name: string;
@@ -311,6 +313,7 @@ export function StudentWorkspace() {
   const [isSendingFeedback, setIsSendingFeedback] = useState(false);
   const [usageIncreaseRequestMessage, setUsageIncreaseRequestMessage] = useState("");
   const [isRequestingUsageIncrease, setIsRequestingUsageIncrease] = useState(false);
+  const [selectedTutorChoiceByMessageId, setSelectedTutorChoiceByMessageId] = useState<Record<string, string>>({});
   const [isTeacherDebugMode, setIsTeacherDebugMode] = useState(false);
   const [isTutorDebugPanelOpen, setIsTutorDebugPanelOpen] = useState(false);
   const [tutorDebugOptions, setTutorDebugOptions] = useState<TutorDebugOptions>(defaultTutorDebugOptions);
@@ -465,6 +468,8 @@ export function StudentWorkspace() {
     return {
       ...savedClass,
       chatBlocked: activeStudentClass.chatBlocked,
+      chatBlockedReason: activeStudentClass.chatBlockedReason ?? savedClass.chatBlockedReason,
+      chatBlockedUntil: activeStudentClass.chatBlockedUntil ?? savedClass.chatBlockedUntil,
       studentChatEnabled:
         savedClass.studentChatEnabled === false || activeStudentClass.studentChatEnabled === false
           ? false
@@ -490,7 +495,7 @@ export function StudentWorkspace() {
   const classSectionLabel = formatClassSectionLabel(classSection, Boolean(activeCourseId));
   const studentChatPauseMessage =
     activeCourseId && !isTeacherPreview && activeClass?.chatBlocked
-      ? "Chat is paused for this account."
+      ? formatStudentChatPauseMessage(activeClass)
       : activeCourseId && !isTeacherPreview && activeClass?.studentChatEnabled === false
         ? "Your teacher has paused chat for this class."
         : "";
@@ -1174,6 +1179,55 @@ export function StudentWorkspace() {
     });
   }
 
+  function applySafetyBlockedResponse({
+    classId,
+    error,
+    pauseAction,
+    pauseUntil
+  }: {
+    classId: string;
+    error?: string;
+    pauseAction?: string;
+    pauseUntil?: string;
+  }) {
+    const safetyMessage =
+      error ||
+      "I can't help with that message. Please rephrase it in a way that stays safe and focused on classwork.";
+
+    setMessages((currentMessages) => {
+      const lastMessage = currentMessages[currentMessages.length - 1];
+
+      if (lastMessage?.role === "assistant" && lastMessage.content === safetyMessage) {
+        return currentMessages;
+      }
+
+      return [
+        ...currentMessages,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: safetyMessage,
+          createdAt: new Date().toISOString()
+        }
+      ];
+    });
+
+    if (pauseAction === "temporary_pause" || pauseAction === "permanent_pause") {
+      setStudentClasses((currentClasses) =>
+        currentClasses.map((studentClass) =>
+          studentClass.id === classId
+            ? {
+                ...studentClass,
+                chatBlocked: true,
+                chatBlockedReason: "student_chat_safety",
+                chatBlockedUntil: pauseAction === "temporary_pause" ? pauseUntil ?? null : null
+              }
+            : studentClass
+        )
+      );
+    }
+  }
+
   async function sendStudentMessage(
     content: string,
     options: {
@@ -1273,9 +1327,22 @@ export function StudentWorkspace() {
           aiUsageStatus?: StudentAiUsageStatus;
           error?: string;
           errorCode?: string;
+          safety?: {
+            pauseAction?: string;
+            pauseUntil?: string;
+          };
         };
         if (data.aiUsageStatus) {
           setAiUsageStatus(data.aiUsageStatus);
+        }
+        if (data.errorCode === "CHAT_SAFETY_BLOCKED") {
+          applySafetyBlockedResponse({
+            classId: activeCourseId,
+            error: data.error,
+            pauseAction: data.safety?.pauseAction,
+            pauseUntil: data.safety?.pauseUntil
+          });
+          return;
         }
         throw new Error(data.error ?? "Chat request failed");
       }
@@ -1635,7 +1702,12 @@ export function StudentWorkspace() {
     });
   }
 
-  function loadChoiceMessageIntoComposer(choiceMessage: string) {
+  function loadChoiceMessageIntoComposer(messageId: string, choice: TutorConfusionChoice) {
+    setSelectedTutorChoiceByMessageId((currentSelections) => ({
+      ...currentSelections,
+      [messageId]: choice.id
+    }));
+    const choiceMessage = choice.message;
     setDraft(choiceMessage);
     requestAnimationFrame(() => {
       resizeStudentComposerTextarea(draftTextareaRef.current);
@@ -2139,18 +2211,26 @@ export function StudentWorkspace() {
                   onPromptSelect={chooseStarterPrompt}
                 />
               ) : null}
-              {messages.map((message) => (
-                <StudentChatMessage
-                  debugEnabled={isTeacherPreview && isTeacherDebugMode}
-                  debugOptions={tutorDebugOptions}
-                  isJustSent={message.id === justSentMessageId}
-                  isLatestKnowledgeMessage={latestKnowledgeMessageId === message.id}
-                  isSending={isSending}
-                  message={message}
-                  key={message.id}
-                  onChoiceSelect={loadChoiceMessageIntoComposer}
-                />
-              ))}
+              {messages.map((message, messageIndex) => {
+                const choicesLocked =
+                  message.role === "assistant" &&
+                  messages.slice(messageIndex + 1).some((nextMessage) => nextMessage.role === "student");
+
+                return (
+                  <StudentChatMessage
+                    choicesLocked={choicesLocked}
+                    debugEnabled={isTeacherPreview && isTeacherDebugMode}
+                    debugOptions={tutorDebugOptions}
+                    isJustSent={message.id === justSentMessageId}
+                    isLatestKnowledgeMessage={latestKnowledgeMessageId === message.id}
+                    isSending={isSending}
+                    message={message}
+                    key={message.id}
+                    selectedChoiceId={selectedTutorChoiceByMessageId[message.id]}
+                    onChoiceSelect={loadChoiceMessageIntoComposer}
+                  />
+                );
+              })}
               {isSending && chatProgress ? <ChatProgressMessage progress={chatProgress} /> : null}
             </div>
 
@@ -2508,21 +2588,25 @@ function StudentFeedbackPopover({
 }
 
 const StudentChatMessage = memo(function StudentChatMessage({
+  choicesLocked,
   debugEnabled,
   debugOptions,
   isJustSent,
   isLatestKnowledgeMessage,
   isSending,
   onChoiceSelect,
+  selectedChoiceId,
   message
 }: {
+  choicesLocked: boolean;
   debugEnabled: boolean;
   debugOptions: TutorDebugOptions;
   isJustSent: boolean;
   isLatestKnowledgeMessage: boolean;
   isSending: boolean;
   message: ChatMessage;
-  onChoiceSelect: (message: string) => void;
+  onChoiceSelect: (messageId: string, choice: TutorConfusionChoice) => void;
+  selectedChoiceId?: string;
 }) {
   if (message.role === "student") {
     return (
@@ -2648,10 +2732,12 @@ const StudentChatMessage = memo(function StudentChatMessage({
         {confusionChoices?.length ? (
           <TutorConfusionChoices
             choices={confusionChoices}
-            disabled={isSending}
+            disabled={isSending || choicesLocked}
             isProblemSelection={isProblemSelectionPrompt}
             isSupportPathChoice={isSupportPathChoicePrompt}
             prompt={visibleConfusionPrompt}
+            selectedChoiceId={selectedChoiceId}
+            sourceMessageId={message.id}
             onChoiceSelect={onChoiceSelect}
           />
         ) : null}
@@ -2787,6 +2873,8 @@ function TutorConfusionChoices({
   isProblemSelection,
   isSupportPathChoice,
   prompt,
+  selectedChoiceId,
+  sourceMessageId,
   onChoiceSelect
 }: {
   choices: TutorConfusionChoice[];
@@ -2794,7 +2882,9 @@ function TutorConfusionChoices({
   isProblemSelection?: boolean;
   isSupportPathChoice?: boolean;
   prompt?: string;
-  onChoiceSelect: (message: string) => void;
+  selectedChoiceId?: string;
+  sourceMessageId: string;
+  onChoiceSelect: (messageId: string, choice: TutorConfusionChoice) => void;
 }) {
   return (
     <div
@@ -2807,10 +2897,11 @@ function TutorConfusionChoices({
         {choices.map((choice) => (
           <button
             aria-label={`Use: ${choice.message}`}
+            aria-pressed={selectedChoiceId === choice.id}
             disabled={disabled}
             key={choice.id}
             type="button"
-            onClick={() => onChoiceSelect(choice.message)}
+            onClick={() => onChoiceSelect(sourceMessageId, choice)}
           >
             <span className="assistant-confusion-choice-label">{choice.label}</span>
             {!isProblemSelection && !sameDisplayedText(choice.label, choice.description ?? choice.message) ? (
@@ -5709,6 +5800,8 @@ function mergeStudentClasses(classes: StudentClassSummary[], activeClass: Studen
   if (activeClass) {
     classMap.set(activeClass.id, {
       chatBlocked: activeClass.chatBlocked,
+      chatBlockedReason: activeClass.chatBlockedReason,
+      chatBlockedUntil: activeClass.chatBlockedUntil,
       id: activeClass.id,
       joinCode: activeClass.joinCode,
       name: activeClass.name,
@@ -5728,6 +5821,18 @@ function getStudentComposerPlaceholder(activeClass: StudentVisibleClass | null) 
     activeClass?.studentPromptPlaceholder?.trim() ||
     "Ask about a concept, assignment, reading, or homework question..."
   );
+}
+
+function formatStudentChatPauseMessage(activeClass: StudentVisibleClass) {
+  if (activeClass.chatBlockedReason === "student_chat_safety" && activeClass.chatBlockedUntil) {
+    return `Chat is paused for this account until ${formatConversationDate(activeClass.chatBlockedUntil)}.`;
+  }
+
+  if (activeClass.chatBlockedReason === "student_chat_safety") {
+    return "Chat is paused for this account. Ask your teacher to turn it back on.";
+  }
+
+  return "Chat is paused for this account.";
 }
 
 function describeStudentClassesError(caughtError: unknown) {
