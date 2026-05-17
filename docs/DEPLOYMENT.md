@@ -12,6 +12,7 @@ npm run build
 npm run start
 ```
 
+
 The root scripts point Next.js at `frontend/`. In a hosting platform, set the frontend service root to the repo root unless you also copy the root `package.json` scripts into a separate frontend package.
 
 Required frontend/server environment variables:
