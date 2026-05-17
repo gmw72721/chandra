@@ -155,7 +155,7 @@ The private backend is the FastAPI service on Cloud Run. Production frontend ser
 | `GOOGLE_CLOUD_PROJECT` | Embedding/retrieval code | Usually `chandra-f6e13`. |
 | `GOOGLE_CLOUD_LOCATION` | Embedding/retrieval code | Configured as `us` for Gemini embeddings in production App Hosting. |
 | `VERTEX_EMBEDDING_MODEL` | Embedding/retrieval code | Default/configured model is `gemini-embedding-2`. |
-| `VERTEX_EMBEDDING_DIMENSIONS` | Embedding/retrieval code | Configured as `768`. |
+| `VERTEX_EMBEDDING_DIMENSIONS` | Embedding/retrieval code | Configured as `1536`. |
 | `LEARNING_PROFILE_UPDATE_SECRET` | Scheduled profile route | Required bearer token for `/api/student-learning-profiles/weekly`. |
 
 ## Useful Source Files

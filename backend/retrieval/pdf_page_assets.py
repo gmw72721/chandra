@@ -31,7 +31,7 @@ async def fetch_pdf_page_assets_via_next(
     *,
     max_total_pages: int = MAX_TOTAL_PAGES,
 ) -> list[dict[str, Any]]:
-    """Fetch page asset data for selected PDF OCR records.
+    """Fetch page asset data for selected structured PDF records.
 
     The request sends only class/professor/material/page selectors. Storage
     paths are resolved by Next.js from PostgreSQL metadata, not trusted from the
@@ -122,8 +122,7 @@ def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
 
     display_page_start = int(printed_page_start or page_start)
     display_page_end = int(printed_page_end or (display_page_start if printed_page_start else page_end))
-    ocr_text = str(page.get("ocr_text") or page.get("ocrText") or page.get("chunk_text") or page.get("chunkText") or "")
-    chunk_text = str(page.get("chunk_text") or page.get("chunkText") or ocr_text)
+    chunk_text = str(page.get("chunk_text") or page.get("chunkText") or page.get("pageLevelSearchText") or page.get("page_level_search_text") or "")
     title = str(page.get("title") or "Untitled PDF")
 
     return {
@@ -133,10 +132,6 @@ def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
         "doc_id": str(page.get("doc_id") or page.get("docId") or page.get("materialId") or ""),
         "images": [],
         "material_type": str(page.get("material_type") or page.get("materialType") or ""),
-        "ocr_confidence": page.get("ocr_confidence") if page.get("ocr_confidence") is not None else page.get("ocrConfidence"),
-        "ocr_provider": str(page.get("ocr_provider") or page.get("ocrProvider") or ""),
-        "ocr_source": str(page.get("ocr_source") or page.get("ocrSource") or ""),
-        "ocr_text": ocr_text,
         "page_end": page_end,
         "page_start": page_start,
         "full_pdf_bucket": str(page.get("full_pdf_bucket") or page.get("fullPdfBucket") or ""),
@@ -145,9 +140,6 @@ def metadata_only_page_asset(page: dict[str, Any]) -> dict[str, Any]:
         "full_pdf_mime_type": str(page.get("full_pdf_mime_type") or page.get("fullPdfMimeType") or "application/pdf"),
         "full_pdf_size_bytes": page.get("full_pdf_size") if page.get("full_pdf_size") is not None else page.get("fullPdfSize") if page.get("fullPdfSize") is not None else page.get("full_pdf_size_bytes") if page.get("full_pdf_size_bytes") is not None else page.get("fullPdfSizeBytes"),
         "full_pdf_sha256": str(page.get("full_pdf_sha256") or page.get("fullPdfSha256") or ""),
-        "full_pdf_data_url": page.get("full_pdf_data_url") or page.get("fullPdfDataUrl"),
-        "full_pdf_file_name": page.get("full_pdf_file_name") or page.get("fullPdfFileName"),
-        "full_pdf_skipped_reason": str(page.get("full_pdf_skipped_reason") or page.get("fullPdfSkippedReason") or ""),
         "page_asset_bucket": str(page.get("page_asset_bucket") or page.get("pageAssetBucket") or page.get("page_asset_storage_bucket") or page.get("pageAssetStorageBucket") or ""),
         "page_asset_path": str(page.get("page_asset_path") or page.get("pageAssetPath") or page.get("page_asset_storage_path") or page.get("pageAssetStoragePath") or ""),
         "page_asset_uri": str(page.get("page_asset_uri") or page.get("pageAssetUri") or ""),
@@ -178,8 +170,6 @@ def has_prefetched_asset_payload(page: dict[str, Any]) -> bool:
     return bool(
         page.get("file_data_url")
         or page.get("fileDataUrl")
-        or page.get("full_pdf_data_url")
-        or page.get("fullPdfDataUrl")
         or (isinstance(image_url, dict) and image_url.get("url"))
         or page.get("images")
     )
@@ -199,7 +189,6 @@ def merge_page_asset_payload(page: dict[str, Any], asset: dict[str, Any] | None)
         "full_pdf_mime_type": str(asset.get("fullPdfMimeType") or page.get("full_pdf_mime_type") or "application/pdf"),
         "full_pdf_size_bytes": asset.get("fullPdfSize") if asset.get("fullPdfSize") is not None else asset.get("fullPdfSizeBytes") if asset.get("fullPdfSizeBytes") is not None else page.get("full_pdf_size_bytes"),
         "full_pdf_sha256": str(asset.get("fullPdfSha256") or page.get("full_pdf_sha256") or ""),
-        "full_pdf_skipped_reason": str(asset.get("fullPdfSkippedReason") or page.get("full_pdf_skipped_reason") or ""),
         "page_asset_bucket": str(asset.get("pageAssetBucket") or page.get("page_asset_bucket") or page.get("page_asset_storage_bucket") or ""),
         "page_asset_path": str(asset.get("pageAssetPath") or page.get("page_asset_path") or page.get("page_asset_storage_path") or ""),
         "page_asset_uri": str(asset.get("pageAssetUri") or page.get("page_asset_uri") or ""),
@@ -217,11 +206,6 @@ def merge_page_asset_payload(page: dict[str, Any], asset: dict[str, Any] | None)
         else:
             merged["file_data_url"] = data_url
             merged["file_name"] = f"{page.get('doc_id') or 'pdf'}-page-{page.get('page_start')}.pdf"
-
-    full_pdf_data_url = str(asset.get("fullPdfDataUrl") or "")
-    if full_pdf_data_url:
-        merged["full_pdf_data_url"] = full_pdf_data_url
-        merged["full_pdf_file_name"] = str(asset.get("fullPdfFileName") or f"{page.get('doc_id') or 'source'}.pdf")
 
     return merged
 
@@ -291,7 +275,7 @@ def select_metadata_pages(
     *,
     max_total_pages: int = MAX_TOTAL_PAGES,
 ) -> list[dict[str, Any]]:
-    """Select narrow OCR metadata records without merging or opening PDFs."""
+    """Select narrow structured PDF metadata records without merging or opening PDFs."""
 
     selected: list[dict[str, Any]] = []
     seen: set[tuple[str, int, int, str, str]] = set()
@@ -312,7 +296,7 @@ def select_metadata_pages(
             normalized_page_start,
             normalized_page_end,
             str(page.get("retrieval_mode") or page.get("retrievalMode") or ""),
-            str(page.get("chunk_text") or page.get("chunkText") or page.get("ocr_text") or page.get("ocrText") or "")[:160],
+            str(page.get("chunk_text") or page.get("chunkText") or page.get("pageLevelSearchText") or page.get("page_level_search_text") or "")[:160],
         )
 
         if key in seen:

@@ -44,6 +44,8 @@ const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
 const geminiApiBaseUrl = "https://generativelanguage.googleapis.com/v1beta";
 const defaultGeminiEmbeddingBatchSize = 6;
 const defaultGeminiEmbeddingBatchMaxBytes = 8 * 1024 * 1024;
+const defaultGeminiEmbeddingBatchConcurrency = 4;
+const defaultVertexEmbeddingConcurrency = 8;
 let warnedAboutMissingVertexConfig = false;
 
 export class VertexEmbeddingError extends Error {
@@ -57,7 +59,7 @@ export function getVertexEmbeddingConfig(): VertexEmbeddingConfig | null {
   const projectId = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.FIREBASE_PROJECT_ID ?? "";
   const model = process.env.VERTEX_EMBEDDING_MODEL ?? "gemini-embedding-2";
   const location = process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
-  const dimensions = readOptionalPositiveInteger(process.env.VERTEX_EMBEDDING_DIMENSIONS) ?? 768;
+  const dimensions = readOptionalPositiveInteger(process.env.VERTEX_EMBEDDING_DIMENSIONS) ?? 1536;
 
   if (!projectId || !location || !model) {
     return null;
@@ -83,6 +85,7 @@ export async function createVertexEmbedding({
 export async function createVertexEmbeddings(
   inputs: VertexEmbeddingInput[],
   options: {
+    dimensions?: number;
     onProgress?: (progress: { completed: number; total: number }) => Promise<void> | void;
   } = {}
 ): Promise<Array<VertexEmbeddingResult | undefined>> {
@@ -99,7 +102,10 @@ export async function createVertexEmbeddings(
     return results;
   }
 
-  const config = getVertexEmbeddingConfig();
+  const baseConfig = getVertexEmbeddingConfig();
+  const config = baseConfig && options.dimensions
+    ? { ...baseConfig, dimensions: options.dimensions }
+    : baseConfig;
 
   if (!config) {
     warnAboutMissingVertexConfig();
@@ -107,11 +113,13 @@ export async function createVertexEmbeddings(
   }
 
   try {
-    if (isGeminiApiEmbeddingModel(config.model)) {
+    if (shouldUseGeminiDeveloperApiEmbeddings(config.model)) {
       const geminiApiKey = getGeminiApiKey();
+      const batches = buildGeminiEmbeddingBatches({ config, inputs: indexedInputs });
+      const batchConcurrency = geminiEmbeddingBatchConcurrency();
       let completed = 0;
 
-      for (const batch of buildGeminiEmbeddingBatches({ config, inputs: indexedInputs })) {
+      await mapWithConcurrency(batches, batchConcurrency, async (batch) => {
         const payload = await fetchGeminiEmbeddingBatch({ batch, config, geminiApiKey });
 
         batch.forEach((input, batchIndex) => {
@@ -132,15 +140,19 @@ export async function createVertexEmbeddings(
 
         completed += batch.length;
         await options.onProgress?.({ completed, total: indexedInputs.length });
-      }
+      });
 
       return results;
     }
 
     const accessToken = await getGoogleAccessToken();
 
-    await Promise.all(
-      indexedInputs.map(async (input, completedIndex) => {
+    let completed = 0;
+
+    await mapWithConcurrency(
+      indexedInputs,
+      vertexEmbeddingConcurrency(),
+      async (input) => {
         const response = await fetch(buildVertexPredictUrl(config), {
           body: JSON.stringify({
             instances: [
@@ -179,8 +191,9 @@ export async function createVertexEmbeddings(
           values
         };
 
-        await options.onProgress?.({ completed: completedIndex + 1, total: indexedInputs.length });
-      })
+        completed += 1;
+        await options.onProgress?.({ completed, total: indexedInputs.length });
+      }
     );
 
     return results;
@@ -232,6 +245,20 @@ function buildGeminiEmbeddingBatches({
   }
 
   return batches;
+}
+
+function geminiEmbeddingBatchConcurrency() {
+  const configured = readOptionalPositiveInteger(process.env.GEMINI_EMBEDDING_BATCH_CONCURRENCY)
+    ?? defaultGeminiEmbeddingBatchConcurrency;
+
+  return Math.min(Math.max(configured, 1), 8);
+}
+
+function vertexEmbeddingConcurrency() {
+  const configured = readOptionalPositiveInteger(process.env.VERTEX_EMBEDDING_CONCURRENCY)
+    ?? defaultVertexEmbeddingConcurrency;
+
+  return Math.min(Math.max(configured, 1), 16);
 }
 
 async function fetchGeminiEmbeddingBatch({
@@ -358,7 +385,23 @@ function buildGeminiBatchEmbedContentUrl(model: string) {
 
 function buildVertexPredictUrl({ location, model, projectId }: VertexEmbeddingConfig) {
   const encodedModel = encodeURIComponent(model);
-  return `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${encodedModel}:predict`;
+  return `https://${buildVertexApiHost(location)}/v1/projects/${projectId}/locations/${location}/publishers/google/models/${encodedModel}:predict`;
+}
+
+function buildVertexApiHost(location: string) {
+  if (location === "global") {
+    return "aiplatform.googleapis.com";
+  }
+
+  if (location === "us") {
+    return "aiplatform.us.rep.googleapis.com";
+  }
+
+  if (location === "eu") {
+    return "aiplatform.eu.rep.googleapis.com";
+  }
+
+  return `${location}-aiplatform.googleapis.com`;
 }
 
 async function getGoogleAccessToken() {
@@ -411,14 +454,17 @@ function getGoogleCredentials(): JWTInput | undefined {
 }
 
 function getGeminiApiKey() {
-  const apiKey =
-    readLocalGeminiApiKey() || process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_API_KEY?.trim();
+  const apiKey = readGeminiApiKeyValue();
 
   if (!apiKey) {
     throw new Error("Gemini embeddings require GEMINI_API_KEY. Create an AI Studio/Gemini API key for this project and restart the dev server.");
   }
 
   return apiKey;
+}
+
+function readGeminiApiKeyValue() {
+  return readLocalGeminiApiKey() || process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_API_KEY?.trim() || "";
 }
 
 function readLocalGeminiApiKey() {
@@ -440,6 +486,24 @@ function fingerprintSecret(secret: string) {
 
 function isGeminiApiEmbeddingModel(model: string) {
   return model.startsWith("gemini-embedding-2");
+}
+
+function shouldUseGeminiDeveloperApiEmbeddings(model: string) {
+  if (!isGeminiApiEmbeddingModel(model)) {
+    return false;
+  }
+
+  const provider = process.env.GEMINI_EMBEDDINGS_API_PROVIDER?.trim().toLowerCase();
+
+  if (provider === "vertex") {
+    return false;
+  }
+
+  if (provider === "developer") {
+    return true;
+  }
+
+  return Boolean(readGeminiApiKeyValue());
 }
 
 function warnAboutMissingVertexConfig() {
@@ -492,6 +556,28 @@ function readRetryDelayMs(retryAfter: string | null) {
 
 function sleep(durationMs: number) {
   return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+async function mapWithConcurrency<TItem, TResult>(
+  items: TItem[],
+  concurrencyLimit: number,
+  mapItem: (item: TItem, index: number) => Promise<TResult>
+) {
+  const results = new Array<TResult>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrencyLimit), items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        results[currentIndex] = await mapItem(items[currentIndex], currentIndex);
+      }
+    })
+  );
+
+  return results;
 }
 
 type VertexEmbeddingPredictResponse = {

@@ -53,7 +53,7 @@ Primary files:
 - `components/TeacherClassManager.tsx`
 - `frontend/app/api/materials/route.ts`
 - `frontend/lib/tutor-knowledge-server.ts`
-- `frontend/lib/google-document-ai-ocr.ts`
+- `frontend/lib/gemini-page-extractor.ts`
 - `frontend/lib/pdf-ocr-postgres.ts`
 
 ### Request Flow
@@ -113,7 +113,7 @@ The teacher UI subscribes to the material job and renders the progress while the
 
 ### PDF Material Path
 
-PDFs do not become Firestore tutor-knowledge chunks. In the current `frontend/` implementation, PDF uploads are indexed through Google Document AI OCR and Postgres metadata.
+PDFs do not become Firestore tutor-knowledge chunks. In the current `frontend/` implementation, PDF uploads are indexed through Gemini structured page extraction and Postgres metadata.
 
 The key branch is in `frontend/lib/tutor-knowledge-server.ts`: after the file is saved or read from Storage, if the source is a PDF and has a Storage path and bucket, `savePdfTutorKnowledgeOcrMetadata()` handles it.
 
@@ -121,14 +121,14 @@ PDF processing steps:
 
 1. Save the original PDF to Firebase Storage/GCS at:
    `classes/{classId}/materials/{materialId}/original/{safeFileName}`.
-2. Run Google Document AI OCR on the stored PDF.
+2. Run Gemini structured page extraction on the stored PDF.
 3. Convert OCR output into page records and detected problem records.
 4. Create Google/Vertex retrieval-document embeddings for OCR pages/problems.
-5. Replace the material's PDF OCR metadata in Postgres via `replacePdfOcrMetadata()`.
+5. Replace the material's PDF structured PDF metadata in Postgres via `replacePdfOcrMetadata()`.
 6. Write/upsert material metadata in Postgres with `searchMetadataSource: "postgres"`.
 7. Write the Firestore material summary with `status: "ready"`, OCR counts, file path, storage bucket, and retrieval metadata.
 
-So the PDF path is: original PDF in Storage -> Document AI OCR -> page/problem records -> Google/Vertex embeddings -> Postgres metadata/vector rows -> Firestore material summary. This means PDF retrieval is page/problem metadata retrieval, not Firestore chunk retrieval.
+So the PDF path is: original PDF in Storage -> Gemini structured page extraction -> page/problem records -> Google/Vertex embeddings -> Postgres metadata/vector rows -> Firestore material summary. This means PDF retrieval is page/problem metadata retrieval, not Firestore chunk retrieval.
 
 The embedding call happens in `attachPdfOcrEmbeddings()`, which uses `createVertexEmbeddings()` with `taskType: "RETRIEVAL_DOCUMENT"` for each OCR page and detected problem that has text. Those embedding vectors are attached to the page/problem records before `replacePdfOcrMetadata()` writes them into Postgres.
 
@@ -246,7 +246,7 @@ There are two retrieval/storage models:
 2. Non-PDF class materials:
    - Chunks live in Firestore under the material.
    - Chunks have Vertex embeddings and source metadata.
-   - These are still material records, but the LangGraph PDF page search path is specifically oriented around Postgres OCR metadata.
+   - These are still material records, but the LangGraph PDF page search path is specifically oriented around Postgres structured PDF metadata.
 
 `frontend/app/api/internal/pdf-page-search/route.ts` is the internal search endpoint used by the Python backend. It:
 
@@ -359,7 +359,7 @@ Nodes:
 2. `decide_retrieval_need`
    - Builds a heuristic retrieval decision.
    - Calls the model through OpenRouter with a low reasoning effort router prompt.
-   - Parses whether the tutor should search class PDF/OCR metadata.
+   - Parses whether the tutor should search class PDF/structured PDF metadata.
    - If no search is needed, it can produce the student-facing response immediately.
    - If search is needed, it emits a `search_pdf_pages` tool call shape.
 
@@ -458,7 +458,7 @@ Before returning to the student, `run_pdf_rag_agent()` also applies an answer le
 1. Teacher uploads a PDF material.
 2. Next.js verifies the teacher owns the class.
 3. Original PDF is saved in Firebase Storage/GCS.
-4. Google Document AI OCR extracts page text.
+4. Gemini structured page extraction extracts page text.
 5. The app detects pages/problems.
 6. Google/Vertex embeddings are created for those OCR page/problem records.
 7. Postgres receives `pdf_pages`, `pdf_detected_problems`, material metadata, and the embedding vectors.
@@ -467,7 +467,7 @@ Before returning to the student, `run_pdf_rag_agent()` also applies an answer le
 10. Next.js sends the chat request to FastAPI/LangGraph.
 11. LangGraph decides whether retrieval is needed.
 12. If needed, LangGraph calls internal Next.js PDF search.
-13. Next.js searches Postgres OCR metadata.
+13. Next.js searches Postgres structured PDF metadata.
 14. LangGraph builds a grounded final prompt with the selected metadata.
 15. OpenRouter returns the final answer.
 16. Next.js finalizes token usage and persists the assistant message.
@@ -492,7 +492,7 @@ Before returning to the student, `run_pdf_rag_agent()` also applies an answer le
    - They are useful for the current chat message, not future class-wide retrieval.
 
 2. Teacher PDFs are not Firestore chunks in `frontend/`.
-   - They are Document AI OCR records in Postgres.
+   - They are Gemini structured page extraction records in Postgres.
    - The Firestore material doc is mostly summary/status/visibility metadata.
 
 3. The streaming path mirrors the graph manually.
@@ -504,7 +504,7 @@ Before returning to the student, `run_pdf_rag_agent()` also applies an answer le
 
 5. PDF OCR requires configured infrastructure.
    - Document AI env/config must exist.
-   - Postgres PDF OCR metadata database must be configured.
+   - Postgres PDF structured PDF metadata database must be configured.
    - Vertex embeddings must be configured for semantic fallback/vector retrieval.
 
 6. The code has duplicate root and `frontend/` trees.
@@ -515,7 +515,7 @@ Before returning to the student, `run_pdf_rag_agent()` also applies an answer le
 - Teacher upload UI: `components/TeacherClassManager.tsx`
 - Teacher material API: `frontend/app/api/materials/route.ts`
 - Teacher material save/index logic: `frontend/lib/tutor-knowledge-server.ts`
-- PDF OCR runner: `frontend/lib/google-document-ai-ocr.ts`
+- Gemini structured page extractor: `frontend/lib/gemini-page-extractor.ts`
 - PDF OCR Postgres search/write logic: `frontend/lib/pdf-ocr-postgres.ts`
 - Internal PDF retrieval route: `frontend/app/api/internal/pdf-page-search/route.ts`
 - Student attachment API: `frontend/app/api/student/conversations/[conversationId]/attachments/route.ts`

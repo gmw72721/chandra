@@ -145,7 +145,7 @@ function queryEmbeddingCacheKey(query: string) {
     process.env.GOOGLE_CLOUD_PROJECT ?? process.env.FIREBASE_PROJECT_ID ?? "",
     process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1",
     process.env.VERTEX_EMBEDDING_MODEL ?? "gemini-embedding-2",
-    process.env.VERTEX_EMBEDDING_DIMENSIONS ?? "768",
+    process.env.VERTEX_EMBEDDING_DIMENSIONS ?? "1536",
     "RETRIEVAL_QUERY",
     query
   ].join("\u001f");

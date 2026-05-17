@@ -77,7 +77,7 @@ GEMINI_API_KEY=
 GOOGLE_CLOUD_PROJECT=
 GOOGLE_CLOUD_LOCATION=us
 VERTEX_EMBEDDING_MODEL=gemini-embedding-2
-VERTEX_EMBEDDING_DIMENSIONS=768
+VERTEX_EMBEDDING_DIMENSIONS=1536
 ```
 
 See `config/env.example` for the full set of supported variables and `docs/DEPLOYMENT.md` for production values.

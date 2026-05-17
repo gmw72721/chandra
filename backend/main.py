@@ -303,7 +303,7 @@ async def check_openrouter_health() -> dict[str, Any]:
 async def check_embedding_health() -> dict[str, Any]:
     api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
     model = os.getenv("VERTEX_EMBEDDING_MODEL") or "gemini-embedding-2"
-    dimensions = int(os.getenv("VERTEX_EMBEDDING_DIMENSIONS") or "768")
+    dimensions = int(os.getenv("VERTEX_EMBEDDING_DIMENSIONS") or "1536")
 
     if not api_key:
         return {"status": "missing_config", "detail": "GEMINI_API_KEY is not configured."}

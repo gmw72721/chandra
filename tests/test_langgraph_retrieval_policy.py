@@ -1736,6 +1736,33 @@ def test_decision_prompt_passes_retrieval_memory_and_policy_but_not_pdf_assets()
     assert "file_data_url" not in messages[-1]["content"]
 
 
+@pytest.mark.asyncio
+async def test_structured_pdf_metadata_context_does_not_fetch_or_attach_page_pdfs() -> None:
+    structured_page = ocr_page(
+        chunk_text="Definition context from structured page JSON.",
+        embedding_dim=1536,
+        embedding_source="structured_page_json",
+        file_data_url="data:application/pdf;base64,cGFnZQ==",
+        full_pdf_data_url="data:application/pdf;base64,ZnVsbA==",
+        ingestion_version="gemini_structured_page_v1",
+        source_type="learning_object",
+    )
+
+    async def page_asset_builder(_pages: list[dict[str, Any]], *, max_total_pages: int) -> list[dict[str, Any]]:
+        raise AssertionError("structured PDF records should not fetch page/full PDF assets")
+
+    records = await graph_module.build_metadata_context_records([structured_page], page_asset_builder)
+    content_parts = graph_module.encoded_page_asset_content_parts(records)
+    serialized = json.dumps(content_parts)
+
+    assert records[0]["file_data_url"] is None
+    assert records[0]["full_pdf_data_url"] is None
+    assert not any(part.get("type") == "file" for part in content_parts)
+    assert "Definition context from structured page JSON" in serialized
+    assert "cGFnZQ==" not in serialized
+    assert "ZnVsbA==" not in serialized
+
+
 def test_example_followup_marks_active_metadata_memory_used() -> None:
     decision = graph_module.build_retrieval_decision(
         {

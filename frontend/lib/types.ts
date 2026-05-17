@@ -86,14 +86,11 @@ export type PdfMaterialMetadata = {
   fullPdfSize?: number | null;
   fullPdfSha256?: string | null;
   sourceKind: "file" | "storage" | "url";
-  ocrProvider: string;
-  ocrSource: string;
-  ocrConfidence?: number | null;
   pageCount: number;
   characterCount: number;
 };
 
-export type PdfOcrPageMetadata = {
+export type PdfPageMetadata = {
   materialId: string;
   classId: string;
   courseId: string;
@@ -104,16 +101,23 @@ export type PdfOcrPageMetadata = {
   pageNumber: number;
   pageStart: number;
   pageEnd: number;
-  ocrText: string;
-  ocrProvider: string;
-  ocrSource: string;
-  ocrConfidence?: number | null;
-  embedding?: number[];
-  embeddingCreatedAt?: string;
-  embeddingDimensions?: number;
-  embeddingModel?: string;
-  embeddingProvider?: string;
-  embeddingTaskType?: string;
+  detectedPageLabel?: string | null;
+  documentTitle?: string | null;
+  chapter?: string | null;
+  section?: string | null;
+  sectionTitle?: string | null;
+  pageType?: string | null;
+  language?: string | null;
+  structuredPageJson?: Record<string, unknown> | null;
+  pageLevelSearchText?: string | null;
+  pageLevelSummary?: string | null;
+  extractionConfidence?: number | null;
+  extractionWarnings?: string[];
+  extractionModel?: string | null;
+  extractionTimestamp?: string | null;
+  ingestionVersion?: string | null;
+  embeddingSource?: string | null;
+  embeddingDim?: number | null;
   storageBucket: string;
   storagePath: string;
   fullPdfBucket?: string | null;
@@ -134,30 +138,63 @@ export type PdfOcrPageMetadata = {
   pageAssetChecksumSha256?: string | null;
 };
 
-export type PdfDetectedProblemMetadata = {
+export type PdfPageBlockMetadata = {
   materialId: string;
   classId: string;
   courseId: string;
   professorId: string;
   teacherId: string;
-  title: string;
-  materialType: string;
-  problemNumber: string;
-  pageStart: number;
-  pageEnd: number;
-  problemText: string;
-  source: string;
-  confidence?: number | null;
-  ocrProvider: string;
-  ocrSource: string;
+  pageNumber: number;
+  blockId: string;
+  readingOrder: number;
+  blockType: string;
+  exactText: string;
+  correctedText: string;
+  mathLatex: string[];
+  mathAscii: string[];
+  itemKind?: string | null;
+  itemNumber?: string | null;
+  itemLabel?: string | null;
+  canonicalItemId?: string | null;
+  searchableKeywords: string[];
+  semanticSummary: string;
+  relationships: Array<Record<string, unknown>>;
+  confidence: number;
+  ingestionVersion: string;
+};
+
+export type PdfContentEmbeddingMetadata = {
+  materialId: string;
+  classId: string;
+  courseId: string;
+  professorId: string;
+  teacherId: string;
+  pageNumber: number;
+  sourceType: "block" | "learning_object" | "page" | "section";
+  sourceId: string;
+  embeddingLevel: "block" | "learning_object" | "page" | "section";
+  embeddingText: string;
   embedding?: number[];
   embeddingCreatedAt?: string;
-  embeddingDimensions?: number;
+  embeddingDim: number;
   embeddingModel?: string;
   embeddingProvider?: string;
+  embeddingSource: string;
   embeddingTaskType?: string;
-  storageBucket: string;
-  storagePath: string;
+  ingestionVersion: string;
+  blockId?: string | null;
+  blockType?: string | null;
+  readingOrder?: number | null;
+  objectId?: string | null;
+  objectType?: string | null;
+  title?: string | null;
+  label?: string | null;
+  relatedBlockIds?: string[];
+  itemKind?: string | null;
+  itemNumber?: string | null;
+  itemLabel?: string | null;
+  canonicalItemId?: string | null;
+  section?: string | null;
 };
 
 export type TutorKnowledgePriority = "primary" | "normal" | "low";

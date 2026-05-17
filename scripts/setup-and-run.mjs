@@ -194,7 +194,7 @@ function ensureEnvFile() {
     CHANDRA_ENV: "development",
     GOOGLE_CLOUD_LOCATION: "us",
     VERTEX_EMBEDDING_MODEL: "gemini-embedding-2",
-    VERTEX_EMBEDDING_DIMENSIONS: "768"
+    VERTEX_EMBEDDING_DIMENSIONS: "1536"
   };
 
   for (const [key, value] of Object.entries(defaults)) {

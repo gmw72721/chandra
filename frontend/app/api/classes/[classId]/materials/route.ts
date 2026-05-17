@@ -52,7 +52,7 @@ function materialRecordToApi(material: MaterialRecord, activeJob?: MaterialJobRe
     characterCount: material.characterCount,
     chunkCount: material.chunkCount,
     metadata: material.metadata,
-    ocrPageCount: numberFromMetadata(material.metadata.ocrPageCount),
+    extractedPageCount: numberFromMetadata(material.metadata.extractedPageCount),
     pageCount: numberFromMetadata(material.metadata.pageCount),
     priority: material.priority,
     requireCitations: material.citationsRequired,
@@ -72,11 +72,17 @@ function materialJobRecordToApi(job: MaterialJobRecord) {
     completedChunks: job.completedChunks ?? undefined,
     detail: job.detail,
     error: job.error ?? undefined,
+    extractedPages: numberFromMetadata(job.metadata.extractedPages),
+    failedStep: typeof job.metadata.failedStep === "string" ? job.metadata.failedStep : undefined,
+    failedPages: numberFromMetadata(job.metadata.failedPages),
+    indexingPages: numberFromMetadata(job.metadata.indexingPages),
     materialId: job.materialId ?? undefined,
     percent: job.percent,
+    postgresReadyPages: numberFromMetadata(job.metadata.postgresReadyPages),
     step: job.step,
     title: typeof job.metadata.title === "string" ? job.metadata.title : undefined,
     totalChunks: job.totalChunks ?? undefined,
+    totalPages: numberFromMetadata(job.metadata.totalPages),
     updatedAt: job.updatedAt.toISOString()
   };
 }

@@ -127,9 +127,15 @@ type MaterialUploadProgress = {
   detail: string;
   error?: string;
   exactStep?: MaterialJobProgress["step"];
+  extractedPages?: number;
+  failedStep?: MaterialJobProgress["failedStep"];
+  failedPages?: number;
+  indexingPages?: number;
   percent: number;
+  postgresReadyPages?: number;
   step: "prepare" | "upload" | "read" | "chunk" | "embed" | "save" | "complete";
   totalChunks?: number;
+  totalPages?: number;
   uploadPercent: number;
 };
 type MaterialUploadDisplayStep = "upload" | "read" | "prepare" | "ready";
@@ -171,24 +177,24 @@ const materialUploadExactSteps: Array<{
     label: "Upload received"
   },
   {
-    description: "The server is reading text, pages, and source metadata.",
+    description: "The server is checking the file, page count, and source metadata.",
     id: "reading_file",
     label: "Read source"
   },
   {
-    description: "Google Document AI is extracting text and page metadata from the PDF.",
-    id: "ocr_material",
-    label: "OCR PDF"
+    description: "Gemini is extracting structured textbook JSON from each PDF page.",
+    id: "extracting_material",
+    label: "Extract pages"
   },
   {
-    description: "The source is being organized into sections Chandra can search.",
+    description: "Page blocks and learning objects are being organized for search.",
     id: "chunking_material",
-    label: "Split into sections"
+    label: "Organize content"
   },
   {
-    description: "Searchable tutor sections are being prepared and indexed.",
+    description: "Page, block, and learning-object records are being embedded for tutor search.",
     id: "embedding_chunks",
-    label: "Prepare for tutor"
+    label: "Index for tutor"
   },
   {
     description: "The processed source is being saved to this class.",
@@ -892,6 +898,7 @@ export function TeacherClassManager({
   const [materialTitle, setMaterialTitle] = useState("");
   const [materialKind, setMaterialKind] = useState<TutorKnowledgeKind>("Assignment");
   const [materialFile, setMaterialFile] = useState<File | null>(null);
+  const [materialProcessingMode, setMaterialProcessingMode] = useState<"now" | "later">("now");
   const [materialSourceUrl, setMaterialSourceUrl] = useState("");
   const [materialText, setMaterialText] = useState("");
   const [materialUploadProgress, setMaterialUploadProgress] = useState<MaterialUploadProgress | null>(null);
@@ -3473,6 +3480,7 @@ export function TeacherClassManager({
     formData.append("materialId", materialId);
     formData.append("title", materialTitle);
     formData.append("kind", materialKind);
+    formData.append("pdfProcessingMode", materialProcessingMode === "now" ? "use_now" : "can_wait");
     formData.append("text", materialText);
     formData.append("sourceUrl", materialSourceUrl.trim());
 
@@ -3550,6 +3558,7 @@ export function TeacherClassManager({
     setMaterialSourceUrl("");
     setMaterialText("");
     setMaterialKind("Assignment");
+    setMaterialProcessingMode("now");
     setMaterialUploadProgress(null);
     setFileInputKey((currentKey) => currentKey + 1);
   }
@@ -7315,33 +7324,97 @@ export function TeacherClassManager({
             </div>
 
             <dl className="material-detail-stat-grid upload-detail-stat-grid">
-              <div>
-                <dt>Progress</dt>
-                <dd>{selectedMaterialUpload.progress.percent}%</dd>
-              </div>
-              <div>
-                <dt>Exact step</dt>
-                <dd>
-                  {materialUploadExactStepLabel(selectedMaterialUpload.progress.exactStep)}
-                  <small>{selectedMaterialUpload.progress.exactStep ?? "client_upload"}</small>
-                </dd>
-              </div>
-              <div>
-                <dt>Sections</dt>
-                <dd>{formatMaterialUploadChunks(selectedMaterialUpload.progress)}</dd>
-              </div>
+              {materialUploadHasPageProgress(selectedMaterialUpload.progress) ? (
+                <>
+                  <div>
+                    <dt>Queued</dt>
+                    <dd>{formatMaterialUploadPageMetric(materialUploadQueuedPages(selectedMaterialUpload.progress), selectedMaterialUpload.progress)}</dd>
+                    <small>Waiting to be read</small>
+                  </div>
+                  <div>
+                    <dt>Gemini read</dt>
+                    <dd>{formatMaterialUploadPageMetric(materialUploadGeminiReadPages(selectedMaterialUpload.progress), selectedMaterialUpload.progress)}</dd>
+                    <small>Text extracted</small>
+                  </div>
+                  <div>
+                    <dt>Embeddings</dt>
+                    <dd>{formatMaterialUploadPageMetric(materialUploadEmbeddingPages(selectedMaterialUpload.progress), selectedMaterialUpload.progress)}</dd>
+                    <small>Preparing search</small>
+                  </div>
+                  <div>
+                    <dt>Postgres</dt>
+                    <dd>{formatMaterialUploadPageMetric(materialUploadPostgresPages(selectedMaterialUpload.progress), selectedMaterialUpload.progress)}</dd>
+                    <small>Saved for tutor search</small>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <dt>Overall</dt>
+                    <dd>{materialUploadOverallValue(selectedMaterialUpload.progress)}</dd>
+                    <small>{materialUploadStepOrdinal(selectedMaterialUpload.progress)}</small>
+                  </div>
+                  <div>
+                    <dt>Status</dt>
+                    <dd>{materialUploadSimpleFocus(selectedMaterialUpload.progress)}</dd>
+                    <small>Preparing source</small>
+                  </div>
+                  <div>
+                    <dt>Progress</dt>
+                    <dd>{formatMaterialUploadWork(selectedMaterialUpload.progress)}</dd>
+                    <small>{materialUploadWorkProgressLabel(selectedMaterialUpload.progress)}</small>
+                  </div>
+                </>
+              )}
             </dl>
 
-            <section className="material-detail-section" aria-labelledby="material-upload-current-step">
-              <div className="material-detail-section-heading">
+            <section
+              className="material-detail-section upload-current-panel"
+              aria-labelledby="material-upload-current-step"
+            >
+              <div className="upload-current-heading">
+                <span>{materialUploadStepOrdinal(selectedMaterialUpload.progress)}</span>
                 <div>
-                  <h4 id="material-upload-current-step">Current upload step</h4>
-                  <span>{selectedMaterialUpload.progress.detail}</span>
+                  <h4 id="material-upload-current-step">
+                    {materialUploadSimpleFocus(selectedMaterialUpload.progress)}
+                  </h4>
+                  <p>{materialUploadSimpleDetail(selectedMaterialUpload.progress)}</p>
                 </div>
               </div>
-              <div className="upload-progress-track">
-                <span style={{ width: `${selectedMaterialUpload.progress.percent}%` }} />
-              </div>
+              {materialUploadHasPageProgress(selectedMaterialUpload.progress) ? (
+                <div className="upload-page-status-list" aria-label="Page processing status">
+                  <PageStatusRow
+                    label="Queued"
+                    value={materialUploadQueuedPages(selectedMaterialUpload.progress)}
+                    total={materialUploadTotalPages(selectedMaterialUpload.progress)}
+                  />
+                  <PageStatusRow
+                    label="Gemini read"
+                    value={materialUploadGeminiReadPages(selectedMaterialUpload.progress)}
+                    total={materialUploadTotalPages(selectedMaterialUpload.progress)}
+                  />
+                  <PageStatusRow
+                    label="Embeddings"
+                    value={materialUploadEmbeddingPages(selectedMaterialUpload.progress)}
+                    total={materialUploadTotalPages(selectedMaterialUpload.progress)}
+                  />
+                  <PageStatusRow
+                    label="Saved to Postgres"
+                    value={materialUploadPostgresPages(selectedMaterialUpload.progress)}
+                    total={materialUploadTotalPages(selectedMaterialUpload.progress)}
+                  />
+                </div>
+              ) : (
+                <div className="upload-progress-group">
+                  <div className="upload-progress-row">
+                    <span>Overall upload</span>
+                    <strong>{selectedMaterialUpload.progress.percent}%</strong>
+                  </div>
+                  <div className="upload-progress-track">
+                    <span style={{ width: `${selectedMaterialUpload.progress.percent}%` }} />
+                  </div>
+                </div>
+              )}
               {selectedMaterialUpload.progress.error ? (
                 <p className="form-error">{selectedMaterialUpload.progress.error}</p>
               ) : null}
@@ -7366,28 +7439,6 @@ export function TeacherClassManager({
               </div>
             </section>
 
-            <section className="material-detail-section" aria-labelledby="material-upload-step-list">
-              <div className="material-detail-section-heading">
-                <div>
-                  <h4 id="material-upload-step-list">Detailed steps</h4>
-                  <span>Live server progress for this source upload.</span>
-                </div>
-              </div>
-              <ol className="upload-detail-step-list">
-                {materialUploadExactSteps.map((step) => (
-                  <li
-                    className={materialUploadExactStepStatus(step.id, selectedMaterialUpload.progress.exactStep)}
-                    key={step.id}
-                  >
-                    <span>
-                      <strong>{step.label}</strong>
-                      <small>{step.id}</small>
-                    </span>
-                    <p>{step.description}</p>
-                  </li>
-                ))}
-              </ol>
-            </section>
           </aside>
         </div>
       ) : null}
@@ -7807,6 +7858,36 @@ export function TeacherClassManager({
                 onChange={(event) => handleMaterialSourceUrlChange(event.target.value)}
               />
               <p className="field-hint">Public PDF URLs are downloaded directly. Public web pages, TXT, MD, and CSV URLs are converted to PDF.</p>
+
+              <fieldset className="material-processing-choice">
+                <legend>When do you want to use this source?</legend>
+                <label>
+                  <input
+                    checked={materialProcessingMode === "now"}
+                    name="material-processing-mode"
+                    type="radio"
+                    value="now"
+                    onChange={() => setMaterialProcessingMode("now")}
+                  />
+                  <span>
+                    <strong>Use right away</strong>
+                    <small>Skip batch jobs and process pages directly.</small>
+                  </span>
+                </label>
+                <label>
+                  <input
+                    checked={materialProcessingMode === "later"}
+                    name="material-processing-mode"
+                    type="radio"
+                    value="later"
+                    onChange={() => setMaterialProcessingMode("later")}
+                  />
+                  <span>
+                    <strong>I can wait</strong>
+                    <small>Large PDFs may use a batch job and can take up to 24 hours.</small>
+                  </span>
+                </label>
+              </fieldset>
 
               <label className="field-label" htmlFor="material-text">
                 Paste text
@@ -8310,6 +8391,24 @@ function MaterialUploadStatusButton({
   );
 }
 
+function PageStatusRow({ label, total, value }: { label: string; total?: number; value?: number }) {
+  const safeTotal = typeof total === "number" && total > 0 ? total : undefined;
+  const safeValue = typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+  const percent = safeTotal ? Math.max(0, Math.min(100, Math.round((safeValue / safeTotal) * 100))) : 0;
+
+  return (
+    <div className="upload-page-status-row">
+      <div>
+        <span>{label}</span>
+        <strong>{safeTotal ? `${safeValue} of ${safeTotal} pages` : `${safeValue} pages`}</strong>
+      </div>
+      <div className="upload-progress-track step-progress">
+        <span style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function formatMaterialMeta(material: ClassMaterial) {
   return [
     formatKnowledgeType(material),
@@ -8469,10 +8568,10 @@ function formatMaterialPageCount(material: ClassMaterial) {
   const pageCount = firstPositiveNumber(
     material.visualPageCount,
     material.pageCount,
-    material.ocrPageCount,
+    material.extractedPageCount,
     material.metadata?.visualPageCount,
     material.metadata?.pageCount,
-    material.metadata?.ocrPageCount
+    material.metadata?.extractedPageCount
   );
 
   if (pageCount) {
@@ -10748,9 +10847,15 @@ function materialJobToUploadProgress(progress: MaterialJobProgress): MaterialUpl
     detail: progress.detail,
     error: progress.error,
     exactStep: progress.step,
+    extractedPages: progress.extractedPages,
+    failedStep: progress.failedStep,
+    failedPages: progress.failedPages,
+    indexingPages: progress.indexingPages,
     percent: progress.percent,
+    postgresReadyPages: progress.postgresReadyPages,
     step: materialJobStepToUploadStep(progress.step),
     totalChunks: progress.totalChunks,
+    totalPages: progress.totalPages,
     uploadPercent: 100
   };
 }
@@ -10764,7 +10869,7 @@ function materialJobStepToUploadStep(step: MaterialJobProgress["step"]): Materia
     return "read";
   }
 
-  if (step === "ocr_material") {
+  if (step === "extracting_material") {
     return "read";
   }
 
@@ -10990,12 +11095,87 @@ function materialUploadExactStepLabel(step?: MaterialJobProgress["step"]) {
   return materialUploadExactSteps.find((uploadStep) => uploadStep.id === step)?.label ?? "Starting upload";
 }
 
-function materialUploadExactStepStatus(step: MaterialJobProgress["step"], currentStep?: MaterialJobProgress["step"]) {
-  if (currentStep === "failed") {
-    return step === "failed" ? "failed active" : "done";
+function materialUploadOverallValue(progress: MaterialUploadProgress) {
+  return progress.exactStep === "failed" ? "Failed" : `${progress.percent}%`;
+}
+
+function materialUploadExactStepDescription(step?: MaterialJobProgress["step"]) {
+  return materialUploadExactSteps.find((uploadStep) => uploadStep.id === step)?.description ?? "Preparing this upload.";
+}
+
+function materialUploadFailureStep(progress: MaterialUploadProgress): MaterialJobProgress["failedStep"] {
+  if (progress.exactStep !== "failed") {
+    return undefined;
   }
 
+  if (progress.failedStep) {
+    return progress.failedStep;
+  }
+
+  const failureText = `${progress.detail} ${progress.error ?? ""}`.toLowerCase();
+
+  if (/\b(save|saving|saved|database|postgres|metadata|written|class)\b/.test(failureText)) {
+    return "saving_to_class";
+  }
+
+  if (/\b(embed|embedding|vector|1536|index)\b/.test(failureText)) {
+    return "embedding_chunks";
+  }
+
+  if (/\b(chunk|section|organizing|organized|content group)\b/.test(failureText)) {
+    return "chunking_material";
+  }
+
+  if (/\b(gemini|extract|extraction|ocr|pdf|page|canonical|asset)\b/.test(failureText)) {
+    return "extracting_material";
+  }
+
+  if (/\b(read|reading|file|source|storage)\b/.test(failureText)) {
+    return "reading_file";
+  }
+
+  return "upload_received";
+}
+
+function materialUploadEffectiveStep(progress: MaterialUploadProgress) {
+  return progress.exactStep === "failed" ? materialUploadFailureStep(progress) : progress.exactStep;
+}
+
+function materialUploadCurrentStepLabel(progress: MaterialUploadProgress) {
+  if (progress.exactStep === "failed") {
+    return `Failed during ${materialUploadExactStepLabel(materialUploadFailureStep(progress))}`;
+  }
+
+  return materialUploadExactStepLabel(progress.exactStep);
+}
+
+function materialUploadExactStepStatus(step: MaterialJobProgress["step"], progress: MaterialUploadProgress) {
+  const currentStep = progress.exactStep;
   const stepIndex = materialUploadExactSteps.findIndex((uploadStep) => uploadStep.id === step);
+
+  if (currentStep === "failed") {
+    if (step === "failed") {
+      return "failed active";
+    }
+
+    const failedStep = materialUploadFailureStep(progress);
+    const failedStepIndex = materialUploadExactSteps.findIndex((uploadStep) => uploadStep.id === failedStep);
+
+    if (failedStepIndex < 0) {
+      return "";
+    }
+
+    if (stepIndex < failedStepIndex) {
+      return "done";
+    }
+
+    if (stepIndex === failedStepIndex) {
+      return "failed";
+    }
+
+    return "";
+  }
+
   const currentStepIndex = materialUploadExactSteps.findIndex((uploadStep) => uploadStep.id === currentStep);
 
   if (currentStepIndex < 0) {
@@ -11013,16 +11193,279 @@ function materialUploadExactStepStatus(step: MaterialJobProgress["step"], curren
   return "";
 }
 
-function formatMaterialUploadChunks(progress: MaterialUploadProgress) {
+function materialUploadStepStatusLabel(status: string) {
+  if (status === "failed active") {
+    return "Failed";
+  }
+
+  if (status.includes("failed")) {
+    return "Failed here";
+  }
+
+  if (status.includes("done")) {
+    return "Done";
+  }
+
+  if (status.includes("active")) {
+    return "In progress";
+  }
+
+  return "Waiting";
+}
+
+function materialUploadStepOrdinal(progress: MaterialUploadProgress) {
+  const orderedSteps = materialUploadExactSteps.filter((step) => step.id !== "failed");
+  const stepIndex = orderedSteps.findIndex((step) => step.id === materialUploadEffectiveStep(progress));
+
+  if (progress.exactStep === "failed") {
+    return stepIndex >= 0 ? `Stopped at step ${stepIndex + 1} of ${orderedSteps.length}` : "Stopped";
+  }
+
+  if (stepIndex < 0) {
+    return `Step 1 of ${orderedSteps.length}`;
+  }
+
+  return `Step ${stepIndex + 1} of ${orderedSteps.length}`;
+}
+
+function materialUploadWorkUnit(progress: MaterialUploadProgress) {
+  const effectiveStep = materialUploadEffectiveStep(progress);
+
+  if (effectiveStep === "extracting_material") {
+    return "page";
+  }
+
+  if (effectiveStep === "embedding_chunks") {
+    return "embedding";
+  }
+
+  if (effectiveStep === "chunking_material") {
+    return "content group";
+  }
+
+  return "item";
+}
+
+function pluralizeMaterialUploadUnit(unit: string, count: number) {
+  if (count === 1) {
+    return unit;
+  }
+
+  if (unit === "content group") {
+    return "content groups";
+  }
+
+  return `${unit}s`;
+}
+
+function materialUploadWorkPercent(progress: MaterialUploadProgress) {
+  if (
+    typeof progress.completedChunks === "number" &&
+    typeof progress.totalChunks === "number" &&
+    progress.totalChunks > 0
+  ) {
+    return Math.max(0, Math.min(100, Math.round((progress.completedChunks / progress.totalChunks) * 100)));
+  }
+
+  if (progress.exactStep === "failed") {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, progress.percent));
+}
+
+function materialUploadWorkProgressLabel(progress: MaterialUploadProgress) {
+  return progress.exactStep === "failed"
+    ? "Stopped before this step finished"
+    : `${materialUploadWorkPercent(progress)}% of this step`;
+}
+
+function formatMaterialUploadWork(progress: MaterialUploadProgress) {
+  const unit = materialUploadWorkUnit(progress);
+
   if (typeof progress.completedChunks === "number" && typeof progress.totalChunks === "number") {
-    return `${progress.completedChunks.toLocaleString()} of ${progress.totalChunks.toLocaleString()}`;
+    const totalLabel = progress.totalChunks.toLocaleString();
+    const completedLabel = progress.completedChunks.toLocaleString();
+    return `${completedLabel} of ${totalLabel} ${pluralizeMaterialUploadUnit(unit, progress.totalChunks)}`;
   }
 
   if (typeof progress.totalChunks === "number") {
-    return progress.totalChunks.toLocaleString();
+    return `${progress.totalChunks.toLocaleString()} ${pluralizeMaterialUploadUnit(unit, progress.totalChunks)}`;
   }
 
-  return "-";
+  return "Waiting for count";
+}
+
+function materialUploadHasPageProgress(progress: MaterialUploadProgress) {
+  return (
+    typeof progress.totalPages === "number" ||
+    typeof progress.extractedPages === "number" ||
+    typeof progress.indexingPages === "number" ||
+    typeof progress.postgresReadyPages === "number" ||
+    progress.exactStep === "extracting_material"
+  );
+}
+
+function materialUploadTotalPages(progress: MaterialUploadProgress) {
+  return progress.totalPages ?? progress.totalChunks;
+}
+
+function materialUploadExtractedPages(progress: MaterialUploadProgress) {
+  return progress.extractedPages ?? (
+    progress.exactStep === "extracting_material" ? progress.completedChunks : progress.postgresReadyPages
+  ) ?? 0;
+}
+
+function materialUploadQueuedPages(progress: MaterialUploadProgress) {
+  const total = materialUploadTotalPages(progress);
+
+  if (!total) {
+    return 0;
+  }
+
+  return Math.max(0, total - materialUploadExtractedPages(progress));
+}
+
+function materialUploadEmbeddingPages(progress: MaterialUploadProgress) {
+  return progress.indexingPages ?? 0;
+}
+
+function materialUploadPostgresPages(progress: MaterialUploadProgress) {
+  if (progress.exactStep === "ready") {
+    return materialUploadTotalPages(progress) ?? progress.postgresReadyPages ?? progress.completedChunks ?? 0;
+  }
+
+  return progress.postgresReadyPages ?? 0;
+}
+
+function materialUploadGeminiReadPages(progress: MaterialUploadProgress) {
+  return Math.max(
+    0,
+    materialUploadExtractedPages(progress) - materialUploadEmbeddingPages(progress) - materialUploadPostgresPages(progress)
+  );
+}
+
+function formatMaterialUploadPageMetric(value: number | undefined, progress: MaterialUploadProgress) {
+  const total = materialUploadTotalPages(progress);
+  const count = typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+
+  return total && total > 0 ? `${count} / ${total}` : String(count);
+}
+
+function materialUploadSimpleFocus(progress: MaterialUploadProgress) {
+  if (progress.exactStep === "failed") {
+    return "Source needs attention";
+  }
+
+  if (materialUploadHasPageProgress(progress)) {
+    const readyPages = materialUploadPostgresPages(progress) ?? 0;
+    const totalPages = materialUploadTotalPages(progress);
+
+    if (totalPages && readyPages >= totalPages) {
+      return "Pages are ready";
+    }
+
+    if (materialUploadEmbeddingPages(progress) > 0) {
+      return "Creating embeddings";
+    }
+
+    return "Gemini is reading pages";
+  }
+
+  if (progress.exactStep === "embedding_chunks" || progress.exactStep === "chunking_material") {
+    return "Preparing for tutor search";
+  }
+
+  if (progress.exactStep === "saving_to_class") {
+    return "Saving source";
+  }
+
+  if (progress.exactStep === "ready" || progress.step === "complete") {
+    return "Source is ready";
+  }
+
+  return "Preparing source";
+}
+
+function materialUploadSimpleDetail(progress: MaterialUploadProgress) {
+  if (progress.exactStep === "failed") {
+    return progress.error ?? progress.detail;
+  }
+
+  if (materialUploadHasPageProgress(progress)) {
+    const totalPages = materialUploadTotalPages(progress);
+    const queuedPages = materialUploadQueuedPages(progress);
+    const geminiReadPages = materialUploadGeminiReadPages(progress);
+    const embeddingPages = materialUploadEmbeddingPages(progress);
+    const readyPages = materialUploadPostgresPages(progress) ?? 0;
+    const totalLabel = totalPages ? ` of ${totalPages}` : "";
+
+    return `${queuedPages} queued. ${geminiReadPages} read by Gemini. ${embeddingPages} creating embeddings. ${readyPages}${totalLabel} saved to Postgres.`;
+  }
+
+  return progress.detail;
+}
+
+function materialUploadTeacherFocus(progress: MaterialUploadProgress) {
+  if (progress.exactStep === "failed") {
+    return `Failed during ${materialUploadExactStepLabel(materialUploadFailureStep(progress))}`;
+  }
+
+  if (materialUploadIsVertexBatch(progress)) {
+    return "Extracting pages with Vertex batch";
+  }
+
+  if (
+    typeof progress.completedChunks === "number" &&
+    typeof progress.totalChunks === "number" &&
+    progress.totalChunks > 0
+  ) {
+    const unit = materialUploadWorkUnit(progress);
+    const totalLabel = progress.totalChunks.toLocaleString();
+
+    if (progress.completedChunks >= progress.totalChunks) {
+      return `Finished ${totalLabel} ${pluralizeMaterialUploadUnit(unit, progress.totalChunks)}`;
+    }
+
+    const currentItem = Math.min(progress.completedChunks + 1, progress.totalChunks).toLocaleString();
+
+    if (unit === "page") {
+      return `Working on page ${currentItem} of ${totalLabel}`;
+    }
+
+    if (unit === "embedding") {
+      return `Creating embedding ${currentItem} of ${totalLabel}`;
+    }
+
+    if (unit === "content group") {
+      return `Organizing group ${currentItem} of ${totalLabel}`;
+    }
+  }
+
+  return materialUploadExactStepDescription(progress.exactStep);
+}
+
+function materialUploadIsVertexBatch(progress: MaterialUploadProgress) {
+  return progress.exactStep === "extracting_material" && /vertex batch/i.test(progress.detail);
+}
+
+function materialUploadVisibleExactSteps(progress: MaterialUploadProgress) {
+  if (progress.exactStep === "failed") {
+    return materialUploadExactSteps;
+  }
+
+  return materialUploadExactSteps.filter((step) => step.id !== "failed");
+}
+
+function materialUploadStepDescription(
+  step: (typeof materialUploadExactSteps)[number],
+  progress: MaterialUploadProgress
+) {
+  if (step.id === "extracting_material" && materialUploadIsVertexBatch(progress)) {
+    return "Vertex writes completed page results to Cloud Storage; Chandra reads those results and starts indexing ready pages while the batch continues.";
+  }
+
+  return step.description;
 }
 
 function uploadDisplayStepFromProgressStep(step: MaterialUploadProgress["step"]): MaterialUploadDisplayStep {

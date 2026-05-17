@@ -10634,6 +10634,10 @@ button.student-row[aria-pressed="true"] {
   margin: 0;
 }
 
+.upload-detail-stat-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .material-detail-stat-grid div {
   min-height: 72px;
   border: 1px solid var(--line);
@@ -10665,6 +10669,15 @@ button.student-row[aria-pressed="true"] {
   color: var(--muted);
   font-size: 0.68rem;
   font-weight: 700;
+}
+
+.material-detail-stat-grid div>small {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.25;
 }
 
 .material-detail-section {
@@ -10789,6 +10802,73 @@ button.student-row[aria-pressed="true"] {
   height: 12px;
 }
 
+.upload-current-panel {
+  gap: 14px;
+}
+
+.upload-current-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.upload-current-heading>span {
+  border: 1px solid #b9d8c4;
+  border-radius: 999px;
+  background: #e9f7ee;
+  color: var(--theme-primary);
+  padding: 5px 9px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.upload-current-heading h4 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+.upload-current-heading p {
+  margin: 5px 0 0;
+  color: #465365;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.upload-progress-group {
+  display: grid;
+  gap: 7px;
+}
+
+.upload-progress-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: #5d6876;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.upload-progress-row strong {
+  color: var(--ink);
+  font-size: 0.82rem;
+  text-align: right;
+}
+
+.upload-progress-track.step-progress {
+  height: 8px;
+  background: #e8e0d2;
+}
+
+.upload-progress-track.step-progress span {
+  background: var(--theme-primary);
+}
+
 .upload-detail-actions {
   display: flex;
   flex-wrap: wrap;
@@ -10814,7 +10894,9 @@ button.student-row[aria-pressed="true"] {
 
 .upload-detail-step-list li {
   display: grid;
-  gap: 7px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #f8f5ed;
@@ -10836,7 +10918,44 @@ button.student-row[aria-pressed="true"] {
   background: #fff0f0;
 }
 
-.upload-detail-step-list li>span {
+.upload-step-number {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #d8d0c0;
+  border-radius: 999px;
+  background: #fffaf0;
+  color: #5d6876;
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.upload-detail-step-list li.done .upload-step-number {
+  border-color: #9ed0ad;
+  background: #dff3e6;
+  color: var(--theme-primary);
+}
+
+.upload-detail-step-list li.active .upload-step-number {
+  border-color: var(--theme-primary);
+  background: var(--theme-primary);
+  color: #fff;
+}
+
+.upload-detail-step-list li.failed .upload-step-number {
+  border-color: #d66f75;
+  background: #b23b42;
+  color: #fff;
+}
+
+.upload-step-copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.upload-step-copy>span {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -10850,9 +10969,14 @@ button.student-row[aria-pressed="true"] {
 }
 
 .upload-detail-step-list small {
+  border: 1px solid #d8d0c0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.52);
   color: var(--muted);
   font-size: 0.68rem;
   font-weight: 700;
+  padding: 3px 7px;
+  white-space: nowrap;
 }
 
 .upload-detail-step-list p {
@@ -10860,6 +10984,117 @@ button.student-row[aria-pressed="true"] {
   color: #465365;
   font-size: 0.82rem;
   line-height: 1.35;
+}
+
+.upload-detail-step-list code {
+  color: #697382;
+  font-size: 0.68rem;
+  font-weight: 750;
+  line-height: 28px;
+  white-space: nowrap;
+}
+
+.upload-detail-step-progress {
+  display: grid;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.upload-detail-step-progress>span {
+  color: var(--theme-primary);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.upload-page-status-list {
+  display: grid;
+  gap: 12px;
+}
+
+.upload-page-status-row {
+  display: grid;
+  gap: 7px;
+}
+
+.upload-page-status-row>div:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.upload-page-status-row span {
+  color: #566171;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.upload-page-status-row strong {
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.material-processing-choice {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 2px 0 4px;
+  border: 0;
+  padding: 0;
+}
+
+.material-processing-choice legend {
+  grid-column: 1 / -1;
+  margin-bottom: 2px;
+  color: #4a5361;
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.material-processing-choice label {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  align-items: flex-start;
+  min-height: 82px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfaf7;
+  padding: 12px;
+  cursor: pointer;
+}
+
+.material-add-form .material-processing-choice input[type="radio"] {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin-top: 3px;
+  border-radius: 999px;
+  padding: 0;
+  accent-color: var(--theme-primary);
+}
+
+.material-processing-choice span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.material-processing-choice strong {
+  color: var(--ink);
+  font-size: 0.9rem;
+  line-height: 1.25;
+}
+
+.material-processing-choice small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 1180px) {
@@ -11041,6 +11276,19 @@ button.student-row[aria-pressed="true"] {
 
   .material-detail-stat-grid {
     grid-template-columns: 1fr;
+  }
+
+  .material-processing-choice {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-detail-step-list li {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .upload-detail-step-list code {
+    grid-column: 2;
+    line-height: 1.2;
   }
 }
 
@@ -14697,6 +14945,47 @@ button.student-row[aria-pressed="true"] {
   border-color: var(--card-border);
   background: var(--panel);
   color: var(--text-primary);
+}
+
+.teacher-dashboard[data-appearance="dark"] .material-detail-stat-grid div,
+.teacher-dashboard[data-appearance="dark"] .material-processing-choice label,
+.teacher-dashboard[data-appearance="dark"] .upload-detail-step-list li {
+  border-color: var(--card-border);
+  background: var(--card);
+}
+
+.teacher-dashboard[data-appearance="dark"] .upload-detail-step-list li.done {
+  border-color: color-mix(in srgb, var(--theme-primary) 52%, var(--card-border));
+  background: color-mix(in srgb, var(--theme-primary) 14%, var(--card));
+}
+
+.teacher-dashboard[data-appearance="dark"] .upload-detail-step-list li.active {
+  border-color: color-mix(in srgb, var(--theme-primary) 72%, var(--card-border));
+  background: color-mix(in srgb, var(--theme-primary) 20%, var(--card));
+}
+
+.teacher-dashboard[data-appearance="dark"] .upload-detail-step-list li.failed {
+  border-color: color-mix(in srgb, #f87171 68%, var(--card-border));
+  background: color-mix(in srgb, #7f1d1d 24%, var(--card));
+}
+
+.teacher-dashboard[data-appearance="dark"] .upload-current-heading>span,
+.teacher-dashboard[data-appearance="dark"] .upload-step-number,
+.teacher-dashboard[data-appearance="dark"] .upload-detail-step-list small {
+  border-color: var(--card-border);
+  background: color-mix(in srgb, var(--theme-primary) 16%, var(--card));
+}
+
+.teacher-dashboard[data-appearance="dark"] .upload-current-heading p,
+.teacher-dashboard[data-appearance="dark"] .upload-progress-row,
+.teacher-dashboard[data-appearance="dark"] .material-processing-choice small,
+.teacher-dashboard[data-appearance="dark"] .upload-detail-step-list code,
+.teacher-dashboard[data-appearance="dark"] .material-detail-stat-grid div>small {
+  color: var(--text-muted);
+}
+
+.teacher-dashboard[data-appearance="dark"] .upload-progress-track {
+  background: color-mix(in srgb, var(--card-border) 74%, transparent);
 }
 
 .teacher-dashboard[data-appearance="dark"] .detail-drawer-backdrop {

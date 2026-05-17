@@ -5,9 +5,27 @@ import { isIP } from "net";
 import { PDFDocument, StandardFonts, type PDFFont } from "pdf-lib";
 import { adminAuth, adminDb, adminStorage, assertFirebaseAdminReady } from "./firebase-admin";
 import {
-  buildPdfOcrMetadataRecords,
-  runGoogleDocumentAiPdfOcr
-} from "./google-document-ai-ocr";
+  extractStructuredPageWithGemini,
+  extractStructuredPagesWithGeminiBatch,
+  type GeminiStructuredPageExtractionResult
+} from "./gemini-page-extractor";
+import {
+  structuredPdfEmbeddingDim,
+  structuredPdfEmbeddingSource,
+  structuredPdfIngestionVersion,
+  pdfPageAssetSaveConcurrency,
+  structuredPageBatchMinPages,
+  structuredPageDirectExtractionConcurrency,
+  structuredPageExtractionConcurrency
+} from "./pdf-ingestion-config";
+import {
+  buildStructuredEmbeddingRecords,
+  type StructuredEmbeddingRecord
+} from "./structured-embedding-builder";
+import {
+  parseAndValidateStructuredPageJson,
+  type StructuredPageJson
+} from "./structured-page-validator";
 import {
   emptyClassAccessPermissions,
   normalizeClassAccessPermissions,
@@ -18,7 +36,9 @@ import {
 import {
   assertPdfOcrPostgresConfigured,
   deletePdfOcrMetadata,
-  replacePdfOcrMetadata
+  getCachedStructuredPdfPageExtractions,
+  replacePdfOcrMetadata,
+  upsertStructuredPdfPageMetadata
 } from "./pdf-ocr-postgres";
 import {
   chunkTutorKnowledgeText,
@@ -30,6 +50,12 @@ import {
 import { TutorKnowledgeHttpError } from "./tutor-knowledge-errors";
 import { materialTypeForKind, problemNumbersFromText } from "./retrieval-ranking";
 import type { TutorKnowledgePriority } from "./types";
+import type {
+  PdfContentEmbeddingMetadata,
+  PdfMaterialMetadata,
+  PdfPageMetadata,
+  PdfPageBlockMetadata
+} from "./types";
 import {
   VertexEmbeddingError,
   createVertexEmbedding,
@@ -98,7 +124,6 @@ const supportedContentTypes = new Set([
   "text/x-markdown"
 ]);
 const embeddingConcurrencyLimit = 4;
-const pdfPageAssetSaveConcurrencyLimit = 4;
 const maxTutorKnowledgeFileBytes = 500 * 1024 * 1024;
 const maxTutorKnowledgePastedTextCharacters = 250000;
 const maxTutorKnowledgeUrlRedirects = 4;
@@ -121,7 +146,7 @@ export function assertTutorKnowledgeTextWithinLimit(text: string, label = "Tutor
 type MaterialJobStep =
   | "upload_received"
   | "reading_file"
-  | "ocr_material"
+  | "extracting_material"
   | "chunking_material"
   | "embedding_chunks"
   | "saving_to_class"
@@ -132,9 +157,15 @@ type MaterialJobProgressUpdate = {
   completedChunks?: number;
   detail: string;
   error?: string;
+  extractedPages?: number;
+  failedStep?: Exclude<MaterialJobStep, "failed">;
+  failedPages?: number;
+  indexingPages?: number;
   percent: number;
+  postgresReadyPages?: number;
   step: MaterialJobStep;
   totalChunks?: number;
+  totalPages?: number;
 };
 
 export type TutorKnowledgeSourceSettings = {
@@ -309,6 +340,7 @@ export async function saveTutorKnowledge({
   const storagePath = String(formData.get("storagePath") ?? "").trim();
   const storageBucket = String(formData.get("storageBucket") ?? "").trim();
   const requestedMaterialId = String(formData.get("materialId") ?? "").trim();
+  const pdfProcessingMode = String(formData.get("pdfProcessingMode") ?? "").trim();
 
   if (!title) {
     throw new TutorKnowledgeHttpError("Add a title before saving tutor knowledge.", 400);
@@ -468,6 +500,7 @@ export async function saveTutorKnowledge({
         storageSha256: fileMetadata.fileSha256,
         teacherId,
         title,
+        useBatchExtraction: pdfProcessingMode !== "use_now",
         updateProgress
       });
     } catch (caughtError) {
@@ -683,6 +716,7 @@ async function savePdfTutorKnowledgeOcrMetadata({
   storageSha256,
   teacherId,
   title,
+  useBatchExtraction,
   updateProgress
 }: {
   classId: string;
@@ -702,13 +736,15 @@ async function savePdfTutorKnowledgeOcrMetadata({
   storageSha256?: string;
   teacherId: string;
   title: string;
+  useBatchExtraction: boolean;
   updateProgress: (progress: MaterialJobProgressUpdate) => Promise<void>;
 }) {
   assertPdfOcrPostgresConfigured();
+  await deletePdfOcrMetadata(materialId);
   await updateProgress({
     detail: "Saving the canonical PDF in dedicated page asset storage.",
     percent: 35,
-    step: "ocr_material"
+    step: "extracting_material"
   });
 
   const canonicalFullPdf = await saveCanonicalOriginalPdfAsset({
@@ -725,42 +761,146 @@ async function savePdfTutorKnowledgeOcrMetadata({
   const canonicalStoragePath = canonicalFullPdf.path;
 
   await updateProgress({
-    detail: "Running Google Document AI OCR on the canonical PDF.",
+    detail: "Splitting the canonical PDF into exact one-page assets.",
     percent: 40,
-    step: "ocr_material"
+    step: "extracting_material"
   });
 
-  const ocr = await runGoogleDocumentAiPdfOcr({
+  const pageAssets = await saveCanonicalPdfPageAssets({
     classId,
     materialId,
-    mimeType: contentType || "application/pdf",
-    onProgress: async (progress) => {
-      if (progress.phase === "started") {
-        await updateProgress({
-          detail: `Running Google Document AI OCR on ${progress.totalShards ?? 1} PDF shard${progress.totalShards === 1 ? "" : "s"}.`,
-          percent: 41,
-          totalChunks: progress.totalShards,
-          step: "ocr_material"
-        });
-        return;
-      }
-
-      if (progress.phase === "processing") {
-        const completed = progress.completedShards ?? 0;
-        const total = progress.totalShards ?? 1;
-        await updateProgress({
-          completedChunks: completed,
-          detail: `OCR shard ${completed} of ${total} complete${progress.pageStart && progress.pageEnd ? ` (pages ${progress.pageStart}-${progress.pageEnd})` : ""}.`,
-          percent: Math.min(49, 41 + Math.round((completed / Math.max(total, 1)) * 8)),
-          totalChunks: total,
-          step: "ocr_material"
-        });
-      }
+    preloadPageExtractions: {
+      contentType: contentType || "application/pdf",
+      title
     },
     storageBucket: canonicalStorageBucket,
     storagePath: canonicalStoragePath
   });
-  const records = buildPdfOcrMetadataRecords({
+
+  await updateProgress({
+    completedChunks: 0,
+    detail: "Extracting structured textbook page JSON with Gemini 3 Flash.",
+    percent: 50,
+    step: "extracting_material",
+    totalChunks: pageAssets.length
+  });
+  const sourceMode = getTutorKnowledgeSourceMode({
+    hasFile: true,
+    hasPastedText: Boolean(pastedText)
+  });
+  const publishPartialPdfMaterial = async (partial: StructuredPdfPartialIndexProgress) => {
+    if (!partial.successfulPageCount) {
+      return;
+    }
+
+    const metadata = {
+      embeddingDim: structuredPdfEmbeddingDim(),
+      embeddingSource: structuredPdfEmbeddingSource,
+      extractionModel: partial.extractionModel,
+      failedPageCount: partial.failedPageCount,
+      ingestionVersion: structuredPdfIngestionVersion,
+      extractedPageCount: partial.indexedPageCount,
+      indexedPageCount: partial.indexedPageCount,
+      pageCount: partial.pageCount,
+      partialIndexReady: partial.indexedPageCount < partial.pageCount,
+      structuredBlockCount: partial.blockCount,
+      structuredEmbeddingCount: partial.embeddingCount,
+      structuredLearningObjectCount: partial.learningObjectCount,
+      structuredWarnings: partial.warnings.slice(0, 50),
+      professorName: professorName ?? "",
+      sourceKind,
+      textSource: pastedText || undefined,
+      visualPageCount: partial.pageCount
+    };
+
+    await tryPostgresData("material.pdf.partial.ready", () =>
+      upsertMaterial({
+        id: materialId,
+        classId,
+        teacherId,
+        title,
+        kind,
+        activeForStudents: sourceSettings.activeForStudents,
+        citationsRequired: sourceSettings.requireCitations,
+        contentType: contentType || "application/pdf",
+        fileName,
+        fileSize,
+        fileUrl: canonicalFullPdf.uri,
+        materialType,
+        metadata,
+        priority: sourceSettings.priority,
+        searchMetadataSource: "postgres",
+        sourceMode,
+        status: "ready",
+        storageBucket: canonicalStorageBucket,
+        storagePath: canonicalStoragePath,
+        storageUri: `gs://${canonicalStorageBucket}/${canonicalStoragePath}`,
+        teacherOnly: sourceSettings.teacherOnly
+      })
+    );
+    await materialRef.set({
+      classId,
+      class_id: classId,
+      course_id: classId,
+      title,
+      kind,
+      materialType,
+      professorId: teacherId,
+      professorName: professorName ?? "",
+      professor_id: teacherId,
+      professor_name: professorName ?? "",
+      teacherId,
+      activeForStudents: sourceSettings.activeForStudents,
+      citationsRequired: sourceSettings.requireCitations,
+      priority: sourceSettings.priority,
+      requireCitations: sourceSettings.requireCitations,
+      studentVisible: sourceSettings.activeForStudents,
+      teacherOnly: sourceSettings.teacherOnly,
+      visibility: sourceSettings.teacherOnly
+        ? "teacher-only"
+        : sourceSettings.activeForStudents
+          ? "student-visible"
+          : "hidden",
+      characterCount: partial.characterCount + pastedText.length,
+      chunkCount: 0,
+      contentType: contentType || "application/pdf",
+      embeddingProvider: "vertex-ai",
+      embeddingStatus: isVertexEmbeddingConfigured() ? "partial-ready" : "not-configured",
+      fileName,
+      filePath: canonicalStoragePath,
+      fileSize,
+      fileUrl: canonicalFullPdf.uri,
+      fullPdfBucket: canonicalFullPdf.bucket,
+      fullPdfPath: canonicalFullPdf.path,
+      fullPdfUri: canonicalFullPdf.uri,
+      fullPdfMimeType: canonicalFullPdf.mimeType,
+      fullPdfSize: canonicalFullPdf.size,
+      fullPdfSha256: canonicalFullPdf.sha256,
+      indexedAt: FieldValue.serverTimestamp(),
+      embeddingDim: structuredPdfEmbeddingDim(),
+      embeddingSource: structuredPdfEmbeddingSource,
+      extractionModel: partial.extractionModel,
+      failedPageCount: partial.failedPageCount,
+      ingestionVersion: structuredPdfIngestionVersion,
+      extractedPageCount: partial.indexedPageCount,
+      indexedPageCount: partial.indexedPageCount,
+      pageCount: partial.pageCount,
+      partialIndexReady: partial.indexedPageCount < partial.pageCount,
+      searchMetadataSource: "postgres",
+      structuredBlockCount: partial.blockCount,
+      structuredEmbeddingCount: partial.embeddingCount,
+      structuredLearningObjectCount: partial.learningObjectCount,
+      structuredWarnings: partial.warnings.slice(0, 50),
+      sourceKind,
+      sourceMode,
+      status: "ready",
+      storageBucket: canonicalStorageBucket,
+      ...(pastedText ? { textSource: pastedText } : {}),
+      visualPageCount: partial.pageCount
+    }, { merge: true });
+  };
+
+  const records = await buildStructuredPdfIngestionRecords({
     classId,
     contentType: contentType || "application/pdf",
     fileName,
@@ -773,58 +913,55 @@ async function savePdfTutorKnowledgeOcrMetadata({
     fullPdfUri: canonicalFullPdf.uri,
     materialId,
     materialType,
-    ocr,
+    onPartialPageIndexed: publishPartialPdfMaterial,
+    pageAssets,
     sourceKind,
     storageBucket: canonicalStorageBucket,
     storagePath: canonicalStoragePath,
     teacherId,
-    title
+    title,
+    useBatchExtraction,
+    updateProgress
   });
 
-  if (!records.pages.length) {
-    throw new TutorKnowledgeHttpError("Google Document AI OCR did not return any PDF pages.", 502);
+  if (!records.successfulPageCount) {
+    throw new TutorKnowledgeHttpError(
+      buildNoValidStructuredPagesError({
+        failedPageCount: records.failedPageCount,
+        pageCount: records.pageCount,
+        warnings: records.warnings
+      }),
+      502
+    );
   }
 
   await updateProgress({
     completedChunks: 0,
-    detail: "Saving exact single-page PDF assets for OCR pages.",
-    percent: 50,
-    step: "ocr_material",
-    totalChunks: records.pages.length
-  });
-  await saveCanonicalPdfPageAssets({
-    classId,
-    materialId,
-    pages: records.pages,
-    storageBucket: canonicalStorageBucket,
-    storagePath: canonicalStoragePath
-  });
-
-  await updateProgress({
-    completedChunks: 0,
-    detail: "Preparing Gemini embeddings for OCR page and problem metadata.",
+    detail: "Preparing 1536-dimensional embeddings from structured page JSON.",
     percent: 60,
     step: "embedding_chunks",
-    totalChunks: records.pages.length + records.problems.length
+    totalChunks: records.embeddings.length
   });
-  await attachPdfOcrEmbeddings({
-    pages: records.pages,
-    problems: records.problems,
+  await attachStructuredPdfEmbeddings({
+    embeddings: records.embeddings,
     title,
     updateProgress
   });
 
   await updateProgress({
-    detail: "Saving OCR page and problem metadata to PostgreSQL.",
+    detail: "Saving structured page JSON and multi-level embeddings to PostgreSQL.",
     percent: 75,
     step: "saving_to_class",
     totalChunks: records.pages.length
   });
-  await replacePdfOcrMetadata({
-    material: records.material,
-    pages: records.pages,
-    problems: records.problems
-  });
+  if (records.persistedPageCount < records.pages.length) {
+    await replacePdfOcrMetadata({
+      blocks: records.blocks,
+      embeddings: records.embeddings,
+      material: records.material,
+      pages: records.pages
+    });
+  }
   await tryPostgresData("material.pdf.metadata.write", () =>
     upsertMaterial({
       id: materialId,
@@ -840,14 +977,17 @@ async function savePdfTutorKnowledgeOcrMetadata({
       fileUrl: canonicalFullPdf.uri,
       materialType,
       metadata: {
-        ocrInputShardCount: ocr.inputShardCount,
-        ocrInputShardPageCount: ocr.inputShardPageCount,
-        ocrOutputPrefix: ocr.outputPrefix,
-        ocrPageCount: records.pageCount,
-        ocrProblemCount: records.problems.length,
-        ocrProvider: records.material.ocrProvider,
-        ocrSource: records.material.ocrSource,
+        embeddingDim: structuredPdfEmbeddingDim(),
+        embeddingSource: structuredPdfEmbeddingSource,
+        extractionModel: records.extractionModel,
+        failedPageCount: records.failedPageCount,
+        ingestionVersion: structuredPdfIngestionVersion,
+        extractedPageCount: records.pageCount,
         pageCount: records.pageCount,
+        structuredBlockCount: records.blocks.length,
+        structuredEmbeddingCount: records.embeddings.length,
+        structuredLearningObjectCount: records.learningObjectCount,
+        structuredWarnings: records.warnings.slice(0, 50),
         professorName: professorName ?? "",
         sourceKind,
         textSource: pastedText || undefined,
@@ -855,10 +995,7 @@ async function savePdfTutorKnowledgeOcrMetadata({
       },
       priority: sourceSettings.priority,
       searchMetadataSource: "postgres",
-      sourceMode: getTutorKnowledgeSourceMode({
-        hasFile: true,
-        hasPastedText: Boolean(pastedText)
-      }),
+      sourceMode,
       status: "ready",
       storageBucket: canonicalStorageBucket,
       storagePath: canonicalStoragePath,
@@ -906,21 +1043,21 @@ async function savePdfTutorKnowledgeOcrMetadata({
     fullPdfSize: canonicalFullPdf.size,
     fullPdfSha256: canonicalFullPdf.sha256,
     indexedAt: FieldValue.serverTimestamp(),
-    ocrInputShardCount: ocr.inputShardCount,
-    ocrInputShardPageCount: ocr.inputShardPageCount,
-    ocrOutputPrefix: ocr.outputPrefix,
-    ocrPageCount: records.pageCount,
-    ocrProblemCount: records.problems.length,
-    ocrProvider: records.material.ocrProvider,
-    ocrSource: records.material.ocrSource,
-    ocrConfidence: records.material.ocrConfidence,
+    embeddingDim: structuredPdfEmbeddingDim(),
+    embeddingSource: structuredPdfEmbeddingSource,
+    extractionModel: records.extractionModel,
+    failedPageCount: records.failedPageCount,
+    ingestionVersion: structuredPdfIngestionVersion,
+    extractionConfidence: records.extractionConfidence,
+    extractedPageCount: records.pageCount,
     pageCount: records.pageCount,
     searchMetadataSource: "postgres",
+    structuredBlockCount: records.blocks.length,
+    structuredEmbeddingCount: records.embeddings.length,
+    structuredLearningObjectCount: records.learningObjectCount,
+    structuredWarnings: records.warnings.slice(0, 50),
     sourceKind,
-    sourceMode: getTutorKnowledgeSourceMode({
-      hasFile: true,
-      hasPastedText: Boolean(pastedText)
-    }),
+    sourceMode,
     status: "ready",
     storageBucket: canonicalStorageBucket,
     ...(pastedText ? { textSource: pastedText } : {}),
@@ -931,7 +1068,7 @@ async function savePdfTutorKnowledgeOcrMetadata({
 
   await updateProgress({
     completedChunks: records.pages.length,
-    detail: "PDF OCR metadata is ready for retrieval.",
+    detail: "Structured PDF metadata is ready for retrieval.",
     percent: 100,
     step: "ready",
     totalChunks: records.pages.length
@@ -1001,27 +1138,28 @@ async function saveCanonicalOriginalPdfAsset({
 async function saveCanonicalPdfPageAssets({
   classId,
   materialId,
-  pages,
+  preloadPageExtractions,
   storageBucket,
   storagePath
 }: {
   classId: string;
   materialId: string;
-  pages: Array<Parameters<typeof replacePdfOcrMetadata>[0]["pages"][number]>;
+  preloadPageExtractions?: {
+    contentType: string;
+    title: string;
+  };
   storageBucket: string;
   storagePath: string;
 }) {
   const sourceBuffer = await downloadGcsPdfAssetBuffer({ bucketName: storageBucket, path: storagePath });
   const sourcePdf = await PDFDocument.load(sourceBuffer, { ignoreEncryption: true });
   const sourcePageCount = sourcePdf.getPageCount();
+  const pageNumbers = Array.from({ length: sourcePageCount }, (_, index) => index + 1);
+  const shouldPreloadExtractions = Boolean(preloadPageExtractions) && sourcePageCount < structuredPageBatchMinPages();
+  const preloadExtraction = createAsyncLimiter(structuredPageDirectExtractionConcurrency());
 
-  await mapWithConcurrency(pages, pdfPageAssetSaveConcurrencyLimit, async (page) => {
-    const pageIndex = page.pageNumber - 1;
-
-    if (pageIndex < 0 || pageIndex >= sourcePageCount) {
-      throw new TutorKnowledgeHttpError(`OCR returned page ${page.pageNumber}, but the stored PDF has ${sourcePageCount} pages.`, 502);
-    }
-
+  return await mapWithConcurrency(pageNumbers, pdfPageAssetSaveConcurrency(), async (pageNumber) => {
+    const pageIndex = pageNumber - 1;
     const pagePdf = await PDFDocument.create();
     const [copiedPage] = await pagePdf.copyPages(sourcePdf, [pageIndex]);
     pagePdf.addPage(copiedPage);
@@ -1030,79 +1168,981 @@ async function saveCanonicalPdfPageAssets({
     const pageAssetStoragePath = canonicalPdfPageAssetPath({
       classId,
       materialId,
-      pageNumber: page.pageNumber
+      pageNumber
     });
     const pageAsset = await saveGcsPdfAsset({
       bucketName: storageBucket,
       buffer: pageBuffer,
       contentType: "application/pdf",
       metadata: {
-        sourcePageNumber: String(page.pageNumber)
+        sourcePageNumber: String(pageNumber)
       },
       path: pageAssetStoragePath
     });
 
-    page.pageAssetBucket = pageAsset.bucket;
-    page.pageAssetPath = pageAsset.path;
-    page.pageAssetUri = pageAsset.uri;
-    page.pageAssetMimeType = pageAsset.mimeType;
-    page.pageAssetSize = pageAsset.size;
-    page.pageAssetSha256 = pageAsset.sha256;
-    page.pageAssetStorageBucket = pageAsset.bucket;
-    page.pageAssetStoragePath = pageAsset.path;
-    page.pageAssetSizeBytes = pageAsset.size;
-    page.pageAssetChecksumSha256 = pageAsset.sha256;
+    return {
+      pageAssetBucket: pageAsset.bucket,
+      pageAssetChecksumSha256: pageAsset.sha256,
+      pageAssetMimeType: pageAsset.mimeType,
+      pageAssetPath: pageAsset.path,
+      pageAssetSha256: pageAsset.sha256,
+      pageAssetSize: pageAsset.size,
+      pageAssetSizeBytes: pageAsset.size,
+      pageAssetStorageBucket: pageAsset.bucket,
+      pageAssetStoragePath: pageAsset.path,
+      pageAssetUri: pageAsset.uri,
+      preloadedExtraction: shouldPreloadExtractions
+        ? preloadExtraction(async () => {
+            try {
+              return {
+                ok: true as const,
+                result: await extractStructuredPageWithGemini({
+                  mimeType: pageAsset.mimeType || preloadPageExtractions!.contentType,
+                  pageAssetUri: pageAsset.uri,
+                  pageNumber,
+                  title: preloadPageExtractions!.title
+                })
+              };
+            } catch (caughtError) {
+              return {
+                error: caughtError instanceof Error ? caughtError : new Error(String(caughtError)),
+                ok: false as const
+              };
+            }
+          })
+        : undefined,
+      pageNumber
+    };
   });
 }
 
-async function attachPdfOcrEmbeddings({
-  pages,
-  problems,
+type StructuredPdfPageAsset = Awaited<ReturnType<typeof saveCanonicalPdfPageAssets>>[number];
+
+type StructuredPdfPageIngestionResult = {
+  blocks: PdfPageBlockMetadata[];
+  cacheHit: boolean;
+  embeddings: PdfContentEmbeddingMetadata[];
+  extractionModel: string;
+  page: PdfPageMetadata;
+  warnings: string[];
+};
+
+type StructuredPdfPartialIndexProgress = {
+  blockCount: number;
+  characterCount: number;
+  embeddingCount: number;
+  extractionModel: string;
+  failedPageCount: number;
+  indexedPageCount: number;
+  learningObjectCount: number;
+  pageCount: number;
+  successfulPageCount: number;
+  warnings: string[];
+};
+
+async function buildStructuredPdfIngestionRecords({
+  classId,
+  contentType,
+  fileName,
+  fileSize,
+  fullPdfBucket,
+  fullPdfMimeType,
+  fullPdfPath,
+  fullPdfSha256,
+  fullPdfSize,
+  fullPdfUri,
+  materialId,
+  materialType,
+  onPartialPageIndexed,
+  pageAssets,
+  sourceKind,
+  storageBucket,
+  storagePath,
+  teacherId,
+  title,
+  useBatchExtraction,
+  updateProgress
+}: {
+  classId: string;
+  contentType: string;
+  fileName: string;
+  fileSize: number;
+  fullPdfBucket?: string;
+  fullPdfMimeType?: string;
+  fullPdfPath?: string;
+  fullPdfSha256?: string;
+  fullPdfSize?: number;
+  fullPdfUri?: string;
+  materialId: string;
+  materialType: string;
+  onPartialPageIndexed?: (progress: StructuredPdfPartialIndexProgress) => Promise<void>;
+  pageAssets: StructuredPdfPageAsset[];
+  sourceKind: PdfMaterialMetadata["sourceKind"];
+  storageBucket: string;
+  storagePath: string;
+  teacherId: string;
+  title: string;
+  useBatchExtraction: boolean;
+  updateProgress: (progress: MaterialJobProgressUpdate) => Promise<void>;
+}) {
+  const pages: PdfPageMetadata[] = [];
+  const blocks: PdfPageBlockMetadata[] = [];
+  const embeddings: PdfContentEmbeddingMetadata[] = [];
+  const warnings: string[] = [];
+  let completedPages = 0;
+  let extractedPages = 0;
+  let extractionModel = "";
+  let indexingPages = 0;
+  let cachedExtractions = new Map<string, {
+    extractionModel: string | null;
+    structuredPageJson: StructuredPageJson;
+  }>();
+
+  try {
+    cachedExtractions = new Map(
+      (await getCachedStructuredPdfPageExtractions({
+        checksums: pageAssets.map((pageAsset) => pageAsset.pageAssetChecksumSha256)
+      })).map((cachedPage) => [
+        cachedPage.pageAssetChecksumSha256,
+        {
+          extractionModel: cachedPage.extractionModel,
+          structuredPageJson: cachedPage.structuredPageJson
+        }
+      ])
+    );
+  } catch (caughtError) {
+    const error = caughtError instanceof Error ? caughtError.message : String(caughtError);
+    warnings.push(`structured page extraction cache lookup skipped: ${error}`);
+  }
+
+  const batchExtractions = new Map<number, {
+    model: string;
+    rawText: string;
+  }>();
+  const uncachedPageAssets = pageAssets.filter(
+    (pageAsset) => !cachedExtractions.has(pageAsset.pageAssetChecksumSha256)
+  );
+  const pageAssetsByNumber = new Map(pageAssets.map((pageAsset) => [pageAsset.pageNumber, pageAsset]));
+  const batchPageResults = new Map<number, StructuredPdfPageIngestionResult>();
+  const batchEmbeddingPromises: Promise<Error | null>[] = [];
+  let batchIndexedPages = 0;
+  let batchEmbeddingRecords = 0;
+  let batchEmbeddedRecords = 0;
+  const persistedPageNumbers = new Set<number>();
+  const partialWarnings: string[] = [];
+  let partialBlockCount = 0;
+  let partialCharacterCount = 0;
+  let partialEmbeddingCount = 0;
+  let partialFailedPageCount = 0;
+  let partialLearningObjectCount = 0;
+  let partialSuccessfulPageCount = 0;
+  const persistingPageResults = new Map<number, Promise<void>>();
+
+  const buildPartialMaterial = (): PdfMaterialMetadata => ({
+    materialId,
+    classId,
+    courseId: classId,
+    professorId: teacherId,
+    teacherId,
+    title,
+    materialType,
+    contentType,
+    fileName,
+    fileSize,
+    storageBucket,
+    storagePath,
+    storageUri: `gs://${storageBucket}/${storagePath}`,
+    fullPdfBucket: fullPdfBucket ?? storageBucket,
+    fullPdfPath: fullPdfPath ?? storagePath,
+    fullPdfUri: fullPdfUri ?? `gs://${fullPdfBucket ?? storageBucket}/${fullPdfPath ?? storagePath}`,
+    fullPdfMimeType: fullPdfMimeType ?? contentType,
+    fullPdfSize: fullPdfSize ?? fileSize,
+    fullPdfSha256: fullPdfSha256 ?? null,
+    sourceKind,
+    pageCount: pageAssets.length,
+    characterCount: partialCharacterCount
+  });
+  const buildPageProgressMetrics = (overrides: Partial<MaterialJobProgressUpdate> = {}) => ({
+    extractedPages,
+    failedPages: partialFailedPageCount,
+    indexingPages,
+    postgresReadyPages: partialSuccessfulPageCount,
+    totalPages: pageAssets.length,
+    ...overrides
+  });
+
+  const persistStructuredPageResult = async (pageResult: StructuredPdfPageIngestionResult) => {
+    const pageNumber = pageResult.page.pageNumber;
+    let countedIndexingPage = false;
+
+    if (persistedPageNumbers.has(pageNumber)) {
+      return;
+    }
+
+    const existingPersist = persistingPageResults.get(pageNumber);
+
+    if (existingPersist) {
+      await existingPersist;
+      return;
+    }
+
+    const persistPromise = (async () => {
+      indexingPages += 1;
+      countedIndexingPage = true;
+      await updateProgress({
+        completedChunks: Math.max(completedPages, extractedPages),
+        detail: `Indexing extracted PDF page ${pageNumber} into PostgreSQL.`,
+        percent: Math.min(59, 50 + Math.round((Math.max(completedPages, extractedPages) / Math.max(pageAssets.length, 1)) * 9)),
+        step: "extracting_material",
+        totalChunks: pageAssets.length,
+        ...buildPageProgressMetrics()
+      });
+      await attachStructuredPdfEmbeddings({
+        embeddings: pageResult.embeddings,
+        progressMode: "silent",
+        title,
+        updateProgress
+      });
+      partialWarnings.push(...pageResult.warnings);
+
+      if (pageResult.page.pageType === "failed") {
+        partialFailedPageCount += 1;
+      } else {
+        partialSuccessfulPageCount += 1;
+        partialBlockCount += pageResult.blocks.length;
+        partialCharacterCount += pageResult.page.pageLevelSearchText?.length ?? 0;
+        partialEmbeddingCount += pageResult.embeddings.length;
+        partialLearningObjectCount += Array.isArray(pageResult.page.structuredPageJson?.detected_learning_objects)
+          ? pageResult.page.structuredPageJson.detected_learning_objects.length
+          : 0;
+      }
+
+      await upsertStructuredPdfPageMetadata({
+        blocks: pageResult.blocks,
+        embeddings: pageResult.embeddings,
+        material: buildPartialMaterial(),
+        page: pageResult.page
+      });
+      persistedPageNumbers.add(pageNumber);
+      if (countedIndexingPage) {
+        indexingPages = Math.max(0, indexingPages - 1);
+        countedIndexingPage = false;
+      }
+
+      await onPartialPageIndexed?.({
+        blockCount: partialBlockCount,
+        characterCount: partialCharacterCount,
+        embeddingCount: partialEmbeddingCount,
+        extractionModel: pageResult.extractionModel || extractionModel || "gemini-3-flash-preview",
+        failedPageCount: partialFailedPageCount,
+        indexedPageCount: partialSuccessfulPageCount,
+        learningObjectCount: partialLearningObjectCount,
+        pageCount: pageAssets.length,
+        successfulPageCount: partialSuccessfulPageCount,
+        warnings: [...new Set(partialWarnings)]
+      });
+      await updateProgress({
+        completedChunks: Math.max(completedPages, extractedPages),
+        detail: `PostgreSQL has ${partialSuccessfulPageCount} of ${pageAssets.length} extracted PDF page${pageAssets.length === 1 ? "" : "s"} ready.`,
+        percent: Math.min(59, 50 + Math.round((Math.max(completedPages, extractedPages) / Math.max(pageAssets.length, 1)) * 9)),
+        step: "extracting_material",
+        totalChunks: pageAssets.length,
+        ...buildPageProgressMetrics()
+      });
+    })();
+
+    persistingPageResults.set(pageNumber, persistPromise);
+
+    try {
+      await persistPromise;
+    } finally {
+      if (countedIndexingPage) {
+        indexingPages = Math.max(0, indexingPages - 1);
+      }
+      persistingPageResults.delete(pageNumber);
+    }
+  };
+
+  const processStructuredPageAsset = async (
+    pageAsset: StructuredPdfPageAsset,
+    extractionOverride?: GeminiStructuredPageExtractionResult
+  ): Promise<StructuredPdfPageIngestionResult> => {
+    const extractedAt = new Date().toISOString();
+    const pageWarnings: string[] = [];
+    let pageExtractionModel = "";
+
+    try {
+      const cachedExtraction = cachedExtractions.get(pageAsset.pageAssetChecksumSha256);
+      let validation: ReturnType<typeof parseAndValidateStructuredPageJson> | null = null;
+      let cacheHit = false;
+
+      if (cachedExtraction && !extractionOverride) {
+        validation = parseAndValidateStructuredPageJson(JSON.stringify(cachedExtraction.structuredPageJson));
+        pageExtractionModel = cachedExtraction.extractionModel || "gemini-3-flash-preview";
+
+        if ("page" in validation) {
+          cacheHit = true;
+        } else {
+          pageWarnings.push(`page ${pageAsset.pageNumber}: cached structured extraction ignored: ${validation.error}`);
+          validation = null;
+        }
+      }
+
+      if (!validation) {
+        const preloadedExtraction = pageAsset.preloadedExtraction
+          ? await pageAsset.preloadedExtraction
+          : null;
+
+        if (preloadedExtraction && !preloadedExtraction.ok) {
+          throw preloadedExtraction.error;
+        }
+
+        const extraction = extractionOverride
+          ?? batchExtractions.get(pageAsset.pageNumber)
+          ?? preloadedExtraction?.result
+          ?? await extractStructuredPageWithGemini({
+            mimeType: pageAsset.pageAssetMimeType,
+            pageAssetUri: pageAsset.pageAssetUri,
+            pageNumber: pageAsset.pageNumber,
+            title
+          });
+        pageExtractionModel = extraction.model;
+        validation = parseAndValidateStructuredPageJson(extraction.rawText);
+      }
+
+      if ("error" in validation) {
+        return {
+          blocks: [],
+          cacheHit,
+          embeddings: [],
+          extractionModel: pageExtractionModel,
+          page: buildFailedStructuredPdfPageRecord({
+            classId,
+            contentType,
+            error: validation.error,
+            extractedAt,
+            extractionModel: pageExtractionModel,
+            fileSize,
+            fullPdfBucket,
+            fullPdfMimeType,
+            fullPdfPath,
+            fullPdfSha256,
+            fullPdfSize,
+            fullPdfUri,
+            materialId,
+            materialType,
+            pageAsset,
+            storageBucket,
+            storagePath,
+            teacherId,
+            title,
+            warnings: validation.warnings
+          }),
+          warnings: [
+            ...pageWarnings,
+            `page ${pageAsset.pageNumber}: ${validation.error}`
+          ]
+        };
+      }
+
+      const structuredPage = validation.page;
+      const pageRecords = buildSuccessfulStructuredPdfPageRecords({
+        classId,
+        contentType,
+        extractedAt,
+        extractionModel: pageExtractionModel,
+        fileSize,
+        fullPdfBucket,
+        fullPdfMimeType,
+        fullPdfPath,
+        fullPdfSha256,
+        fullPdfSize,
+        fullPdfUri,
+        materialId,
+        materialType,
+        pageAsset,
+        storageBucket,
+        storagePath,
+        structuredPage,
+        teacherId,
+        title
+      });
+
+      return {
+        ...pageRecords,
+        cacheHit,
+        extractionModel: pageExtractionModel,
+        warnings: [
+          ...pageWarnings,
+          ...validation.warnings.map((warning) => `page ${pageAsset.pageNumber}: ${warning}`)
+        ]
+      };
+    } catch (caughtError) {
+      const error = caughtError instanceof Error ? caughtError.message : String(caughtError);
+      const failedExtractionModel = pageExtractionModel || "gemini-3-flash-preview";
+
+      return {
+        blocks: [],
+        cacheHit: false,
+        embeddings: [],
+        extractionModel: failedExtractionModel,
+        page: buildFailedStructuredPdfPageRecord({
+          classId,
+          contentType,
+          error: `Gemini extraction failure: ${error}`,
+          extractedAt,
+          extractionModel: failedExtractionModel,
+          fileSize,
+          fullPdfBucket,
+          fullPdfMimeType,
+          fullPdfPath,
+          fullPdfSha256,
+          fullPdfSize,
+          fullPdfUri,
+          materialId,
+          materialType,
+          pageAsset,
+          storageBucket,
+          storagePath,
+          teacherId,
+          title,
+          warnings: ["Gemini extraction failure"]
+        }),
+        warnings: [
+          ...pageWarnings,
+          `page ${pageAsset.pageNumber}: Gemini extraction failure: ${error}`
+        ]
+      };
+    }
+  };
+
+  const batchMinPages = structuredPageBatchMinPages();
+  let attemptedBatchExtraction = false;
+
+  if (useBatchExtraction && uncachedPageAssets.length >= batchMinPages) {
+    attemptedBatchExtraction = true;
+    try {
+      await updateProgress({
+        completedChunks: 0,
+        detail: `Reading ${uncachedPageAssets.length} PDF pages. Pages are saved as soon as they are ready.`,
+        percent: 50,
+        step: "extracting_material",
+        totalChunks: pageAssets.length,
+        ...buildPageProgressMetrics()
+      });
+      const batchExtraction = await extractStructuredPagesWithGeminiBatch({
+        onPageResult: async ({ pageNumber, result }) => {
+          const pageAsset = pageAssetsByNumber.get(pageNumber);
+
+          if (!pageAsset || batchPageResults.has(pageNumber)) {
+            return;
+          }
+
+          const pageResult = await processStructuredPageAsset(pageAsset, result);
+          batchPageResults.set(pageNumber, pageResult);
+
+          if (pageResult.page.pageType !== "failed" && pageResult.embeddings.length) {
+            batchIndexedPages += 1;
+            batchEmbeddingRecords += pageResult.embeddings.length;
+            const embeddingPromise = persistStructuredPageResult(pageResult).then(() => {
+              batchEmbeddedRecords += pageResult.embeddings.filter((embedding) => embedding.embedding?.length).length;
+              return null;
+            }).catch((caughtError: unknown) => {
+              return caughtError instanceof Error ? caughtError : new Error(String(caughtError));
+            });
+            batchEmbeddingPromises.push(embeddingPromise);
+          }
+        },
+        onProgress: async ({
+          batchIndex,
+          elapsedMs,
+          failedPageCount,
+          outputPageCount,
+          pageCount,
+          processedPageCount,
+          state,
+          successfulPageCount,
+          totalBatches
+        }) => {
+          extractedPages = Math.max(extractedPages, outputPageCount);
+          const completed = Math.max(completedPages, outputPageCount);
+          const failedDetail = failedPageCount
+            ? ` ${failedPageCount} failed.`
+            : "";
+          await updateProgress({
+            completedChunks: completed,
+            detail: `Reading pages. ${outputPageCount} of ${pageCount} page${pageCount === 1 ? "" : "s"} can move to embeddings from batch ${batchIndex} of ${totalBatches} (${formatDurationSeconds(elapsedMs)} elapsed).${failedDetail}`,
+            percent: Math.min(58, 50 + Math.round((completed / Math.max(pageAssets.length, 1)) * 8)),
+            step: "extracting_material",
+            totalChunks: pageAssets.length,
+            ...buildPageProgressMetrics({
+              failedPages: Math.max(partialFailedPageCount, failedPageCount)
+            })
+          });
+        },
+        pages: uncachedPageAssets.map((pageAsset) => ({
+          mimeType: pageAsset.pageAssetMimeType,
+          pageAssetUri: pageAsset.pageAssetUri,
+          pageNumber: pageAsset.pageNumber
+        })),
+        title
+      });
+
+      batchExtraction.results.forEach((result, pageNumber) => {
+        batchExtractions.set(pageNumber, result);
+      });
+      warnings.push(...batchExtraction.warnings);
+
+      if (!extractionModel && batchExtraction.model) {
+        extractionModel = batchExtraction.model;
+      }
+    } catch (caughtError) {
+      const error = caughtError instanceof Error ? caughtError.message : String(caughtError);
+      warnings.push(`Vertex AI batch extraction unavailable; falling back to direct page extraction: ${error}`);
+    }
+  } else if (uncachedPageAssets.length) {
+    warnings.push(`using direct concurrent Vertex extraction for ${uncachedPageAssets.length} uncached page${uncachedPageAssets.length === 1 ? "" : "s"}; Vertex batch starts at ${batchMinPages} pages`);
+  }
+
+  const hasPendingDirectExtractions = pageAssets.some(
+    (pageAsset) => !cachedExtractions.has(pageAsset.pageAssetChecksumSha256)
+      && !batchPageResults.has(pageAsset.pageNumber)
+  );
+  const pageExtractionConcurrency = attemptedBatchExtraction && !hasPendingDirectExtractions
+    ? structuredPageExtractionConcurrency()
+    : structuredPageDirectExtractionConcurrency();
+  const pageResults = await mapWithConcurrency(
+    pageAssets,
+    pageExtractionConcurrency,
+    async (pageAsset) => {
+      try {
+        const result = batchPageResults.get(pageAsset.pageNumber)
+          ?? await processStructuredPageAsset(pageAsset);
+        if (result.page.pageType !== "failed") {
+          extractedPages = Math.max(extractedPages, completedPages + 1);
+          await updateProgress({
+            completedChunks: Math.max(completedPages, extractedPages),
+            detail: `Gemini read page ${result.page.pageNumber}. Creating embeddings next.`,
+            percent: Math.min(58, 50 + Math.round((extractedPages / Math.max(pageAssets.length, 1)) * 8)),
+            step: "extracting_material",
+            totalChunks: pageAssets.length,
+            ...buildPageProgressMetrics()
+          });
+        }
+        await persistStructuredPageResult(result);
+        return result;
+      } finally {
+        completedPages += 1;
+        await updateProgress({
+          completedChunks: completedPages,
+          detail: batchEmbeddingRecords
+            ? `Read ${completedPages} of ${pageAssets.length} pages. ${partialSuccessfulPageCount} pages are ready in the database.`
+            : `Read ${completedPages} of ${pageAssets.length} pages.`,
+          percent: Math.min(59, 50 + Math.round((completedPages / Math.max(pageAssets.length, 1)) * 9)),
+          step: "extracting_material",
+          totalChunks: pageAssets.length,
+          ...buildPageProgressMetrics()
+        });
+      }
+    }
+  );
+
+  if (batchEmbeddingPromises.length) {
+    await updateProgress({
+      completedChunks: completedPages,
+      detail: `Finishing page saves that already started (${batchEmbeddedRecords} of ${batchEmbeddingRecords} search records ready).`,
+      percent: 59,
+      step: "extracting_material",
+      totalChunks: pageAssets.length,
+      ...buildPageProgressMetrics()
+    });
+    const embeddingErrors = (await Promise.all(batchEmbeddingPromises)).filter((error): error is Error => Boolean(error));
+
+    if (embeddingErrors[0]) {
+      throw embeddingErrors[0];
+    }
+  }
+
+  for (const result of pageResults) {
+    pages.push(result.page);
+    blocks.push(...result.blocks);
+    embeddings.push(...result.embeddings);
+    warnings.push(...result.warnings);
+
+    if (!extractionModel && result.extractionModel) {
+      extractionModel = result.extractionModel;
+    }
+  }
+
+  const characterCount = pages.reduce(
+    (sum, page) => sum + (page.pageLevelSearchText?.length ?? 0),
+    0
+  );
+  const confidenceValues = pages
+    .map((page) => page.extractionConfidence)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const extractionConfidence = confidenceValues.length
+    ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length
+    : null;
+  const material: PdfMaterialMetadata = {
+    materialId,
+    classId,
+    courseId: classId,
+    professorId: teacherId,
+    teacherId,
+    title,
+    materialType,
+    contentType,
+    fileName,
+    fileSize,
+    storageBucket,
+    storagePath,
+    storageUri: `gs://${storageBucket}/${storagePath}`,
+    fullPdfBucket: fullPdfBucket ?? storageBucket,
+    fullPdfPath: fullPdfPath ?? storagePath,
+    fullPdfUri: fullPdfUri ?? `gs://${fullPdfBucket ?? storageBucket}/${fullPdfPath ?? storagePath}`,
+    fullPdfMimeType: fullPdfMimeType ?? contentType,
+    fullPdfSize: fullPdfSize ?? fileSize,
+    fullPdfSha256: fullPdfSha256 ?? null,
+    sourceKind,
+    pageCount: pages.length,
+    characterCount
+  };
+
+  return {
+    blocks,
+    embeddings,
+    extractionModel: extractionModel || "gemini-3-flash-preview",
+    failedPageCount: pages.filter((page) => page.pageType === "failed").length,
+    learningObjectCount: pages.reduce((sum, page) => {
+      const objects = page.structuredPageJson?.detected_learning_objects;
+      return sum + (Array.isArray(objects) ? objects.length : 0);
+    }, 0),
+    characterCount,
+    material,
+    pageCount: pages.length,
+    persistedPageCount: persistedPageNumbers.size,
+    pages,
+    extractionConfidence,
+    successfulPageCount: pages.filter((page) => page.pageType !== "failed").length,
+    warnings: [...new Set(warnings)]
+  };
+}
+
+function buildNoValidStructuredPagesError({
+  failedPageCount,
+  pageCount,
+  warnings
+}: {
+  failedPageCount: number;
+  pageCount: number;
+  warnings: string[];
+}) {
+  const baseMessage = "Gemini structured PDF extraction did not return any valid pages.";
+  const pageSummary = pageCount
+    ? ` ${failedPageCount || pageCount} of ${pageCount} page${pageCount === 1 ? "" : "s"} failed.`
+    : "";
+  const details = [...new Set(warnings.map((warning) => warning.trim()).filter(Boolean))]
+    .slice(0, 5);
+
+  if (!details.length) {
+    return `${baseMessage}${pageSummary}`;
+  }
+
+  return `${baseMessage}${pageSummary} First extraction issue: ${details[0]}${
+    details.length > 1 ? ` Additional issues: ${details.slice(1).join(" | ")}` : ""
+  }`.slice(0, 2000);
+}
+
+function buildSuccessfulStructuredPdfPageRecords({
+  classId,
+  contentType,
+  extractedAt,
+  extractionModel,
+  fileSize,
+  fullPdfBucket,
+  fullPdfMimeType,
+  fullPdfPath,
+  fullPdfSha256,
+  fullPdfSize,
+  fullPdfUri,
+  materialId,
+  materialType,
+  pageAsset,
+  storageBucket,
+  storagePath,
+  structuredPage,
+  teacherId,
+  title
+}: {
+  classId: string;
+  contentType: string;
+  extractedAt: string;
+  extractionModel: string;
+  fileSize: number;
+  fullPdfBucket?: string;
+  fullPdfMimeType?: string;
+  fullPdfPath?: string;
+  fullPdfSha256?: string;
+  fullPdfSize?: number;
+  fullPdfUri?: string;
+  materialId: string;
+  materialType: string;
+  pageAsset: StructuredPdfPageAsset;
+  storageBucket: string;
+  storagePath: string;
+  structuredPage: StructuredPageJson;
+  teacherId: string;
+  title: string;
+}) {
+  const pageMetadata = structuredPage.page;
+  const pageNumber = pageMetadata.page_number && pageMetadata.page_number > 0
+    ? pageMetadata.page_number
+    : pageAsset.pageNumber;
+  const pageSearchText = structuredPage.page_level_search_text.trim();
+  const page: PdfPageMetadata = {
+    materialId,
+    classId,
+    courseId: classId,
+    professorId: teacherId,
+    teacherId,
+    title,
+    materialType,
+    pageNumber,
+    pageStart: pageNumber,
+    pageEnd: pageNumber,
+    detectedPageLabel: pageMetadata.detected_page_label,
+    documentTitle: pageMetadata.document_title,
+    chapter: pageMetadata.chapter,
+    section: pageMetadata.section,
+    sectionTitle: pageMetadata.section_title,
+    pageType: pageMetadata.page_type,
+    language: pageMetadata.language,
+    structuredPageJson: structuredPage as unknown as Record<string, unknown>,
+    pageLevelSearchText: pageSearchText,
+    pageLevelSummary: structuredPage.page_level_summary,
+    extractionConfidence: pageMetadata.overall_confidence,
+    extractionWarnings: structuredPage.extraction_warnings,
+    extractionModel,
+    extractionTimestamp: extractedAt,
+    ingestionVersion: structuredPdfIngestionVersion,
+    embeddingSource: structuredPdfEmbeddingSource,
+    embeddingDim: structuredPdfEmbeddingDim(),
+    storageBucket,
+    storagePath,
+    fullPdfBucket: fullPdfBucket ?? storageBucket,
+    fullPdfPath: fullPdfPath ?? storagePath,
+    fullPdfUri: fullPdfUri ?? `gs://${fullPdfBucket ?? storageBucket}/${fullPdfPath ?? storagePath}`,
+    fullPdfMimeType: fullPdfMimeType ?? contentType,
+    fullPdfSize: fullPdfSize ?? fileSize,
+    fullPdfSha256: fullPdfSha256 ?? null,
+    pageAssetBucket: pageAsset.pageAssetBucket,
+    pageAssetPath: pageAsset.pageAssetPath,
+    pageAssetUri: pageAsset.pageAssetUri,
+    pageAssetMimeType: pageAsset.pageAssetMimeType,
+    pageAssetSize: pageAsset.pageAssetSize,
+    pageAssetSha256: pageAsset.pageAssetSha256,
+    pageAssetStorageBucket: pageAsset.pageAssetStorageBucket,
+    pageAssetStoragePath: pageAsset.pageAssetStoragePath,
+    pageAssetSizeBytes: pageAsset.pageAssetSizeBytes,
+    pageAssetChecksumSha256: pageAsset.pageAssetChecksumSha256
+  };
+  const blocks: PdfPageBlockMetadata[] = structuredPage.blocks.map((block) => ({
+    materialId,
+    classId,
+    courseId: classId,
+    professorId: teacherId,
+    teacherId,
+    pageNumber,
+    blockId: block.block_id,
+    readingOrder: block.reading_order,
+    blockType: block.type,
+    exactText: block.exact_text,
+    correctedText: block.corrected_text,
+    mathLatex: block.math.latex,
+    mathAscii: block.math.normalized_ascii,
+    itemKind: block.item_metadata.item_kind,
+    itemNumber: block.item_metadata.item_number,
+    itemLabel: block.item_metadata.item_label,
+    canonicalItemId: block.item_metadata.canonical_item_id,
+    searchableKeywords: block.searchable_keywords,
+    semanticSummary: block.semantic_summary,
+    relationships: block.relationships,
+    confidence: block.confidence,
+    ingestionVersion: structuredPdfIngestionVersion
+  }));
+  const embeddings = buildStructuredEmbeddingRecords({
+    documentId: materialId,
+    page: structuredPage,
+    pageNumber,
+    title
+  }).map((record) => structuredEmbeddingToPdfContentEmbedding({
+    classId,
+    record,
+    teacherId
+  }));
+
+  return { blocks, embeddings, page };
+}
+
+function buildFailedStructuredPdfPageRecord({
+  classId,
+  contentType,
+  error,
+  extractedAt,
+  extractionModel,
+  fileSize,
+  fullPdfBucket,
+  fullPdfMimeType,
+  fullPdfPath,
+  fullPdfSha256,
+  fullPdfSize,
+  fullPdfUri,
+  materialId,
+  materialType,
+  pageAsset,
+  storageBucket,
+  storagePath,
+  teacherId,
+  title,
+  warnings
+}: {
+  classId: string;
+  contentType: string;
+  error: string;
+  extractedAt: string;
+  extractionModel: string;
+  fileSize: number;
+  fullPdfBucket?: string;
+  fullPdfMimeType?: string;
+  fullPdfPath?: string;
+  fullPdfSha256?: string;
+  fullPdfSize?: number;
+  fullPdfUri?: string;
+  materialId: string;
+  materialType: string;
+  pageAsset: StructuredPdfPageAsset;
+  storageBucket: string;
+  storagePath: string;
+  teacherId: string;
+  title: string;
+  warnings: string[];
+}): PdfPageMetadata {
+  return {
+    materialId,
+    classId,
+    courseId: classId,
+    professorId: teacherId,
+    teacherId,
+    title,
+    materialType,
+    pageNumber: pageAsset.pageNumber,
+    pageStart: pageAsset.pageNumber,
+    pageEnd: pageAsset.pageNumber,
+    pageType: "failed",
+    structuredPageJson: null,
+    pageLevelSearchText: "",
+    pageLevelSummary: "",
+    extractionConfidence: null,
+    extractionWarnings: [...new Set([error, ...warnings])],
+    extractionModel,
+    extractionTimestamp: extractedAt,
+    ingestionVersion: structuredPdfIngestionVersion,
+    embeddingSource: structuredPdfEmbeddingSource,
+    embeddingDim: structuredPdfEmbeddingDim(),
+    storageBucket,
+    storagePath,
+    fullPdfBucket: fullPdfBucket ?? storageBucket,
+    fullPdfPath: fullPdfPath ?? storagePath,
+    fullPdfUri: fullPdfUri ?? `gs://${fullPdfBucket ?? storageBucket}/${fullPdfPath ?? storagePath}`,
+    fullPdfMimeType: fullPdfMimeType ?? contentType,
+    fullPdfSize: fullPdfSize ?? fileSize,
+    fullPdfSha256: fullPdfSha256 ?? null,
+    pageAssetBucket: pageAsset.pageAssetBucket,
+    pageAssetPath: pageAsset.pageAssetPath,
+    pageAssetUri: pageAsset.pageAssetUri,
+    pageAssetMimeType: pageAsset.pageAssetMimeType,
+    pageAssetSize: pageAsset.pageAssetSize,
+    pageAssetSha256: pageAsset.pageAssetSha256,
+    pageAssetStorageBucket: pageAsset.pageAssetStorageBucket,
+    pageAssetStoragePath: pageAsset.pageAssetStoragePath,
+    pageAssetSizeBytes: pageAsset.pageAssetSizeBytes,
+    pageAssetChecksumSha256: pageAsset.pageAssetChecksumSha256
+  };
+}
+
+function structuredEmbeddingToPdfContentEmbedding({
+  classId,
+  record,
+  teacherId
+}: {
+  classId: string;
+  record: StructuredEmbeddingRecord;
+  teacherId: string;
+}): PdfContentEmbeddingMetadata {
+  return {
+    materialId: record.documentId,
+    classId,
+    courseId: classId,
+    professorId: teacherId,
+    teacherId,
+    pageNumber: record.pageNumber,
+    sourceType: record.sourceType,
+    sourceId: record.sourceId,
+    embeddingLevel: record.embeddingLevel,
+    embeddingText: record.embeddingText,
+    embeddingDim: record.embeddingDim,
+    embeddingSource: record.embeddingSource,
+    ingestionVersion: record.ingestionVersion,
+    blockId: record.blockId,
+    blockType: record.blockType,
+    readingOrder: record.readingOrder,
+    objectId: record.objectId,
+    objectType: record.objectType,
+    title: record.title,
+    label: record.label,
+    relatedBlockIds: record.relatedBlockIds,
+    itemKind: record.itemKind,
+    itemNumber: record.itemNumber,
+    itemLabel: record.itemLabel,
+    canonicalItemId: record.canonicalItemId,
+    section: record.section
+  };
+}
+
+async function attachStructuredPdfEmbeddings({
+  embeddings,
+  progressMode = "embedding-step",
   title,
   updateProgress
 }: {
-  pages: Array<Parameters<typeof replacePdfOcrMetadata>[0]["pages"][number]>;
-  problems: Array<Parameters<typeof replacePdfOcrMetadata>[0]["problems"][number]>;
+  embeddings: PdfContentEmbeddingMetadata[];
+  progressMode?: "embedding-step" | "silent";
   title: string;
   updateProgress: (progress: MaterialJobProgressUpdate) => Promise<void>;
 }) {
-  const problemInputs = problems
-    .map((problem) => ({
-      label: `Problem ${problem.problemNumber}`,
-      target: problem,
-      text: problem.problemText
-    }))
-    .filter((input) => input.text.trim());
-  const pageInputs = pages
-    .map((page) => ({
-      label: `Page ${page.pageNumber}`,
-      target: page,
-      text: page.ocrText
-    }))
-    .filter((input) => input.text.trim());
-  const pageInputsByTextAndPage = new Map(
-    pageInputs.map((input) => [pdfEmbeddingReuseKey(input.target.pageNumber, input.text), input])
-  );
-  const problemInputsNeedingEmbeddings = problemInputs.filter(
-    (input) => !pageInputsByTextAndPage.has(pdfEmbeddingReuseKey(input.target.pageStart, input.text))
-  );
-  const embeddingInputs = [...pageInputs, ...problemInputsNeedingEmbeddings];
+  const embeddingInputs = embeddings.filter((embedding) => embedding.embeddingText.trim() && !embedding.embedding?.length);
 
   if (!embeddingInputs.length) {
     return;
   }
 
-  const embeddings = await createVertexEmbeddings(
+  const generatedEmbeddings = await createVertexEmbeddings(
     embeddingInputs.map((input) => ({
       taskType: "RETRIEVAL_DOCUMENT",
-      text: input.text,
-      title: `${title} ${input.label}`
+      text: input.embeddingText,
+      title: `${title} ${input.sourceType} ${input.sourceId}`
     })),
     {
+      dimensions: structuredPdfEmbeddingDim(),
       onProgress: async ({ completed, total }) => {
+        if (progressMode === "silent") {
+          return;
+        }
+
         await updateProgress({
           completedChunks: completed,
-          detail: `Preparing OCR metadata embedding ${completed} of ${total}.`,
+          detail: `Preparing structured PDF embedding ${completed} of ${total}.`,
           percent: Math.min(74, 60 + Math.round((completed / Math.max(total, 1)) * 14)),
           step: "embedding_chunks",
           totalChunks: total
@@ -1112,43 +2152,33 @@ async function attachPdfOcrEmbeddings({
   );
   const embeddingCreatedAt = new Date().toISOString();
 
-  embeddings.forEach((embedding, index) => {
+  generatedEmbeddings.forEach((embedding, index) => {
     if (!embedding?.values.length) {
       return;
     }
 
-    const target = embeddingInputs[index].target;
+    if (embedding.dimensions !== structuredPdfEmbeddingDim()) {
+      throw new VertexEmbeddingError(
+        `Structured PDF ingestion expected ${structuredPdfEmbeddingDim()}-dimensional embeddings but ${embedding.model} returned ${embedding.dimensions}.`
+      );
+    }
+
+    const target = embeddingInputs[index];
     target.embedding = embedding.values;
     target.embeddingCreatedAt = embeddingCreatedAt;
-    target.embeddingDimensions = embedding.dimensions;
+    target.embeddingDim = embedding.dimensions;
     target.embeddingModel = embedding.model;
     target.embeddingProvider = embedding.provider;
     target.embeddingTaskType = embedding.taskType;
   });
 
-  for (const problemInput of problemInputs) {
-    if (problemInput.target.embedding?.length) {
-      continue;
-    }
+  const missingEmbedding = embeddingInputs.find((input) => !input.embedding?.length);
 
-    const pageInput = pageInputsByTextAndPage.get(pdfEmbeddingReuseKey(problemInput.target.pageStart, problemInput.text));
-    const pageEmbedding = pageInput?.target.embedding;
-
-    if (!pageInput || !pageEmbedding?.length) {
-      continue;
-    }
-
-    problemInput.target.embedding = pageEmbedding;
-    problemInput.target.embeddingCreatedAt = pageInput.target.embeddingCreatedAt;
-    problemInput.target.embeddingDimensions = pageInput.target.embeddingDimensions;
-    problemInput.target.embeddingModel = pageInput.target.embeddingModel;
-    problemInput.target.embeddingProvider = pageInput.target.embeddingProvider;
-    problemInput.target.embeddingTaskType = pageInput.target.embeddingTaskType;
+  if (missingEmbedding) {
+    throw new VertexEmbeddingError(
+      `Structured PDF ingestion could not create an embedding for ${missingEmbedding.sourceType}:${missingEmbedding.sourceId}.`
+    );
   }
-}
-
-function pdfEmbeddingReuseKey(pageNumber: number, text: string) {
-  return `${pageNumber}:${text.trim()}`;
 }
 
 export async function deleteTutorKnowledge({
@@ -1999,7 +3029,7 @@ async function extractChunksFromFile({
   }
 
   throw new TutorKnowledgeHttpError(
-    "PDF files are indexed through Document AI OCR and PostgreSQL metadata, not Firestore tutor-knowledge chunks.",
+    "PDF files are indexed through Gemini structured page extraction and PostgreSQL metadata, not Firestore tutor-knowledge chunks.",
     400
   );
 }
@@ -2026,7 +3056,7 @@ async function extractChunksFromUrl({
 
   if (isPdfSource(downloaded.fileName, contentType)) {
     throw new TutorKnowledgeHttpError(
-      "PDF URLs are not ingested as Firestore tutor-knowledge chunks. Upload the PDF so it can be indexed through Document AI OCR and PostgreSQL metadata.",
+      "PDF URLs are not ingested as Firestore tutor-knowledge chunks. Upload the PDF so it can be indexed through Gemini structured page extraction and PostgreSQL metadata.",
       400
     );
   }
@@ -2230,6 +3260,59 @@ async function mapWithConcurrency<TItem, TResult>(
   return results;
 }
 
+function createAsyncLimiter(concurrencyLimit: number) {
+  const limit = Math.max(1, concurrencyLimit);
+  let activeCount = 0;
+  const queue: Array<() => void> = [];
+
+  const runNext = () => {
+    if (activeCount >= limit) {
+      return;
+    }
+
+    const next = queue.shift();
+
+    if (!next) {
+      return;
+    }
+
+    activeCount += 1;
+    next();
+  };
+
+  return async function limitTask<TResult>(task: () => Promise<TResult>): Promise<TResult> {
+    await new Promise<void>((resolve) => {
+      queue.push(resolve);
+      runNext();
+    });
+
+    try {
+      return await task();
+    } finally {
+      activeCount = Math.max(0, activeCount - 1);
+      runNext();
+    }
+  };
+}
+
+function formatDurationSeconds(durationMs: number) {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function formatVertexBatchState(state: string) {
+  const normalized = state.replace(/^JOB_STATE_/, "").toLowerCase().replace(/_/g, " ");
+
+  if (!normalized) {
+    return "pending";
+  }
+
+  return normalized;
+}
+
 export async function prepareTutorKnowledgeChunkData({
   classId,
   chunk,
@@ -2358,8 +3441,22 @@ function createMaterialJobProgressWriter({
   }
 
   const jobRef = adminDb!.collection("classes").doc(classId).collection("materialJobs").doc(normalizedJobId);
+  let lastNonFailedStep: Exclude<MaterialJobStep, "failed"> | undefined;
 
   return async (progress: MaterialJobProgressUpdate) => {
+    const failedStep = progress.step === "failed" ? progress.failedStep ?? lastNonFailedStep : undefined;
+    const pageProgressMetadata = {
+      ...(typeof progress.extractedPages === "number" ? { extractedPages: progress.extractedPages } : {}),
+      ...(typeof progress.failedPages === "number" ? { failedPages: progress.failedPages } : {}),
+      ...(typeof progress.indexingPages === "number" ? { indexingPages: progress.indexingPages } : {}),
+      ...(typeof progress.postgresReadyPages === "number" ? { postgresReadyPages: progress.postgresReadyPages } : {}),
+      ...(typeof progress.totalPages === "number" ? { totalPages: progress.totalPages } : {})
+    };
+
+    if (progress.step !== "failed") {
+      lastNonFailedStep = progress.step;
+    }
+
     await tryPostgresData("material.job.write", () =>
       upsertMaterialJob({
         classId,
@@ -2368,7 +3465,11 @@ function createMaterialJobProgressWriter({
         error: progress.error ?? null,
         id: normalizedJobId,
         materialId,
-        metadata: { professorId: teacherId },
+        metadata: {
+          professorId: teacherId,
+          ...pageProgressMetadata,
+          ...(failedStep ? { failedStep } : {})
+        },
         percent: progress.percent,
         step: progress.step,
         title,
@@ -2381,12 +3482,18 @@ function createMaterialJobProgressWriter({
         completedChunks: progress.completedChunks ?? null,
         detail: progress.detail,
         error: progress.error ?? null,
+        extractedPages: progress.extractedPages ?? null,
+        failedStep: failedStep ?? null,
+        failedPages: progress.failedPages ?? null,
+        indexingPages: progress.indexingPages ?? null,
         materialId,
         percent: Math.max(0, Math.min(100, progress.percent)),
+        postgresReadyPages: progress.postgresReadyPages ?? null,
         professorId: teacherId,
         step: progress.step,
         title,
         totalChunks: progress.totalChunks ?? null,
+        totalPages: progress.totalPages ?? null,
         updatedAt: FieldValue.serverTimestamp()
       },
       { merge: true }

@@ -2,7 +2,6 @@ import { downloadGcsPdfAssetBuffer } from "./gcs-pdf-page-assets";
 import { getPdfPageAssetRecords } from "./pdf-ocr-postgres";
 
 const defaultConcurrency = 4;
-const fullPdfPayloadLimitReason = "full PDF payload would exceed configured byte limit";
 
 export class PdfPageAssetPayloadTooLargeError extends Error {
   constructor(message: string) {
@@ -70,33 +69,7 @@ export async function buildPdfPageAssetPayloads({
   if (actualPageBytes > maxTotalBytes) {
     throw new PdfPageAssetPayloadTooLargeError("PDF page asset payload is too large.");
   }
-
-  const fullPdfJobs = firstFullPdfJobsByMaterial(records);
-  const fullPdfPlan = planFullPdfDownloads(fullPdfJobs, maxFullPdfTotalBytes);
-  const fullPdfBuffers = await mapWithConcurrency(
-    fullPdfPlan.downloadJobs,
-    concurrency,
-    async (job) => await downloadGcsPdfAssetBuffer({ bucketName: job.fullPdfBucket, path: job.fullPdfPath })
-  );
-  let fullPdfTotalBytes = 0;
-  const fullPdfByMaterial = new Map<string, Buffer>();
-  const skippedFullPdfByMaterial = new Map(fullPdfPlan.skippedReasons);
-
-  fullPdfPlan.downloadJobs.forEach((job, index) => {
-    const buffer = fullPdfBuffers[index];
-
-    if (!buffer) {
-      return;
-    }
-
-    if (fullPdfTotalBytes + buffer.length > maxFullPdfTotalBytes) {
-      skippedFullPdfByMaterial.set(job.materialId, fullPdfPayloadLimitReason);
-      return;
-    }
-
-    fullPdfTotalBytes += buffer.length;
-    fullPdfByMaterial.set(job.materialId, buffer);
-  });
+  void maxFullPdfTotalBytes;
 
   return records.map((record, index) => {
     const storageBucket = String(record.page_asset_bucket ?? record.page_asset_storage_bucket ?? "");
@@ -108,8 +81,6 @@ export async function buildPdfPageAssetPayloads({
     const fullPdfMimeType = String(record.full_pdf_mime_type ?? "application/pdf") || "application/pdf";
     const materialId = String(record.material_id ?? "");
     const pageAssetBuffer = downloadedPages[index];
-    const fullPdfBuffer = materialId ? fullPdfByMaterial.get(materialId) ?? null : null;
-    const fullPdfSkippedReason = materialId ? skippedFullPdfByMaterial.get(materialId) ?? "" : "";
 
     return {
       classId: record.class_id,
@@ -117,25 +88,13 @@ export async function buildPdfPageAssetPayloads({
       materialId,
       materialType: record.material_type,
       mimeType,
-      ocrConfidence: record.ocr_confidence,
-      ocrProvider: record.ocr_provider,
-      ocrSource: record.ocr_source,
-      ocrText: record.ocr_text,
       fullPdfBucket,
       fullPdfPath,
       fullPdfUri: record.full_pdf_uri,
       fullPdfMimeType,
-      fullPdfSize: fullPdfBuffer?.length ?? record.full_pdf_size,
-      fullPdfSizeBytes: fullPdfBuffer?.length ?? record.full_pdf_size,
+      fullPdfSize: record.full_pdf_size,
+      fullPdfSizeBytes: record.full_pdf_size,
       fullPdfSha256: record.full_pdf_sha256,
-      ...(fullPdfBuffer
-        ? {
-            fullPdfDataUrl: `data:${fullPdfMimeType};base64,${fullPdfBuffer.toString("base64")}`,
-            fullPdfFileName: `${materialId || "source"}.pdf`
-          }
-        : fullPdfSkippedReason
-          ? { fullPdfSkippedReason }
-          : {}),
       pageAssetBucket: storageBucket,
       pageAssetPath: storagePath,
       pageAssetUri: record.page_asset_uri,
@@ -153,62 +112,6 @@ export async function buildPdfPageAssetPayloads({
       ...(pageAssetBuffer ? { dataUrl: `data:${mimeType};base64,${pageAssetBuffer.toString("base64")}` } : {})
     };
   });
-}
-
-function firstFullPdfJobsByMaterial(records: Awaited<ReturnType<typeof getPdfPageAssetRecords>>) {
-  const jobs: Array<{
-    declaredSize: number;
-    fullPdfBucket: string;
-    fullPdfPath: string;
-    materialId: string;
-  }> = [];
-  const seen = new Set<string>();
-
-  for (const record of records) {
-    const materialId = String(record.material_id ?? "");
-    const fullPdfBucket = String(record.full_pdf_bucket ?? "");
-    const fullPdfPath = String(record.full_pdf_path ?? "");
-
-    if (!materialId || !fullPdfBucket || !fullPdfPath || seen.has(materialId)) {
-      continue;
-    }
-
-    seen.add(materialId);
-    jobs.push({
-      declaredSize: Number(record.full_pdf_size ?? 0),
-      fullPdfBucket,
-      fullPdfPath,
-      materialId
-    });
-  }
-
-  return jobs;
-}
-
-function planFullPdfDownloads(
-  jobs: Array<{
-    declaredSize: number;
-    fullPdfBucket: string;
-    fullPdfPath: string;
-    materialId: string;
-  }>,
-  maxFullPdfTotalBytes: number
-) {
-  let declaredTotal = 0;
-  const downloadJobs: typeof jobs = [];
-  const skippedReasons = new Map<string, string>();
-
-  for (const job of jobs) {
-    if (job.declaredSize > 0 && declaredTotal + job.declaredSize > maxFullPdfTotalBytes) {
-      skippedReasons.set(job.materialId, fullPdfPayloadLimitReason);
-      continue;
-    }
-
-    declaredTotal += Math.max(0, job.declaredSize);
-    downloadJobs.push(job);
-  }
-
-  return { downloadJobs, skippedReasons };
 }
 
 async function mapWithConcurrency<T, R>(

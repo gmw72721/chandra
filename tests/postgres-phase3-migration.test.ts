@@ -90,14 +90,17 @@ test("chat route keeps Firebase Auth and uses Postgres-backed conversation persi
   assert.match(conversations, /addPostgresMessage/);
 });
 
-test("PDF retrieval remains on the existing Postgres OCR/search tables", () => {
+test("PDF retrieval remains on the Postgres structured PDF search tables", () => {
   const route = source("frontend/app/api/internal/pdf-page-search/route.ts");
   const ocr = source("frontend/lib/pdf-ocr-postgres.ts");
   const migration = source("migrations/001_pdf_ocr_metadata.sql");
 
-  assert.match(route, /searchPdfOcrMetadata/);
+  assert.match(route, /searchStructuredPdfMetadata/);
+  assert.doesNotMatch(route, /searchPdfOcrMetadata\(/);
   assert.match(ocr, /export async function searchPdfOcrMetadata/);
+  assert.match(ocr, /export async function searchStructuredPdfMetadata/);
   assert.match(ocr, /export async function replacePdfOcrMetadata/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS pdf_materials/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS pdf_pages/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS content_embeddings/);
 });

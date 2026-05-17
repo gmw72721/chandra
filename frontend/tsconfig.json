@@ -47,7 +47,12 @@
     "**/* 2.ts",
     "**/* 2.tsx",
     "**/* 2.d.ts",
+    "**/* 3.ts",
+    "**/* 3.tsx",
+    "**/* 3.d.ts",
     ".next/types/**/* 2.ts",
-    ".next/dev/types/**/* 2.ts"
+    ".next/dev/types/**/* 2.ts",
+    ".next/types/**/* 3.ts",
+    ".next/dev/types/**/* 3.ts"
   ]
 }

@@ -61,7 +61,7 @@ SEARCH_PDF_PAGES_TOOL: dict[str, Any] = {
     "function": {
         "name": "search_pdf_pages",
         "description": (
-            "Search PostgreSQL-indexed OCR metadata for class PDF pages/problems from worksheets, assignments, "
+            "Search PostgreSQL-indexed structured PDF metadata for class PDF pages/problems from worksheets, assignments, "
             "textbook/readings, notes, examples, page numbers, sections, problem numbers, or prior source-backed context."
         ),
         "parameters": {
@@ -77,7 +77,7 @@ SEARCH_PDF_PAGES_TOOL: dict[str, Any] = {
                 "top_k": {
                     "type": "integer",
                     "description": (
-                        "Maximum OCR metadata records to return. Exact problem lookups should use several candidates when source disambiguation may be needed."
+                        "Maximum structured PDF metadata records to return. Exact problem lookups should use several candidates when source disambiguation may be needed."
                     ),
                     "default": 5,
                 },
@@ -85,7 +85,7 @@ SEARCH_PDF_PAGES_TOOL: dict[str, Any] = {
                     "type": "string",
                     "enum": sorted(ALLOWED_RETRIEVAL_REASONS),
                     "description": (
-                        "Internal reason for searching indexed OCR metadata. Must be one of the allowed values."
+                        "Internal reason for searching indexed structured PDF metadata. Must be one of the allowed values."
                     ),
                 },
             },
@@ -173,7 +173,7 @@ async def search_pdf_pages(
     professor_id: str | None = None,
     retrieval_reason: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search indexed PostgreSQL OCR metadata and return metadata, not whole PDFs."""
+    """Search indexed PostgreSQL structured PDF metadata and return metadata, not whole PDFs."""
 
     normalized_reason = normalize_retrieval_reason(retrieval_reason, query=query)
     normalized_query = normalize_query_for_retrieval_reason(query, normalized_reason)
@@ -234,7 +234,6 @@ async def search_pdf_pages_via_next(
             },
             json={
                 "classId": class_id,
-                "includeAssets": True,
                 "professorId": professor_id,
                 "query": query,
                 "retrievalReason": retrieval_reason,
@@ -294,6 +293,7 @@ def normalize_pdf_page_result(page: dict[str, Any] | Any) -> dict[str, Any]:
     source = page if isinstance(page, dict) else page.to_dict()
     page_start = int(source.get("page_start") or source.get("pageStart") or source.get("pageNumber") or 1)
     page_end = int(source.get("page_end") or source.get("pageEnd") or page_start)
+    is_structured_pdf = is_structured_pdf_result(source)
 
     return {
         "class_id": str(source.get("classId") or source.get("class_id") or ""),
@@ -315,7 +315,7 @@ def normalize_pdf_page_result(page: dict[str, Any] | Any) -> dict[str, Any]:
         "full_pdf_mime_type": str(source.get("fullPdfMimeType") or source.get("full_pdf_mime_type") or "application/pdf"),
         "full_pdf_size_bytes": source.get("fullPdfSizeBytes") if source.get("fullPdfSizeBytes") is not None else source.get("full_pdf_size_bytes") if source.get("full_pdf_size_bytes") is not None else source.get("fullPdfSize") if source.get("fullPdfSize") is not None else source.get("full_pdf_size"),
         "full_pdf_sha256": str(source.get("fullPdfSha256") or source.get("full_pdf_sha256") or ""),
-        "full_pdf_data_url": source.get("full_pdf_data_url") or source.get("fullPdfDataUrl"),
+        "full_pdf_data_url": None if is_structured_pdf else source.get("full_pdf_data_url") or source.get("fullPdfDataUrl"),
         "full_pdf_file_name": source.get("full_pdf_file_name") or source.get("fullPdfFileName"),
         "full_pdf_skipped_reason": str(source.get("full_pdf_skipped_reason") or source.get("fullPdfSkippedReason") or ""),
         "printed_page_start": source.get("printed_page_start") or source.get("printedPageStart"),
@@ -323,11 +323,7 @@ def normalize_pdf_page_result(page: dict[str, Any] | Any) -> dict[str, Any]:
         "professor_id": str(source.get("professorId") or source.get("professor_id") or ""),
         "section": str(source.get("section") or source.get("sectionHeading") or ""),
         "score": float(source.get("score") or 0.0),
-        "chunk_text": str(source.get("chunk_text") or source.get("chunkText") or source.get("ocrText") or source.get("content") or ""),
-        "ocr_text": str(source.get("ocrText") or source.get("ocr_text") or source.get("chunk_text") or source.get("chunkText") or ""),
-        "ocr_confidence": source.get("ocrConfidence") if source.get("ocrConfidence") is not None else source.get("ocr_confidence"),
-        "ocr_provider": str(source.get("ocrProvider") or source.get("ocr_provider") or ""),
-        "ocr_source": str(source.get("ocrSource") or source.get("ocr_source") or ""),
+        "chunk_text": str(source.get("chunk_text") or source.get("chunkText") or source.get("pageLevelSearchText") or source.get("content") or ""),
         "problem_numbers": source.get("problemNumbers") or source.get("problem_numbers") or [],
         "retrieval_mode": str(source.get("retrievalMode") or source.get("retrieval_mode") or ""),
         "source_pdf_path": str(
@@ -340,8 +336,29 @@ def normalize_pdf_page_result(page: dict[str, Any] | Any) -> dict[str, Any]:
         "storage_bucket": str(source.get("storageBucket") or source.get("storage_bucket") or ""),
         "storage_path": str(source.get("storagePath") or source.get("storage_path") or ""),
         "material_type": str(source.get("material_type") or source.get("materialType") or source.get("kind") or ""),
-        "file_data_url": source.get("file_data_url") or source.get("fileDataUrl"),
+        "file_data_url": None if is_structured_pdf else source.get("file_data_url") or source.get("fileDataUrl"),
         "file_name": source.get("file_name") or source.get("fileName"),
         "image_url": source.get("image_url") or source.get("imageUrl"),
         "images": source.get("images") if isinstance(source.get("images"), list) else [],
+        "source_type": str(source.get("sourceType") or source.get("source_type") or ""),
+        "source_id": str(source.get("sourceId") or source.get("source_id") or ""),
+        "embedding_level": str(source.get("embeddingLevel") or source.get("embedding_level") or ""),
+        "block_id": str(source.get("blockId") or source.get("block_id") or ""),
+        "object_id": str(source.get("objectId") or source.get("object_id") or ""),
+        "block_type": str(source.get("blockType") or source.get("block_type") or ""),
+        "object_type": str(source.get("objectType") or source.get("object_type") or ""),
+        "item_kind": str(source.get("itemKind") or source.get("item_kind") or ""),
+        "item_number": str(source.get("itemNumber") or source.get("item_number") or ""),
+        "item_label": str(source.get("itemLabel") or source.get("item_label") or ""),
+        "canonical_item_id": str(source.get("canonicalItemId") or source.get("canonical_item_id") or ""),
+        "embedding_source": str(source.get("embeddingSource") or source.get("embedding_source") or ""),
+        "ingestion_version": str(source.get("ingestionVersion") or source.get("ingestion_version") or ""),
+        "embedding_dim": source.get("embeddingDim") if source.get("embeddingDim") is not None else source.get("embedding_dim"),
     }
+
+
+def is_structured_pdf_result(source: dict[str, Any]) -> bool:
+    return (
+        str(source.get("ingestionVersion") or source.get("ingestion_version") or "") == "gemini_structured_page_v1"
+        or str(source.get("embeddingSource") or source.get("embedding_source") or "") == "structured_page_json"
+    )

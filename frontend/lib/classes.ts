@@ -83,7 +83,7 @@ export type ClassMaterial = {
   characterCount?: number;
   chunkCount?: number;
   metadata?: Record<string, unknown>;
-  ocrPageCount?: number;
+  extractedPageCount?: number;
   pageCount?: number;
   priority?: TutorKnowledgePriority;
   requireCitations?: boolean;
@@ -98,7 +98,7 @@ export type ClassMaterial = {
 export type MaterialJobStep =
   | "upload_received"
   | "reading_file"
-  | "ocr_material"
+  | "extracting_material"
   | "chunking_material"
   | "embedding_chunks"
   | "saving_to_class"
@@ -111,11 +111,17 @@ export type MaterialJobProgress = {
   completedChunks?: number;
   detail: string;
   error?: string;
+  extractedPages?: number;
+  failedStep?: Exclude<MaterialJobStep, "failed">;
+  failedPages?: number;
+  indexingPages?: number;
   materialId?: string;
   percent: number;
+  postgresReadyPages?: number;
   step: MaterialJobStep;
   title?: string;
   totalChunks?: number;
+  totalPages?: number;
   updatedAt?: unknown;
 };
 

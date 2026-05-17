@@ -174,19 +174,6 @@ env:
     value: "0"
     availability:
       - RUNTIME
-  - variable: DOCUMENT_AI_LOCATION
-    value: us
-    availability:
-      - RUNTIME
-  - variable: DOCUMENT_AI_OCR_PROCESSOR_NAME
-    value: chandra-ocr
-    availability:
-      - RUNTIME
-  - variable: DOCUMENT_AI_OCR_PROCESSOR_ID
-    value: 5d3fa32c2ebe2a90
-    availability:
-      - RUNTIME
-
   - variable: GEMINI_API_KEY
     secret: GEMINI_API_KEY
     availability:
@@ -197,6 +184,22 @@ env:
       - RUNTIME
   - variable: GOOGLE_CLOUD_LOCATION
     value: us
+    availability:
+      - RUNTIME
+  - variable: GEMINI_PAGE_EXTRACTION_LOCATION
+    value: global
+    availability:
+      - RUNTIME
+  - variable: PDF_STRUCTURED_PAGE_DIRECT_EXTRACTION_CONCURRENCY
+    value: "32"
+    availability:
+      - RUNTIME
+  - variable: PDF_STRUCTURED_PAGE_BATCH_MIN_PAGES
+    value: "200"
+    availability:
+      - RUNTIME
+  - variable: PDF_PAGE_ASSET_SAVE_CONCURRENCY
+    value: "10"
     availability:
       - RUNTIME
 
@@ -230,6 +233,6 @@ env:
     availability:
       - RUNTIME
   - variable: VERTEX_EMBEDDING_DIMENSIONS
-    value: "768"
+    value: "1536"
     availability:
       - RUNTIME

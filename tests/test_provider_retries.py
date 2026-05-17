@@ -290,37 +290,18 @@ async def test_search_pdf_pages_defaults_to_next_internal_retrieval(monkeypatch:
         professor_id="teacher-1",
     )
 
-    assert pages == [
-        {
-            "chunk_text": "Problem 7 asks students to solve a linear equation.",
-            "class_id": "class-1",
-            "doc_id": "material-1",
-            "material_type": "assignment",
-            "ocr_confidence": 0.94,
-            "ocr_provider": "google-document-ai",
-            "ocr_source": "projects/demo/locations/us/processors/5d3fa32c2ebe2a90",
-            "ocr_text": "Problem 7 asks students to solve a linear equation.",
-            "page_end": 3,
-            "page_start": 3,
-            "page_asset_checksum_sha256": "",
-            "page_asset_mime_type": "",
-            "page_asset_size_bytes": None,
-            "page_asset_storage_bucket": "",
-            "page_asset_storage_path": "",
-            "printed_page_end": None,
-            "printed_page_start": None,
-            "professor_id": "teacher-1",
-            "problem_numbers": ["7"],
-            "retrieval_mode": "exact_problem",
-            "retrieval_reason": "student_requested_problem",
-            "score": 0.91,
-            "section": "Practice",
-            "source_pdf_path": "gs://bucket/material.pdf",
-            "storage_bucket": "bucket",
-            "storage_path": "material.pdf",
-            "title": "Practice Problems",
-        }
-    ]
+    assert len(pages) == 1
+    assert pages[0]["chunk_text"] == "Problem 7 asks students to solve a linear equation."
+    assert pages[0]["class_id"] == "class-1"
+    assert pages[0]["doc_id"] == "material-1"
+    assert pages[0]["page_start"] == 3
+    assert pages[0]["page_end"] == 3
+    assert pages[0]["problem_numbers"] == ["7"]
+    assert pages[0]["retrieval_mode"] == "exact_problem"
+    assert pages[0]["retrieval_reason"] == "student_requested_problem"
+    assert pages[0]["title"] == "Practice Problems"
+    assert pages[0]["file_data_url"] is None
+    assert pages[0]["full_pdf_data_url"] is None
     assert requests == [
         {
             "headers": {

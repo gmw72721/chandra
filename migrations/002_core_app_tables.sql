@@ -606,7 +606,7 @@ DO $$
 BEGIN
   IF to_regclass('pdf_materials') IS NOT NULL THEN
     COMMENT ON TABLE pdf_materials IS
-      'Existing PDF OCR metadata table. material_id is intentionally named to align with materials.id after the materials backfill.';
+      'Structured PDF metadata table. material_id is intentionally named to align with materials.id after the materials backfill.';
     COMMENT ON COLUMN pdf_materials.class_id IS
       'Intended to align with classes.id after the classes backfill.';
     COMMENT ON COLUMN pdf_materials.material_id IS

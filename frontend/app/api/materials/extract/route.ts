@@ -29,7 +29,7 @@ export async function POST(request: Request) {
 
     if (isPdf) {
       return NextResponse.json({
-        extractionMode: "google-document-ai-on-save",
+        extractionMode: "gemini-structured-page-on-save",
         fileName: file.name,
         text: ""
       });

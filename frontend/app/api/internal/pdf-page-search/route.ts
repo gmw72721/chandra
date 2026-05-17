@@ -2,8 +2,11 @@ import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { buildPdfPageAssetPayloads, PdfPageAssetPayloadTooLargeError } from "@/lib/pdf-page-assets-payload";
-import { searchPdfOcrMetadata, searchPdfOcrMetadataVectorOnly } from "@/lib/pdf-ocr-postgres";
-import { VertexEmbeddingError, createVertexEmbedding } from "@/lib/vertex-embeddings";
+import {
+  searchStructuredPdfMetadata
+} from "@/lib/pdf-ocr-postgres";
+import { defaultStructuredPdfEmbeddingDim } from "@/lib/pdf-ingestion-config";
+import { VertexEmbeddingError, createVertexEmbeddings } from "@/lib/vertex-embeddings";
 
 export const runtime = "nodejs";
 
@@ -33,28 +36,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid internal PDF retrieval request." }, { status: 400 });
   }
 
-  let pages = await searchPdfOcrMetadata({
+  const queryEmbedding = shouldUseStructuredVectorSearch(parsed.data.query)
+    ? await createPdfSearchQueryEmbedding(parsed.data.query)
+    : undefined;
+  let pages = await searchStructuredPdfMetadata({
     classId: parsed.data.classId,
     limit: parsed.data.topK ?? 5,
     materialId: parsed.data.materialId,
     professorId: parsed.data.professorId,
-    query: parsed.data.query
+    query: parsed.data.query,
+    queryVector: queryEmbedding?.values
   });
-
-  if (!pages.length) {
-    const queryEmbedding = await createPdfSearchQueryEmbedding(parsed.data.query);
-
-    if (queryEmbedding?.values.length) {
-      pages = await searchPdfOcrMetadataVectorOnly({
-        classId: parsed.data.classId,
-        limit: parsed.data.topK ?? 5,
-        materialId: parsed.data.materialId,
-        professorId: parsed.data.professorId,
-        query: parsed.data.query,
-        queryVector: queryEmbedding.values
-      });
-    }
-  }
 
   const responsePayload: {
     assets?: Array<Record<string, unknown>>;
@@ -68,10 +60,7 @@ export async function POST(request: Request) {
       materialId: page.materialId,
       material_type: page.materialType,
       materialType: page.materialType,
-      ocrConfidence: page.ocrConfidence,
-      ocrProvider: page.ocrProvider,
-      ocrSource: page.ocrSource,
-      ocrText: page.ocrText,
+      pageLevelSearchText: page.pageLevelSearchText,
       page_end: page.pageEnd,
       page_start: page.pageStart,
       fullPdfBucket: page.fullPdfBucket,
@@ -98,7 +87,21 @@ export async function POST(request: Request) {
       source_pdf_path: page.sourcePdfPath,
       storageBucket: page.storageBucket,
       storagePath: page.storagePath,
-      title: page.title
+      title: page.title,
+      sourceType: page.sourceType,
+      sourceId: page.sourceId,
+      embeddingLevel: page.embeddingLevel,
+      blockId: page.blockId,
+      objectId: page.objectId,
+      blockType: page.blockType,
+      objectType: page.objectType,
+      itemKind: page.itemKind,
+      itemNumber: page.itemNumber,
+      itemLabel: page.itemLabel,
+      canonicalItemId: page.canonicalItemId,
+      embeddingSource: page.embeddingSource,
+      ingestionVersion: page.ingestionVersion,
+      embeddingDim: page.embeddingDim
     }))
   };
 
@@ -126,7 +129,7 @@ export async function POST(request: Request) {
   return NextResponse.json(responsePayload);
 }
 
-function assetRequestsFromSearchResults(pages: Awaited<ReturnType<typeof searchPdfOcrMetadata>>) {
+function assetRequestsFromSearchResults(pages: Awaited<ReturnType<typeof searchStructuredPdfMetadata>>) {
   const requests: Array<{ materialId: string; pageNumber: number }> = [];
   const seen = new Set<string>();
 
@@ -156,18 +159,43 @@ function assetRequestsFromSearchResults(pages: Awaited<ReturnType<typeof searchP
 
 async function createPdfSearchQueryEmbedding(query: string) {
   try {
-    return await createVertexEmbedding({
-      taskType: "RETRIEVAL_QUERY",
-      text: query
-    });
+    const [embedding] = await createVertexEmbeddings(
+      [{
+        taskType: "RETRIEVAL_QUERY",
+        text: query
+      }],
+      { dimensions: defaultStructuredPdfEmbeddingDim }
+    );
+
+    if (embedding?.values.length && embedding.values.length !== defaultStructuredPdfEmbeddingDim) {
+      console.warn(
+        `Structured PDF query embedding has ${embedding.values.length} dimensions; expected ${defaultStructuredPdfEmbeddingDim}. Skipping PDF vector search.`
+      );
+      return undefined;
+    }
+
+    return embedding;
   } catch (caughtError) {
     if (caughtError instanceof VertexEmbeddingError) {
-      console.warn("PDF OCR query embedding failed. Falling back to exact/full-text PostgreSQL OCR search.", caughtError);
+      console.warn("Structured PDF query embedding failed. Returning exact/full-text PDF search results only.", caughtError);
       return undefined;
     }
 
     throw caughtError;
   }
+}
+
+function shouldUseStructuredVectorSearch(query: string) {
+  const normalized = query.trim().toLowerCase();
+
+  if (!normalized) {
+    return false;
+  }
+
+  return !(
+    /^(?:problem|exercise|question|number|no\.?|#)?\s*\d{1,3}(?:\s*\.\s*\d{1,3}[a-z]?)?\s*[?.!]?$/.test(normalized)
+    || /^(?:page|pg\.?|p\.?|printed\s+page)\s*#?\s*\d{1,4}\s*[?.!]?$/.test(normalized)
+  );
 }
 
 function authorizeInternalRequest(request: Request) {

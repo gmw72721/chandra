@@ -392,14 +392,7 @@ def build_pdf_rag_graph(
 
     async def prepare_metadata_context(state: PdfRagState) -> dict[str, Any]:
         pages_for_context = page_context_records_for_state(state)
-        page_assets = (
-            normalize_metadata_page_assets(
-                await build_assets(pages_for_context, max_total_pages=MAX_TOTAL_PAGES),
-                pages_for_context,
-            )
-            if pages_for_context
-            else []
-        )
+        page_assets = await build_metadata_context_records(pages_for_context, build_assets)
         return {
             "page_assets": page_assets,
             "selected_metadata_records": selected_metadata_records(page_assets),
@@ -5263,7 +5256,7 @@ def normalize_metadata_page_assets(
     assets: list[dict[str, Any]],
     source_pages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep only OCR metadata fields needed by the final model and trace."""
+    """Keep only structured PDF metadata fields needed by the final model and trace."""
 
     pages_by_key = {metadata_page_key(page): page for page in source_pages if isinstance(page, dict)}
     normalized_assets: list[dict[str, Any]] = []
@@ -5272,16 +5265,16 @@ def normalize_metadata_page_assets(
             continue
 
         source_page = pages_by_key.get(metadata_page_key(asset), {})
+        is_structured_pdf = is_structured_pdf_metadata_record(asset) or is_structured_pdf_metadata_record(source_page)
         normalized_assets.append(
             {
-                "chunk_text": metadata_value(asset, source_page, "chunk_text", "chunkText", "ocr_text", "ocrText"),
+                "chunk_text": metadata_value(asset, source_page, "chunk_text", "chunkText", "pageLevelSearchText", "page_level_search_text"),
                 "citation_label": asset.get("citation_label") or source_page.get("citation_label"),
                 "doc_id": str(metadata_value(asset, source_page, "doc_id", "docId", "materialId") or ""),
                 "material_type": str(metadata_value(asset, source_page, "material_type", "materialType") or ""),
-                "ocr_confidence": metadata_value(asset, source_page, "ocr_confidence", "ocrConfidence"),
-                "ocr_provider": str(metadata_value(asset, source_page, "ocr_provider", "ocrProvider") or ""),
-                "ocr_source": str(metadata_value(asset, source_page, "ocr_source", "ocrSource") or ""),
-                "ocr_text": metadata_value(asset, source_page, "ocr_text", "ocrText", "chunk_text", "chunkText"),
+                "ocr_confidence": None if is_structured_pdf else metadata_value(asset, source_page, "ocr_confidence", "ocrConfidence"),
+                "ocr_provider": "" if is_structured_pdf else str(metadata_value(asset, source_page, "ocr_provider", "ocrProvider") or ""),
+                "ocr_source": "" if is_structured_pdf else str(metadata_value(asset, source_page, "ocr_source", "ocrSource") or ""),
                 "page_end": metadata_value(asset, source_page, "page_end", "pageEnd", "pageNumber"),
                 "page_start": metadata_value(asset, source_page, "page_start", "pageStart", "pageNumber"),
                 "full_pdf_bucket": str(metadata_value(asset, source_page, "full_pdf_bucket", "fullPdfBucket") or ""),
@@ -5290,7 +5283,7 @@ def normalize_metadata_page_assets(
                 "full_pdf_mime_type": str(metadata_value(asset, source_page, "full_pdf_mime_type", "fullPdfMimeType") or "application/pdf"),
                 "full_pdf_size_bytes": metadata_value(asset, source_page, "full_pdf_size_bytes", "fullPdfSizeBytes", "full_pdf_size", "fullPdfSize"),
                 "full_pdf_sha256": str(metadata_value(asset, source_page, "full_pdf_sha256", "fullPdfSha256") or ""),
-                "full_pdf_data_url": asset.get("full_pdf_data_url") or asset.get("fullPdfDataUrl"),
+                "full_pdf_data_url": None if is_structured_pdf else asset.get("full_pdf_data_url") or asset.get("fullPdfDataUrl"),
                 "full_pdf_file_name": asset.get("full_pdf_file_name") or asset.get("fullPdfFileName"),
                 "full_pdf_skipped_reason": str(metadata_value(asset, source_page, "full_pdf_skipped_reason", "fullPdfSkippedReason") or ""),
                 "page_asset_bucket": str(metadata_value(asset, source_page, "page_asset_bucket", "pageAssetBucket") or ""),
@@ -5304,7 +5297,7 @@ def normalize_metadata_page_assets(
                 "score": metadata_value(asset, source_page, "score"),
                 "class_id": str(metadata_value(asset, source_page, "class_id", "classId") or ""),
                 "professor_id": str(metadata_value(asset, source_page, "professor_id", "professorId") or ""),
-                "file_data_url": asset.get("file_data_url"),
+                "file_data_url": None if is_structured_pdf else asset.get("file_data_url"),
                 "file_name": asset.get("file_name"),
                 "image_url": asset.get("image_url"),
                 "images": asset.get("images") if isinstance(asset.get("images"), list) else [],
@@ -5316,6 +5309,20 @@ def normalize_metadata_page_assets(
                 "storage_bucket": str(metadata_value(asset, source_page, "storage_bucket", "storageBucket") or ""),
                 "storage_path": str(metadata_value(asset, source_page, "storage_path", "storagePath") or ""),
                 "title": str(metadata_value(asset, source_page, "title") or "Untitled PDF"),
+                "source_type": str(metadata_value(asset, source_page, "source_type", "sourceType") or ""),
+                "source_id": str(metadata_value(asset, source_page, "source_id", "sourceId") or ""),
+                "embedding_level": str(metadata_value(asset, source_page, "embedding_level", "embeddingLevel") or ""),
+                "block_id": str(metadata_value(asset, source_page, "block_id", "blockId") or ""),
+                "object_id": str(metadata_value(asset, source_page, "object_id", "objectId") or ""),
+                "block_type": str(metadata_value(asset, source_page, "block_type", "blockType") or ""),
+                "object_type": str(metadata_value(asset, source_page, "object_type", "objectType") or ""),
+                "item_kind": str(metadata_value(asset, source_page, "item_kind", "itemKind") or ""),
+                "item_number": str(metadata_value(asset, source_page, "item_number", "itemNumber") or ""),
+                "item_label": str(metadata_value(asset, source_page, "item_label", "itemLabel") or ""),
+                "canonical_item_id": str(metadata_value(asset, source_page, "canonical_item_id", "canonicalItemId") or ""),
+                "embedding_source": str(metadata_value(asset, source_page, "embedding_source", "embeddingSource") or ""),
+                "ingestion_version": str(metadata_value(asset, source_page, "ingestion_version", "ingestionVersion") or ""),
+                "embedding_dim": metadata_value(asset, source_page, "embedding_dim", "embeddingDim"),
             }
         )
 
@@ -5346,6 +5353,71 @@ def metadata_value(primary: dict[str, Any], fallback: dict[str, Any], *keys: str
     return None
 
 
+async def build_metadata_context_records(
+    pages_for_context: list[dict[str, Any]],
+    build_assets: Any,
+) -> list[dict[str, Any]]:
+    if not pages_for_context:
+        return []
+
+    structured_pages = [
+        strip_structured_pdf_asset_data(page)
+        for page in pages_for_context
+        if is_structured_pdf_metadata_record(page)
+    ]
+    asset_pages = [
+        page
+        for page in pages_for_context
+        if not is_structured_pdf_metadata_record(page)
+    ]
+    fetched_assets = (
+        normalize_metadata_page_assets(
+            await build_assets(asset_pages, max_total_pages=MAX_TOTAL_PAGES),
+            asset_pages,
+        )
+        if asset_pages
+        else []
+    )
+    structured_assets = normalize_metadata_page_assets(structured_pages, structured_pages)
+    fetched_by_key: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
+    for asset in fetched_assets:
+        fetched_by_key.setdefault(metadata_page_key(asset), []).append(asset)
+    structured_by_key: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
+    for asset in structured_assets:
+        structured_by_key.setdefault(metadata_page_key(asset), []).append(asset)
+
+    ordered: list[dict[str, Any]] = []
+    for page in pages_for_context:
+        key = metadata_page_key(page)
+        bucket = structured_by_key if is_structured_pdf_metadata_record(page) else fetched_by_key
+        ordered.extend(bucket.pop(key, []))
+
+    for remaining in [*structured_by_key.values(), *fetched_by_key.values()]:
+        ordered.extend(remaining)
+
+    return ordered
+
+
+def is_structured_pdf_metadata_record(record: dict[str, Any]) -> bool:
+    return (
+        str(record.get("ingestion_version") or record.get("ingestionVersion") or "") == "gemini_structured_page_v1"
+        or str(record.get("embedding_source") or record.get("embeddingSource") or "") == "structured_page_json"
+    )
+
+
+def strip_structured_pdf_asset_data(record: dict[str, Any]) -> dict[str, Any]:
+    if not is_structured_pdf_metadata_record(record):
+        return record
+
+    return {
+        **record,
+        "file_data_url": None,
+        "fileDataUrl": None,
+        "full_pdf_data_url": None,
+        "fullPdfDataUrl": None,
+    }
+
+
 def encoded_page_asset_content_parts(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     content_parts: list[dict[str, Any]] = []
     attached_full_pdf_keys: set[str] = set()
@@ -5354,9 +5426,10 @@ def encoded_page_asset_content_parts(assets: list[dict[str, Any]]) -> list[dict[
         if not isinstance(asset, dict):
             continue
 
+        is_structured_pdf = is_structured_pdf_metadata_record(asset)
         full_pdf_data_url = str(asset.get("full_pdf_data_url") or "").strip()
         full_pdf_key = str(asset.get("doc_id") or asset.get("full_pdf_sha256") or asset.get("full_pdf_file_name") or "").strip()
-        if full_pdf_data_url and full_pdf_key and full_pdf_key not in attached_full_pdf_keys:
+        if not is_structured_pdf and full_pdf_data_url and full_pdf_key and full_pdf_key not in attached_full_pdf_keys:
             content_parts.append(
                 {
                     "type": "file",
@@ -5373,7 +5446,7 @@ def encoded_page_asset_content_parts(assets: list[dict[str, Any]]) -> list[dict[
             content_parts.append({"type": "image_url", "image_url": image_url})
 
         file_data_url = str(asset.get("file_data_url") or "").strip()
-        if file_data_url:
+        if not is_structured_pdf and file_data_url:
             content_parts.append(
                 {
                     "type": "file",
@@ -5385,8 +5458,8 @@ def encoded_page_asset_content_parts(assets: list[dict[str, Any]]) -> list[dict[
             )
 
         has_visual_or_file_asset = bool(
-            full_pdf_data_url
-            or file_data_url
+            (not is_structured_pdf and full_pdf_data_url)
+            or (not is_structured_pdf and file_data_url)
             or (isinstance(image_url, dict) and image_url.get("url"))
         )
         content_parts.append(
@@ -5462,9 +5535,10 @@ def page_asset_encoding_jobs(assets: list[dict[str, Any]]) -> list[dict[str, Any
     attached_full_pdf_keys: set[str] = set()
 
     for asset in assets:
+        is_structured_pdf = is_structured_pdf_metadata_record(asset)
         full_pdf_data_url = str(asset.get("full_pdf_data_url") or "").strip()
         full_pdf_key = str(asset.get("doc_id") or asset.get("full_pdf_sha256") or asset.get("full_pdf_file_name") or "").strip()
-        if full_pdf_data_url and full_pdf_key and full_pdf_key not in attached_full_pdf_keys:
+        if not is_structured_pdf and full_pdf_data_url and full_pdf_key and full_pdf_key not in attached_full_pdf_keys:
             jobs.append({"asset": asset, "kind": "full_pdf_file", "file_data_url": full_pdf_data_url})
             attached_full_pdf_keys.add(full_pdf_key)
 
@@ -5473,7 +5547,7 @@ def page_asset_encoding_jobs(assets: list[dict[str, Any]]) -> list[dict[str, Any
             jobs.append({"asset": asset, "kind": "image_url", "image_url": image_url})
 
         file_data_url = str(asset.get("file_data_url") or "").strip()
-        if file_data_url:
+        if not is_structured_pdf and file_data_url:
             jobs.append({"asset": asset, "kind": "file", "file_data_url": file_data_url})
 
         ocr_text = str(asset.get("ocr_text") or asset.get("chunk_text") or "").strip()
@@ -5494,8 +5568,8 @@ def encode_page_asset_job(job: dict[str, Any]) -> dict[str, Any] | None:
     if kind == "ocr_text":
         asset = job.get("asset") if isinstance(job.get("asset"), dict) else {}
         has_visual_or_file_asset = bool(
-            asset.get("full_pdf_data_url")
-            or asset.get("file_data_url")
+            (not is_structured_pdf_metadata_record(asset) and asset.get("full_pdf_data_url"))
+            or (not is_structured_pdf_metadata_record(asset) and asset.get("file_data_url"))
             or (isinstance(asset.get("image_url"), dict) and asset.get("image_url", {}).get("url"))
         )
         return encoded_page_asset_ocr_part(asset, str(job.get("text") or ""), include_ocr_text=not has_visual_or_file_asset)
@@ -5541,9 +5615,6 @@ def encoded_page_asset_ocr_part(asset: dict[str, Any], ocr_text: str, *, include
         "printedPageStart": asset.get("printed_page_start"),
         "printedPageEnd": asset.get("printed_page_end"),
         "problemNumbers": asset.get("problem_numbers") or [],
-        "ocrConfidence": asset.get("ocr_confidence"),
-        "ocrProvider": asset.get("ocr_provider"),
-        "ocrSource": asset.get("ocr_source"),
         "retrievalMode": asset.get("retrieval_mode"),
         "retrievalReason": asset.get("retrieval_reason"),
         "score": asset.get("score"),
@@ -6886,14 +6957,7 @@ async def run_pdf_rag_agent_stream(
                 decision = state.get("retrieval_decision") or decision
 
         pages_for_context = page_context_records_for_state(state)
-        state["page_assets"] = (
-            normalize_metadata_page_assets(
-                await build_assets(pages_for_context, max_total_pages=MAX_TOTAL_PAGES),
-                pages_for_context,
-            )
-            if pages_for_context
-            else []
-        )
+        state["page_assets"] = await build_metadata_context_records(pages_for_context, build_assets)
         state["selected_metadata_records"] = selected_metadata_records(state["page_assets"])
         state["stage_history"] = append_stage(state, "prepare_metadata_context")
 
@@ -9874,15 +9938,6 @@ def selected_page_trace(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if asset.get("problem_numbers"):
             page_trace["problemNumbers"] = asset.get("problem_numbers")
 
-        if asset.get("ocr_confidence") is not None:
-            page_trace["ocrConfidence"] = asset.get("ocr_confidence")
-
-        if asset.get("ocr_provider"):
-            page_trace["ocrProvider"] = asset.get("ocr_provider")
-
-        if asset.get("ocr_source"):
-            page_trace["ocrSource"] = asset.get("ocr_source")
-
         if asset.get("retrieval_mode"):
             page_trace["retrievalMode"] = asset.get("retrieval_mode")
 
@@ -9918,7 +9973,6 @@ def selected_metadata_records(assets: list[dict[str, Any]]) -> list[dict[str, An
                 "ocr_confidence": asset.get("ocr_confidence"),
                 "ocr_provider": asset.get("ocr_provider"),
                 "ocr_source": asset.get("ocr_source"),
-                "ocr_text": asset.get("ocr_text") or asset.get("chunk_text"),
                 "page_end": asset.get("page_end"),
                 "page_start": asset.get("page_start"),
                 "full_pdf_bucket": asset.get("full_pdf_bucket"),
@@ -9946,6 +10000,20 @@ def selected_metadata_records(assets: list[dict[str, Any]]) -> list[dict[str, An
                 "storage_bucket": asset.get("storage_bucket"),
                 "storage_path": asset.get("storage_path"),
                 "title": asset.get("title"),
+                "source_type": asset.get("source_type"),
+                "source_id": asset.get("source_id"),
+                "embedding_level": asset.get("embedding_level"),
+                "block_id": asset.get("block_id"),
+                "object_id": asset.get("object_id"),
+                "block_type": asset.get("block_type"),
+                "object_type": asset.get("object_type"),
+                "item_kind": asset.get("item_kind"),
+                "item_number": asset.get("item_number"),
+                "item_label": asset.get("item_label"),
+                "canonical_item_id": asset.get("canonical_item_id"),
+                "embedding_source": asset.get("embedding_source"),
+                "ingestion_version": asset.get("ingestion_version"),
+                "embedding_dim": asset.get("embedding_dim"),
             }
         )
     return records

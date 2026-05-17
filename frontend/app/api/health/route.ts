@@ -263,7 +263,7 @@ async function checkOpenRouter(): Promise<DependencyStatus> {
 async function checkEmbeddings(): Promise<DependencyStatus> {
   const apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
   const model = process.env.VERTEX_EMBEDDING_MODEL || "gemini-embedding-2";
-  const dimensions = Number(process.env.VERTEX_EMBEDDING_DIMENSIONS || "768");
+  const dimensions = Number(process.env.VERTEX_EMBEDDING_DIMENSIONS || "1536");
 
   if (!apiKey) {
     return {
@@ -276,7 +276,7 @@ async function checkEmbeddings(): Promise<DependencyStatus> {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent`, {
       body: JSON.stringify({
         content: { parts: [{ text: "health check" }] },
-        outputDimensionality: Number.isFinite(dimensions) ? dimensions : 768,
+        outputDimensionality: Number.isFinite(dimensions) ? dimensions : 1536,
         taskType: "RETRIEVAL_QUERY"
       }),
       cache: "no-store",
