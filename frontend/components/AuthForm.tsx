@@ -1,8 +1,9 @@
 "use client";
 
+import type { User } from "firebase/auth";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ProviderAccountLinkingRequiredError,
   completeProviderRedirectSignIn,
@@ -87,6 +88,43 @@ export function AuthForm() {
     [profile?.role]
   );
 
+  const hydrateSignupFieldsFromPendingProfile = useCallback((pendingProfile: PendingProfile, userEmail: string) => {
+    setRole(pendingProfile.role);
+    setClassId(formatClassCodeInput(pendingProfile.classId ?? ""));
+    setDisplayName(pendingProfile.displayName || user?.displayName || userEmail);
+    setEmail(pendingProfile.email || userEmail);
+    setUsername(pendingProfile.username || userEmail);
+  }, [user?.displayName]);
+
+  const finishPendingRoleProfileSetup = useCallback(async (nextUser: User) => {
+    const pendingProfile = readPendingProfile();
+    const userEmail = String(nextUser.email ?? "").trim().toLowerCase();
+
+    if (!pendingProfile) {
+      return;
+    }
+
+    if (pendingProfile.email && pendingProfile.email !== userEmail) {
+      throw new Error("Google returned a different email than the one saved for signup. Start signup again.");
+    }
+
+    const nextProfile = await createRoleProfile({
+      classId: pendingProfile.classId,
+      displayName: pendingProfile.displayName || nextUser.displayName || userEmail,
+      role: pendingProfile.role,
+      username: pendingProfile.username || userEmail,
+      user: nextUser
+    });
+    window.localStorage.removeItem(pendingProfileStorageKey);
+
+    if (userNeedsBackupPassword(nextUser)) {
+      setNotice("You have successfully signed in. Create a backup password just in case.");
+      return;
+    }
+
+    router.push(nextProfile.role === "teacher" ? "/teacher" : "/student");
+  }, [router]);
+
   useEffect(() => {
     if (!firebaseReady || !emailLinkUrl || hasCheckedEmailLinkRef.current) {
       return;
@@ -119,12 +157,13 @@ export function AuthForm() {
 
     hasCheckedProviderRedirectRef.current = true;
     completeProviderRedirectSignIn()
-      .then((credential) => {
+      .then(async (credential) => {
         if (!credential) {
           return;
         }
 
         updatePendingProfileFromProvider(credential.user);
+        await finishPendingRoleProfileSetup(credential.user);
 
         if (userNeedsBackupPassword(credential.user)) {
           setNotice("You have successfully signed in. Create a backup password just in case.");
@@ -140,7 +179,7 @@ export function AuthForm() {
 
         setError(caughtError instanceof Error ? caughtError.message : "Provider sign-in failed.");
       });
-  }, [firebaseReady]);
+  }, [firebaseReady, finishPendingRoleProfileSetup]);
 
   useEffect(() => {
     if (!user || profile || isLoading || isRepairingProfileRef.current) {
@@ -154,6 +193,7 @@ export function AuthForm() {
       return;
     }
 
+    queueMicrotask(() => hydrateSignupFieldsFromPendingProfile(pendingProfile, userEmail));
     isRepairingProfileRef.current = true;
     createRoleProfile({
       classId: pendingProfile.classId,
@@ -177,7 +217,22 @@ export function AuthForm() {
       .finally(() => {
         isRepairingProfileRef.current = false;
       });
-  }, [isLoading, profile, router, user]);
+  }, [hydrateSignupFieldsFromPendingProfile, isLoading, profile, router, user]);
+
+  useEffect(() => {
+    if (!user || profile || isLoading) {
+      return;
+    }
+
+    const pendingProfile = readPendingProfile();
+    const userEmail = String(user.email ?? "").trim().toLowerCase();
+
+    if (!pendingProfile || (pendingProfile.email && pendingProfile.email !== userEmail)) {
+      return;
+    }
+
+    queueMicrotask(() => hydrateSignupFieldsFromPendingProfile(pendingProfile, userEmail));
+  }, [hydrateSignupFieldsFromPendingProfile, isLoading, profile, user]);
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -249,6 +304,8 @@ export function AuthForm() {
 
       if (mode === "signup") {
         updatePendingProfileFromProvider(credential.user);
+        await finishPendingRoleProfileSetup(credential.user);
+        return;
       }
 
       if (userNeedsBackupPassword(credential.user)) {

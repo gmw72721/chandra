@@ -39,6 +39,8 @@ test("Google signup is shown after required signup profile fields", () => {
   assert.match(source, /assertSignupProfileFieldsArePresent/);
   assert.match(source, /Enter your name to create an account\./);
   assert.match(source, /showEmailSignup/);
+  assert.match(source, /finishPendingRoleProfileSetup/);
+  assert.match(source, /createRoleProfile/);
 });
 
 test("teacher workspace keeps join codes available without rendering top-page invite controls", () => {
@@ -61,9 +63,13 @@ test("student-entered join codes enroll the student through the server route", (
   assert.ok(authSource.indexOf("requireStudentClassCode(classId)") < authSource.indexOf("const credential = await createUserWithEmailAndPassword"));
   assert.match(joinSource, /resolveClassCodePostgresFirst\(classCode\)/);
   assert.match(joinSource, /Enter your class code to continue\./);
+  assert.match(joinSource, /Class code not found\. Check the code with your teacher\./);
+  assert.match(joinSource, /Class lookup is temporarily unavailable/);
+  assert.match(joinSource, /Class join profile lookup failed; falling back to Firebase user data/);
   assert.match(joinSource, /firstString\(userData\.email, decodedToken\.email, decodedToken\.firebase\?\.identities\?\.email\?\.\[0\], body\.email\)/);
   assert.match(joinSource, /collection\("classes"\)\.doc\(nextClassId\)\.collection\("students"\)/);
   assert.match(joinSource, /enrollStudentPostgresFirst/);
+  assert.ok(joinSource.indexOf("await upsertAccountProfile(profileInput") < joinSource.indexOf("await enrollStudentPostgresFirst"));
   assert.match(joinSource, /batch\.set\(/);
 });
 

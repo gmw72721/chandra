@@ -18,6 +18,15 @@ type JoinClassBody = {
   syncProfile?: unknown;
 };
 
+class ClassJoinError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+  }
+}
+
 const classJoinLockoutPolicy = {
   resetWindowMs: 60 * 60 * 1000,
   lockoutSteps: [
@@ -40,7 +49,10 @@ export async function POST(request: Request) {
     const body = (await request.json()) as JoinClassBody;
     const classCode = normalizeClassCode(String(body.classCode ?? ""));
     const userSnapshot = await adminDb!.collection("users").doc(decodedToken.uid).get();
-    const postgresProfile = await getAccountProfile(decodedToken.uid);
+    const postgresProfile = await getAccountProfile(decodedToken.uid).catch((caughtError) => {
+      console.error("Class join profile lookup failed; falling back to Firebase user data.", caughtError);
+      return null;
+    });
     const userData = postgresProfile ?? userSnapshot.data() ?? {};
 
     if (userData.role === "teacher") {
@@ -74,7 +86,7 @@ export async function POST(request: Request) {
 
     if (!classId) {
       await recordAbuseFailure(abuseScope, classJoinLockoutPolicy);
-      return NextResponse.json({ error: "Class join failed." }, { status: 404 });
+      return NextResponse.json({ error: "Class code not found. Check the code with your teacher." }, { status: 404 });
     }
 
     await resetAbuseFailures(abuseScope);
@@ -87,13 +99,28 @@ export async function POST(request: Request) {
     });
 
     return NextResponse.json({ classId });
-  } catch {
-    return NextResponse.json({ error: "Class join failed." }, { status: 500 });
+  } catch (caughtError) {
+    if (caughtError instanceof ClassJoinError) {
+      return NextResponse.json({ error: caughtError.message }, { status: caughtError.status });
+    }
+
+    console.error("Class join failed.", caughtError);
+    return NextResponse.json(
+      { error: "Class join is temporarily unavailable. Try again in a moment." },
+      { status: 503 }
+    );
   }
 }
 
 async function resolveClassId(classCode: string) {
-  return resolveClassCodePostgresFirst(classCode);
+  try {
+    return await resolveClassCodePostgresFirst(classCode);
+  } catch {
+    throw new ClassJoinError(
+      "Class lookup is temporarily unavailable. Check the local database connection or try again in a moment.",
+      503
+    );
+  }
 }
 
 async function updateStudentEnrollment({
@@ -112,6 +139,35 @@ async function updateStudentEnrollment({
   const batch = adminDb!.batch();
   const rosterStudentId = encodeURIComponent(email || uid);
   const userReference = adminDb!.collection("users").doc(uid);
+  const profileInput = {
+    id: uid,
+    firebaseUid: uid,
+    email,
+    role: "student" as const,
+    displayName,
+    legacyClassId: nextClassId || null,
+    legacyClassIds: nextClassId ? [nextClassId] : [],
+    profile: nextClassId
+      ? {
+          classId: nextClassId,
+          classIds: [nextClassId],
+          displayName,
+          email,
+          role: "student" as const,
+          uid
+        }
+      : {
+          displayName,
+          email,
+          role: "student" as const,
+          uid
+        },
+    username: email
+  };
+
+  if (syncProfile) {
+    await upsertAccountProfile(profileInput, { mirrorFirestore: false });
+  }
 
   if (nextClassId) {
     await enrollStudentPostgresFirst({
@@ -129,31 +185,6 @@ async function updateStudentEnrollment({
   }
 
   if (syncProfile) {
-    await upsertAccountProfile({
-      id: uid,
-      firebaseUid: uid,
-      email,
-      role: "student",
-      displayName,
-      legacyClassId: nextClassId || null,
-      legacyClassIds: nextClassId ? [nextClassId] : [],
-      profile: nextClassId
-        ? {
-            classId: nextClassId,
-            classIds: [nextClassId],
-            displayName,
-            email,
-            role: "student",
-            uid
-          }
-        : {
-            displayName,
-            email,
-            role: "student",
-            uid
-          },
-      username: email
-    }, { mirrorFirestore: false });
     batch.set(
       userReference,
       nextClassId

@@ -57,6 +57,8 @@ test("Google auth completes through redirect when production popups are blocked"
   assert.match(authFormSource, /completeProviderRedirectSignIn/);
   assert.match(authFormSource, /hasCheckedProviderRedirectRef/);
   assert.match(authFormSource, /updatePendingProfileFromProvider\(credential\.user\)/);
+  assert.match(authFormSource, /finishPendingRoleProfileSetup\(credential\.user\)/);
+  assert.match(authFormSource, /await finishPendingRoleProfileSetup\(credential\.user\)/);
 });
 
 test("signed-in users without a role profile can finish account setup", () => {
