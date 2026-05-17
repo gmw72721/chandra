@@ -4544,6 +4544,21 @@ button.student-row[aria-pressed="true"] {
   text-align: center;
 }
 
+.auth-form-heading-left {
+  margin-top: 2px;
+  text-align: left;
+}
+
+.auth-signup-methods {
+  display: grid;
+  gap: 10px;
+  margin: 22px 0 22px;
+}
+
+.auth-signup-methods .auth-method-group {
+  margin-bottom: 0;
+}
+
 .auth-form .field-label {
   margin: 0 0 7px;
   color: #28314e;

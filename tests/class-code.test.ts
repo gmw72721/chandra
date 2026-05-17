@@ -23,6 +23,24 @@ test("student-entered six-letter class codes normalize to uppercase", () => {
   assert.equal(formatClassCodeInput("ab-12cdefg"), "ABCDEF");
 });
 
+test("Google signup is shown after required signup profile fields", () => {
+  const source = readFileSync(join(repoRoot, "frontend/components/AuthForm.tsx"), "utf8");
+  const roleIndex = source.indexOf('htmlFor="role"');
+  const classCodeIndex = source.indexOf('htmlFor="class-id"');
+  const nameIndex = source.indexOf('htmlFor="name"');
+  const googleSignupIndex = source.indexOf("{renderProviderAuthGroup({ showDivider: showEmailSignup })}");
+  const emailChoiceIndex = source.indexOf("Use email instead");
+
+  assert.ok(roleIndex >= 0);
+  assert.ok(classCodeIndex > roleIndex);
+  assert.ok(nameIndex > classCodeIndex);
+  assert.ok(googleSignupIndex > nameIndex);
+  assert.ok(emailChoiceIndex > googleSignupIndex);
+  assert.match(source, /assertSignupProfileFieldsArePresent/);
+  assert.match(source, /Enter your name to create an account\./);
+  assert.match(source, /showEmailSignup/);
+});
+
 test("teacher workspace keeps join codes available without rendering top-page invite controls", () => {
   const source = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 

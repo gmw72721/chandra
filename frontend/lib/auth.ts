@@ -5,7 +5,9 @@ import {
   EmailAuthProvider,
   GoogleAuthProvider,
   User,
+  type UserCredential,
   createUserWithEmailAndPassword,
+  getRedirectResult,
   isSignInWithEmailLink,
   linkWithCredential,
   onAuthStateChanged,
@@ -16,6 +18,7 @@ import {
   signInWithEmailAndPassword,
   signInWithEmailLink,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   updateEmail,
   updatePassword,
@@ -291,31 +294,41 @@ export async function signInWithProviderAuth(provider: AuthProviderKey) {
     await assertUserHasProviderEmail(credential.user, definition.label);
     return credential;
   } catch (caughtError) {
-    if (getAuthErrorCode(caughtError) !== "auth/account-exists-with-different-credential") {
-      throw normalizeProviderAuthError(caughtError, definition.label);
+    const accountLinkingError = accountLinkingErrorFromProviderAuthError(caughtError, provider);
+
+    if (accountLinkingError) {
+      throw accountLinkingError;
     }
 
-    const pendingCredential = definition.credentialFromError(caughtError);
-    const email = getAuthErrorEmail(caughtError);
-
-    if (!pendingCredential) {
-      throw new Error(
-        `${definition.label} sign-in found an existing account, but Firebase did not return the provider credential needed to link it. Try again.`
-      );
+    if (shouldRetryProviderSignInWithRedirect(caughtError)) {
+      await signInWithRedirect(auth!, definition.createProvider());
+      return null;
     }
 
-    if (!email) {
-      throw new Error(
-        `${definition.label} sign-in found an existing account, but Firebase did not return the account email needed to link it.`
-      );
+    throw normalizeProviderAuthError(caughtError, definition.label);
+  }
+}
+
+export async function completeProviderRedirectSignIn(): Promise<UserCredential | null> {
+  assertFirebaseReady();
+
+  try {
+    const credential = await getRedirectResult(auth!);
+
+    if (!credential) {
+      return null;
     }
 
-    throw new ProviderAccountLinkingRequiredError({
-      credential: pendingCredential,
-      email,
-      provider,
-      providerLabel: definition.label
-    });
+    await assertUserHasProviderEmail(credential.user, providerDefinitions.google.label);
+    return credential;
+  } catch (caughtError) {
+    const accountLinkingError = accountLinkingErrorFromProviderAuthError(caughtError, "google");
+
+    if (accountLinkingError) {
+      throw accountLinkingError;
+    }
+
+    throw normalizeProviderAuthError(caughtError, providerDefinitions.google.label);
   }
 }
 
@@ -785,6 +798,43 @@ function getAuthErrorEmail(error: unknown) {
   }
 
   return customData.email.trim().toLowerCase();
+}
+
+function accountLinkingErrorFromProviderAuthError(error: unknown, provider: AuthProviderKey) {
+  if (getAuthErrorCode(error) !== "auth/account-exists-with-different-credential") {
+    return null;
+  }
+
+  const definition = providerDefinitions[provider];
+  const pendingCredential = definition.credentialFromError(error);
+  const email = getAuthErrorEmail(error);
+
+  if (!pendingCredential) {
+    return new Error(
+      `${definition.label} sign-in found an existing account, but Firebase did not return the provider credential needed to link it. Try again.`
+    );
+  }
+
+  if (!email) {
+    return new Error(
+      `${definition.label} sign-in found an existing account, but Firebase did not return the account email needed to link it.`
+    );
+  }
+
+  return new ProviderAccountLinkingRequiredError({
+    credential: pendingCredential,
+    email,
+    provider,
+    providerLabel: definition.label
+  });
+}
+
+function shouldRetryProviderSignInWithRedirect(error: unknown) {
+  return new Set([
+    "auth/operation-not-supported-in-this-environment",
+    "auth/popup-blocked",
+    "auth/web-storage-unsupported"
+  ]).has(getAuthErrorCode(error));
 }
 
 function normalizeProviderAuthError(error: unknown, providerLabel: string) {

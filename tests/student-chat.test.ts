@@ -155,6 +155,21 @@ test("student chat safety blocked payloads avoid raw text and use fixed support 
   assert.ok(sendMessageSource.indexOf("const response = await fetch") < sendMessageSource.indexOf("setMessages(nextMessages);"));
 });
 
+test("student chat safety does not block every message when moderation is unavailable", () => {
+  const helperSource = readFileSync(join(repoRoot, "frontend/lib/student-chat-safety.ts"), "utf8");
+  const appHostingSource = readFileSync(join(repoRoot, "apphosting.yaml"), "utf8");
+
+  assert.match(helperSource, /missing_openai_api_key/);
+  assert.match(helperSource, /shouldBlockWhenModerationIsUnavailable/);
+  assert.match(helperSource, /STUDENT_CHAT_SAFETY_FAIL_CLOSED/);
+  assert.match(helperSource, /Student chat safety moderation unavailable; allowing request/);
+  assert.match(helperSource, /blocked: false/);
+  assert.match(appHostingSource, /variable: OPENAI_API_KEY/);
+  assert.match(appHostingSource, /secret: OPENAI_API_KEY/);
+  assert.match(appHostingSource, /variable: STUDENT_CHAT_SAFETY_FAIL_CLOSED/);
+  assert.match(appHostingSource, /value: "false"/);
+});
+
 test("student chat safety counts trigger teacher review and urgent escalation metadata", () => {
   const helperSource = readFileSync(join(repoRoot, "frontend/lib/student-chat-safety.ts"), "utf8");
   const backendSource = readFileSync(join(repoRoot, "backend/main.py"), "utf8");

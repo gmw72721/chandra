@@ -45,6 +45,20 @@ test("password reset flow uses Firebase reset email without account enumeration"
   assert.doesNotMatch(authFormSource, /No account matches/);
 });
 
+test("Google auth completes through redirect when production popups are blocked", () => {
+  const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
+  const authFormSource = readFileSync(join(repoRoot, "frontend/components/AuthForm.tsx"), "utf8");
+
+  assert.match(authSource, /signInWithPopup/);
+  assert.match(authSource, /signInWithRedirect/);
+  assert.match(authSource, /getRedirectResult/);
+  assert.match(authSource, /shouldRetryProviderSignInWithRedirect/);
+  assert.match(authSource, /auth\/popup-blocked/);
+  assert.match(authFormSource, /completeProviderRedirectSignIn/);
+  assert.match(authFormSource, /hasCheckedProviderRedirectRef/);
+  assert.match(authFormSource, /updatePendingProfileFromProvider\(credential\.user\)/);
+});
+
 test("class join uses server-side lockouts and teacher signup is open to signed-in users", () => {
   const resolveSource = readFileSync(join(repoRoot, "frontend/app/api/classes/resolve/route.ts"), "utf8");
   const joinSource = readFileSync(join(repoRoot, "frontend/app/api/classes/join/route.ts"), "utf8");

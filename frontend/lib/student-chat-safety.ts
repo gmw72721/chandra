@@ -209,6 +209,7 @@ async function moderateStudentChatInput({
   text: string;
 }) {
   if (!process.env.OPENAI_API_KEY?.trim()) {
+    logModerationUnavailable("missing_openai_api_key");
     return unavailableModerationDecision("missing_openai_api_key");
   }
 
@@ -256,12 +257,16 @@ async function moderateStudentChatInput({
       };
     }
 
+    logModerationUnavailable(
+      "moderation_unavailable",
+      caughtError instanceof Error ? caughtError.message : String(caughtError)
+    );
     return unavailableModerationDecision("moderation_unavailable");
   }
 }
 
 function unavailableModerationDecision(primaryReason: string): StudentChatSafetyDecision {
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== "production" || !shouldBlockWhenModerationIsUnavailable()) {
     return {
       blocked: false,
       categories: [],
@@ -280,6 +285,22 @@ function unavailableModerationDecision(primaryReason: string): StudentChatSafety
     riskLevel: "general",
     supportMessage: generalStudentSafetyMessage
   };
+}
+
+function shouldBlockWhenModerationIsUnavailable() {
+  return process.env.STUDENT_CHAT_SAFETY_FAIL_CLOSED?.trim().toLowerCase() === "true";
+}
+
+function logModerationUnavailable(primaryReason: string, message = "") {
+  if (process.env.NODE_ENV !== "production") {
+    return;
+  }
+
+  console.error("Student chat safety moderation unavailable; allowing request.", JSON.stringify({
+    message,
+    model: studentChatSafetyModerationModel,
+    primaryReason
+  }));
 }
 
 function buildModerationInput({

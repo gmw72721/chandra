@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ProviderAccountLinkingRequiredError,
+  completeProviderRedirectSignIn,
   completeEmailMagicLinkSignIn,
   createBackupPasswordForCurrentUser,
   createRoleProfile,
@@ -61,6 +62,7 @@ export function AuthForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [showEmailSignup, setShowEmailSignup] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [emailLinkUrl] = useState(() => {
@@ -76,6 +78,7 @@ export function AuthForm() {
   const [backupPasswordConfirmation, setBackupPasswordConfirmation] = useState("");
   const [savedBackupPasswordUid, setSavedBackupPasswordUid] = useState("");
   const hasCheckedEmailLinkRef = useRef(false);
+  const hasCheckedProviderRedirectRef = useRef(false);
   const isRepairingProfileRef = useRef(false);
   const { firebaseReady, isLoading, profile, profileError, sessionError, user } = useAuth();
 
@@ -108,6 +111,36 @@ export function AuthForm() {
         setError(caughtError instanceof Error ? caughtError.message : "Magic-link sign-in failed.");
       });
   }, [emailLinkUrl, firebaseReady, router]);
+
+  useEffect(() => {
+    if (!firebaseReady || hasCheckedProviderRedirectRef.current) {
+      return;
+    }
+
+    hasCheckedProviderRedirectRef.current = true;
+    completeProviderRedirectSignIn()
+      .then((credential) => {
+        if (!credential) {
+          return;
+        }
+
+        updatePendingProfileFromProvider(credential.user);
+
+        if (userNeedsBackupPassword(credential.user)) {
+          setNotice("You have successfully signed in. Create a backup password just in case.");
+        }
+      })
+      .catch((caughtError) => {
+        if (caughtError instanceof ProviderAccountLinkingRequiredError) {
+          setLinkingRequest(caughtError.pendingCredential);
+          setLinkingPassword("");
+          setNotice("");
+          return;
+        }
+
+        setError(caughtError instanceof Error ? caughtError.message : "Provider sign-in failed.");
+      });
+  }, [firebaseReady]);
 
   useEffect(() => {
     if (!user || profile || isLoading || isRepairingProfileRef.current) {
@@ -154,7 +187,13 @@ export function AuthForm() {
 
     try {
       if (mode === "signup") {
-        assertStudentClassCodeIsPresent();
+        if (!showEmailSignup) {
+          assertSignupProfileFieldsArePresent();
+          setShowEmailSignup(true);
+          return;
+        }
+
+        assertSignupProfileFieldsArePresent();
         savePendingProfile(buildPendingProfile());
         await signUpWithRole({
           displayName: displayName.trim(),
@@ -185,6 +224,7 @@ export function AuthForm() {
     setMode(nextMode);
     setError("");
     setNotice("");
+    setShowEmailSignup(false);
   }
 
   async function submitProviderSignIn(provider: AuthProviderKey) {
@@ -194,13 +234,18 @@ export function AuthForm() {
 
     try {
       if (mode === "signup") {
-        assertStudentClassCodeIsPresent();
+        assertSignupProfileFieldsArePresent();
         savePendingProfile(buildPendingProfile());
       } else {
         clearPendingProfile();
       }
 
       const credential = await signInWithProviderAuth(provider);
+
+      if (!credential) {
+        setNotice("Redirecting to Google sign-in.");
+        return;
+      }
 
       if (mode === "signup") {
         updatePendingProfileFromProvider(credential.user);
@@ -236,7 +281,7 @@ export function AuthForm() {
       }
 
       if (mode === "signup") {
-        assertStudentClassCodeIsPresent();
+        assertSignupProfileFieldsArePresent();
         savePendingProfile(buildPendingProfile());
       } else {
         clearPendingProfile();
@@ -333,9 +378,13 @@ export function AuthForm() {
     };
   }
 
-  function assertStudentClassCodeIsPresent() {
+  function assertSignupProfileFieldsArePresent() {
     if (mode === "signup" && role === "student" && !classId.trim()) {
       throw new Error("Enter your class code to create a student account.");
+    }
+
+    if (mode === "signup" && !displayName.trim()) {
+      throw new Error("Enter your name to create an account.");
     }
   }
 
@@ -654,6 +703,30 @@ export function AuthForm() {
     );
   }
 
+  function renderProviderAuthGroup({ showDivider = true }: { showDivider?: boolean } = {}) {
+    return (
+      <div className="auth-method-group" aria-label="Google authentication">
+        {providerOptions.map((provider) => (
+          <button
+            className={`auth-provider-button ${provider.key}`}
+            disabled={isSubmitting}
+            key={provider.key}
+            type="button"
+            onClick={() => submitProviderSignIn(provider.key)}
+          >
+            <ProviderIcon provider={provider.key} />
+            <span>{mode === "signup" ? "Continue" : "Sign in"} with {provider.label}</span>
+          </button>
+        ))}
+        {showDivider ? (
+          <div className="auth-divider">
+            <span>{mode === "signup" ? "or create a password" : "or use email"}</span>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
     <section className="auth-card">
       <h1>
@@ -682,35 +755,15 @@ export function AuthForm() {
         </button>
       </div>
 
-      {mode !== "reset" ? (
-        <div className="auth-method-group" aria-label="Google authentication">
-          {providerOptions.map((provider) => (
-            <button
-              className={`auth-provider-button ${provider.key}`}
-              disabled={isSubmitting}
-              key={provider.key}
-              type="button"
-              onClick={() => submitProviderSignIn(provider.key)}
-            >
-              <ProviderIcon provider={provider.key} />
-              <span>{mode === "signup" ? "Sign up" : "Sign in"} with {provider.label}</span>
-            </button>
-          ))}
-          <div className="auth-divider">
-            <span>or use email</span>
-          </div>
-        </div>
-      ) : null}
+      {mode === "signin" ? renderProviderAuthGroup() : null}
 
       <form className="auth-form" onSubmit={submitAuth}>
-        {mode !== "reset" ? (
-          <p className="auth-form-heading">
-            {mode === "signup" ? "Create an account with email and password" : "Sign in with email and password"}
-          </p>
-        ) : null}
-
         {mode === "signup" ? (
           <>
+            <p className="auth-form-heading auth-form-heading-left">
+              Account details
+            </p>
+
             <label className="field-label" htmlFor="role">
               Account type
             </label>
@@ -748,7 +801,45 @@ export function AuthForm() {
               onChange={(event) => setDisplayName(event.target.value)}
               placeholder="Ada Lovelace"
             />
+          </>
+        ) : null}
 
+        {mode === "signup" ? (
+          <div className="auth-signup-methods">
+            <p className="auth-form-heading auth-form-heading-left">
+              Sign-in method
+            </p>
+            {renderProviderAuthGroup({ showDivider: showEmailSignup })}
+            {!showEmailSignup ? (
+              <button
+                className="auth-secondary-button"
+                disabled={isSubmitting}
+                type="button"
+                onClick={() => {
+                  setError("");
+                  setNotice("");
+                  try {
+                    assertSignupProfileFieldsArePresent();
+                    setShowEmailSignup(true);
+                  } catch (caughtError) {
+                    setError(caughtError instanceof Error ? caughtError.message : "Complete the account details first.");
+                  }
+                }}
+              >
+                Use email instead
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {mode !== "reset" && (mode !== "signup" || showEmailSignup) ? (
+          <p className="auth-form-heading">
+            {mode === "signup" ? "Create an account with email and password" : "Sign in with email and password"}
+          </p>
+        ) : null}
+
+        {mode === "signup" && showEmailSignup ? (
+          <>
             <label className="field-label" htmlFor="username">
               Username
             </label>
@@ -764,21 +855,25 @@ export function AuthForm() {
           </>
         ) : null}
 
-        <label className="field-label" htmlFor="email">
-          {mode === "signin" || mode === "reset" ? "Username or email" : "Email"}
-        </label>
-        <input
-          id="email"
-          required
-          autoCapitalize="none"
-          autoComplete={mode === "signin" || mode === "reset" ? "username" : "email"}
-          type={mode === "signin" || mode === "reset" ? "text" : "email"}
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          placeholder={mode === "signin" || mode === "reset" ? "ada or you@example.com" : "you@example.com"}
-        />
+        {mode !== "signup" || showEmailSignup ? (
+          <>
+            <label className="field-label" htmlFor="email">
+              {mode === "signin" || mode === "reset" ? "Username or email" : "Email"}
+            </label>
+            <input
+              id="email"
+              required
+              autoCapitalize="none"
+              autoComplete={mode === "signin" || mode === "reset" ? "username" : "email"}
+              type={mode === "signin" || mode === "reset" ? "text" : "email"}
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder={mode === "signin" || mode === "reset" ? "ada or you@example.com" : "you@example.com"}
+            />
+          </>
+        ) : null}
 
-        {mode !== "reset" ? (
+        {mode !== "reset" && (mode !== "signup" || showEmailSignup) ? (
           <>
             <label className="field-label" htmlFor="password">
               Password
@@ -795,7 +890,7 @@ export function AuthForm() {
           </>
         ) : null}
 
-        {mode !== "reset" ? (
+        {mode !== "reset" && (mode !== "signup" || showEmailSignup) ? (
           <div className="auth-magic-link-panel">
             <p>Prefer not to use a password?</p>
             <button
@@ -834,15 +929,17 @@ export function AuthForm() {
         {error ? <p className="form-error">{error}</p> : null}
         {notice ? <p className="form-notice">{notice}</p> : null}
 
-        <button className="primary-button" disabled={isSubmitting} type="submit">
-          {isSubmitting
-            ? "Working"
-            : mode === "signup"
-              ? "Create account"
-              : mode === "reset"
-                ? "Send reset link"
-                : "Sign in"}
-        </button>
+        {mode !== "signup" || showEmailSignup ? (
+          <button className="primary-button" disabled={isSubmitting} type="submit">
+            {isSubmitting
+              ? "Working"
+              : mode === "signup"
+                ? "Create account"
+                : mode === "reset"
+                  ? "Send reset link"
+                  : "Sign in"}
+          </button>
+        ) : null}
       </form>
     </section>
   );

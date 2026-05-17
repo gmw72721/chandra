@@ -86,6 +86,10 @@ env:
     secret: OPENROUTER_API_KEY
     availability:
       - RUNTIME
+  - variable: OPENAI_API_KEY
+    secret: OPENAI_API_KEY
+    availability:
+      - RUNTIME
   - variable: OPENROUTER_BASE_URL
     value: https://openrouter.ai/api/v1
     availability:
@@ -104,6 +108,10 @@ env:
       - RUNTIME
   - variable: OPENROUTER_APP_TITLE
     value: Chandra
+    availability:
+      - RUNTIME
+  - variable: STUDENT_CHAT_SAFETY_FAIL_CLOSED
+    value: "false"
     availability:
       - RUNTIME
 
