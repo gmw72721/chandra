@@ -59,6 +59,18 @@ test("Google auth completes through redirect when production popups are blocked"
   assert.match(authFormSource, /updatePendingProfileFromProvider\(credential\.user\)/);
 });
 
+test("signed-in users without a role profile can finish account setup", () => {
+  const requireAuthSource = readFileSync(join(repoRoot, "frontend/components/RequireAuth.tsx"), "utf8");
+  const authFormSource = readFileSync(join(repoRoot, "frontend/components/AuthForm.tsx"), "utf8");
+
+  assert.match(requireAuthSource, /This account needs a role profile/);
+  assert.match(requireAuthSource, /Finish account setup/);
+  assert.match(requireAuthSource, /\/auth\?mode=signup&role=\$\{setupRole\}/);
+  assert.doesNotMatch(requireAuthSource, /Sign out and create a student or teacher account/);
+  assert.match(authFormSource, /Choose your workspace/);
+  assert.match(authFormSource, /createRoleProfile/);
+});
+
 test("class join uses server-side lockouts and teacher signup is open to signed-in users", () => {
   const resolveSource = readFileSync(join(repoRoot, "frontend/app/api/classes/resolve/route.ts"), "utf8");
   const joinSource = readFileSync(join(repoRoot, "frontend/app/api/classes/join/route.ts"), "utf8");

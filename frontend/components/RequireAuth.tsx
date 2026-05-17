@@ -45,11 +45,16 @@ export function RequireAuth({
 
   if (allowedRoles.length) {
     if (!profile) {
+      const setupRole = allowedRoles[0] ?? "student";
+
       return (
         <section className="auth-state-panel">
           <h1>This account needs a role profile.</h1>
-          <p>Sign out and create a student or teacher account to continue.</p>
+          <p>You are signed in, but this account is missing its Chandra role profile.</p>
           {profileError ? <p className="form-error">{profileError}</p> : null}
+          <Link className="primary-button" href={`/auth?mode=signup&role=${setupRole}`}>
+            Finish account setup
+          </Link>
         </section>
       );
     }
