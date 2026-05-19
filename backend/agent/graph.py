@@ -252,6 +252,24 @@ METHOD_SOURCE_RE = re.compile(
     r"\b(?:textbook|reading|readings|chapter|notes|lecture|worked example|example|definition|theorem|formula|method|rule)\b"
 )
 METHOD_SOURCE_CONTEXT_RE = re.compile(r"\b(?:textbook|reading|readings|notes|lecture)\b")
+COMMON_SOURCE_SECTION_LABELS = {
+    "activities",
+    "awards",
+    "certifications",
+    "contact",
+    "coursework",
+    "education",
+    "experience",
+    "leadership",
+    "objective",
+    "projects",
+    "publications",
+    "skills",
+    "summary",
+    "volunteer",
+    "volunteering",
+    "work experience",
+}
 PROBLEM_STATEMENT_ITEM_START_PATTERN = (
     "assume|calculate|compute|consider|define|describe|determine|evaluate|explain|find|"
     "for|given|if|let|prove|recall|show|solve|suppose|use|verify|what|when|where|"
@@ -795,10 +813,10 @@ def build_primary_tutor_system_prompt(state: PdfRagState) -> str:
     system_parts = [
         (
             "You are Chandra's primary tutor turn. Inspect latest_student_message, earlier chat, compact metadata, teacher policy, tutor state, and any attached class-work files; then answer now or request class-material retrieval. Return valid JSON only, escaping LaTeX backslashes as `\\\\` when needed. "
-            "latest_student_message is the current turn; chat_history contains only earlier turns. Missing optional payload fields mean no relevant prior state, debug override, failed search, active problem, or source policy is known. active_metadata is metadata only, not full source wording; if exact source wording is needed and not visible in uploads/chat, request retrieval. Treat heuristic as the default plan and override it only with stronger payload evidence."
+            "latest_student_message is the current turn; chat_history contains only earlier turns. Missing optional payload fields mean no relevant prior state, debug override, failed search, active problem, or source policy is known. active_metadata identifies an already selected source/page; if the student asks a follow-up about that source, page, document, resume, or one of its sections, set needs_search false and memory_used true so the context-grounded answer step can use the selected OCR/PDF. Treat heuristic as the default plan and override it only with stronger payload evidence."
         ),
         (
-            "Retrieval: search only when exact class-material/OCR/source metadata is needed, not for a basic hint. For a bare number, problem/exercise/question/page locator, source title, or request to find/read/quote/show a source item, set needs_search true unless active_metadata identifies the exact item. If the active problem references another exercise and the student asks to start, use, apply, or get method support from that referenced exercise, treat it as support for the active problem rather than pure source lookup: use retrieval_reason needed_supporting_page and search method/source-context terms unless the student explicitly asks to quote, read, show, locate, or restate the referenced exercise text. For source lookup, search the requested task/page first and do not invent source facts or ask for a page/title/problem text while retrieval can check class metadata. Allowed retrieval_reason values: student_requested_problem, needed_supporting_page, needed_example_page, student_changed_problem, previous_search_failed. Use up to three distinct searches; for similar-example requests, use needed_example_page and search topic/method/example terms rather than only the assigned problem number."
+            "Retrieval: search only when exact class-material/OCR/source metadata is needed, not for a basic hint or an already selected source/page. For a bare number, problem/exercise/question/page locator, source title, or request to find/read/quote/show a new source item, set needs_search true unless active_metadata identifies the exact item or selected source being discussed. If active_metadata is present and the latest message is a follow-up like `what's on the resume`, `more detail`, `what does it say`, or a section choice such as `Projects`, `Education`, `Work experience`, `Skills`, or another heading visible in the selected source, do not start a new search; answer from the active selected source context with memory_used true. If the active problem references another exercise and the student asks to start, use, apply, or get method support from that referenced exercise, treat it as support for the active problem rather than pure source lookup: use retrieval_reason needed_supporting_page and search method/source-context terms unless the student explicitly asks to quote, read, show, locate, or restate the referenced exercise text. For source lookup, search the requested task/page first and do not invent source facts or ask for a page/title/problem text while retrieval can check class metadata. Allowed retrieval_reason values: student_requested_problem, needed_supporting_page, needed_example_page, student_changed_problem, previous_search_failed. Use up to three distinct searches; for similar-example requests, use needed_example_page and search topic/method/example terms rather than only the assigned problem number."
         ),
         (
             "Planning: produce activeProblemDecision and tutorPlan. activeProblemDecision decides whether pasted text or an upload is an actual academic problem; if so, copy the exact visible task text. tutorPlan is the internal progressive-disclosure plan for later calls. Decide studentIntent from vague_help, specific_question, showed_work, unclear_attempt, asks_for_next_step, asks_for_solution, asks_for_explanation, verification. You own tutor state updates in this first step: set stateUpdates.understandingLevel, lastHelpDepth, answerSeekingRisk, currentStep, currentStepStatus, and concise lastHintSummary/lastStudentAttemptSummary when applicable. State-update wording must be evidence about the student's level, not concept teaching or analogies; do not increment hintsGiven here because the backend counts rendered hints."
@@ -841,7 +859,7 @@ def build_primary_tutor_system_prompt(state: PdfRagState) -> str:
         ),
         (
             "Structured output: Use structuredOutput.sections for student-visible content. Include only useful non-empty sections. Allowed section keys: mainChat, problem, answer, hint, explanation, formula, example, checkWork, sourceNote. Put each idea in one place; do not duplicate text across sections. For stuck/help/hint requests, put the tutoring nudge in sections.hint and omit sections.mainChat unless it adds necessary non-hint context or a distinct action request; never paraphrase the hint or write filler like `I can give you a hint` in mainChat. sections.problem must contain only the exact academic task statement, never hints, lookup status, source notes, or next actions. For pure source/problem lookup, omit hint; if problem is present, set metadata.problemNumber when visible and metadata.problemSummary to a short non-solving noun phrase. If needs_search is true, keep visible output to one short natural mainChat/status sentence about checking the relevant class material, and do not invent source facts. Never use a bare locator echo like `problem 2.18` as mainChat."
-            " For requested problem lookup, an acceptable status sentence is: I'm checking the class materials for that problem."
+            " Say `I'm checking...` only when needs_search is true. Say `for that problem` only when the latest message is actually asking for a problem/exercise/question, not when it asks about a selected page, resume, document, source section, or `what does it say`. For requested problem lookup, an acceptable status sentence is: I'm checking the class materials for that problem."
         ),
         (
             "Streaming order matters: emit structuredOutput.sections in the exact student-visible order. sectionOrder must match that order. Put problem first when it should render first. Emit sections before legacy content/message fields. JSON schema: {\"outcome\": \"answer_now\"|\"retrieve_then_answer\"|\"ask_problem_selection\"|\"ask_support_path_choice\", \"content\": string, \"sections\": object, \"sectionOrder\": string[], \"metadata\": object, \"can_answer_now\": boolean, \"needs_search\": boolean, \"retrieval_reason\": string, \"search_query\": string, \"searches\": [{\"query\": string, \"retrieval_reason\": string, \"top_k\": number}], \"help_level\": string, \"memory_used\": boolean, \"activeProblemDecision\": object, \"answerSeekingAssessment\": object, \"tutorPlan\": object, \"structuredOutput\": {\"sections\": object, \"sectionOrder\": array, \"confusionPrompt\": string, \"confusionChoices\": [{\"id\": string, \"label\": string, \"description\": string, \"message\": string}], \"metadata\": {\"choiceDisplay\"?: \"problem_selection\"|\"support_path_choice\"}}}."
@@ -3857,8 +3875,14 @@ def can_answer_from_chat_retrieval_memory(message: str, active_record: dict[str,
     if student_changed_problem(message, active_record):
         return False
 
+    if re.search(r"\b(?:example|worked example|similar problem)\b", normalize_search_query(message)):
+        return False
+
     if explicit_source_lookup_intent(message) and problem_numbers_from_text(message):
         return active_record_matches_message(active_record, message)
+
+    if active_source_followup_intent(message, active_record):
+        return True
 
     if simple_hint_or_next_step_intent(message) or answer_shopping_intent(message):
         return True
@@ -3881,6 +3905,9 @@ def retrieval_reason_for_message(message: str, memory: dict[str, Any]) -> str:
     normalized = normalize_search_query(message)
     if re.search(r"\b(?:example|worked example|similar problem)\b", normalized):
         return "needed_example_page"
+
+    if active_record and active_source_followup_intent(message, active_record):
+        return "needed_supporting_page"
 
     if active_record and re.search(r"\b(?:why|explain|method|formula|theorem|reading|textbook|notes)\b", normalized):
         return "needed_supporting_page"
@@ -3963,6 +3990,8 @@ def explicit_source_lookup_intent(message: str) -> bool:
             r"\b(?:find|where|locate|which page|what page|pull up|quote|read|show me|problem|exercise|question|worksheet|assignment|pdf|page)\b",
             normalized,
         )
+        or re.search(r"\bwhat(?: s| is)?\s+on\b", normalized)
+        or re.search(r"\bwhat does\b.+\b(?:say|state)\b", normalized)
     )
 
 
@@ -3970,10 +3999,54 @@ def source_material_signal(message: str) -> bool:
     normalized = normalize_search_query(message)
     return bool(
         re.search(
-            r"\b(?:pdf|worksheet|assignment|homework|problem set|textbook|reading|notes|page|problem|exercise|question|example|class material|source)\b",
+            r"\b(?:pdf|worksheet|assignment|homework|problem set|textbook|reading|notes|page|problem|exercise|question|example|class material|source|resume|document)\b",
             normalized,
         )
     )
+
+
+def active_source_followup_intent(message: str, active_record: dict[str, Any]) -> bool:
+    normalized = normalize_search_query(message)
+    if not normalized:
+        return False
+
+    if active_record_matches_message(active_record, message) and (
+        explicit_source_lookup_intent(message)
+        or re.search(r"\b(?:this|that|it|same source|same page|same document|the source|the page|the document|resume)\b", normalized)
+    ):
+        return True
+
+    if source_section_choice(message, active_record):
+        return True
+
+    return bool(
+        re.fullmatch(r"(?:more|more detail|more details|details|continue|keep going|what else|tell me more)", normalized)
+        or re.search(r"\bwhat does\b.+\b(?:say|state)\b", normalized)
+        or re.search(r"\bwhat(?: s| is)?\s+on\s+(?:it|this|that|the page|the source|the document|the resume|resume)\b", normalized)
+    )
+
+
+def source_section_choice(message: str, active_record: dict[str, Any]) -> bool:
+    label = normalize_search_query(message)
+    if not label or len(label) > 60:
+        return False
+
+    if re.search(r"\b(?:problem|exercise|question|page|chapter|section)\s+\d", label):
+        return False
+
+    if label in COMMON_SOURCE_SECTION_LABELS:
+        return True
+
+    return active_record_has_section_heading(active_record, label)
+
+
+def active_record_has_section_heading(active_record: dict[str, Any], label: str) -> bool:
+    text = record_problem_search_text(active_record)
+    if not text:
+        return False
+
+    heading_re = re.compile(rf"^\s*{re.escape(label)}\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
+    return bool(heading_re.search(text))
 
 
 def simple_hint_or_next_step_intent(message: str) -> bool:
@@ -5111,6 +5184,7 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
         "Depth 4 response: full explanation only if teacher policy allows and the student explicitly asked for it or an allowed full-teaching mode is active.",
         "Knowledge source-use contract: each Knowledge item separates what the source is (`kind`) from how Chandra used it (`usedAs`). Use `usedAs`, not file type alone, to decide whether it is the active problem, problem source, supporting context, theorem/definition/example reference, or student attempt. Do not describe retrieved class OCR, selected PDF pages, or Knowledge items from class materials as something the student shared, uploaded, pasted, or provided; use those student-attribution words only for actual latest-turn student attachments, pasted text, or visible student work.",
         "Source lookup contract: when the latest student message is only a problem/exercise/question/page number or asks to find, read, quote, show, identify, locate, or restate a source item, your job is extraction, not tutoring. First locate the exact visible item in the selected page asset or OCR metadata, then return that item without solving it.",
+        "Selected-source follow-up contract: when the latest student message asks about the already selected source/page/document/resume, or gives a bare section heading such as `Projects`, `Education`, `Work experience`, `Skills`, or another heading visible in the selected source, answer from the selected OCR/PDF context first. If the previous student turn selected a section and the latest message is vague, such as `more detail` or `what does it say`, continue with that same selected section unless the student names a different section.",
         "When selected page assets or OCR metadata are present, never ask the student for a page image, textbook title, homework title, or pasted problem before using those selected records. Ask for more source detail only after you have checked the selected records and they do not contain the requested item.",
             "Problem extraction procedure: match requested printed page, PDF page, problem number, exercise number, question number, or exact quoted words; copy the visible block beginning at that marker; stop before the next same-level numbered item, heading, or unrelated problem. Prefer the attached page/PDF if it conflicts with OCR; use OCR only when the visible asset is unreadable.",
             "For exact problem/exercise/question/prompt lookup, keep the extracted task statement clear in `Problem:`. Include a short useful sections.mainChat before the problem when it adds context, such as confirming the item found or naming the source/page. When the item came from retrieved class materials, phrase that context as `I found Problem N in the class materials` or name the source/page; never say `the page you shared`, `your upload`, or similar student-attribution wording unless the student actually supplied that page or file in the latest turn. Never use a bare locator echo like `problem 2.18` as mainChat or answer; mainChat should add information beyond the student's locator. Do not solve it and do not add hints, attempts, method steps, or generic offers unless the student separately asks for solving help.",
@@ -5190,7 +5264,7 @@ def build_context_grounded_answer_messages(state: PdfRagState) -> list[dict[str,
         (
             "Internal-only source tracking: put the old `Referenced sources:` block records inside metadata.referencedSources, never outside the required JSON. "
             "Each referencedSources item may include doc_id, page, and reason. "
-            "When source context matters to the student, put a concise page/source note in sections.sourceNote."
+            "When source context matters to the student, including selected-source follow-ups and section answers, include the selected doc_id/page in metadata.referencedSources so source cards match the current answer, and put a concise page/source note in sections.sourceNote only when it helps the student."
         ),
         "Before sending the student-facing reply, privately check intent, page fit, policy, citations, and privacy. If needed, fix the reply once.",
         f"Clean Knowledge context package:\n{compact_json_dumps(knowledge_context)}",

@@ -1793,6 +1793,74 @@ def test_referenced_exercise_support_intent_uses_supporting_retrieval_terms() ->
     assert "find exact problem page" not in query
 
 
+def test_selected_source_followups_do_not_start_problem_search() -> None:
+    resume_page = ocr_page(
+        chunk_text=(
+            "Gavin Williams\n"
+            "Education\n"
+            "B.S. Computer Science, Example University\n\n"
+            "Projects\n"
+            "Chandra Tutor - built source-grounded tutoring flows.\n\n"
+            "Work experience\n"
+            "Software Engineer, Example Co."
+        ),
+        material_type="resume",
+        problem_numbers=[],
+        retrieval_reason="student_requested_problem",
+        title="Resume",
+    )
+    memory = {"active_metadata": resume_page}
+
+    for message in ["what's on the resume", "more detail", "Projects", "Work experience", "what does it say"]:
+        decision = graph_module.build_retrieval_decision(
+            {
+                "chat_retrieval_memory": memory,
+                "messages": [{"role": "user", "content": message}],
+            }
+        )
+
+        assert decision["needs_search"] is False, message
+        assert decision["memory_used"] is True, message
+        assert decision["decision_source"] == "chat_memory", message
+        assert decision["retrieval_reason"] == "", message
+        assert decision["query"] == "", message
+
+
+def test_selected_source_section_followup_contract_is_in_model_prompts() -> None:
+    resume_page = ocr_page(
+        chunk_text="Projects\nChandra Tutor - source-grounded tutor.\nEducation\nExample University",
+        material_type="resume",
+        problem_numbers=[],
+        title="Resume",
+    )
+    state = {
+        "chat_retrieval_memory": {"active_metadata": resume_page},
+        "messages": [
+            {"role": "user", "content": "Projects"},
+            {"role": "assistant", "content": "The Projects section mentions Chandra Tutor."},
+            {"role": "user", "content": "what does it say"},
+        ],
+        "page_assets": [resume_page],
+        "retrieval_decision": {
+            "memory_used": True,
+            "needs_search": False,
+            "retrieval_reason": "",
+        },
+    }
+
+    primary_messages = graph_module.build_primary_tutor_messages(state, graph_module.build_retrieval_decision(state))
+    primary_system = primary_messages[0]["content"]
+    final_messages = graph_module.build_context_grounded_answer_messages(state)
+    final_instruction_text = final_messages[0]["content"][1]["text"]
+
+    assert "what's on the resume" in primary_system
+    assert "`what does it say`" in primary_system
+    assert "Say `I'm checking...` only when needs_search is true" in primary_system
+    assert "Say `for that problem` only when the latest message is actually asking for a problem" in primary_system
+    assert "continue with that same selected section" in final_instruction_text
+    assert "source cards match the current answer" in final_instruction_text
+
+
 def test_referenced_exercise_support_intent_does_not_force_exact_initial_search() -> None:
     state = {
         "chat_retrieval_memory": {

@@ -88,6 +88,7 @@ import {
   type TeacherClass
 } from "@/lib/classes";
 import { capitalizeLabel, coerceDate, formatConversationDate } from "@/lib/display-format";
+import { PreDashboardWizard } from "./PreDashboardWizard";
 import { conversationNeedsTeacherReview } from "@/lib/conversation-review-utils";
 import { defaultModelOptions } from "@/lib/model-options";
 import {
@@ -4099,6 +4100,10 @@ export function TeacherClassManager({
     window.addEventListener("pointerup", handlePointerUp);
     window.addEventListener("pointercancel", handlePointerCancel);
   };
+
+  if (!isLoadingClasses && classes.length === 0) {
+    return <PreDashboardWizard onComplete={(newClassId) => selectTeacherClass(newClassId)} />;
+  }
 
   return (
     <>
@@ -8727,7 +8732,7 @@ function SidebarDrawer({
         role="dialog"
       >
         <div className="sidebar-drawer-header">
-          <Link className="drawer-wordmark" href="/" onClick={onClose}>
+          <Link className="drawer-wordmark" href="/teacher" onClick={onClose}>
             Chandra
           </Link>
           <button aria-label="Close navigation" className="drawer-close-button" type="button" onClick={onClose}>
@@ -8842,7 +8847,7 @@ function PersistentPrimarySidebar({
   return (
     <aside className="sidebar-drawer persistent-primary-sidebar" aria-label="Persistent primary navigation">
       <div className="sidebar-drawer-header">
-        <Link className="drawer-wordmark" href="/">
+        <Link className="drawer-wordmark" href="/teacher">
           Chandra
         </Link>
         <button

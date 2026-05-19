@@ -1,16 +1,51 @@
+"use client";
+
 import Link from "next/link";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { Suspense } from "react";
 import { AuthForm } from "@/components/AuthForm";
 
 export default function AuthPage() {
+  const [isNavigating, setIsNavigating] = useState(false);
+  const router = useRouter();
+
+  const handleNavigation = (e: React.MouseEvent<HTMLAnchorElement>, href: string) => {
+    e.preventDefault();
+    setIsNavigating(true);
+    setTimeout(() => {
+      router.push(href as any);
+    }, 750);
+  };
+
+  const handleAuthSuccess = (destination: string) => {
+    setIsNavigating(true);
+    setTimeout(() => {
+      router.push(destination as any);
+    }, 750);
+  };
+
   return (
     <main className="auth-shell">
       <nav className="auth-topbar" aria-label="Authentication navigation">
-        <Link className="landing-brand auth-brand" href="/" aria-label="Chandra home">
-          <CrescentIcon />
+        <Link 
+          className="landing-brand auth-brand" 
+          href="/" 
+          aria-label="Chandra home"
+          onClick={(e) => handleNavigation(e, "/")}
+        >
           <span>Chandra</span>
         </Link>
+        <div className="nav-actions">
+          <Link 
+            href="/" 
+            className="nav-button-home"
+            onClick={(e) => handleNavigation(e, "/")}
+          >
+            Back to home
+          </Link>
+        </div>
       </nav>
       <div className="auth-layout">
         <section className="auth-story-panel" aria-label="Chandra introduction">
@@ -31,9 +66,34 @@ export default function AuthPage() {
             </section>
           }
         >
-          <AuthForm />
+          <AuthForm onAuthSuccess={handleAuthSuccess} />
         </Suspense>
       </div>
+
+      {isNavigating && (
+        <div className="page-transition-veil">
+          <div className="transition-panel panel-1" />
+          <div className="transition-panel panel-2" />
+          <div className="transition-panel panel-3" />
+          <div className="veil-glow" />
+          <div className="transition-content">
+            <div className="transition-logo-wrapper">
+              {"Chandra".split("").map((char, idx) => (
+                <span
+                  key={idx}
+                  className="logo-letter"
+                  style={{ animationDelay: `${0.22 + idx * 0.04}s` }}
+                >
+                  {char}
+                </span>
+              ))}
+            </div>
+            <div className="transition-progress-line">
+              <div className="progress-bar-fill" />
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

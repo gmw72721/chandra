@@ -8,54 +8,68 @@ export function ChandraLogoMark({ className = "" }: { className?: string }) {
       xmlns="http://www.w3.org/2000/svg"
     >
       <defs>
-        <radialGradient id="chandra-logo-bg" cx="50%" cy="38%" r="74%">
-          <stop offset="0%" stopColor="#171348" />
-          <stop offset="54%" stopColor="#080d2b" />
-          <stop offset="100%" stopColor="#030712" />
-        </radialGradient>
-        <linearGradient id="chandra-logo-crescent" x1="62" x2="118" y1="39" y2="154">
-          <stop offset="0%" stopColor="#f5ddff" />
-          <stop offset="42%" stopColor="#a56dff" />
-          <stop offset="100%" stopColor="#5b2cff" />
+        {/* Soft shadow filter for the entire squircle logo mark */}
+        <filter id="squircle-shadow" x="-10%" y="-10%" width="120%" height="120%">
+          <feDropShadow dx="0" dy="6" stdDeviation="8" floodColor="#11261a" floodOpacity="0.06" />
+        </filter>
+
+        {/* Luminous outer glow filter for the leaf-green crescent moon */}
+        <filter id="moon-glow" x="-25%" y="-25%" width="150%" height="150%">
+          <feGaussianBlur stdDeviation="5" result="blur" />
+          <feComponentTransfer in="blur" result="glow">
+            <feFuncA type="linear" slope="0.4" />
+          </feComponentTransfer>
+          <feMerge>
+            <feMergeNode in="glow" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+
+        {/* Luminous gradient spanning from bright lime down to rich grass green */}
+        <linearGradient id="leaf-gradient" x1="40" x2="140" y1="35" y2="145" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#a5ea5a" />    {/* Top glowing tip */}
+          <stop offset="35%" stopColor="#78ce41" />   {/* Mid leaf green */}
+          <stop offset="70%" stopColor="#48a42b" />   {/* Rich grass green */}
+          <stop offset="100%" stopColor="#2e7e17" />  {/* Deep meadow green shadow */}
         </linearGradient>
-        <linearGradient id="chandra-logo-crescent-edge" x1="48" x2="126" y1="43" y2="58">
-          <stop offset="0%" stopColor="#ffffff" />
-          <stop offset="100%" stopColor="#c7a4ff" />
+
+        {/* Inner glow highlight gradient to simulate 3D curvature */}
+        <linearGradient id="inner-highlight" x1="50" x2="130" y1="40" y2="120" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#cff69d" stopOpacity="0.8" />
+          <stop offset="50%" stopColor="#81d547" stopOpacity="0.3" />
+          <stop offset="100%" stopColor="#48a42b" stopOpacity="0" />
         </linearGradient>
-        <radialGradient id="chandra-logo-star" cx="46%" cy="38%" r="70%">
-          <stop offset="0%" stopColor="#ffffff" />
-          <stop offset="100%" stopColor="#a986ff" />
-        </radialGradient>
       </defs>
-      <rect width="180" height="180" rx="38" fill="url(#chandra-logo-bg)" />
+
+      {/* Warm-White Squircle Base matching the logo upload */}
+      <rect
+        width="172"
+        height="172"
+        x="4"
+        y="4"
+        rx="40"
+        fill="#ffffff"
+        stroke="#e6e2d8"
+        strokeWidth="1"
+        filter="url(#squircle-shadow)"
+      />
+
+      {/* Luminous outer glow backdrop circle */}
+      <circle cx="82" cy="94" r="54" fill="#a5ea5a" opacity="0.08" filter="url(#moon-glow)" />
+
+      {/* Main leaf-green crescent moon */}
       <path
         d="M130.6 55.1C111.1 34.3 77.2 30 51.9 46.5 20.4 67 13.9 111.6 38.4 139.7c24.4 28 68 29.2 94.1 3.8-28.8 9.1-61.3-1.5-77.6-28.4C37.5 86.2 48.2 48 77.4 31.4c18.9-10.7 40.8-8.6 53.2 23.7Z"
-        fill="url(#chandra-logo-crescent)"
+        fill="url(#leaf-gradient)"
+        filter="url(#moon-glow)"
       />
-      <path
-        d="M48.2 99.8c1.1-22.7 14.8-43.7 36.2-55.9 17-9.7 36.2-11.1 52.4-4.8-19.7-18-51.3-20.9-75-5.5-30.3 19.6-38.1 62-17.5 91.7 9.2 13.3 22.9 22.2 37.8 25.9-20.6-10.2-35-29.7-33.9-51.4Z"
-        fill="#e7c8ff"
-        opacity="0.5"
-      />
+
+      {/* Highlight curve path to add realistic depth and shape definition */}
       <path
         d="M51 91.5c6.9-29.2 35.2-53.5 70.2-49.9 5.4.5 10.5 1.7 15.4 3.4-17.9-15-47.3-16.2-70.3-1-23.8 15.8-34.6 45.1-26.5 71.9 1.9-8.8 5.5-17.2 11.2-24.4Z"
-        fill="url(#chandra-logo-crescent-edge)"
-        opacity="0.92"
+        fill="url(#inner-highlight)"
+        opacity="0.85"
       />
-      <path
-        d="M100.7 79.6c-1.1 15.6-8.9 23.7-24.3 25.1 15.3 1.3 23.1 9.4 24.3 25.1 1.2-15.7 9-23.8 24.3-25.1-15.4-1.4-23.2-9.5-24.3-25.1Z"
-        fill="url(#chandra-logo-star)"
-      />
-      <path
-        d="M112.7 86.2c14.4 3.7 24 16.3 24 32.1 0 15.7-9.6 28.3-24 32"
-        fill="none"
-        stroke="#7d4dff"
-        strokeLinecap="round"
-        strokeWidth="4"
-      />
-      <circle cx="117.9" cy="83.3" r="4.4" fill="#ead9ff" />
-      <circle cx="136.9" cy="118.3" r="4.4" fill="#ead9ff" />
-      <circle cx="117.9" cy="153.1" r="4.4" fill="#ead9ff" />
     </svg>
   );
 }

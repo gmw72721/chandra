@@ -12,10 +12,15 @@ import { getStorage } from "firebase/storage";
 import { firebaseConfig, isFirebaseConfigured } from "./firebase-config";
 export { isFirebaseConfigured };
 
-const app = isFirebaseConfigured && !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];
+const app =
+  isFirebaseConfigured && typeof window !== "undefined"
+    ? !getApps().length
+      ? initializeApp(firebaseConfig)
+      : getApps()[0]
+    : null;
 
 function getClientAuth() {
-  if (!app) {
+  if (!app || typeof window === "undefined") {
     return null;
   }
 

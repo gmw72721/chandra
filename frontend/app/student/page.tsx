@@ -1989,7 +1989,7 @@ export function StudentWorkspace() {
             </section>
 
             <div className="student-brand-row" aria-label="Chandra">
-              <Link className="student-brand" href="/">
+              <Link className="student-brand" href="/student">
                 <span className="student-wordmark">Chandra</span>
               </Link>
               <span className="student-brand-divider" aria-hidden="true" />

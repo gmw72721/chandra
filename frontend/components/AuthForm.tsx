@@ -48,8 +48,11 @@ const providerOptions: Array<{ key: AuthProviderKey; label: string }> = [
 function parseAuthMode(value: string | null): AuthMode {
   return value === "signin" || value === "reset" ? value : "signup";
 }
+interface AuthFormProps {
+  onAuthSuccess?: (destination: string) => void;
+}
 
-export function AuthForm() {
+export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const requestedRole = searchParams.get("role") === "teacher" ? "teacher" : "student";
@@ -122,8 +125,13 @@ export function AuthForm() {
       return;
     }
 
-    router.push(nextProfile.role === "teacher" ? "/teacher" : "/student");
-  }, [router]);
+    const dest = nextProfile.role === "teacher" ? "/teacher" : "/student";
+    if (onAuthSuccess) {
+      onAuthSuccess(dest);
+    } else {
+      router.push(dest);
+    }
+  }, [router, onAuthSuccess]);
 
   useEffect(() => {
     if (!firebaseReady || !emailLinkUrl || hasCheckedEmailLinkRef.current) {
@@ -209,7 +217,12 @@ export function AuthForm() {
           return;
         }
 
-        router.push(nextProfile.role === "teacher" ? "/teacher" : "/student");
+        const dest = nextProfile.role === "teacher" ? "/teacher" : "/student";
+        if (onAuthSuccess) {
+          onAuthSuccess(dest);
+        } else {
+          router.push(dest);
+        }
       })
       .catch((caughtError) => {
         setError(caughtError instanceof Error ? caughtError.message : "Profile setup failed.");
@@ -217,7 +230,7 @@ export function AuthForm() {
       .finally(() => {
         isRepairingProfileRef.current = false;
       });
-  }, [hydrateSignupFieldsFromPendingProfile, isLoading, profile, router, user]);
+  }, [hydrateSignupFieldsFromPendingProfile, isLoading, profile, router, user, onAuthSuccess]);
 
   useEffect(() => {
     if (!user || profile || isLoading) {
@@ -258,8 +271,12 @@ export function AuthForm() {
           classId: role === "student" ? classId.trim() : "",
           username: username.trim()
         });
-        window.localStorage.removeItem(pendingProfileStorageKey);
-        router.push(role === "teacher" ? "/teacher" : "/student");
+        const dest = role === "teacher" ? "/teacher" : "/student";
+        if (onAuthSuccess) {
+          onAuthSuccess(dest);
+        } else {
+          router.push(dest);
+        }
       } else if (mode === "signin") {
         clearPendingProfile();
         await signInWithEmail(email.trim(), password);
@@ -458,7 +475,11 @@ export function AuthForm() {
 
     try {
       await updateStudentClass({ classId: classId.trim(), uid: user.uid });
-      router.push("/student");
+      if (onAuthSuccess) {
+        onAuthSuccess("/student");
+      } else {
+        router.push("/student");
+      }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Class join failed.");
     } finally {
@@ -591,8 +612,12 @@ export function AuthForm() {
                   username: user.email ?? "",
                   user
                 });
-                window.localStorage.removeItem(pendingProfileStorageKey);
-                router.push(nextProfile.role === "teacher" ? "/teacher" : "/student");
+                const dest = nextProfile.role === "teacher" ? "/teacher" : "/student";
+                if (onAuthSuccess) {
+                  onAuthSuccess(dest);
+                } else {
+                  router.push(dest);
+                }
               } catch (caughtError) {
                 setError(caughtError instanceof Error ? caughtError.message : "Profile setup failed.");
               } finally {
@@ -753,7 +778,16 @@ export function AuthForm() {
         <h1>{profile?.displayName ?? user.email}</h1>
         <p>You are signed in as a {profile?.role ?? "Chandra"} account.</p>
         {notice ? <p className="form-notice">{notice}</p> : null}
-        <Link className="primary-button" href={destination}>
+        <Link 
+          className="primary-button" 
+          href={destination}
+          onClick={(e) => {
+            if (onAuthSuccess) {
+              e.preventDefault();
+              onAuthSuccess(destination);
+            }
+          }}
+        >
           Continue
         </Link>
       </section>
