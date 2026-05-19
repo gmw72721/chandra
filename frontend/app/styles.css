@@ -26062,3 +26062,401 @@ button[aria-label="Open Next.js Dev Tools"] {
   font-size: 0.84rem;
   line-height: 1.45;
 }
+
+/* Student chat focus pass: warmer empty state and a lighter composer. */
+.student-workspace-shell .student-workspace-main.is-starting-chat,
+.student-workspace-shell[data-appearance] .student-workspace-main.is-starting-chat {
+  grid-template-rows: auto auto auto;
+  align-content: start;
+}
+
+.student-workspace-shell .student-message-list.has-starter-guidance,
+.student-workspace-shell[data-appearance] .student-message-list.has-starter-guidance {
+  align-content: start;
+  justify-items: center;
+  gap: 14px;
+  min-height: 0;
+  overflow: visible;
+  padding-top: clamp(40px, 9vh, 104px);
+  padding-bottom: 16px;
+}
+
+.student-workspace-shell .student-message-list.has-starter-guidance .student-workspace-message.assistant,
+.student-workspace-shell[data-appearance] .student-message-list.has-starter-guidance .student-workspace-message.assistant {
+  align-items: start;
+}
+
+.student-workspace-shell .student-message-list.has-starter-guidance .chandra-message-avatar,
+.student-workspace-shell[data-appearance] .student-message-list.has-starter-guidance .chandra-message-avatar {
+  margin-top: 6px;
+}
+
+.student-workspace-shell .student-starter-panel,
+.student-workspace-shell[data-appearance] .student-starter-panel {
+  max-width: 620px;
+  margin: 0 auto 0;
+  border: 0;
+  background: transparent;
+  padding: 0 0 4px;
+  box-shadow: none;
+  text-align: left;
+}
+
+.student-workspace-shell .student-starter-kicker,
+.student-workspace-shell[data-appearance] .student-starter-kicker {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  font-weight: 750;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.student-workspace-shell .student-starter-panel h2,
+.student-workspace-shell[data-appearance] .student-starter-panel h2 {
+  font-size: 1.22rem;
+  line-height: 1.18;
+}
+
+.student-workspace-shell .student-starter-panel p,
+.student-workspace-shell[data-appearance] .student-starter-panel p {
+  max-width: 44ch;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.student-workspace-shell .student-starter-actions,
+.student-workspace-shell[data-appearance] .student-starter-actions {
+  gap: 7px;
+  margin-top: 4px;
+}
+
+.student-workspace-shell .student-starter-actions button,
+.student-workspace-shell[data-appearance] .student-starter-actions button {
+  min-height: 30px;
+  border-color: color-mix(in srgb, var(--card-border) 76%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--card-bg-strong) 66%, transparent);
+  padding: 0 11px;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  font-weight: 720;
+  box-shadow: none;
+}
+
+.student-workspace-shell .student-starter-actions button:hover:not(:disabled),
+.student-workspace-shell .student-starter-actions button:focus-visible,
+.student-workspace-shell[data-appearance] .student-starter-actions button:hover:not(:disabled),
+.student-workspace-shell[data-appearance] .student-starter-actions button:focus-visible {
+  border-color: color-mix(in srgb, var(--theme-primary) 28%, var(--card-border));
+  background: color-mix(in srgb, var(--theme-primary-soft) 70%, transparent);
+  color: var(--theme-primary);
+}
+
+.student-workspace-shell .student-composer,
+.student-workspace-shell[data-appearance] .student-composer {
+  --student-composer-attachment-width: 38px;
+  --student-composer-send-width: 78px;
+  --student-composer-control-height: 38px;
+  max-width: 820px;
+  column-gap: 6px;
+  row-gap: 5px;
+  border-color: color-mix(in srgb, var(--card-border) 70%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--student-composer-bg) 92%, transparent);
+  padding: 6px;
+  box-shadow: 0 -6px 18px rgba(15, 23, 42, 0.05);
+}
+
+.student-workspace-shell[data-appearance="dark"] .student-composer {
+  box-shadow: 0 -8px 22px rgba(2, 6, 23, 0.2);
+}
+
+.student-workspace-shell .student-composer-mode-row,
+.student-workspace-shell[data-appearance] .student-composer-mode-row {
+  min-height: 26px;
+}
+
+.student-workspace-shell .student-composer .student-message-mode-trigger,
+.student-workspace-shell[data-appearance] .student-composer .student-message-mode-trigger {
+  height: 26px;
+  min-height: 26px;
+  border-color: color-mix(in srgb, var(--theme-primary-ring) 58%, var(--card-border));
+  background: color-mix(in srgb, var(--theme-primary-soft) 34%, transparent);
+  padding: 0 9px;
+  font-size: 0.76rem;
+}
+
+.student-workspace-shell .student-composer-add,
+.student-workspace-shell[data-appearance] .student-composer-add {
+  border-color: color-mix(in srgb, var(--card-border) 88%, transparent);
+  background: color-mix(in srgb, var(--card-bg-strong) 80%, transparent);
+  color: var(--theme-primary);
+}
+
+.student-workspace-shell .student-composer-add:hover:not(:disabled),
+.student-workspace-shell[data-appearance] .student-composer-add:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--theme-primary) 24%, var(--card-border));
+  background: color-mix(in srgb, var(--theme-primary-soft) 58%, var(--card-bg-strong));
+  color: var(--theme-primary-strong);
+}
+
+.student-workspace-shell .student-composer-add:disabled,
+.student-workspace-shell[data-appearance] .student-composer-add:disabled {
+  border-color: color-mix(in srgb, var(--card-border) 70%, transparent);
+  background: color-mix(in srgb, var(--card-bg) 62%, transparent);
+  color: var(--text-muted);
+  opacity: 0.62;
+}
+
+.student-workspace-shell .student-composer textarea,
+.student-workspace-shell[data-appearance] .student-composer textarea {
+  min-height: var(--student-composer-control-height);
+  border-color: color-mix(in srgb, var(--input-border) 88%, transparent);
+  background: color-mix(in srgb, var(--input-bg) 96%, transparent);
+  padding: 9px 11px;
+  font-size: 0.84rem;
+  line-height: 1.25;
+}
+
+.student-workspace-shell .student-send-button,
+.student-workspace-shell[data-appearance] .student-send-button {
+  border-color: var(--theme-primary);
+  background: var(--theme-primary);
+  color: var(--on-primary);
+  font-size: 0.8rem;
+  font-weight: 780;
+}
+
+.student-workspace-shell .student-send-button:hover:not(:disabled),
+.student-workspace-shell[data-appearance] .student-send-button:hover:not(:disabled) {
+  border-color: var(--theme-primary-strong);
+  background: var(--theme-primary-strong);
+}
+
+.student-workspace-shell .student-send-button:disabled,
+.student-workspace-shell[data-appearance] .student-send-button:disabled {
+  border-color: color-mix(in srgb, var(--input-border) 74%, transparent);
+  background: color-mix(in srgb, var(--input-bg) 82%, transparent);
+  color: color-mix(in srgb, var(--text-muted) 84%, var(--text-secondary));
+  opacity: 1;
+}
+
+@media (max-width: 820px) {
+  .student-workspace-shell .student-workspace-main.is-starting-chat,
+  .student-workspace-shell[data-appearance] .student-workspace-main.is-starting-chat {
+    grid-template-rows: auto auto auto;
+  }
+
+  .student-workspace-shell .student-message-list.has-starter-guidance,
+  .student-workspace-shell[data-appearance] .student-message-list.has-starter-guidance {
+    align-content: start;
+    overflow: auto;
+    padding-top: 22px;
+  }
+
+  .student-workspace-shell .student-starter-panel,
+  .student-workspace-shell[data-appearance] .student-starter-panel {
+    padding: 0;
+  }
+}
+
+/* Student workspace polish: lighter preview sidebar and subtle empty-chat texture. */
+.student-workspace-shell .student-workspace-main.is-starting-chat,
+.student-workspace-shell[data-appearance] .student-workspace-main.is-starting-chat {
+  background:
+    radial-gradient(
+      circle at 50% 58%,
+      color-mix(in srgb, var(--theme-primary-soft) 42%, transparent) 0,
+      transparent 38%
+    ),
+    linear-gradient(180deg, color-mix(in srgb, var(--student-main-bg) 96%, var(--theme-primary-soft)), var(--student-main-bg));
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-sidebar-scroll,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-sidebar-scroll {
+  gap: 16px;
+  padding: 28px 22px 12px;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-current-class-card,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-sidebar-card.student-current-class-card {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-class-select-card,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-class-select-card {
+  min-height: 56px;
+  border: 1px solid color-mix(in srgb, var(--card-border) 74%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--card-bg-strong) 58%, transparent);
+  padding: 10px 36px 10px 12px;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-class-select-card h3,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-class-select-card h3 {
+  font-size: 0.86rem;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-class-select-card span:not(.student-class-chevron),
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-class-select-card span:not(.student-class-chevron) {
+  font-size: 0.74rem;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-class-chevron,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-class-chevron {
+  right: 14px;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-dashboard-link,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-dashboard-link {
+  justify-content: flex-start;
+  min-height: 32px;
+  margin-top: 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  padding: 0 9px;
+  color: var(--text-secondary);
+  box-shadow: none;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-dashboard-link:hover,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-dashboard-link:hover {
+  background: color-mix(in srgb, var(--theme-primary-soft) 42%, transparent);
+  color: var(--theme-primary);
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-dashboard-link-icon,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-dashboard-link-icon {
+  width: 15px;
+  height: 15px;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-dashboard-link-label,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-dashboard-link-label {
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-sidebar-footer,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-sidebar-footer {
+  gap: 9px;
+  padding: 0 22px 18px;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-toggle,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-toggle {
+  grid-template-columns: 28px minmax(0, 1fr);
+  min-height: 40px;
+  border-color: transparent;
+  background: transparent;
+  padding: 5px 6px;
+  box-shadow: none;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-toggle:hover,
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-toggle[aria-expanded="true"],
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-toggle:hover,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-toggle[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--theme-primary) 14%, transparent);
+  background: color-mix(in srgb, var(--theme-primary-soft) 38%, transparent);
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-icon,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--theme-primary-soft) 58%, transparent);
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-copy strong,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-copy strong {
+  font-size: 0.78rem;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-copy small,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .teacher-preview-settings-copy small {
+  font-size: 0.68rem;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-account-card,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-account-card {
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  gap: 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  padding: 5px 6px;
+  box-shadow: none;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-avatar,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-avatar {
+  width: 30px;
+  height: 30px;
+  font-size: 0.66rem;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-account-copy strong,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-account-copy strong {
+  font-size: 0.78rem;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-account-copy span,
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-signout-button,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-account-copy span,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-signout-button {
+  font-size: 0.68rem;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-signout-button,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-signout-button {
+  padding: 0;
+  color: var(--text-muted);
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-brand-row,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-brand-row {
+  grid-template-columns: minmax(0, 1fr) 28px 28px;
+  gap: 7px;
+  border: 0;
+  background: transparent;
+  padding: 3px 6px 0;
+  box-shadow: none;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-wordmark,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-wordmark {
+  font-size: 1.18rem;
+}
+
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-brand-mode-toggle,
+.student-workspace-shell:not([data-sidebar-collapsed="true"]) .student-brand-settings-toggle,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-brand-mode-toggle,
+.student-workspace-shell[data-appearance]:not([data-sidebar-collapsed="true"]) .student-brand-settings-toggle {
+  width: 28px;
+  height: 28px;
+  border-color: color-mix(in srgb, var(--card-border) 76%, transparent);
+  background: color-mix(in srgb, var(--card-bg-strong) 58%, transparent);
+  box-shadow: none;
+}
+
+.student-workspace-shell .student-starter-panel,
+.student-workspace-shell[data-appearance] .student-starter-panel {
+  max-width: 600px;
+}
+
+.student-workspace-shell .student-starter-panel h2,
+.student-workspace-shell[data-appearance] .student-starter-panel h2 {
+  font-size: 1.36rem;
+}
+
+.student-workspace-shell .student-starter-panel p,
+.student-workspace-shell[data-appearance] .student-starter-panel p {
+  max-width: 42ch;
+  font-size: 0.88rem;
+}

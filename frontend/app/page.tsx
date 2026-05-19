@@ -89,8 +89,8 @@ export default function LandingPage() {
   const [hintActive, setHintActive] = useState<boolean>(true);
   const [actionActive, setActionActive] = useState<boolean>(false);
   const [explainActive, setExplainActive] = useState<boolean>(false);
-  const [mounted, setMounted] = useState(false);
   const [isNavigating, setIsNavigating] = useState(false);
+  const [isNavCompact, setIsNavCompact] = useState(false);
   const router = useRouter();
 
   const handleNavigation = (e: React.MouseEvent<HTMLAnchorElement | HTMLButtonElement>, href: string) => {
@@ -102,13 +102,20 @@ export default function LandingPage() {
   };
 
   useEffect(() => {
-    setMounted(true);
+    const updateNavDensity = () => {
+      setIsNavCompact(window.scrollY > 32);
+    };
+
+    updateNavDensity();
+    window.addEventListener("scroll", updateNavDensity, { passive: true });
+
+    return () => {
+      window.removeEventListener("scroll", updateNavDensity);
+    };
   }, []);
 
   // Scroll reveal Intersection Observer setup
   useEffect(() => {
-    if (!mounted) return;
-    
     const observerOptions = {
       threshold: 0.08,
       rootMargin: "0px 0px -80px 0px"
@@ -129,7 +136,7 @@ export default function LandingPage() {
     return () => {
       revealTargets.forEach((target) => scrollObserver.unobserve(target));
     };
-  }, [mounted]);
+  }, []);
 
   const handleSubjectChange = (subj: Subject) => {
     if (subj === activeSubject || isChangingSubject) return;
@@ -211,14 +218,30 @@ export default function LandingPage() {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 1.25rem clamp(2rem, 5vw, 6rem);
+          min-height: 84px;
+          padding: 0 clamp(2rem, 5vw, 6rem);
           background: rgba(3, 20, 22, 0.95);
           backdrop-filter: blur(12px);
           border-bottom: 1px solid rgba(227, 222, 213, 0.05);
-          position: sticky;
+          box-sizing: border-box;
+          left: 0;
+          position: fixed;
+          right: 0;
           top: 0;
+          width: 100%;
           z-index: 100;
-          transition: all 0.4s var(--ease-out-quint);
+          transition:
+            min-height 0.32s var(--ease-out-quint),
+            background-color 0.32s var(--ease-out-quint),
+            border-color 0.32s var(--ease-out-quint),
+            box-shadow 0.32s var(--ease-out-quint);
+        }
+
+        .landing-nav--compact {
+          min-height: 64px;
+          background: rgba(3, 20, 22, 0.985);
+          border-bottom-color: rgba(227, 222, 213, 0.11);
+          box-shadow: 0 14px 30px rgba(0, 0, 0, 0.16);
         }
 
         .landing-brand {
@@ -237,7 +260,8 @@ export default function LandingPage() {
 
         .landing-nav-links {
           display: flex;
-          gap: 2.8rem;
+          gap: clamp(1.4rem, 2.6vw, 2.7rem);
+          align-items: center;
         }
 
         .landing-nav-links a {
@@ -280,6 +304,7 @@ export default function LandingPage() {
           flex-direction: column;
           align-items: center;
           text-align: center;
+          margin-top: 84px;
           position: relative;
           background-image: 
             radial-gradient(circle at 15% 25%, rgba(7, 91, 96, 0.08) 0%, transparent 45%),
@@ -288,6 +313,7 @@ export default function LandingPage() {
 
         .hero-copy {
           max-width: 960px;
+          margin-top: -2.75rem;
           z-index: 2;
           display: flex;
           flex-direction: column;
@@ -357,7 +383,7 @@ export default function LandingPage() {
 
         .hero-copy h1 {
           font-family: var(--heading-font);
-          font-size: clamp(2.8rem, 5.2vw, 4.6rem);
+          font-size: clamp(2.65rem, 4.8vw, 4.25rem);
           line-height: 1.14;
           font-weight: 400;
           margin: 0 0 1.8rem;
@@ -381,8 +407,12 @@ export default function LandingPage() {
         }
 
         .hero-actions .landing-primary-button {
+          align-items: center;
           background: var(--color-teal-brand);
           color: #ffffff;
+          display: inline-flex;
+          justify-content: center;
+          line-height: 1.15;
           padding: 1.15rem 2.6rem;
           border-radius: 8px;
           font-weight: 600;
@@ -403,8 +433,12 @@ export default function LandingPage() {
         }
 
         .landing-secondary-button {
+          align-items: center;
           border: 1px solid rgba(227, 222, 213, 0.25);
           color: var(--color-light-cream);
+          display: inline-flex;
+          justify-content: center;
+          line-height: 1.15;
           padding: 1.15rem 2.6rem;
           border-radius: 8px;
           font-weight: 600;
@@ -1141,13 +1175,13 @@ export default function LandingPage() {
           gap: 12px;
         }
 
-        .landing-nav .nav-actions a,
+        .landing-nav .nav-link,
         .landing-nav .nav-button {
-          min-height: 44px;
+          min-height: 42px;
           border: 1px solid rgba(227, 222, 213, 0.12);
           border-radius: 6px;
           background: transparent;
-          padding: 0 22px;
+          padding: 0 18px;
           color: #9ab3b5;
           text-decoration: none;
           font-weight: 600;
@@ -1158,7 +1192,12 @@ export default function LandingPage() {
           transition: all 0.3s var(--ease-out-quint);
         }
 
-        .landing-nav .nav-actions a:hover,
+        .landing-nav--compact .nav-link,
+        .landing-nav--compact .nav-button {
+          min-height: 38px;
+        }
+
+        .landing-nav .nav-link:hover,
         .landing-nav .nav-button:hover {
           background: rgba(250, 250, 247, 0.05);
           border-color: var(--color-light-cream);
@@ -1166,24 +1205,91 @@ export default function LandingPage() {
           transform: translateY(-1px);
         }
 
-        .landing-nav .nav-actions a:last-child {
+        .landing-nav .nav-link-primary {
           background: var(--color-teal-brand);
           color: #ffffff;
-          border: none;
+          border-color: var(--color-teal-brand);
         }
 
-        .landing-nav .nav-actions a:last-child:hover {
+        .landing-nav .nav-link-primary:hover {
           background-color: var(--color-teal-brand-hover);
+          border-color: var(--color-teal-brand-hover);
         }
 
         .landing-nav .account-pill {
           background: rgba(250, 250, 247, 0.08);
           border: 1px solid rgba(227, 222, 213, 0.12);
-          padding: 0.5rem 1.25rem;
+          padding: 0 15px;
           border-radius: 99px;
           font-size: 0.88rem;
           font-weight: 600;
           color: var(--color-light-cream);
+          min-height: 42px;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          cursor: pointer;
+          list-style: none;
+          max-width: 190px;
+        }
+
+        .landing-nav--compact .account-pill {
+          min-height: 38px;
+        }
+
+        .landing-nav .account-pill::-webkit-details-marker {
+          display: none;
+        }
+
+        .landing-nav .account-pill span:first-child {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .landing-nav .account-menu {
+          position: relative;
+        }
+
+        .landing-nav .account-menu-panel {
+          background: #071b1e;
+          border: 1px solid rgba(227, 222, 213, 0.12);
+          border-radius: 8px;
+          box-shadow: 0 18px 38px rgba(0, 0, 0, 0.24);
+          color: #9ab3b5;
+          display: grid;
+          gap: 8px;
+          min-width: 210px;
+          padding: 10px;
+          position: absolute;
+          right: 0;
+          top: calc(100% + 10px);
+        }
+
+        .landing-nav .account-menu-role {
+          border-bottom: 1px solid rgba(227, 222, 213, 0.1);
+          color: #a7bebf;
+          font-size: 0.78rem;
+          font-weight: 600;
+          padding: 4px 4px 10px;
+        }
+
+        .landing-nav .nav-menu-button {
+          background: transparent;
+          border: 0;
+          border-radius: 6px;
+          color: var(--color-light-cream);
+          cursor: pointer;
+          font: inherit;
+          font-size: 0.9rem;
+          font-weight: 600;
+          min-height: 36px;
+          padding: 0 10px;
+          text-align: left;
+        }
+
+        .landing-nav .nav-menu-button:hover {
+          background: rgba(250, 250, 247, 0.08);
         }
 
         /* Footer styling */
@@ -1276,13 +1382,325 @@ export default function LandingPage() {
         }
 
         @media (max-width: 768px) {
+          .landing-nav {
+            min-height: 72px;
+            padding: 0 20px;
+          }
+
+          .landing-nav--compact {
+            min-height: 60px;
+          }
+
+          .landing-brand {
+            font-size: 1.58rem;
+          }
+
+          .landing-nav .nav-actions {
+            gap: 8px;
+          }
+
+          .landing-nav .nav-link,
+          .landing-nav .nav-button {
+            min-height: 40px;
+            padding: 0 13px;
+            font-size: 0.8rem;
+            line-height: 1.05;
+            white-space: nowrap;
+          }
+
+          .landing-hero-grid {
+            margin-top: 72px;
+            padding: 3.8rem 2rem 10rem;
+          }
+
+          .hero-copy {
+            margin-top: 0;
+          }
+
+          .hero-pill {
+            align-self: stretch;
+            justify-content: center;
+            margin-bottom: 1.75rem;
+            padding: 0.55rem 0.95rem;
+            font-size: 0.66rem;
+            letter-spacing: 0.09em;
+          }
+
+          .hero-copy h1 {
+            font-size: 2.8rem;
+            line-height: 1.05;
+            max-width: 10.5ch;
+            margin-bottom: 1.5rem;
+          }
+
+          .hero-copy p {
+            font-size: 1.02rem;
+            line-height: 1.6;
+            margin-bottom: 2.4rem;
+          }
+
+          .hero-actions {
+            align-items: stretch;
+            gap: 1rem;
+            justify-content: center;
+            margin-bottom: 3rem;
+            width: 100%;
+          }
+
+          .hero-actions .landing-primary-button,
+          .hero-actions .landing-secondary-button {
+            align-items: center;
+            flex: 1;
+            justify-content: center;
+            min-height: 58px;
+            min-width: 0;
+            padding: 0 1rem;
+            text-align: center;
+          }
+
+          .hero-product-container {
+            margin-top: -6rem;
+            padding: 0 18px;
+          }
+
+          .comparison-card {
+            animation: mobileComparisonShellIn 0.72s var(--ease-out-expo) both;
+            border-radius: 14px;
+            overflow: hidden;
+            padding: 1.25rem 0.9rem 1rem;
+          }
+
+          .comparison-card h2 {
+            font-family: var(--body-font);
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.11em;
+            line-height: 1.25;
+            margin: 0 0 1rem;
+            text-transform: uppercase;
+          }
+
+          .comparison-card h2 span {
+            display: inline;
+            font-family: inherit;
+            font-style: normal;
+            font-weight: 800;
+          }
+
+          .comparison-card h2,
+          .comparison-subject-tabs {
+            animation: mobileComparisonHeaderIn 0.58s var(--ease-out-expo) both;
+          }
+
+          .comparison-subject-tabs {
+            animation-delay: 90ms;
+          }
+
+          .comparison-subject-tabs {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.38rem;
+            background: transparent;
+            border: 0;
+            margin-bottom: 1rem;
+            max-width: none;
+            padding: 0;
+            width: 100%;
+          }
+
+          .comparison-subject-active-pill {
+            display: none;
+          }
+
+          .comparison-subject-button {
+            background: #efebe2;
+            border: 1px solid rgba(227, 222, 213, 0.9);
+            border-radius: 8px;
+            color: #596364;
+            font-size: 0.78rem;
+            font-weight: 700;
+            min-width: 0;
+            overflow: hidden;
+            padding: 0.62rem 0.2rem;
+            text-overflow: ellipsis;
+            transition:
+              background-color 0.22s var(--ease-out-quint),
+              border-color 0.22s var(--ease-out-quint),
+              box-shadow 0.22s var(--ease-out-quint),
+              transform 0.22s var(--ease-out-quint);
+            white-space: nowrap;
+          }
+
+          .comparison-subject-button:active {
+            transform: scale(0.97);
+          }
+
+          .comparison-subject-button[aria-selected="true"] {
+            background: var(--color-pure-white);
+            border-color: rgba(7, 91, 96, 0.18);
+            box-shadow: 0 6px 14px rgba(3, 20, 22, 0.08);
+            color: var(--color-deep-forest);
+          }
+
           .comparison-grid {
-            grid-template-columns: 1fr;
-            gap: 1.5rem;
+            display: flex;
+            gap: 0.7rem;
+            margin: 0 -0.2rem;
+            overflow-x: auto;
+            overscroll-behavior-x: contain;
+            padding: 0 0.2rem 0.35rem;
+            scroll-padding-left: 0.2rem;
+            scroll-snap-type: x mandatory;
+            scroll-behavior: smooth;
+            -webkit-overflow-scrolling: touch;
+          }
+
+          .comparison-grid::-webkit-scrollbar {
+            display: none;
           }
 
           .comparison-vs {
             display: none;
+          }
+
+          .comparison-panel {
+            flex: 0 0 88%;
+            min-height: 0;
+            padding: 1.05rem 0.95rem;
+            border-radius: 10px;
+            opacity: 0;
+            scroll-snap-align: start;
+            scroll-snap-stop: always;
+            transform: translateY(12px) scale(0.985);
+            animation: mobileCompareCardIn 0.6s var(--ease-out-expo) forwards;
+            transition:
+              border-color 0.24s var(--ease-out-quint),
+              box-shadow 0.24s var(--ease-out-quint),
+              transform 0.24s var(--ease-out-quint);
+          }
+
+          .comparison-panel.success {
+            animation-delay: 90ms;
+          }
+
+          .comparison-panel:active {
+            transform: translateY(0) scale(0.992);
+          }
+
+          .comparison-panel.warning,
+          .comparison-panel.success {
+            background: #fffffb;
+          }
+
+          @keyframes mobileCompareCardIn {
+            to {
+              opacity: 1;
+              transform: translateY(0) scale(1);
+            }
+          }
+
+          @keyframes mobileComparisonShellIn {
+            from {
+              opacity: 0;
+              transform: translateY(18px) scale(0.985);
+            }
+            to {
+              opacity: 1;
+              transform: translateY(0) scale(1);
+            }
+          }
+
+          @keyframes mobileComparisonHeaderIn {
+            from {
+              opacity: 0;
+              transform: translateY(10px);
+            }
+            to {
+              opacity: 1;
+              transform: translateY(0);
+            }
+          }
+
+          .comparison-panel-head {
+            align-items: flex-start;
+            gap: 0.7rem;
+            margin-bottom: 1rem;
+          }
+
+          .comparison-panel-head h3 {
+            font-size: 1.28rem;
+            line-height: 1.05;
+          }
+
+          .comparison-panel-head span {
+            border-radius: 6px;
+            font-size: 0.56rem;
+            line-height: 1.25;
+            padding: 0.32rem 0.48rem;
+            text-align: center;
+          }
+
+          .comparison-dialogue {
+            gap: 0.72rem;
+            margin-bottom: 0.8rem;
+          }
+
+          .comparison-avatar {
+            height: 28px;
+            width: 28px;
+          }
+
+          .comparison-meta {
+            font-size: 0.58rem;
+            letter-spacing: 0.055em;
+          }
+
+          .comparison-question,
+          .comparison-response p {
+            font-size: 0.82rem;
+            line-height: 1.45;
+          }
+
+          .comparison-problem,
+          .comparison-response-row {
+            border-radius: 8px;
+            padding: 0.85rem;
+            margin-bottom: 0.8rem;
+          }
+
+          .comparison-response-row {
+            flex-grow: 0;
+          }
+
+          .comparison-problem p {
+            font-size: 0.61rem;
+            margin-bottom: 0.45rem;
+          }
+
+          .comparison-problem span,
+          .comparison-problem li {
+            font-size: 0.78rem;
+            line-height: 1.4;
+          }
+
+          .comparison-guidance-controls {
+            background: #eef2f1;
+            gap: 0.26rem;
+            margin-bottom: 0.8rem;
+            padding: 0.22rem;
+          }
+
+          .comparison-guidance-button {
+            min-height: 42px;
+            padding: 0.42rem 0.1rem;
+            font-size: 0.68rem;
+          }
+
+          .comparison-strip {
+            align-items: flex-start;
+            font-size: 0.78rem;
+            line-height: 1.35;
+            padding-top: 0.75rem;
           }
 
           .landing-nav-links {
@@ -1294,9 +1712,74 @@ export default function LandingPage() {
             gap: 1.25rem;
             align-items: center;
           }
+
+          .features-section {
+            padding: 5.5rem 1.35rem 5rem;
+          }
+
+          .asymmetric-features-grid {
+            gap: 2.6rem;
+          }
+
+          .features-narrative span {
+            font-size: 0.72rem;
+            margin-bottom: 0.9rem;
+          }
+
+          .features-narrative h2 {
+            font-size: 2.38rem;
+            line-height: 1.08;
+            max-width: 11.5ch;
+          }
+
+          .features-narrative p {
+            font-size: 1rem;
+          }
+
+          .reveal-element {
+            transform: translateY(22px) scale(0.992);
+            transition-duration: 0.78s;
+          }
+
+          .asymmetric-card.reveal-element,
+          .timeline-card.reveal-element,
+          .audience-box.reveal-element {
+            transform: translateY(26px) scale(0.985);
+          }
+
+          .asymmetric-card.reveal-element.revealed,
+          .timeline-card.reveal-element.revealed,
+          .audience-box.reveal-element.revealed {
+            transform: translateY(0) scale(1);
+          }
+
+          .features-narrative.revealed h2,
+          .section-header.revealed h2,
+          .cta-band.revealed h2 {
+            animation: mobileSectionTitleIn 0.68s var(--ease-out-expo) both;
+          }
+
+          @keyframes mobileSectionTitleIn {
+            from {
+              opacity: 0;
+              transform: translateY(12px);
+            }
+            to {
+              opacity: 1;
+              transform: translateY(0);
+            }
+          }
         }
 
         @media (max-width: 640px) {
+          .landing-nav .nav-link:not(.nav-link-primary) {
+            display: none;
+          }
+
+          .landing-nav .nav-link-primary {
+            min-width: 118px;
+          }
+
           .staggered-timeline {
             grid-template-columns: 1fr;
           }
@@ -1318,15 +1801,15 @@ export default function LandingPage() {
       `}</style>
 
       {/* Navigation */}
-      <nav className="landing-nav" aria-label="Main Navigation">
+      <nav className={`landing-nav ${isNavCompact ? "landing-nav--compact" : ""}`} aria-label="Main Navigation">
         <Link href="/" className="landing-brand">
           <span>Chandra</span>
         </Link>
         <div className="landing-nav-links">
           <a href="#how-it-works" onClick={(e) => handleScrollToSection(e, "how-it-works")}>How it works</a>
-          <a href="#features" onClick={(e) => handleScrollToSection(e, "features")}>Features</a>
-          <a href="#teachers" onClick={(e) => handleScrollToSection(e, "teachers")}>Teachers</a>
-          <a href="#students" onClick={(e) => handleScrollToSection(e, "students")}>Students</a>
+          <a href="#teachers" onClick={(e) => handleScrollToSection(e, "teachers")}>Teacher controls</a>
+          <a href="#students" onClick={(e) => handleScrollToSection(e, "students")}>Student experience</a>
+          <a href="#features" onClick={(e) => handleScrollToSection(e, "features")}>Evidence & safety</a>
         </div>
         <LocalAuthNav onNavigate={handleNavigation} />
       </nav>
@@ -1415,7 +1898,7 @@ export default function LandingPage() {
                 <div className="comparison-avatar">S</div>
                 <div>
                   <div className="comparison-meta">Student asks</div>
-                  <p className="comparison-question">"I'm stuck on #3. Where do I start?"</p>
+                  <p className="comparison-question">{"\"I'm stuck on #3. Where do I start?\""}</p>
                 </div>
               </div>
 
@@ -1466,7 +1949,7 @@ export default function LandingPage() {
                 <div className="comparison-avatar">S</div>
                 <div>
                   <div className="comparison-meta">Student asks</div>
-                  <p className="comparison-question">"I'm stuck on #3. Where do I start?"</p>
+                  <p className="comparison-question">{"\"I'm stuck on #3. Where do I start?\""}</p>
                 </div>
               </div>
 
@@ -1550,8 +2033,7 @@ export default function LandingPage() {
             </p>
             <div className="features-quote">
               <p>
-                "Chandra gives my AP students the customized nudge they need during homework hours,
-                without simply doing the work for them."
+                {"\"Chandra gives my AP students the customized nudge they need during homework hours, without simply doing the work for them.\""}
               </p>
               <cite>Sarah Jenkins, Chemistry Teacher</cite>
             </div>
@@ -1579,7 +2061,7 @@ export default function LandingPage() {
               <div>
                 <h3>Grounded in your materials</h3>
                 <p>
-                  Upload PDFs, worksheets, class notes, and textbook pages so that Chandra's AI tutoring
+                  Upload PDFs, worksheets, class notes, and textbook pages so that Chandra&apos;s AI tutoring
                   explanations always anchor directly to the exact terminology and methods you taught in class.
                 </p>
               </div>
@@ -1822,10 +2304,11 @@ function LocalAuthNav({ onNavigate }: NavigationProps) {
     return (
       <div className="nav-actions">
         <Link 
+          className="nav-link nav-link-primary"
           href="/auth?mode=signup"
           onClick={(e) => onNavigate(e, "/auth?mode=signup")}
         >
-          Set up auth
+          Request demo
         </Link>
       </div>
     );
@@ -1839,27 +2322,50 @@ function LocalAuthNav({ onNavigate }: NavigationProps) {
     return (
       <div className="nav-actions">
         <Link 
+          className="nav-link"
           href="/auth?mode=signin"
           onClick={(e) => onNavigate(e, "/auth?mode=signin")}
         >
           Sign in
         </Link>
         <Link 
+          className="nav-link nav-link-primary"
           href="/auth?mode=signup"
           onClick={(e) => onNavigate(e, "/auth?mode=signup")}
         >
-          Create account
+          Request demo
         </Link>
       </div>
     );
   }
 
+  const isStudent = profile?.role === "student";
+  const actionHref = isStudent ? "/student" : "/teacher";
+  const actionLabel = isStudent ? "Open study space" : "Open dashboard";
+  const accountLabel = profile?.displayName || user.email || "Account";
+  const accountRole = isStudent ? "Student account" : "Teacher account";
+
   return (
     <div className="nav-actions">
-      <span className="account-pill">{profile?.displayName ?? user.email}</span>
-      <button className="nav-button" type="button" onClick={handleSignOut}>
-        Sign out
-      </button>
+      <Link
+        className="nav-link nav-link-primary"
+        href={actionHref}
+        onClick={(e) => onNavigate(e, actionHref)}
+      >
+        {actionLabel}
+      </Link>
+      <details className="account-menu">
+        <summary className="account-pill" aria-label="Account menu">
+          <span>{accountLabel}</span>
+          <span aria-hidden="true">▾</span>
+        </summary>
+        <div className="account-menu-panel">
+          <span className="account-menu-role">{accountRole}</span>
+          <button className="nav-menu-button" type="button" onClick={handleSignOut}>
+            Sign out
+          </button>
+        </div>
+      </details>
     </div>
   );
 }

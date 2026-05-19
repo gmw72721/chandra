@@ -2092,7 +2092,10 @@ export function StudentWorkspace() {
             deleteAccountPassword={deleteAccountPassword}
           />
         ) : (
-          <section className="student-workspace-main" aria-label="Student tutor chat">
+          <section
+            className={`student-workspace-main${showStarterGuidance ? " is-starting-chat" : ""}`}
+            aria-label="Student tutor chat"
+          >
             <header className="student-main-header">
               <div className="student-main-title">
                 <h1>
@@ -2223,7 +2226,7 @@ export function StudentWorkspace() {
             {conversationMessagesError && !isPausedChatAccessMessage(conversationMessagesError) ? (
               <p className="form-error chat-error">{conversationMessagesError}</p>
             ) : null}
-            <div className="message-list student-message-list">
+            <div className={`message-list student-message-list${showStarterGuidance ? " has-starter-guidance" : ""}`}>
               {showStarterGuidance ? (
                 <StudentStarterPanel
                   isDisabled={studentChatPaused || !activeCourseId}
@@ -2375,12 +2378,12 @@ function StudentStarterPanel({
   const starterPrompts: Array<{ label: string; mode?: StudentMessageMode; prompt: string }> = [
     {
       label: "Ask about a problem",
-      prompt: "Can you help me understand where to start on this problem?"
+      prompt: "I need help starting this problem."
     },
     {
       label: "Check my work",
       mode: "work",
-      prompt: "Can you check my work and tell me what I should revisit?"
+      prompt: "Can you check my work and point out what I should revisit?"
     },
     {
       label: "Explain a concept",
@@ -2390,11 +2393,8 @@ function StudentStarterPanel({
 
   return (
     <section className="student-starter-panel" aria-labelledby="student-starter-heading">
-      <span className="student-starter-kicker">Tutoring workspace</span>
-      <h2 id="student-starter-heading">Start with the problem or step you want to work on.</h2>
-      <p>
-        Paste a prompt, upload a worksheet image or PDF, or ask Chandra to check an attempt. Short questions are fine.
-      </p>
+      <h2 id="student-starter-heading">What are you working on?</h2>
+      <p>Start with a problem, a step, or a screenshot. Chandra will help one step at a time.</p>
       <div className="student-starter-actions" aria-label="Starter prompts">
         {starterPrompts.map((starterPrompt) => (
           <button
