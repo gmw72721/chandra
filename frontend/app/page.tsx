@@ -1045,6 +1045,13 @@ export default function LandingPage() {
           line-height: 1.25;
         }
 
+        .timeline-card p {
+          color: #495354;
+          font-size: 0.9rem;
+          line-height: 1.6;
+          margin: 0.5rem 0 0;
+        }
+
         /* Classroom Split Columns */
         .audience-section {
           padding: 9.5rem clamp(2rem, 5vw, 6rem);
@@ -1714,7 +1721,8 @@ export default function LandingPage() {
           }
 
           .features-section {
-            padding: 5.5rem 1.35rem 5rem;
+            overflow: hidden;
+            padding: 5.2rem 1.15rem 4.8rem;
           }
 
           .asymmetric-features-grid {
@@ -1736,6 +1744,247 @@ export default function LandingPage() {
             font-size: 1rem;
           }
 
+          .features-quote {
+            margin-top: 2rem;
+            padding-left: 1.1rem;
+          }
+
+          .features-quote p {
+            font-size: 1.08rem;
+            line-height: 1.5;
+          }
+
+          .features-cards-stack {
+            gap: 1rem;
+          }
+
+          .asymmetric-card {
+            border-radius: 14px;
+            flex-direction: column;
+            gap: 1rem;
+            padding: 1.35rem;
+          }
+
+          .asymmetric-card:nth-child(2) {
+            margin-left: 0;
+          }
+
+          .card-icon-wrapper {
+            border-radius: 12px;
+            height: 48px;
+            width: 48px;
+          }
+
+          .asymmetric-card h3 {
+            font-size: 1.72rem;
+            line-height: 1.08;
+            margin-bottom: 0.55rem;
+          }
+
+          .asymmetric-card p {
+            font-size: 0.95rem;
+            line-height: 1.55;
+          }
+
+          .how-it-works-section {
+            padding: 5.4rem 1.15rem;
+          }
+
+          .how-it-works-section .section-header {
+            margin-bottom: 3rem;
+            text-align: left;
+          }
+
+          .how-it-works-section .section-header h2 {
+            font-size: 2.24rem;
+            line-height: 1.08;
+          }
+
+          .staggered-timeline {
+            gap: 0;
+            grid-template-columns: 1fr;
+            padding-left: 2.6rem;
+          }
+
+          .staggered-timeline::before {
+            background: linear-gradient(180deg, rgba(7, 91, 96, 0.16), rgba(7, 91, 96, 0.42), rgba(7, 91, 96, 0.1));
+            bottom: 1.4rem;
+            content: "";
+            left: 1.1rem;
+            position: absolute;
+            top: 1.4rem;
+            width: 1px;
+          }
+
+          .timeline-card {
+            border-radius: 14px;
+            margin-bottom: 1rem;
+            min-height: 0;
+            padding: 1.35rem 1.25rem 1.4rem;
+          }
+
+          .timeline-card:last-child {
+            margin-bottom: 0;
+          }
+
+          .timeline-card::before {
+            background: #efebe2;
+            border: 2px solid var(--color-teal-brand);
+            border-radius: 99px;
+            box-shadow: 0 0 0 6px #efebe2;
+            content: "";
+            height: 12px;
+            left: -2.02rem;
+            position: absolute;
+            top: 1.65rem;
+            width: 12px;
+            z-index: 2;
+          }
+
+          .timeline-card:nth-child(2) {
+            border-color: rgba(7, 91, 96, 0.28);
+            box-shadow: 0 16px 34px rgba(7, 91, 96, 0.08);
+          }
+
+          .timeline-number {
+            align-items: center;
+            background: rgba(7, 91, 96, 0.1);
+            border: 1px solid rgba(7, 91, 96, 0.16);
+            border-radius: 99px;
+            color: var(--color-teal-brand);
+            display: inline-flex;
+            font-family: var(--body-font);
+            font-size: 0.72rem;
+            font-weight: 800;
+            height: 28px;
+            justify-content: center;
+            letter-spacing: 0.08em;
+            margin-bottom: 0.9rem;
+            position: static;
+            width: 40px;
+          }
+
+          .timeline-card h3 {
+            font-size: 1.48rem;
+            line-height: 1.1;
+            margin: 0 0 0.55rem;
+          }
+
+          .timeline-card p {
+            font-size: 0.95rem;
+            line-height: 1.55;
+          }
+
+          .audience-section {
+            gap: 1rem;
+            overflow: hidden;
+            padding: 4.8rem 1.15rem;
+          }
+
+          .audience-box {
+            background: linear-gradient(180deg, #fffffb 0%, #fbfdfd 100%);
+            border-radius: 14px;
+            padding: 1.45rem;
+          }
+
+          .audience-box h2 {
+            align-items: center;
+            font-size: 1.9rem;
+            gap: 0.8rem;
+            line-height: 1.05;
+            margin-bottom: 1.25rem;
+          }
+
+          .audience-box h2 svg {
+            background: #edf3f5;
+            border-radius: 12px;
+            box-sizing: border-box;
+            height: 46px;
+            padding: 10px;
+            width: 46px;
+          }
+
+          .audience-box ul {
+            gap: 0.72rem;
+          }
+
+          .audience-box li {
+            background: rgba(239, 235, 226, 0.45);
+            border: 1px solid rgba(227, 222, 213, 0.7);
+            border-radius: 10px;
+            font-size: 0.94rem;
+            gap: 0.72rem;
+            line-height: 1.38;
+            padding: 0.82rem 0.9rem;
+          }
+
+          .audience-box li svg {
+            height: 17px;
+            margin-top: 0.12rem;
+            width: 17px;
+          }
+
+          .cta-band {
+            align-items: stretch;
+            gap: 2rem;
+            overflow: hidden;
+            padding: 4.6rem 1.35rem;
+            text-align: left;
+          }
+
+          .cta-band h2 {
+            font-size: 2.35rem;
+            line-height: 1.08;
+            max-width: 11ch;
+          }
+
+          .cta-actions {
+            gap: 0.9rem;
+            width: 100%;
+          }
+
+          .cta-actions a {
+            align-items: center;
+            display: inline-flex;
+            justify-content: center;
+            min-height: 56px;
+          }
+
+          .landing-footer {
+            align-items: flex-start;
+            flex-direction: column;
+            gap: 1.4rem;
+            overflow: hidden;
+            padding: 3.2rem 1.35rem calc(3.2rem + env(safe-area-inset-bottom));
+          }
+
+          .footer-brand {
+            font-size: 2.2rem;
+            line-height: 1;
+          }
+
+          .footer-links {
+            display: grid;
+            gap: 0.65rem;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            width: 100%;
+          }
+
+          .footer-links a {
+            background: rgba(255, 255, 251, 0.54);
+            border: 1px solid rgba(227, 222, 213, 0.85);
+            border-radius: 8px;
+            min-width: 0;
+            padding: 0.78rem 0.5rem;
+            text-align: center;
+          }
+
+          .landing-footer p {
+            line-height: 1.45;
+            margin: 0;
+            max-width: 28ch;
+          }
+
           .reveal-element {
             transform: translateY(22px) scale(0.992);
             transition-duration: 0.78s;
@@ -1745,6 +1994,22 @@ export default function LandingPage() {
           .timeline-card.reveal-element,
           .audience-box.reveal-element {
             transform: translateY(26px) scale(0.985);
+          }
+
+          .timeline-card:nth-child(odd).reveal-element {
+            transform: translateX(-18px) translateY(22px) scale(0.985);
+          }
+
+          .timeline-card:nth-child(even).reveal-element {
+            transform: translateX(18px) translateY(22px) scale(0.985);
+          }
+
+          .audience-box:first-child.reveal-element {
+            transform: translateX(-28px) translateY(18px) scale(0.985);
+          }
+
+          .audience-box:nth-child(2).reveal-element {
+            transform: translateX(28px) translateY(18px) scale(0.985);
           }
 
           .asymmetric-card.reveal-element.revealed,
@@ -1795,7 +2060,7 @@ export default function LandingPage() {
           }
 
           .audience-box {
-            padding: 3rem 2rem;
+            padding: 1.45rem;
           }
         }
       `}</style>
@@ -2094,7 +2359,7 @@ export default function LandingPage() {
           <div className="timeline-card reveal-element delay-1">
             <div className="timeline-number">I</div>
             <h3>Upload class materials</h3>
-            <p style={{ fontSize: "0.9rem", lineHeight: "1.6", color: "#495354", marginTop: "0.5rem" }}>
+            <p>
               Provide PDFs, study guides, worksheets, or textbook pages to establish the grounding corpus.
             </p>
           </div>
@@ -2102,7 +2367,7 @@ export default function LandingPage() {
           <div className="timeline-card reveal-element delay-2">
             <div className="timeline-number">II</div>
             <h3>Set tutoring policy</h3>
-            <p style={{ fontSize: "0.9rem", lineHeight: "1.6", color: "#495354", marginTop: "0.5rem" }}>
+            <p>
               Define the rules, enabling or limiting hints, explanations, and review tools for assignments.
             </p>
           </div>
@@ -2110,7 +2375,7 @@ export default function LandingPage() {
           <div className="timeline-card reveal-element delay-3">
             <div className="timeline-number">III</div>
             <h3>Students ask for guided help</h3>
-            <p style={{ fontSize: "0.9rem", lineHeight: "1.6", color: "#495354", marginTop: "0.5rem" }}>
+            <p>
               Students interact with the chatbot, getting scaffolded next steps rather than instant answers.
             </p>
           </div>
@@ -2118,7 +2383,7 @@ export default function LandingPage() {
           <div className="timeline-card reveal-element delay-4">
             <div className="timeline-number">IV</div>
             <h3>Review learning insights</h3>
-            <p style={{ fontSize: "0.9rem", lineHeight: "1.6", color: "#495354", marginTop: "0.5rem" }}>
+            <p>
               Spot exactly where students got stuck and examine engagement patterns to adjust your lesson plans.
             </p>
           </div>
