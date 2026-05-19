@@ -30,6 +30,8 @@ import { CLASS_CODE_LENGTH, formatClassCodeInput } from "@/lib/class-code";
 import { useAuth } from "./AuthProvider";
 
 type AuthMode = "signin" | "signup" | "reset";
+type AuthAudience = "chooser" | "student" | "teacher";
+type StudentSignupStep = "classCode" | "name" | "auth";
 type EmailLinkCompletionStatus = "idle" | "needsEmail" | "working";
 
 const pendingProfileStorageKey = "chandra.pendingProfile";
@@ -61,10 +63,18 @@ interface AuthFormProps {
 export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const requestedRole = searchParams.get("role") === "teacher" ? "teacher" : "student";
+  const requestedRoleParam = searchParams.get("role");
+  const requestedRole = requestedRoleParam === "teacher" ? "teacher" : "student";
   const requestedClassId = formatClassCodeInput(searchParams.get("classId") ?? "");
+  const hasRequestedRole = requestedRoleParam === "teacher" || requestedRoleParam === "student";
   const [mode, setMode] = useState<AuthMode>(() => parseAuthMode(searchParams.get("authMode") ?? searchParams.get("mode")));
   const [role, setRole] = useState<AccountRole>(requestedRole);
+  const [authAudience, setAuthAudience] = useState<AuthAudience>(() =>
+    requestedClassId ? "student" : hasRequestedRole ? requestedRole : "chooser"
+  );
+  const [studentSignupStep, setStudentSignupStep] = useState<StudentSignupStep>(() =>
+    requestedRole === "student" && requestedClassId ? "name" : "classCode"
+  );
   const [classId, setClassId] = useState(requestedClassId);
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
@@ -278,6 +288,24 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
 
     try {
       if (mode === "signup") {
+        if (role === "student" && studentSignupStep !== "auth") {
+          if (studentSignupStep === "classCode") {
+            if (!classId.trim()) {
+              throw new Error("Enter your class code to continue.");
+            }
+
+            setStudentSignupStep("name");
+            return;
+          }
+
+          if (!displayName.trim()) {
+            throw new Error("Enter your name to continue.");
+          }
+
+          setStudentSignupStep("auth");
+          return;
+        }
+
         if (!showEmailSignup) {
           assertSignupProfileFieldsArePresent();
           setShowEmailSignup(true);
@@ -320,6 +348,29 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
     setError("");
     setNotice("");
     setShowEmailSignup(false);
+    if (nextMode === "signup" && role === "student") {
+      setStudentSignupStep(classId.trim() ? "name" : "classCode");
+    }
+  }
+
+  function chooseStudentSignupStep(nextStep: StudentSignupStep) {
+    setStudentSignupStep(nextStep);
+    setError("");
+    setNotice("");
+    setShowEmailSignup(false);
+  }
+
+  function chooseAudience(nextAudience: Exclude<AuthAudience, "chooser">, nextMode: AuthMode) {
+    setAuthAudience(nextAudience);
+    setRole(nextAudience);
+    setMode(nextMode);
+    setError("");
+    setNotice("");
+    setShowEmailSignup(false);
+
+    if (nextAudience === "student" && nextMode === "signup") {
+      setStudentSignupStep(classId.trim() ? "name" : "classCode");
+    }
   }
 
   async function submitProviderSignIn(provider: AuthProviderKey) {
@@ -887,124 +938,447 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
     );
   }
 
-  return (
-    <section className={`auth-card auth-card--${mode}`}>
-      <h1>
-        {mode === "signup"
-          ? "Create your Chandra account"
-          : mode === "reset"
+  const isStudentSignupFlow = mode === "signup" && role === "student";
+
+  if (authAudience === "chooser") {
+    return (
+      <section className="auth-card auth-card--role-choice">
+        <p className="auth-step-label">Welcome to Chandra</p>
+        <h1>How are you using Chandra today?</h1>
+        <p className="auth-support-copy">
+          Choose the path that matches what you need to do.
+        </p>
+        {sessionError ? <p className="form-error">{sessionError}</p> : null}
+
+        <div className="auth-choice-grid" aria-label="Choose account path">
+          <button
+            className="auth-choice-card"
+            type="button"
+            onClick={() => chooseAudience("student", "signup")}
+          >
+            <span>Student</span>
+            <strong>Join a class</strong>
+            <small>Use the class code your teacher gave you.</small>
+          </button>
+          <button
+            className="auth-choice-card"
+            type="button"
+            onClick={() => chooseAudience("teacher", "signin")}
+          >
+            <span>Teacher</span>
+            <strong>Manage classes</strong>
+            <small>Sign in to tutors, materials, and student support.</small>
+          </button>
+        </div>
+
+        <div className="auth-entry-links">
+          <button type="button" onClick={() => chooseAudience("student", "signin")}>
+            Student sign in
+          </button>
+          <button type="button" onClick={() => chooseAudience("teacher", "signup")}>
+            Create teacher account
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (isStudentSignupFlow) {
+    const studentHeading =
+      studentSignupStep === "classCode"
+        ? "Join your class"
+        : studentSignupStep === "name"
+          ? "Tell us who's joining"
+          : "Create your student account";
+    const studentSupportingCopy =
+      studentSignupStep === "classCode"
+        ? "Enter the class code your teacher gave you."
+        : studentSignupStep === "name"
+          ? "Use the name your teacher will recognize in class."
+          : "Choose how you'll sign in when you come back to Chandra.";
+
+    return (
+      <section className="auth-card auth-card--student-join">
+        <p className="auth-step-label">
+          {studentSignupStep === "classCode"
+            ? "Student access"
+            : studentSignupStep === "name"
+              ? "Class profile"
+              : "Sign-in method"}
+        </p>
+        <h1>{studentHeading}</h1>
+        <p className="auth-support-copy">{studentSupportingCopy}</p>
+        {sessionError ? <p className="form-error">{sessionError}</p> : null}
+
+        <form className="auth-form" onSubmit={submitAuth}>
+          {studentSignupStep === "classCode" ? (
+            <>
+              <label className="field-label" htmlFor="student-class-id">
+                Class code
+              </label>
+              <input
+                id="student-class-id"
+                required
+                value={classId}
+                maxLength={CLASS_CODE_LENGTH}
+                autoCapitalize="characters"
+                autoComplete="off"
+                onChange={(event) => setClassId(formatClassCodeInput(event.target.value))}
+                placeholder="ABCDEF"
+              />
+            </>
+          ) : null}
+
+          {studentSignupStep === "name" ? (
+            <>
+              <button
+                className="auth-text-button auth-step-back"
+                type="button"
+                onClick={() => chooseStudentSignupStep("classCode")}
+              >
+                Change class code
+              </button>
+              <label className="field-label" htmlFor="student-name">
+                Name
+              </label>
+              <input
+                id="student-name"
+                required
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+                placeholder="Ada Lovelace"
+              />
+            </>
+          ) : null}
+
+          {studentSignupStep === "auth" ? (
+            <>
+              <div className="auth-student-summary" aria-label="Student signup details">
+                <span>Class code</span>
+                <strong>{classId}</strong>
+                <button
+                  className="auth-text-button"
+                  type="button"
+                  onClick={() => chooseStudentSignupStep("classCode")}
+                >
+                  Change
+                </button>
+              </div>
+              <div className="auth-student-summary" aria-label="Student name">
+                <span>Name</span>
+                <strong>{displayName}</strong>
+                <button
+                  className="auth-text-button"
+                  type="button"
+                  onClick={() => chooseStudentSignupStep("name")}
+                >
+                  Edit
+                </button>
+              </div>
+
+              <div className="auth-signup-methods">
+                {renderProviderAuthGroup({ showDivider: showEmailSignup })}
+                {!showEmailSignup ? (
+                  <button
+                    className="auth-secondary-button"
+                    disabled={isSubmitting}
+                    type="button"
+                    onClick={() => {
+                      setError("");
+                      setNotice("");
+                      try {
+                        assertSignupProfileFieldsArePresent();
+                        setShowEmailSignup(true);
+                      } catch (caughtError) {
+                        setError(caughtError instanceof Error ? caughtError.message : "Complete the class details first.");
+                      }
+                    }}
+                  >
+                    Use email instead
+                  </button>
+                ) : null}
+              </div>
+            </>
+          ) : null}
+
+          {studentSignupStep === "auth" && showEmailSignup ? (
+            <>
+              <p className="auth-form-heading">Create an account with email and password</p>
+
+              <label className="field-label" htmlFor="student-username">
+                Username
+              </label>
+              <input
+                id="student-username"
+                required
+                autoCapitalize="none"
+                autoComplete="username"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                placeholder="ada"
+              />
+
+              <label className="field-label" htmlFor="student-email">
+                Email
+              </label>
+              <input
+                id="student-email"
+                required
+                autoCapitalize="none"
+                autoComplete="email"
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="you@example.com"
+              />
+
+              <label className="field-label" htmlFor="student-password">
+                Password
+              </label>
+              <input
+                id="student-password"
+                required
+                minLength={6}
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="At least 6 characters"
+              />
+
+              <div className="auth-magic-link-panel">
+                <p>Prefer not to use a password?</p>
+                <button
+                  className="auth-secondary-button"
+                  disabled={isSubmitting}
+                  type="button"
+                  onClick={submitMagicLink}
+                >
+                  Sign up with email link
+                </button>
+              </div>
+            </>
+          ) : null}
+
+          {error ? <p className="form-error">{error}</p> : null}
+          {notice ? <p className="form-notice">{notice}</p> : null}
+
+          {studentSignupStep !== "auth" || showEmailSignup ? (
+            <button className="primary-button" disabled={isSubmitting} type="submit">
+              {isSubmitting
+                ? "Working"
+                : studentSignupStep === "classCode" || studentSignupStep === "name"
+                  ? "Continue"
+                  : "Join class"}
+            </button>
+          ) : null}
+        </form>
+
+        <div className="auth-entry-links">
+          <button type="button" onClick={() => chooseAudience("student", "signin")}>
+            Already have a student account? Sign in
+          </button>
+          <button type="button" onClick={() => chooseAudience("teacher", "signin")}>
+            Teacher? Sign in here
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (mode === "signin" || mode === "reset") {
+    const isTeacher = role === "teacher";
+
+    return (
+      <section className={`auth-card auth-card--${mode}`}>
+        <p className="auth-step-label">
+          {mode === "reset" ? "Account recovery" : isTeacher ? "Teacher access" : "Student access"}
+        </p>
+        <h1>
+          {mode === "reset"
             ? "Reset your password"
-            : "Welcome back."}
-      </h1>
-      {sessionError ? <p className="form-error">{sessionError}</p> : null}
+            : isTeacher
+              ? "Teacher sign in"
+              : "Student sign in"}
+        </h1>
+        <p className="auth-support-copy">
+          {mode === "reset"
+            ? "Enter the email or username for your Chandra account."
+            : isTeacher
+              ? "Manage classes, tutors, materials, and student support."
+              : "Return to your class tutor and saved conversations."}
+        </p>
+        {sessionError ? <p className="form-error">{sessionError}</p> : null}
 
-      <div className="segmented-control" aria-label="Authentication mode">
-        <button
-          aria-pressed={mode === "signup"}
-          type="button"
-          onClick={() => chooseMode("signup")}
-        >
-          Sign up
-        </button>
-        <button
-          aria-pressed={mode === "signin"}
-          type="button"
-          onClick={() => chooseMode("signin")}
-        >
-          Sign in
-        </button>
-      </div>
+        {mode === "signin" ? renderProviderAuthGroup() : null}
 
-      {mode === "signin" ? renderProviderAuthGroup() : null}
+        <form className="auth-form" onSubmit={submitAuth}>
+          <p className="auth-form-heading">
+            {mode === "reset" ? "Send a password reset link" : "Sign in with email and password"}
+          </p>
 
-      <form className="auth-form" onSubmit={submitAuth}>
-        {mode === "signup" ? (
-          <>
-            <p className="auth-form-heading auth-form-heading-left">
-              Account details
-            </p>
+          <label className="field-label" htmlFor="email">
+            Username or email
+          </label>
+          <input
+            id="email"
+            required
+            autoCapitalize="none"
+            autoComplete="username"
+            type="text"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="ada or you@example.com"
+          />
 
-            <label className="field-label" htmlFor="role">
-              Account type
-            </label>
-            <select
-              id="role"
-              value={role}
-              onChange={(event) => setRole(event.target.value as AccountRole)}
-            >
-              <option value="student">Student</option>
-              <option value="teacher">Teacher</option>
-            </select>
+          {mode !== "reset" ? (
+            <>
+              <label className="field-label" htmlFor="password">
+                Password
+              </label>
+              <input
+                id="password"
+                required
+                minLength={6}
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="At least 6 characters"
+              />
+            </>
+          ) : null}
 
-            {role === "student" ? (
-              <>
-                <label className="field-label" htmlFor="class-id">
-                  Class code
-                </label>
-                <input
-                  id="class-id"
-                  value={classId}
-                  maxLength={CLASS_CODE_LENGTH}
-                  onChange={(event) => setClassId(formatClassCodeInput(event.target.value))}
-                  placeholder="ABCDEF"
-                />
-              </>
-            ) : null}
-
-            <label className="field-label" htmlFor="name">
-              Name
-            </label>
-            <input
-              id="name"
-              required
-              value={displayName}
-              onChange={(event) => setDisplayName(event.target.value)}
-              placeholder="Ada Lovelace"
-            />
-          </>
-        ) : null}
-
-        {mode === "signup" ? (
-          <div className="auth-signup-methods">
-            <p className="auth-form-heading auth-form-heading-left">
-              Sign-in method
-            </p>
-            {renderProviderAuthGroup({ showDivider: showEmailSignup })}
-            {!showEmailSignup ? (
+          {mode !== "reset" ? (
+            <div className="auth-magic-link-panel">
+              <p>Prefer not to use a password?</p>
               <button
                 className="auth-secondary-button"
                 disabled={isSubmitting}
                 type="button"
-                onClick={() => {
-                  setError("");
-                  setNotice("");
-                  try {
-                    assertSignupProfileFieldsArePresent();
-                    setShowEmailSignup(true);
-                  } catch (caughtError) {
-                    setError(caughtError instanceof Error ? caughtError.message : "Complete the account details first.");
-                  }
-                }}
+                onClick={submitMagicLink}
               >
-                Use email instead
+                {emailLinkUrl ? "Complete email-link sign-in" : "Sign in with email link"}
               </button>
-            ) : null}
-          </div>
-        ) : null}
+            </div>
+          ) : null}
 
-        {mode !== "reset" && (mode !== "signup" || showEmailSignup) ? (
-          <p className="auth-form-heading">
-            {mode === "signup" ? "Create an account with email and password" : "Sign in with email and password"}
-          </p>
-        ) : null}
+          {mode === "signin" ? (
+            <div className="auth-inline-action">
+              <span>Forgot your password?</span>
+              <button type="button" onClick={() => chooseMode("reset")}>
+                Reset it
+              </button>
+            </div>
+          ) : null}
 
-        {mode === "signup" && showEmailSignup ? (
+          {mode === "reset" ? (
+            <div className="auth-inline-action">
+              <span>Know your password?</span>
+              <button type="button" onClick={() => chooseMode("signin")}>
+                Sign in
+              </button>
+            </div>
+          ) : null}
+
+          {error ? <p className="form-error">{error}</p> : null}
+          {notice ? <p className="form-notice">{notice}</p> : null}
+
+          <button className="primary-button" disabled={isSubmitting} type="submit">
+            {isSubmitting ? "Working" : mode === "reset" ? "Send reset link" : "Sign in"}
+          </button>
+        </form>
+
+        <div className="auth-entry-links">
+          {isTeacher ? (
+            <>
+              <button type="button" onClick={() => chooseAudience("teacher", "signup")}>
+                New teacher? Create account
+              </button>
+              <button type="button" onClick={() => chooseAudience("student", "signup")}>
+                Student? Join a class
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="button" onClick={() => chooseAudience("student", "signup")}>
+                Need to join a class?
+              </button>
+              <button type="button" onClick={() => chooseAudience("teacher", "signin")}>
+                Teacher? Sign in here
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setAuthAudience("chooser");
+              setError("");
+              setNotice("");
+              setShowEmailSignup(false);
+            }}
+          >
+            Choose a different path
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="auth-card auth-card--teacher-signup">
+      <p className="auth-step-label">Teacher account</p>
+      <h1>Create teacher account</h1>
+      <p className="auth-support-copy">
+        Set up classes, invite students, and guide how Chandra tutors respond.
+      </p>
+      {sessionError ? <p className="form-error">{sessionError}</p> : null}
+
+      <form className="auth-form" onSubmit={submitAuth}>
+        <p className="auth-form-heading auth-form-heading-left">Teacher details</p>
+
+        <label className="field-label" htmlFor="teacher-name">
+          Name
+        </label>
+        <input
+          id="teacher-name"
+          required
+          value={displayName}
+          onChange={(event) => setDisplayName(event.target.value)}
+          placeholder="Ada Lovelace"
+        />
+
+        <div className="auth-signup-methods">
+          <p className="auth-form-heading auth-form-heading-left">Sign-in method</p>
+          {renderProviderAuthGroup({ showDivider: showEmailSignup })}
+          {!showEmailSignup ? (
+            <button
+              className="auth-secondary-button"
+              disabled={isSubmitting}
+              type="button"
+              onClick={() => {
+                setError("");
+                setNotice("");
+                try {
+                  assertSignupProfileFieldsArePresent();
+                  setShowEmailSignup(true);
+                } catch (caughtError) {
+                  setError(caughtError instanceof Error ? caughtError.message : "Enter your name first.");
+                }
+              }}
+            >
+              Use email instead
+            </button>
+          ) : null}
+        </div>
+
+        {showEmailSignup ? (
           <>
-            <label className="field-label" htmlFor="username">
+            <p className="auth-form-heading">Create an account with email and password</p>
+
+            <label className="field-label" htmlFor="teacher-username">
               Username
             </label>
             <input
-              id="username"
+              id="teacher-username"
               required
               autoCapitalize="none"
               autoComplete="username"
@@ -1012,34 +1386,26 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
               onChange={(event) => setUsername(event.target.value)}
               placeholder="ada"
             />
-          </>
-        ) : null}
 
-        {mode !== "signup" || showEmailSignup ? (
-          <>
-            <label className="field-label" htmlFor="email">
-              {mode === "signin" || mode === "reset" ? "Username or email" : "Email"}
+            <label className="field-label" htmlFor="teacher-email">
+              Email
             </label>
             <input
-              id="email"
+              id="teacher-email"
               required
               autoCapitalize="none"
-              autoComplete={mode === "signin" || mode === "reset" ? "username" : "email"}
-              type={mode === "signin" || mode === "reset" ? "text" : "email"}
+              autoComplete="email"
+              type="email"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              placeholder={mode === "signin" || mode === "reset" ? "ada or you@example.com" : "you@example.com"}
+              placeholder="you@example.com"
             />
-          </>
-        ) : null}
 
-        {mode !== "reset" && (mode !== "signup" || showEmailSignup) ? (
-          <>
-            <label className="field-label" htmlFor="password">
+            <label className="field-label" htmlFor="teacher-password">
               Password
             </label>
             <input
-              id="password"
+              id="teacher-password"
               required
               minLength={6}
               type="password"
@@ -1047,60 +1413,50 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
               onChange={(event) => setPassword(event.target.value)}
               placeholder="At least 6 characters"
             />
+
+            <div className="auth-magic-link-panel">
+              <p>Prefer not to use a password?</p>
+              <button
+                className="auth-secondary-button"
+                disabled={isSubmitting}
+                type="button"
+                onClick={submitMagicLink}
+              >
+                Sign up with email link
+              </button>
+            </div>
           </>
-        ) : null}
-
-        {mode !== "reset" && (mode !== "signup" || showEmailSignup) ? (
-          <div className="auth-magic-link-panel">
-            <p>Prefer not to use a password?</p>
-            <button
-              className="auth-secondary-button"
-              disabled={isSubmitting}
-              type="button"
-              onClick={submitMagicLink}
-            >
-              {emailLinkUrl
-                ? "Complete email-link sign-in"
-                : mode === "signup"
-                  ? "Sign up with email link"
-                  : "Sign in with email link"}
-            </button>
-          </div>
-        ) : null}
-
-        {mode === "signin" ? (
-          <div className="auth-inline-action">
-            <span>Forgot your password?</span>
-            <button type="button" onClick={() => chooseMode("reset")}>
-              Reset it
-            </button>
-          </div>
-        ) : null}
-
-        {mode === "reset" ? (
-          <div className="auth-inline-action">
-            <span>Know your password?</span>
-            <button type="button" onClick={() => chooseMode("signin")}>
-              Sign in
-            </button>
-          </div>
         ) : null}
 
         {error ? <p className="form-error">{error}</p> : null}
         {notice ? <p className="form-notice">{notice}</p> : null}
 
-        {mode !== "signup" || showEmailSignup ? (
+        {showEmailSignup ? (
           <button className="primary-button" disabled={isSubmitting} type="submit">
-            {isSubmitting
-              ? "Working"
-              : mode === "signup"
-                ? "Create account"
-                : mode === "reset"
-                  ? "Send reset link"
-                  : "Sign in"}
+            {isSubmitting ? "Working" : "Create teacher account"}
           </button>
         ) : null}
       </form>
+
+      <div className="auth-entry-links">
+        <button type="button" onClick={() => chooseAudience("teacher", "signin")}>
+          Already have a teacher account? Sign in
+        </button>
+        <button type="button" onClick={() => chooseAudience("student", "signup")}>
+          Student? Join a class
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setAuthAudience("chooser");
+            setError("");
+            setNotice("");
+            setShowEmailSignup(false);
+          }}
+        >
+          Choose a different path
+        </button>
+      </div>
     </section>
   );
 }

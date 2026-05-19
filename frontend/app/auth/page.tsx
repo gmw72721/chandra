@@ -55,8 +55,8 @@ export default function AuthPage() {
           </div>
           <h1>Teacher-guided AI tutoring that keeps students doing the thinking.</h1>
           <p>
-            Sign in to manage class materials, keep tutoring guardrails in place, and see where
-            students need support.
+            Students join with a class code from their teacher. Teachers sign in to manage
+            materials, tutoring guardrails, and class support.
           </p>
         </section>
         <Suspense

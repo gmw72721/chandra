@@ -3086,6 +3086,23 @@ button.student-row[aria-pressed="true"] {
   text-transform: none;
 }
 
+.auth-step-label {
+  margin: 0 0 12px !important;
+  color: #a4e6ea !important;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.auth-support-copy {
+  max-width: 34rem;
+  margin: 14px auto 24px;
+  color: var(--auth-muted) !important;
+  text-align: center;
+}
+
 .segmented-control {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -3227,6 +3244,137 @@ button.student-row[aria-pressed="true"] {
 
 .auth-signup-methods .auth-method-group {
   margin-bottom: 0;
+}
+
+.auth-choice-grid {
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.auth-choice-card {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  border: 1px solid rgba(227, 222, 213, 0.12);
+  border-radius: 8px;
+  background: rgba(250, 250, 247, 0.045);
+  padding: 18px 20px;
+  color: var(--auth-ink);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.auth-choice-card:hover,
+.auth-choice-card:focus-visible {
+  border-color: rgba(164, 230, 234, 0.45);
+  background: rgba(7, 91, 96, 0.16);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.auth-choice-card span {
+  color: #a4e6ea;
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.auth-choice-card strong {
+  font-size: 1.05rem;
+  line-height: 1.25;
+}
+
+.auth-choice-card small {
+  color: var(--auth-muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.auth-student-summary {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 14px;
+  align-items: center;
+  border: 1px solid rgba(227, 222, 213, 0.1);
+  border-radius: 8px;
+  background: rgba(250, 250, 247, 0.035);
+  padding: 12px 14px;
+}
+
+.auth-student-summary + .auth-student-summary {
+  margin-top: 10px;
+}
+
+.auth-student-summary span {
+  color: var(--auth-muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.auth-student-summary strong {
+  grid-column: 1;
+  color: var(--auth-ink);
+  font-size: 0.98rem;
+  font-weight: 800;
+}
+
+.auth-text-button {
+  border: 0;
+  background: transparent;
+  color: #a4e6ea;
+  font: inherit;
+  font-size: 0.86rem;
+  font-weight: 800;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.auth-text-button:hover,
+.auth-text-button:focus-visible {
+  color: #fafaf6;
+}
+
+.auth-step-back {
+  justify-self: start;
+  margin: 0 0 14px;
+}
+
+.auth-entry-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 18px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--auth-line);
+}
+
+.auth-entry-links button {
+  border: 0;
+  background: transparent;
+  color: var(--auth-muted);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  padding: 0;
+  cursor: pointer;
+}
+
+.auth-entry-links button:hover,
+.auth-entry-links button:focus-visible {
+  color: #fafaf6;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .auth-form .field-label {
