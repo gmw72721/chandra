@@ -59,6 +59,7 @@ export function ChandraLogoMark({ className = "" }: { className?: string }) {
 
       {/* Main leaf-green crescent moon */}
       <path
+        className="chandra-logo-crescent"
         d="M130.6 55.1C111.1 34.3 77.2 30 51.9 46.5 20.4 67 13.9 111.6 38.4 139.7c24.4 28 68 29.2 94.1 3.8-28.8 9.1-61.3-1.5-77.6-28.4C37.5 86.2 48.2 48 77.4 31.4c18.9-10.7 40.8-8.6 53.2 23.7Z"
         fill="url(#leaf-gradient)"
         filter="url(#moon-glow)"

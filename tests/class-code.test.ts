@@ -52,6 +52,35 @@ test("teacher workspace keeps join codes available without rendering top-page in
   assert.doesNotMatch(source, /Copy student invite link/);
 });
 
+test("pre-dashboard wizard has a dev-only always-on testing mode", () => {
+  const source = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
+
+  assert.match(source, /NEXT_PUBLIC_CHANDRA_PRE_DASHBOARD_MODE/);
+  assert.match(source, /chandra\.dev\.preDashboardMode/);
+  assert.match(source, /process\.env\.NODE_ENV === "production"/);
+  assert.match(source, /preDashboardTestModeLoginUserIdRef\.current === user\.uid/);
+  assert.match(source, /setIsPreDashboardWizardActive\(true\)/);
+});
+
+test("pre-dashboard wizard step indicators can navigate back without duplicating the class", () => {
+  const source = readFileSync(join(repoRoot, "frontend/components/PreDashboardWizard.tsx"), "utf8");
+
+  assert.match(source, /function handleStepSelect\(nextStep: number\)/);
+  assert.match(source, /maxStepReached/);
+  assert.match(source, /saveWizardProgressBeforeNavigation/);
+  assert.match(source, /nextStep > maxStepReached/);
+  assert.match(source, /setMaxStepReached\(\(currentMaxStep\) => Math\.max\(currentMaxStep, nextStep\)\)/);
+  assert.match(source, /<button\s+key=\{i\}[\s\S]*?className=\{`wizard-step-indicator/);
+  assert.match(source, /onClick=\{\(\) => void handleStepSelect\(stepNum\)\}/);
+  assert.match(source, /min-width:\s*36px/);
+  assert.match(source, /const classId = createdClassId \|\|/);
+  assert.match(source, /await saveWizardClassSettings\(classId\)/);
+  assert.match(source, /await saveWizardClassSettings\(createdClassId\)/);
+  assert.match(source, /appearance: normalizeTeacherClassAppearance\(userAppearance\)/);
+  assert.match(source, /themeMood: normalizeTeacherClassThemeMood\(themeMood\)/);
+  assert.match(source, /createdClassId \? "Save & Continue" : "Create Class"/);
+});
+
 test("student-entered join codes enroll the student through the server route", () => {
   const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
   const joinSource = readFileSync(join(repoRoot, "frontend/app/api/classes/join/route.ts"), "utf8");

@@ -3,7 +3,8 @@ import { getAccountProfile, getClassSnapshotPostgresFirst, listStudentClassIdsPo
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 import {
   normalizeTeacherClassAppearance,
-  normalizeTeacherClassThemeColor
+  normalizeTeacherClassThemeColor,
+  normalizeTeacherClassThemeMood
 } from "@/lib/class-theme";
 
 export const runtime = "nodejs";
@@ -21,6 +22,7 @@ type StudentClassSummary = {
   studentPromptPlaceholder?: string;
   studentChatEnabled: boolean;
   themeColor: string;
+  themeMood: string;
 };
 
 export async function GET(request: Request) {
@@ -176,7 +178,8 @@ async function getStudentClassSummary(
       ? { studentPromptPlaceholder: String(classData.studentPromptPlaceholder ?? "").trim() }
       : {}),
     studentChatEnabled: readTutorAccessEnabled(classData.tutorAccess) !== false && classData.studentChatEnabled !== false,
-    themeColor: normalizeTeacherClassThemeColor(classData.themeColor)
+    themeColor: normalizeTeacherClassThemeColor(classData.themeColor),
+    themeMood: normalizeTeacherClassThemeMood(classData.themeMood)
   };
 }
 

@@ -151,6 +151,7 @@ service cloud.firestore {
           "classIds",
           "appearance",
           "themeColor",
+          "themeMood",
           "createdAt"
         ])
         && data.uid == userId
@@ -162,7 +163,8 @@ service cloud.firestore {
         && validRole(data.role)
         && validProfileClass(data)
         && validOptionalProfileAppearance(data)
-        && validOptionalProfileThemeColor(data);
+        && validOptionalProfileThemeColor(data)
+        && validOptionalProfileThemeMood(data);
     }
 
     function validProfileCreate(userId) {
@@ -177,7 +179,8 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "displayName",
           "appearance",
-          "themeColor"
+          "themeColor",
+          "themeMood"
         ])
         && request.resource.data.uid == resource.data.uid
         && request.resource.data.email == resource.data.email
@@ -195,10 +198,12 @@ service cloud.firestore {
     function validProfileThemePreferenceUpdate() {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "appearance",
-          "themeColor"
+          "themeColor",
+          "themeMood"
         ])
         && validOptionalProfileAppearance(request.resource.data)
-        && validOptionalProfileThemeColor(request.resource.data);
+        && validOptionalProfileThemeColor(request.resource.data)
+        && validOptionalProfileThemeMood(request.resource.data);
     }
 
     function validProfileUsernameBackfill(userId) {
@@ -216,6 +221,11 @@ service cloud.firestore {
     function validOptionalProfileThemeColor(data) {
       return !data.keys().hasAny(["themeColor"])
         || validThemeColor(data.themeColor);
+    }
+
+    function validOptionalProfileThemeMood(data) {
+      return !data.keys().hasAny(["themeMood"])
+        || validThemeMood(data.themeMood);
     }
 
     function validClassCreate() {
@@ -244,6 +254,7 @@ service cloud.firestore {
           "studentFacingInstructions",
           "tutorAccess",
           "themeColor",
+          "themeMood",
           "createdAt"
         ])
         && request.resource.data.name is string
@@ -272,6 +283,7 @@ service cloud.firestore {
         && request.resource.data.studentFacingInstructions is string
         && validTutorAccess(request.resource.data.tutorAccess)
         && validThemeColor(request.resource.data.themeColor)
+        && validThemeMood(request.resource.data.themeMood)
         && request.resource.data.createdAt == request.time;
     }
 
@@ -298,7 +310,8 @@ service cloud.firestore {
             "studentChatEnabled",
             "studentFacingInstructions",
             "tutorAccess",
-            "themeColor"
+            "themeColor",
+            "themeMood"
           ])
         && request.resource.data.teacherId == resource.data.teacherId
         && stableClassTeacherName()
@@ -330,7 +343,8 @@ service cloud.firestore {
           "studentChatEnabled",
           "studentFacingInstructions",
           "tutorAccess",
-          "themeColor"
+          "themeColor",
+          "themeMood"
         ])
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0
@@ -353,7 +367,8 @@ service cloud.firestore {
         && request.resource.data.studentChatEnabled is bool
         && request.resource.data.studentFacingInstructions is string
         && validTutorAccess(request.resource.data.tutorAccess)
-        && validThemeColor(request.resource.data.themeColor);
+        && validThemeColor(request.resource.data.themeColor)
+        && validThemeMood(request.resource.data.themeMood);
     }
 
     function validThemeColor(themeColor) {
@@ -364,6 +379,11 @@ service cloud.firestore {
     function validAppearance(appearance) {
       return appearance is string
         && appearance in ["light", "dark"];
+    }
+
+    function validThemeMood(themeMood) {
+      return themeMood is string
+        && themeMood in ["calm", "focused", "warm", "highContrast"];
     }
 
     function validAnswerPolicy(answerPolicy) {

@@ -13,11 +13,15 @@ import { deleteCurrentAccount, signOutAllSessions, signOutCurrentUser, updateStu
 import {
   defaultTeacherClassAppearance,
   defaultTeacherClassThemeColor,
+  defaultTeacherClassThemeMood,
   normalizeTeacherClassAppearance,
   normalizeTeacherClassThemeColor,
+  normalizeTeacherClassThemeMood,
   teacherClassThemeColorOptions,
+  teacherClassThemeMoodOptions,
   type TeacherClassAppearance,
-  type TeacherClassThemeColor
+  type TeacherClassThemeColor,
+  type TeacherClassThemeMood
 } from "@/lib/class-theme";
 import {
   defaultBehaviorInstructions,
@@ -152,6 +156,7 @@ type StudentVisibleClass = {
   studentPromptPlaceholder?: string;
   studentChatEnabled?: boolean;
   themeColor?: TeacherClassThemeColor;
+  themeMood?: TeacherClassThemeMood;
 };
 
 type StudentClassSummary = StudentVisibleClass;
@@ -281,6 +286,7 @@ export function StudentWorkspace() {
   const [themePreferencePreview, setThemePreferencePreview] = useState<{
     appearance?: unknown;
     themeColor?: unknown;
+    themeMood?: unknown;
   } | null>(null);
   const [accountDisplayName, setAccountDisplayName] = useState<string | null>(null);
   const [accountEmailDraft, setAccountEmailDraft] = useState<string | null>(null);
@@ -489,6 +495,13 @@ export function StudentWorkspace() {
         themePreferencePreview?.themeColor ?? profile?.themeColor ?? activeClass?.themeColor ?? defaultTeacherClassThemeColor
       ),
     [activeClass?.themeColor, profile?.themeColor, themePreferencePreview?.themeColor]
+  );
+  const activeThemeMood = useMemo(
+    () =>
+      normalizeTeacherClassThemeMood(
+        themePreferencePreview?.themeMood ?? profile?.themeMood ?? activeClass?.themeMood ?? defaultTeacherClassThemeMood
+      ),
+    [activeClass?.themeMood, profile?.themeMood, themePreferencePreview?.themeMood]
   );
   const className = activeClass?.name ?? (activeCourseId ? "Saved class" : "Class needed");
   const classSection = activeClass?.section ?? (activeCourseId ? "Student chat" : "Enter your class code");
@@ -1525,6 +1538,7 @@ export function StudentWorkspace() {
   async function updatePersonalThemePreference(nextPreference: {
     appearance?: unknown;
     themeColor?: unknown;
+    themeMood?: unknown;
   }) {
     if (!user) {
       return;
@@ -1533,11 +1547,13 @@ export function StudentWorkspace() {
     const previousPreview = themePreferencePreview;
     const nextAppearance = normalizeTeacherClassAppearance(nextPreference.appearance ?? activeAppearance);
     const nextThemeColor = normalizeTeacherClassThemeColor(nextPreference.themeColor ?? activeThemeColor);
+    const nextThemeMood = normalizeTeacherClassThemeMood(nextPreference.themeMood ?? activeThemeMood);
 
     setThemePreferenceError("");
     setThemePreferencePreview({
       appearance: nextAppearance,
-      themeColor: nextThemeColor
+      themeColor: nextThemeColor,
+      themeMood: nextThemeMood
     });
     setIsSavingThemePreference(true);
 
@@ -1545,6 +1561,7 @@ export function StudentWorkspace() {
       await updateUserThemePreference({
         appearance: nextAppearance,
         themeColor: nextThemeColor,
+        themeMood: nextThemeMood,
         uid: user.uid
       });
     } catch (caughtError) {
@@ -1799,6 +1816,7 @@ export function StudentWorkspace() {
         data-sidebar-collapsed={isSidebarCollapsed}
         data-student-view={studentMainView}
         data-theme-color={activeThemeColor}
+        data-theme-mood={activeThemeMood}
       >
         <aside className="student-workspace-sidebar" aria-label="Student workspace navigation">
           <button
@@ -2046,6 +2064,7 @@ export function StudentWorkspace() {
             activeClass={activeClass}
             activeClassId={activeCourseId}
             activeThemeColor={activeThemeColor}
+            activeThemeMood={activeThemeMood}
             classLoadMessage={classLoadMessage}
             classes={visibleStudentClasses}
             isSavingAccountSettings={isSavingAccountSettings}
@@ -3625,6 +3644,7 @@ function StudentSettingsPanel({
   activeClass,
   activeClassId,
   activeThemeColor,
+  activeThemeMood,
   classLoadMessage,
   classes,
   isSavingAccountSettings,
@@ -3663,6 +3683,7 @@ function StudentSettingsPanel({
   activeClass: StudentVisibleClass | null;
   activeClassId: string;
   activeThemeColor: TeacherClassThemeColor;
+  activeThemeMood: TeacherClassThemeMood;
   classLoadMessage: string;
   classes: StudentClassSummary[];
   isSavingAccountSettings: boolean;
@@ -3689,6 +3710,7 @@ function StudentSettingsPanel({
   onUpdateThemePreference: (nextPreference: {
     appearance?: unknown;
     themeColor?: unknown;
+    themeMood?: unknown;
   }) => Promise<void>;
 }) {
   return (
@@ -3879,7 +3901,29 @@ function StudentSettingsPanel({
                   type="button"
                   onClick={() => void onUpdateThemePreference({ themeColor: option.id })}
                 >
-                  <span className="student-settings-color-dot" style={{ backgroundColor: option.color }} aria-hidden="true" />
+                  <span
+                    className="student-settings-color-dot"
+                    style={{ backgroundColor: activeAppearance === "dark" ? option.darkColor : option.color }}
+                    aria-hidden="true"
+                  />
+                  <span>{option.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="student-settings-control-row">
+            <span className="student-settings-control-label">Mood</span>
+            <div className="student-settings-pill-group wide" role="radiogroup" aria-label="Mood">
+              {teacherClassThemeMoodOptions.map((option) => (
+                <button
+                  aria-pressed={activeThemeMood === option.id}
+                  className="student-settings-pill"
+                  disabled={isSavingThemePreference}
+                  key={option.id}
+                  title={option.description}
+                  type="button"
+                  onClick={() => void onUpdateThemePreference({ themeMood: option.id })}
+                >
                   <span>{option.label}</span>
                 </button>
               ))}

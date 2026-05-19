@@ -296,7 +296,7 @@
   --card-border: rgba(139, 149, 192, 0.2);
   --input-bg: rgba(8, 12, 25, 0.74);
   --input-border: rgba(143, 153, 194, 0.26);
-  --on-primary: #ffffff;
+  --on-primary: #07101f;
   --chip-bg: rgba(10, 14, 29, 0.72);
   --text-primary: #f5f7ff;
   --text-secondary: #d8def0;
@@ -352,6 +352,16 @@
   --theme-bg-rgb: 7, 91, 96;
 }
 
+[data-theme-color="cyan"] {
+  --theme-primary: #087487;
+  --theme-primary-strong: #075d6d;
+  --theme-primary-soft: rgba(8, 116, 135, 0.11);
+  --theme-primary-ring: rgba(8, 116, 135, 0.22);
+  --theme-primary-shadow: rgba(8, 116, 135, 0.18);
+  --theme-primary-gradient: #087487;
+  --theme-bg-rgb: 8, 116, 135;
+}
+
 [data-theme-color="emerald"] {
   --theme-primary: #167c3d;
   --theme-primary-strong: #106330;
@@ -360,6 +370,26 @@
   --theme-primary-shadow: rgba(22, 124, 61, 0.18);
   --theme-primary-gradient: #167c3d;
   --theme-bg-rgb: 22, 124, 61;
+}
+
+[data-theme-color="amber"] {
+  --theme-primary: #a05f00;
+  --theme-primary-strong: #7d4900;
+  --theme-primary-soft: rgba(160, 95, 0, 0.12);
+  --theme-primary-ring: rgba(160, 95, 0, 0.23);
+  --theme-primary-shadow: rgba(160, 95, 0, 0.18);
+  --theme-primary-gradient: #a05f00;
+  --theme-bg-rgb: 160, 95, 0;
+}
+
+[data-theme-color="coral"] {
+  --theme-primary: #c4512c;
+  --theme-primary-strong: #9d3d21;
+  --theme-primary-soft: rgba(196, 81, 44, 0.12);
+  --theme-primary-ring: rgba(196, 81, 44, 0.23);
+  --theme-primary-shadow: rgba(196, 81, 44, 0.18);
+  --theme-primary-gradient: #c4512c;
+  --theme-bg-rgb: 196, 81, 44;
 }
 
 [data-theme-color="rose"] {
@@ -374,7 +404,7 @@
 
 [data-appearance="dark"][data-theme-color="purple"] {
   --theme-primary: #8f6cff;
-  --theme-primary-strong: #6e4be0;
+  --theme-primary-strong: #8067f7;
   --theme-primary-soft: rgba(110, 75, 224, 0.26);
   --theme-primary-ring: rgba(143, 108, 255, 0.42);
   --theme-primary-shadow: rgba(91, 63, 205, 0.34);
@@ -383,7 +413,7 @@
 
 [data-appearance="dark"][data-theme-color="indigo"] {
   --theme-primary: #7f91ff;
-  --theme-primary-strong: #5368d8;
+  --theme-primary-strong: #7789f6;
   --theme-primary-soft: rgba(83, 104, 216, 0.24);
   --theme-primary-ring: rgba(127, 145, 255, 0.4);
   --theme-primary-shadow: rgba(83, 104, 216, 0.3);
@@ -392,7 +422,7 @@
 
 [data-appearance="dark"][data-theme-color="blue"] {
   --theme-primary: #55b5f2;
-  --theme-primary-strong: #1681c4;
+  --theme-primary-strong: #47abe7;
   --theme-primary-soft: rgba(22, 129, 196, 0.23);
   --theme-primary-ring: rgba(85, 181, 242, 0.4);
   --theme-primary-shadow: rgba(22, 129, 196, 0.3);
@@ -401,29 +431,250 @@
 
 [data-appearance="dark"][data-theme-color="teal"] {
   --theme-primary: #32c0c6;
-  --theme-primary-strong: #159196;
+  --theme-primary-strong: #2cb6bc;
   --theme-primary-soft: rgba(21, 145, 150, 0.22);
   --theme-primary-ring: rgba(50, 192, 198, 0.38);
   --theme-primary-shadow: rgba(21, 145, 150, 0.28);
   --theme-primary-gradient: #159196;
 }
 
+[data-appearance="dark"][data-theme-color="cyan"] {
+  --theme-primary: #2bb8ce;
+  --theme-primary-strong: #27b4c9;
+  --theme-primary-soft: rgba(39, 180, 201, 0.22);
+  --theme-primary-ring: rgba(43, 184, 206, 0.4);
+  --theme-primary-shadow: rgba(39, 180, 201, 0.28);
+  --theme-primary-gradient: #27b4c9;
+}
+
 [data-appearance="dark"][data-theme-color="emerald"] {
   --theme-primary: #48d17b;
-  --theme-primary-strong: #239b55;
+  --theme-primary-strong: #40c473;
   --theme-primary-soft: rgba(35, 155, 85, 0.22);
   --theme-primary-ring: rgba(72, 209, 123, 0.38);
   --theme-primary-shadow: rgba(35, 155, 85, 0.28);
   --theme-primary-gradient: #239b55;
 }
 
+[data-appearance="dark"][data-theme-color="amber"] {
+  --theme-primary: #f0b450;
+  --theme-primary-strong: #dea243;
+  --theme-primary-soft: rgba(201, 129, 22, 0.24);
+  --theme-primary-ring: rgba(240, 180, 80, 0.42);
+  --theme-primary-shadow: rgba(201, 129, 22, 0.3);
+  --theme-primary-gradient: #c98116;
+}
+
+[data-appearance="dark"][data-theme-color="coral"] {
+  --theme-primary: #e0774f;
+  --theme-primary-strong: #dc7048;
+  --theme-primary-soft: rgba(224, 119, 79, 0.23);
+  --theme-primary-ring: rgba(224, 119, 79, 0.42);
+  --theme-primary-shadow: rgba(224, 119, 79, 0.3);
+  --theme-primary-gradient: #dc7048;
+}
+
 [data-appearance="dark"][data-theme-color="rose"] {
   --theme-primary: #ff8992;
-  --theme-primary-strong: #d65d67;
+  --theme-primary-strong: #f07d87;
   --theme-primary-soft: rgba(214, 93, 103, 0.23);
   --theme-primary-ring: rgba(255, 137, 146, 0.42);
   --theme-primary-shadow: rgba(214, 93, 103, 0.3);
   --theme-primary-gradient: #d65d67;
+}
+
+[data-theme-mood="calm"] {
+  --mood-surface-alpha: 0.72;
+  --mood-border-strength: 0.72;
+  --mood-radius: 14px;
+  --mood-control-height: 42px;
+  --mood-section-gap: 26px;
+}
+
+[data-theme-mood="focused"] {
+  --mood-surface-alpha: 0.88;
+  --mood-border-strength: 0.9;
+  --mood-radius: 8px;
+  --mood-control-height: 38px;
+  --mood-section-gap: 18px;
+}
+
+[data-theme-mood="warm"] {
+  --mood-surface-alpha: 0.84;
+  --mood-border-strength: 0.8;
+  --mood-radius: 12px;
+  --content-wash: rgba(var(--theme-bg-rgb), 0.035);
+  --mood-control-height: 40px;
+  --mood-section-gap: 22px;
+}
+
+[data-theme-mood="highContrast"] {
+  --mood-surface-alpha: 0.96;
+  --mood-border-strength: 1;
+  --mood-radius: 6px;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 74%, transparent);
+  --mood-control-height: 40px;
+  --mood-section-gap: 18px;
+}
+
+[data-appearance="light"][data-theme-mood="calm"] {
+  --app-bg-layer: #f8f5ec;
+  --sidebar-bg: #fcfaf3;
+  --sticky-header-bg: rgba(252, 250, 243, 0.94);
+  --card-bg: #fffef9;
+  --card-bg-strong: #fffef9;
+  --card-border: rgba(201, 196, 180, 0.66);
+  --input-bg: #fffef9;
+  --input-border: rgba(201, 196, 180, 0.74);
+  --row-bg: #fffef9;
+  --row-hover-bg: #ffffff;
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 7%, #fffef9);
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 22%, rgba(201, 196, 180, 0.72));
+  --text-secondary: #4b5549;
+  --text-muted: #697064;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 18%, transparent);
+  --app-shadow: 0 8px 22px rgba(44, 42, 33, 0.045);
+  --sidebar-shadow: 6px 0 18px rgba(42, 37, 25, 0.026);
+}
+
+[data-appearance="light"][data-theme-mood="focused"] {
+  --app-bg-layer: #f7f3e8;
+  --sidebar-bg: #fbf8ef;
+  --sticky-header-bg: #fbf8ef;
+  --card-bg: #fffdf7;
+  --card-bg-strong: #ffffff;
+  --card-border: rgba(201, 196, 180, 0.86);
+  --input-bg: #fffdf7;
+  --input-border: #d2cec0;
+  --row-bg: #fffdf7;
+  --row-hover-bg: #ffffff;
+  --selected-row-bg: var(--theme-primary-soft);
+  --selected-row-border: var(--theme-primary-ring);
+  --focus-ring: var(--theme-primary-ring);
+  --app-shadow: 0 10px 24px rgba(44, 42, 33, 0.07);
+  --sidebar-shadow: 8px 0 22px rgba(42, 37, 25, 0.035);
+}
+
+[data-appearance="light"][data-theme-mood="warm"] {
+  --app-bg-layer: #faf1e4;
+  --sidebar-bg: #fcf4e7;
+  --sticky-header-bg: rgba(252, 244, 231, 0.94);
+  --card-bg: #fff8ed;
+  --card-bg-strong: #fffaf2;
+  --card-border: rgba(194, 165, 122, 0.7);
+  --input-bg: #fffaf2;
+  --input-border: rgba(187, 154, 107, 0.76);
+  --row-bg: #fff9ef;
+  --row-hover-bg: #fffdf8;
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 9%, #fff4e6);
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 30%, rgba(194, 165, 122, 0.74));
+  --text-secondary: #514737;
+  --text-muted: #756b5b;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 28%, rgba(177, 122, 45, 0.18));
+  --app-shadow: 0 12px 28px rgba(91, 61, 24, 0.065);
+  --sidebar-shadow: 8px 0 24px rgba(91, 61, 24, 0.04);
+  --content-wash: rgba(177, 122, 45, 0.035);
+}
+
+[data-appearance="light"][data-theme-mood="highContrast"] {
+  --app-bg-layer: #f6f5ed;
+  --sidebar-bg: #f9f8f0;
+  --sticky-header-bg: #f9f8f0;
+  --card-bg: #fffffb;
+  --card-bg-strong: #fffffb;
+  --card-border: color-mix(in srgb, var(--theme-primary) 38%, #958f7c);
+  --input-bg: #fffffb;
+  --input-border: color-mix(in srgb, var(--theme-primary) 48%, #8e8773);
+  --row-bg: #fffffb;
+  --row-hover-bg: color-mix(in srgb, var(--theme-primary) 5%, #fffffb);
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 16%, #fffffb);
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 68%, #8e8773);
+  --text-primary: #171b17;
+  --text-secondary: #171b17;
+  --text-muted: #333a32;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 42%, transparent);
+  --app-shadow: none;
+  --sidebar-shadow: none;
+}
+
+[data-appearance="dark"][data-theme-mood="calm"] {
+  --app-bg-layer: #080d18;
+  --sidebar-bg: #0b111e;
+  --sticky-header-bg: rgba(11, 17, 30, 0.94);
+  --card-bg: rgba(19, 27, 43, 0.7);
+  --card-bg-strong: rgba(20, 29, 46, 0.82);
+  --card-border: rgba(148, 163, 184, 0.16);
+  --input-bg: rgba(10, 15, 27, 0.72);
+  --input-border: rgba(148, 163, 184, 0.2);
+  --row-bg: rgba(17, 25, 40, 0.58);
+  --row-hover-bg: rgba(28, 39, 60, 0.72);
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 13%, rgba(17, 25, 40, 0.84));
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 28%, rgba(148, 163, 184, 0.2));
+  --text-secondary: #c5cddc;
+  --text-muted: #939db0;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 24%, transparent);
+  --app-shadow: 0 14px 34px rgba(0, 0, 0, 0.24);
+  --sidebar-shadow: 10px 0 34px rgba(0, 0, 0, 0.16);
+}
+
+[data-appearance="dark"][data-theme-mood="focused"] {
+  --app-bg-layer: #070a17;
+  --sidebar-bg: #080b18;
+  --sticky-header-bg: #0a0e1d;
+  --card-bg: rgba(18, 24, 45, 0.78);
+  --card-bg-strong: rgba(19, 25, 47, 0.9);
+  --card-border: rgba(139, 149, 192, 0.2);
+  --input-bg: rgba(8, 12, 25, 0.74);
+  --input-border: rgba(143, 153, 194, 0.26);
+  --row-bg: rgba(13, 18, 35, 0.58);
+  --row-hover-bg: rgba(24, 31, 58, 0.84);
+  --selected-row-bg: var(--theme-primary-soft);
+  --selected-row-border: var(--theme-primary-ring);
+  --focus-ring: var(--theme-primary-ring);
+  --app-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+  --sidebar-shadow: 14px 0 42px rgba(0, 0, 0, 0.24);
+}
+
+[data-appearance="dark"][data-theme-mood="warm"] {
+  --app-bg-layer: #111018;
+  --sidebar-bg: #15131d;
+  --sticky-header-bg: rgba(21, 19, 29, 0.94);
+  --card-bg: rgba(30, 27, 38, 0.82);
+  --card-bg-strong: rgba(35, 31, 43, 0.92);
+  --card-border: rgba(180, 148, 104, 0.24);
+  --input-bg: rgba(23, 20, 30, 0.8);
+  --input-border: rgba(180, 148, 104, 0.3);
+  --row-bg: rgba(27, 24, 35, 0.68);
+  --row-hover-bg: rgba(40, 35, 48, 0.86);
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 16%, rgba(40, 31, 25, 0.9));
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 34%, rgba(180, 148, 104, 0.28));
+  --text-secondary: #ddd0be;
+  --text-muted: #a99e91;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 34%, rgba(180, 148, 104, 0.14));
+  --app-shadow: 0 18px 42px rgba(9, 7, 5, 0.34);
+  --sidebar-shadow: 14px 0 42px rgba(9, 7, 5, 0.22);
+  --content-wash: rgba(180, 148, 104, 0.045);
+}
+
+[data-appearance="dark"][data-theme-mood="highContrast"] {
+  --app-bg-layer: #050711;
+  --sidebar-bg: #070a14;
+  --sticky-header-bg: #070a14;
+  --card-bg: rgba(12, 17, 31, 0.98);
+  --card-bg-strong: rgba(14, 20, 36, 0.98);
+  --card-border: color-mix(in srgb, var(--theme-primary) 42%, rgba(199, 210, 254, 0.28));
+  --input-bg: rgba(7, 11, 22, 0.98);
+  --input-border: color-mix(in srgb, var(--theme-primary) 54%, rgba(199, 210, 254, 0.32));
+  --row-bg: rgba(11, 16, 29, 0.96);
+  --row-hover-bg: color-mix(in srgb, var(--theme-primary) 9%, rgba(11, 16, 29, 0.96));
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 22%, rgba(11, 16, 29, 0.96));
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 72%, rgba(199, 210, 254, 0.34));
+  --text-primary: #fbfcff;
+  --text-secondary: #fbfcff;
+  --text-muted: #d9deea;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 54%, transparent);
+  --app-shadow: none;
+  --sidebar-shadow: none;
 }
 
 * {
@@ -12777,6 +13028,29 @@ button.student-row[aria-pressed="true"] {
   margin-top: 2px;
 }
 
+.settings-mood-pills {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+}
+
+.settings-mood-pill>span {
+  min-height: 64px;
+  align-items: flex-start;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.settings-mood-pill strong {
+  font-size: 0.78rem;
+}
+
+.settings-mood-pill small {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 520;
+  line-height: 1.35;
+}
+
 .settings-theme-swatch {
   position: relative;
 }
@@ -12845,6 +13119,44 @@ button.student-row[aria-pressed="true"] {
 .student-workspace-shell[data-appearance] {
   background: var(--app-bg-layer);
   color: var(--text-primary);
+}
+
+.teacher-dashboard[data-theme-mood] .settings-group,
+.teacher-dashboard[data-theme-mood] .ai-tutor-card,
+.teacher-dashboard[data-theme-mood] .overview-panel,
+.teacher-dashboard[data-theme-mood] .knowledge-library-card,
+.teacher-dashboard[data-theme-mood] .knowledge-detail-card,
+.teacher-dashboard[data-theme-mood] .conversation-inbox-panel,
+.teacher-dashboard[data-theme-mood] .transcript-viewer-panel,
+.teacher-dashboard[data-theme-mood] .review-side-panel,
+.teacher-dashboard[data-theme-mood] .roster-stat-card,
+.teacher-dashboard[data-theme-mood] .roster-table-card,
+.teacher-dashboard[data-theme-mood] .student-detail-panel,
+.teacher-dashboard[data-theme-mood] .student-detail-card,
+.teacher-dashboard[data-theme-mood] .material-list,
+.teacher-dashboard[data-theme-mood] .student-list,
+.teacher-dashboard[data-theme-mood] .problems-table-card,
+.teacher-dashboard[data-theme-mood] .problem-detail-panel,
+.student-workspace-shell[data-theme-mood] .student-settings-card,
+.student-workspace-shell[data-theme-mood] .student-current-class-card,
+.student-workspace-shell[data-theme-mood] .student-composer,
+.student-workspace-shell[data-theme-mood] .assistant-message-bubble {
+  border-radius: var(--mood-radius, 8px);
+}
+
+.teacher-dashboard[data-theme-mood] .overview-command-column,
+.teacher-dashboard[data-theme-mood] .settings-pane,
+.teacher-dashboard[data-theme-mood] .ai-tutor-settings-layout,
+.teacher-dashboard[data-theme-mood] .student-detail-content,
+.student-workspace-shell[data-theme-mood] .student-workspace-main {
+  gap: var(--mood-section-gap, 18px);
+}
+
+.teacher-dashboard[data-theme-mood="highContrast"],
+.student-workspace-shell[data-theme-mood="highContrast"] {
+  --text-secondary: var(--text-primary);
+  --card-border: color-mix(in srgb, var(--theme-primary) 34%, var(--soft-border));
+  --input-border: color-mix(in srgb, var(--theme-primary) 42%, var(--soft-border));
 }
 
 .teacher-dashboard[data-appearance]::before,
@@ -17368,6 +17680,16 @@ button.student-row[aria-pressed="true"] {
   --theme-bg-rgb: 7, 91, 96;
 }
 
+.student-workspace-shell[data-theme-color="cyan"] {
+  --theme-primary: #087487;
+  --theme-primary-strong: #075d6d;
+  --theme-primary-soft: rgba(8, 116, 135, 0.11);
+  --theme-primary-ring: rgba(8, 116, 135, 0.22);
+  --theme-primary-shadow: rgba(8, 116, 135, 0.18);
+  --theme-primary-gradient: #087487;
+  --theme-bg-rgb: 8, 116, 135;
+}
+
 .student-workspace-shell[data-theme-color="emerald"] {
   --theme-primary: #167c3d;
   --theme-primary-strong: #106330;
@@ -17376,6 +17698,26 @@ button.student-row[aria-pressed="true"] {
   --theme-primary-shadow: rgba(22, 124, 61, 0.18);
   --theme-primary-gradient: #167c3d;
   --theme-bg-rgb: 22, 124, 61;
+}
+
+.student-workspace-shell[data-theme-color="amber"] {
+  --theme-primary: #a05f00;
+  --theme-primary-strong: #7d4900;
+  --theme-primary-soft: rgba(160, 95, 0, 0.12);
+  --theme-primary-ring: rgba(160, 95, 0, 0.23);
+  --theme-primary-shadow: rgba(160, 95, 0, 0.18);
+  --theme-primary-gradient: #a05f00;
+  --theme-bg-rgb: 160, 95, 0;
+}
+
+.student-workspace-shell[data-theme-color="coral"] {
+  --theme-primary: #c4512c;
+  --theme-primary-strong: #9d3d21;
+  --theme-primary-soft: rgba(196, 81, 44, 0.12);
+  --theme-primary-ring: rgba(196, 81, 44, 0.23);
+  --theme-primary-shadow: rgba(196, 81, 44, 0.18);
+  --theme-primary-gradient: #c4512c;
+  --theme-bg-rgb: 196, 81, 44;
 }
 
 .student-workspace-shell[data-theme-color="rose"] {
@@ -17390,7 +17732,7 @@ button.student-row[aria-pressed="true"] {
 
 .student-workspace-shell[data-appearance="dark"][data-theme-color="purple"] {
   --theme-primary: #8f6cff;
-  --theme-primary-strong: #6e4be0;
+  --theme-primary-strong: #8067f7;
   --theme-primary-soft: rgba(110, 75, 224, 0.26);
   --theme-primary-ring: rgba(143, 108, 255, 0.42);
   --theme-primary-shadow: rgba(91, 63, 205, 0.34);
@@ -17399,7 +17741,7 @@ button.student-row[aria-pressed="true"] {
 
 .student-workspace-shell[data-appearance="dark"][data-theme-color="indigo"] {
   --theme-primary: #7f91ff;
-  --theme-primary-strong: #5368d8;
+  --theme-primary-strong: #7789f6;
   --theme-primary-soft: rgba(83, 104, 216, 0.24);
   --theme-primary-ring: rgba(127, 145, 255, 0.4);
   --theme-primary-shadow: rgba(83, 104, 216, 0.3);
@@ -17408,7 +17750,7 @@ button.student-row[aria-pressed="true"] {
 
 .student-workspace-shell[data-appearance="dark"][data-theme-color="blue"] {
   --theme-primary: #55b5f2;
-  --theme-primary-strong: #1681c4;
+  --theme-primary-strong: #47abe7;
   --theme-primary-soft: rgba(22, 129, 196, 0.23);
   --theme-primary-ring: rgba(85, 181, 242, 0.4);
   --theme-primary-shadow: rgba(22, 129, 196, 0.3);
@@ -17417,25 +17759,52 @@ button.student-row[aria-pressed="true"] {
 
 .student-workspace-shell[data-appearance="dark"][data-theme-color="teal"] {
   --theme-primary: #32c0c6;
-  --theme-primary-strong: #159196;
+  --theme-primary-strong: #2cb6bc;
   --theme-primary-soft: rgba(21, 145, 150, 0.22);
   --theme-primary-ring: rgba(50, 192, 198, 0.38);
   --theme-primary-shadow: rgba(21, 145, 150, 0.28);
   --theme-primary-gradient: #159196;
 }
 
+.student-workspace-shell[data-appearance="dark"][data-theme-color="cyan"] {
+  --theme-primary: #2bb8ce;
+  --theme-primary-strong: #27b4c9;
+  --theme-primary-soft: rgba(39, 180, 201, 0.22);
+  --theme-primary-ring: rgba(43, 184, 206, 0.4);
+  --theme-primary-shadow: rgba(39, 180, 201, 0.28);
+  --theme-primary-gradient: #27b4c9;
+}
+
 .student-workspace-shell[data-appearance="dark"][data-theme-color="emerald"] {
   --theme-primary: #48d17b;
-  --theme-primary-strong: #239b55;
+  --theme-primary-strong: #40c473;
   --theme-primary-soft: rgba(35, 155, 85, 0.22);
   --theme-primary-ring: rgba(72, 209, 123, 0.38);
   --theme-primary-shadow: rgba(35, 155, 85, 0.28);
   --theme-primary-gradient: #239b55;
 }
 
+.student-workspace-shell[data-appearance="dark"][data-theme-color="amber"] {
+  --theme-primary: #f0b450;
+  --theme-primary-strong: #dea243;
+  --theme-primary-soft: rgba(201, 129, 22, 0.24);
+  --theme-primary-ring: rgba(240, 180, 80, 0.42);
+  --theme-primary-shadow: rgba(201, 129, 22, 0.3);
+  --theme-primary-gradient: #c98116;
+}
+
+.student-workspace-shell[data-appearance="dark"][data-theme-color="coral"] {
+  --theme-primary: #e0774f;
+  --theme-primary-strong: #dc7048;
+  --theme-primary-soft: rgba(224, 119, 79, 0.23);
+  --theme-primary-ring: rgba(224, 119, 79, 0.42);
+  --theme-primary-shadow: rgba(224, 119, 79, 0.3);
+  --theme-primary-gradient: #dc7048;
+}
+
 .student-workspace-shell[data-appearance="dark"][data-theme-color="rose"] {
   --theme-primary: #ff8992;
-  --theme-primary-strong: #d65d67;
+  --theme-primary-strong: #f07d87;
   --theme-primary-soft: rgba(214, 93, 103, 0.23);
   --theme-primary-ring: rgba(255, 137, 146, 0.42);
   --theme-primary-shadow: rgba(214, 93, 103, 0.3);
@@ -20376,6 +20745,14 @@ button.student-row[aria-pressed="true"] {
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
+  border-bottom: 1px solid var(--card-border);
+  padding-bottom: 18px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-page-header-main {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
 }
 
 .teacher-dashboard[data-active-tab="overview"] .analytics-page-title {
@@ -20436,6 +20813,93 @@ button.student-row[aria-pressed="true"] {
   font-size: 0.92rem;
   font-weight: 600;
   line-height: 1.35;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-trust-signal {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-trust-signal::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--theme-primary);
+  content: "";
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-class-control-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-class-control {
+  display: inline-grid;
+  grid-template-columns: auto minmax(84px, auto) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--card-bg-strong);
+  padding: 5px 6px 5px 10px;
+  color: var(--text-primary);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-class-control-icon {
+  display: grid;
+  place-items: center;
+  color: var(--theme-primary);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-class-control > span:not(.analytics-class-control-icon) {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-class-control strong {
+  color: var(--text-primary);
+  font-size: 0.72rem;
+  font-weight: 750;
+  line-height: 1.1;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-class-control em {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 650;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-class-control button {
+  min-height: 30px;
+  border: 1px solid var(--card-border);
+  border-radius: 7px;
+  background: var(--card-bg);
+  color: var(--theme-primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 750;
+  padding: 0 9px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-class-control button:hover,
+.teacher-dashboard[data-active-tab="overview"] .analytics-class-control button:focus-visible {
+  outline: none;
+  border-color: var(--theme-primary-ring);
+  background: var(--theme-primary-soft);
 }
 
 .teacher-dashboard[data-active-tab="overview"] .analytics-header-actions {
@@ -21102,6 +21566,64 @@ button.student-row[aria-pressed="true"] {
   gap: 18px;
 }
 
+.teacher-dashboard[data-active-tab="overview"] .analytics-status-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--card-border);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-metric-pill {
+  display: grid;
+  grid-template-areas:
+    "label value"
+    "detail value";
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 16px;
+  min-width: 0;
+  min-height: 78px;
+  background: var(--card-bg-strong);
+  padding: 14px 18px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-metric-pill strong {
+  grid-area: value;
+  color: var(--text-primary);
+  font-size: 1.85rem;
+  font-weight: 760;
+  line-height: 1;
+  min-width: 2ch;
+  text-align: right;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-metric-pill span {
+  grid-area: label;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 0.86rem;
+  font-weight: 750;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-metric-pill em {
+  grid-area: detail;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-style: normal;
+  font-weight: 650;
+  line-height: 1.15;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-metric-pill.warning strong {
+  color: var(--analytics-orange);
+}
+
 .teacher-dashboard[data-active-tab="overview"] .analytics-control-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -21221,13 +21743,18 @@ button.student-row[aria-pressed="true"] {
 .teacher-dashboard[data-active-tab="overview"] .analytics-overview-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.18fr);
-  gap: 24px;
+  gap: 18px;
 }
 
 .teacher-dashboard[data-active-tab="overview"] .analytics-overview-panel,
+.teacher-dashboard[data-active-tab="overview"] .analytics-attention-panel,
 .teacher-dashboard[data-active-tab="overview"] .analytics-chart-card {
   min-width: 0;
   padding: 18px 22px;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-attention-panel {
+  grid-column: 1 / -1;
 }
 
 .teacher-dashboard[data-active-tab="overview"] .analytics-card-heading {
@@ -21269,6 +21796,11 @@ button.student-row[aria-pressed="true"] {
   grid-template-columns: minmax(132px, 0.82fr) minmax(150px, 1.08fr) minmax(118px, 0.68fr) minmax(118px, auto);
 }
 
+.teacher-dashboard[data-active-tab="overview"] .attention-table .analytics-compact-table-header,
+.teacher-dashboard[data-active-tab="overview"] .attention-table .analytics-compact-table-row {
+  grid-template-columns: minmax(160px, 0.8fr) minmax(170px, 0.9fr) minmax(240px, 1.35fr) minmax(120px, 0.58fr) minmax(132px, auto);
+}
+
 .teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-header {
   min-height: 36px;
   border-bottom: 1px solid var(--card-border);
@@ -21295,6 +21827,46 @@ button.student-row[aria-pressed="true"] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-empty-state {
+  display: grid;
+  gap: 4px;
+  border: 1px dashed var(--card-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--card-bg-strong) 80%, transparent);
+  color: var(--text-muted);
+  padding: 18px;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-empty-state strong {
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-empty-state span {
+  color: var(--text-muted);
+}
+
+.teacher-dashboard[data-active-tab="overview"] .analytics-skeleton-row span {
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--card-border) 58%, transparent),
+    color-mix(in srgb, var(--card-bg-strong) 72%, var(--card-border)),
+    color-mix(in srgb, var(--card-border) 58%, transparent)
+  );
+  background-size: 220% 100%;
+  animation: analytics-skeleton-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes analytics-skeleton-pulse {
+  to {
+    background-position: -220% 0;
+  }
 }
 
 .teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-row > .analytics-time-cell {
@@ -21492,6 +22064,10 @@ button.student-row[aria-pressed="true"] {
     grid-template-columns: 1fr;
   }
 
+  .teacher-dashboard[data-active-tab="overview"] .analytics-status-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .teacher-dashboard[data-active-tab="overview"] .analytics-status-card,
   .teacher-dashboard[data-active-tab="overview"] .analytics-kpi-card {
     min-height: 0;
@@ -21504,6 +22080,11 @@ button.student-row[aria-pressed="true"] {
   .teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-header,
   .teacher-dashboard[data-active-tab="overview"] .analytics-compact-table-row {
     min-width: 640px;
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .attention-table .analytics-compact-table-header,
+  .teacher-dashboard[data-active-tab="overview"] .attention-table .analytics-compact-table-row {
+    min-width: 820px;
   }
 }
 
@@ -21527,6 +22108,24 @@ button.student-row[aria-pressed="true"] {
     right: auto;
     left: 0;
     width: min(292px, 100%);
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-page-header-main,
+  .teacher-dashboard[data-active-tab="overview"] .analytics-class-control-strip {
+    width: 100%;
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-class-control-strip {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-status-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .teacher-dashboard[data-active-tab="overview"] .analytics-class-control {
+    width: 100%;
   }
 
   .teacher-dashboard[data-active-tab="overview"] .analytics-bar-chart {
@@ -24535,7 +25134,7 @@ button[aria-label="Open Next.js Dev Tools"] {
 .teacher-dashboard:not([data-appearance="dark"]),
 .teacher-dashboard:not([data-appearance="dark"]) .teacher-main,
 .teacher-dashboard:not([data-appearance="dark"]) .teacher-sticky-chrome {
-  background: #ffffff;
+  background: var(--app-bg-layer);
 }
 
 .teacher-dashboard:not([data-appearance="dark"])::before,
@@ -24660,6 +25259,608 @@ button[aria-label="Open Next.js Dev Tools"] {
   transform: translateX(0);
 }
 
+.teacher-dashboard[data-theme-mood],
+.student-workspace-shell[data-theme-mood] {
+  background: var(--app-bg-layer);
+  transition:
+    background-color 180ms ease,
+    color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.teacher-dashboard[data-theme-mood] .teacher-main,
+.teacher-dashboard[data-theme-mood] .teacher-sticky-chrome,
+.student-workspace-shell[data-theme-mood] .student-workspace-main {
+  background: var(--app-bg-layer);
+}
+
+.teacher-dashboard[data-theme-mood] .primary-icon-rail,
+.teacher-dashboard[data-theme-mood] .sidebar-drawer,
+.teacher-dashboard[data-theme-mood] .teacher-sidebar,
+.teacher-dashboard[data-theme-mood] .teacher-secondary-sidebar,
+.teacher-dashboard[data-theme-mood] .persistent-primary-sidebar,
+.student-workspace-shell[data-theme-mood] .student-workspace-sidebar {
+  border-color: var(--card-border);
+  background: var(--sidebar-bg);
+  box-shadow: var(--sidebar-shadow);
+}
+
+.teacher-dashboard[data-theme-mood] .settings-workspace .settings-group,
+.teacher-dashboard[data-theme-mood] .ai-tutor-card,
+.teacher-dashboard[data-theme-mood] .overview-panel,
+.teacher-dashboard[data-theme-mood] .conversation-inbox-panel,
+.teacher-dashboard[data-theme-mood] .transcript-viewer-panel,
+.teacher-dashboard[data-theme-mood] .review-side-panel,
+.teacher-dashboard[data-theme-mood] .roster-stat-card,
+.teacher-dashboard[data-theme-mood] .roster-table-card,
+.teacher-dashboard[data-theme-mood] .student-detail-panel,
+.teacher-dashboard[data-theme-mood] .student-detail-card,
+.teacher-dashboard[data-theme-mood] .material-list,
+.teacher-dashboard[data-theme-mood] .student-list,
+.teacher-dashboard[data-theme-mood] .knowledge-library-card,
+.teacher-dashboard[data-theme-mood] .knowledge-detail-card,
+.teacher-dashboard[data-theme-mood] .test-tutor-preview,
+.teacher-dashboard[data-theme-mood] .next-action-tile,
+.teacher-dashboard[data-theme-mood] .recommendation-row,
+.teacher-dashboard[data-theme-mood] .ai-tutor-model-card,
+.teacher-dashboard[data-theme-mood] .problems-table-card,
+.teacher-dashboard[data-theme-mood] .problem-detail-panel,
+.student-workspace-shell[data-theme-mood] .student-settings-card,
+.student-workspace-shell[data-theme-mood] .student-current-class-card,
+.student-workspace-shell[data-theme-mood] .student-composer {
+  border-color: var(--card-border);
+  border-radius: var(--mood-radius);
+  background: var(--card-bg-strong);
+  box-shadow: var(--app-shadow);
+}
+
+.teacher-dashboard[data-theme-mood] .class-row,
+.teacher-dashboard[data-theme-mood] .student-row,
+.teacher-dashboard[data-theme-mood] .material-row,
+.teacher-dashboard[data-theme-mood] .conversation-inbox-row,
+.teacher-dashboard[data-theme-mood] .roster-table-row,
+.teacher-dashboard[data-theme-mood] .knowledge-source-row,
+.teacher-dashboard[data-theme-mood] .teacher-conversation-row,
+.teacher-dashboard[data-theme-mood] .problems-table-row,
+.teacher-dashboard[data-theme-mood] .problem-student-row,
+.student-workspace-shell[data-theme-mood] .student-conversation-row {
+  border-color: var(--card-border);
+  border-radius: max(6px, calc(var(--mood-radius) - 2px));
+  background: var(--row-bg);
+}
+
+.teacher-dashboard[data-theme-mood] .class-row:hover,
+.teacher-dashboard[data-theme-mood] .student-row:hover,
+.teacher-dashboard[data-theme-mood] .material-row:hover,
+.teacher-dashboard[data-theme-mood] .conversation-inbox-row:hover,
+.teacher-dashboard[data-theme-mood] .roster-table-row:hover,
+.teacher-dashboard[data-theme-mood] .knowledge-source-row:hover,
+.teacher-dashboard[data-theme-mood] .teacher-conversation-row:hover,
+.teacher-dashboard[data-theme-mood] .problems-table-row:hover,
+.teacher-dashboard[data-theme-mood] .problem-student-row:hover,
+.student-workspace-shell[data-theme-mood] .student-conversation-row:hover {
+  background: var(--row-hover-bg);
+}
+
+.teacher-dashboard[data-theme-mood] .class-row[aria-pressed="true"],
+.teacher-dashboard[data-theme-mood] .roster-table-row[aria-selected="true"],
+.teacher-dashboard[data-theme-mood] .knowledge-source-row[aria-selected="true"],
+.teacher-dashboard[data-theme-mood] .conversation-inbox-row[aria-selected="true"],
+.teacher-dashboard[data-theme-mood] .conversation-inbox-row[aria-pressed="true"],
+.teacher-dashboard[data-theme-mood] .teacher-conversation-row[aria-pressed="true"],
+.teacher-dashboard[data-theme-mood] .problems-table-row[aria-selected="true"],
+.student-workspace-shell[data-theme-mood] .student-conversation-row[aria-pressed="true"] {
+  border-color: var(--selected-row-border);
+  background: var(--selected-row-bg);
+}
+
+.teacher-dashboard[data-theme-mood] .settings-choice-pill > span,
+.teacher-dashboard[data-theme-mood] .settings-theme-swatch > span,
+.teacher-dashboard[data-theme-mood] .settings-nav-row,
+.teacher-dashboard[data-theme-mood] .secondary-nav-row,
+.teacher-dashboard[data-theme-mood] .primary-nav-row,
+.teacher-dashboard[data-theme-mood] .sidebar-nav-item,
+.teacher-dashboard[data-theme-mood] .teacher-action-button,
+.teacher-dashboard[data-theme-mood] .overview-date-button,
+.teacher-dashboard[data-theme-mood] .knowledge-filter-list button,
+.teacher-dashboard[data-theme-mood] .conversation-chip-list button,
+.teacher-dashboard[data-theme-mood] .transcript-header-actions button,
+.teacher-dashboard[data-theme-mood] .review-note-actions button,
+.student-workspace-shell[data-theme-mood] .student-sidebar-action,
+.student-workspace-shell[data-theme-mood] .student-new-mini-button,
+.student-workspace-shell[data-theme-mood] .student-new-chat-button,
+.student-workspace-shell[data-theme-mood] .student-signout-button {
+  min-height: var(--mood-control-height);
+  border-color: var(--card-border);
+  border-radius: max(6px, calc(var(--mood-radius) - 4px));
+  background: var(--card-bg);
+}
+
+.teacher-dashboard[data-theme-mood] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.teacher-dashboard[data-theme-mood] select,
+.teacher-dashboard[data-theme-mood] textarea,
+.student-workspace-shell[data-theme-mood] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.student-workspace-shell[data-theme-mood] select,
+.student-workspace-shell[data-theme-mood] textarea {
+  border-color: var(--input-border);
+  border-radius: max(6px, calc(var(--mood-radius) - 4px));
+  background: var(--input-bg);
+}
+
+.teacher-dashboard[data-theme-mood="warm"] .settings-choice-pill input:checked + span,
+.teacher-dashboard[data-theme-mood="warm"] .settings-theme-swatch input:checked + span,
+.student-workspace-shell[data-theme-mood="warm"] .student-conversation-row[aria-pressed="true"] {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--theme-primary) 26%, transparent),
+    0 8px 18px rgba(91, 61, 24, 0.075);
+}
+
+.teacher-dashboard[data-theme-mood="calm"] .settings-choice-pill input:checked + span,
+.teacher-dashboard[data-theme-mood="calm"] .settings-theme-swatch input:checked + span {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--theme-primary) 18%, transparent),
+    0 6px 14px rgba(44, 42, 33, 0.04);
+}
+
+.teacher-dashboard[data-theme-mood="highContrast"] .settings-choice-pill input:checked + span,
+.teacher-dashboard[data-theme-mood="highContrast"] .settings-theme-swatch input:checked + span,
+.teacher-dashboard[data-theme-mood="highContrast"] input:focus,
+.teacher-dashboard[data-theme-mood="highContrast"] select:focus,
+.teacher-dashboard[data-theme-mood="highContrast"] textarea:focus,
+.student-workspace-shell[data-theme-mood="highContrast"] input:focus,
+.student-workspace-shell[data-theme-mood="highContrast"] select:focus,
+.student-workspace-shell[data-theme-mood="highContrast"] textarea:focus {
+  border-color: var(--theme-primary);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.teacher-dashboard[data-appearance="light"][data-theme-mood="calm"],
+.student-workspace-shell[data-appearance="light"][data-theme-mood="calm"],
+.wizard-backdrop[data-appearance="light"][data-theme-mood="calm"] {
+  --app-bg-layer: #f3f7ef;
+  --sidebar-bg: #f8fbf5;
+  --sticky-header-bg: rgba(248, 251, 245, 0.95);
+  --card-bg: #fcfff9;
+  --card-bg-strong: #fcfff9;
+  --card-border: rgba(179, 198, 170, 0.52);
+  --input-bg: #fcfff9;
+  --input-border: rgba(172, 193, 162, 0.62);
+  --row-bg: #fcfff9;
+  --row-hover-bg: #ffffff;
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 6%, #f7fbf3);
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 18%, rgba(179, 198, 170, 0.62));
+  --text-primary: #222a20;
+  --text-secondary: #52624d;
+  --text-muted: #71806b;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 16%, transparent);
+  --app-shadow: 0 6px 18px rgba(45, 58, 38, 0.035);
+  --sidebar-shadow: none;
+}
+
+.teacher-dashboard[data-appearance="light"][data-theme-mood="focused"],
+.student-workspace-shell[data-appearance="light"][data-theme-mood="focused"],
+.wizard-backdrop[data-appearance="light"][data-theme-mood="focused"] {
+  --app-bg-layer: #f4f5f2;
+  --sidebar-bg: #f7f7f3;
+  --sticky-header-bg: rgba(247, 247, 243, 0.96);
+  --card-bg: #fffffb;
+  --card-bg-strong: #fffffb;
+  --card-border: rgba(151, 154, 143, 0.58);
+  --input-bg: #fffffb;
+  --input-border: rgba(137, 141, 130, 0.68);
+  --row-bg: #fffffb;
+  --row-hover-bg: #f8f9f5;
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 10%, #fffffb);
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 44%, rgba(137, 141, 130, 0.68));
+  --text-primary: #20261f;
+  --text-secondary: #30372f;
+  --text-muted: #5d6559;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 28%, transparent);
+  --app-shadow: none;
+  --sidebar-shadow: none;
+}
+
+.teacher-dashboard[data-appearance="light"][data-theme-mood="warm"],
+.student-workspace-shell[data-appearance="light"][data-theme-mood="warm"],
+.wizard-backdrop[data-appearance="light"][data-theme-mood="warm"] {
+  --app-bg-layer: #faead8;
+  --sidebar-bg: #fff1de;
+  --sticky-header-bg: rgba(255, 241, 222, 0.95);
+  --card-bg: #fff6e8;
+  --card-bg-strong: #fff9ef;
+  --card-border: rgba(196, 137, 74, 0.62);
+  --input-bg: #fff9ef;
+  --input-border: rgba(181, 118, 55, 0.7);
+  --row-bg: #fff6e8;
+  --row-hover-bg: #fffaf2;
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 12%, #ffe7c8);
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 42%, rgba(181, 118, 55, 0.7));
+  --text-primary: #2a241b;
+  --text-secondary: #5c472f;
+  --text-muted: #806c52;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 34%, rgba(181, 118, 55, 0.18));
+  --app-shadow: 0 14px 30px rgba(108, 68, 22, 0.09);
+  --sidebar-shadow: 8px 0 24px rgba(108, 68, 22, 0.055);
+  --content-wash: rgba(181, 118, 55, 0.06);
+}
+
+.teacher-dashboard[data-appearance="light"][data-theme-mood="highContrast"],
+.student-workspace-shell[data-appearance="light"][data-theme-mood="highContrast"],
+.wizard-backdrop[data-appearance="light"][data-theme-mood="highContrast"] {
+  --app-bg-layer: #f1f1ea;
+  --sidebar-bg: #f8f8f0;
+  --sticky-header-bg: #f8f8f0;
+  --card-bg: #fffffb;
+  --card-bg-strong: #fffffb;
+  --card-border: color-mix(in srgb, var(--theme-primary) 52%, #6f705f);
+  --input-bg: #fffffb;
+  --input-border: color-mix(in srgb, var(--theme-primary) 62%, #5f604f);
+  --row-bg: #fffffb;
+  --row-hover-bg: color-mix(in srgb, var(--theme-primary) 8%, #fffffb);
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 20%, #fffffb);
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 82%, #565746);
+  --text-primary: #101510;
+  --text-secondary: #101510;
+  --text-muted: #242c23;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 54%, transparent);
+  --app-shadow: none;
+  --sidebar-shadow: none;
+}
+
+.teacher-dashboard[data-appearance="dark"][data-theme-mood="calm"],
+.student-workspace-shell[data-appearance="dark"][data-theme-mood="calm"],
+.wizard-backdrop[data-appearance="dark"][data-theme-mood="calm"] {
+  --app-bg-layer: #0b1220;
+  --sidebar-bg: #0f1726;
+  --sticky-header-bg: rgba(15, 23, 38, 0.95);
+  --card-bg: rgba(21, 31, 50, 0.68);
+  --card-bg-strong: rgba(23, 34, 54, 0.82);
+  --card-border: rgba(158, 174, 196, 0.14);
+  --input-bg: rgba(11, 18, 32, 0.72);
+  --input-border: rgba(158, 174, 196, 0.18);
+  --row-bg: rgba(19, 29, 47, 0.58);
+  --row-hover-bg: rgba(30, 44, 66, 0.72);
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 11%, rgba(19, 29, 47, 0.86));
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 24%, rgba(158, 174, 196, 0.18));
+  --text-secondary: #c3ccda;
+  --text-muted: #8e9aac;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 22%, transparent);
+  --app-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+}
+
+.teacher-dashboard[data-appearance="dark"][data-theme-mood="focused"],
+.student-workspace-shell[data-appearance="dark"][data-theme-mood="focused"],
+.wizard-backdrop[data-appearance="dark"][data-theme-mood="focused"] {
+  --app-bg-layer: #070911;
+  --sidebar-bg: #090c15;
+  --sticky-header-bg: #090c15;
+  --card-bg: rgba(15, 20, 34, 0.92);
+  --card-bg-strong: rgba(16, 22, 37, 0.96);
+  --card-border: rgba(132, 143, 166, 0.26);
+  --input-bg: rgba(8, 12, 22, 0.92);
+  --input-border: rgba(144, 155, 178, 0.34);
+  --row-bg: rgba(12, 17, 29, 0.84);
+  --row-hover-bg: rgba(22, 29, 45, 0.96);
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 15%, rgba(12, 17, 29, 0.94));
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 46%, rgba(144, 155, 178, 0.34));
+  --text-secondary: #dce2ef;
+  --text-muted: #a3adbf;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 34%, transparent);
+  --app-shadow: 0 16px 38px rgba(0, 0, 0, 0.3);
+}
+
+.teacher-dashboard[data-appearance="dark"][data-theme-mood="warm"],
+.student-workspace-shell[data-appearance="dark"][data-theme-mood="warm"],
+.wizard-backdrop[data-appearance="dark"][data-theme-mood="warm"] {
+  --app-bg-layer: #181216;
+  --sidebar-bg: #1f171b;
+  --sticky-header-bg: rgba(31, 23, 27, 0.95);
+  --card-bg: rgba(41, 31, 34, 0.84);
+  --card-bg-strong: rgba(48, 36, 38, 0.94);
+  --card-border: rgba(203, 147, 82, 0.28);
+  --input-bg: rgba(28, 21, 25, 0.84);
+  --input-border: rgba(203, 147, 82, 0.34);
+  --row-bg: rgba(36, 27, 31, 0.74);
+  --row-hover-bg: rgba(53, 39, 42, 0.92);
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 18%, rgba(63, 42, 29, 0.92));
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 42%, rgba(203, 147, 82, 0.34));
+  --text-secondary: #ead7c1;
+  --text-muted: #b8a392;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 40%, rgba(203, 147, 82, 0.16));
+  --app-shadow: 0 18px 44px rgba(9, 5, 3, 0.36);
+  --content-wash: rgba(203, 147, 82, 0.07);
+}
+
+.teacher-dashboard[data-appearance="dark"][data-theme-mood="highContrast"],
+.student-workspace-shell[data-appearance="dark"][data-theme-mood="highContrast"],
+.wizard-backdrop[data-appearance="dark"][data-theme-mood="highContrast"] {
+  --app-bg-layer: #03050c;
+  --sidebar-bg: #050812;
+  --sticky-header-bg: #050812;
+  --card-bg: rgba(9, 13, 24, 0.99);
+  --card-bg-strong: rgba(11, 16, 29, 0.99);
+  --card-border: color-mix(in srgb, var(--theme-primary) 58%, rgba(216, 226, 255, 0.36));
+  --input-bg: rgba(4, 8, 17, 0.99);
+  --input-border: color-mix(in srgb, var(--theme-primary) 68%, rgba(216, 226, 255, 0.42));
+  --row-bg: rgba(8, 12, 22, 0.98);
+  --row-hover-bg: color-mix(in srgb, var(--theme-primary) 12%, rgba(8, 12, 22, 0.98));
+  --selected-row-bg: color-mix(in srgb, var(--theme-primary) 28%, rgba(8, 12, 22, 0.98));
+  --selected-row-border: color-mix(in srgb, var(--theme-primary) 88%, rgba(216, 226, 255, 0.42));
+  --text-primary: #fcfdff;
+  --text-secondary: #fcfdff;
+  --text-muted: #e2e7f0;
+  --focus-ring: color-mix(in srgb, var(--theme-primary) 68%, transparent);
+  --app-shadow: none;
+  --sidebar-shadow: none;
+}
+
+.teacher-dashboard[data-theme-mood="calm"] .settings-mood-pill input[value="calm"] + span {
+  background: #f4fbef;
+}
+
+.teacher-dashboard[data-theme-mood="focused"] .settings-mood-pill input[value="focused"] + span {
+  background: #f3f5f1;
+}
+
+.teacher-dashboard[data-theme-mood="warm"] .settings-mood-pill input[value="warm"] + span {
+  background: #fff0da;
+}
+
+.teacher-dashboard[data-theme-mood="highContrast"] .settings-mood-pill input[value="highContrast"] + span {
+  background: #fffffb;
+}
+
+.teacher-dashboard[data-appearance="dark"][data-theme-mood="calm"] .settings-mood-pill input[value="calm"] + span {
+  background: rgba(24, 38, 60, 0.82);
+}
+
+.teacher-dashboard[data-appearance="dark"][data-theme-mood="focused"] .settings-mood-pill input[value="focused"] + span {
+  background: rgba(16, 22, 37, 0.96);
+}
+
+.teacher-dashboard[data-appearance="dark"][data-theme-mood="warm"] .settings-mood-pill input[value="warm"] + span {
+  background: rgba(55, 39, 37, 0.94);
+}
+
+.teacher-dashboard[data-appearance="dark"][data-theme-mood="highContrast"] .settings-mood-pill input[value="highContrast"] + span {
+  background: rgba(8, 12, 22, 0.99);
+}
+
+.teacher-dashboard .settings-mood-pill input[value="calm"] + span {
+  border-color: rgba(179, 198, 170, 0.58);
+  background: #f4fbef;
+}
+
+.teacher-dashboard .settings-mood-pill input[value="focused"] + span {
+  border-color: rgba(151, 154, 143, 0.62);
+  background: #f3f5f1;
+}
+
+.teacher-dashboard .settings-mood-pill input[value="warm"] + span {
+  border-color: rgba(196, 137, 74, 0.64);
+  background: #fff0da;
+}
+
+.teacher-dashboard .settings-mood-pill input[value="highContrast"] + span {
+  border-color: color-mix(in srgb, var(--theme-primary) 52%, #6f705f);
+  background: #fffffb;
+}
+
+.teacher-dashboard[data-appearance="dark"] .settings-mood-pill input[value="calm"] + span {
+  border-color: rgba(158, 174, 196, 0.22);
+  background: rgba(24, 38, 60, 0.82);
+}
+
+.teacher-dashboard[data-appearance="dark"] .settings-mood-pill input[value="focused"] + span {
+  border-color: rgba(132, 143, 166, 0.3);
+  background: rgba(16, 22, 37, 0.96);
+}
+
+.teacher-dashboard[data-appearance="dark"] .settings-mood-pill input[value="warm"] + span {
+  border-color: rgba(203, 147, 82, 0.34);
+  background: rgba(55, 39, 37, 0.94);
+}
+
+.teacher-dashboard[data-appearance="dark"] .settings-mood-pill input[value="highContrast"] + span {
+  border-color: color-mix(in srgb, var(--theme-primary) 58%, rgba(216, 226, 255, 0.36));
+  background: rgba(8, 12, 22, 0.99);
+}
+
+.teacher-dashboard .settings-mood-pill input:checked + span {
+  border-color: var(--theme-primary);
+  color: var(--theme-primary-strong);
+  box-shadow: 0 0 0 3px var(--theme-primary-ring);
+}
+
+.teacher-dashboard[data-theme-mood="calm"],
+.student-workspace-shell[data-theme-mood="calm"],
+.wizard-backdrop[data-theme-mood="calm"] {
+  --mood-radius: 18px;
+  --mood-control-height: 44px;
+  --mood-section-gap: 30px;
+}
+
+.teacher-dashboard[data-theme-mood="focused"],
+.student-workspace-shell[data-theme-mood="focused"],
+.wizard-backdrop[data-theme-mood="focused"] {
+  --mood-radius: 6px;
+  --mood-control-height: 36px;
+  --mood-section-gap: 16px;
+}
+
+.teacher-dashboard[data-theme-mood="warm"],
+.student-workspace-shell[data-theme-mood="warm"],
+.wizard-backdrop[data-theme-mood="warm"] {
+  --mood-radius: 12px;
+  --mood-control-height: 42px;
+  --mood-section-gap: 24px;
+}
+
+.teacher-dashboard[data-theme-mood="highContrast"],
+.student-workspace-shell[data-theme-mood="highContrast"],
+.wizard-backdrop[data-theme-mood="highContrast"] {
+  --mood-radius: 4px;
+  --mood-control-height: 40px;
+  --mood-section-gap: 18px;
+}
+
+.teacher-dashboard[data-theme-mood="calm"] .teacher-main-inner,
+.student-workspace-shell[data-theme-mood="calm"] .student-workspace-main {
+  padding-top: 34px;
+}
+
+.teacher-dashboard[data-theme-mood="focused"] .teacher-main-inner,
+.student-workspace-shell[data-theme-mood="focused"] .student-workspace-main {
+  padding-top: 24px;
+}
+
+.teacher-dashboard[data-theme-mood="warm"] .teacher-main-inner,
+.student-workspace-shell[data-theme-mood="warm"] .student-workspace-main {
+  padding-top: 32px;
+}
+
+.teacher-dashboard[data-theme-mood="highContrast"] .teacher-main-inner,
+.student-workspace-shell[data-theme-mood="highContrast"] .student-workspace-main {
+  padding-top: 28px;
+}
+
+.teacher-dashboard[data-theme-mood] .teacher-main-header,
+.teacher-dashboard[data-theme-mood] .teacher-section-heading,
+.teacher-dashboard[data-theme-mood] .settings-page-heading,
+.student-workspace-shell[data-theme-mood] .student-main-header,
+.student-workspace-shell[data-theme-mood] .student-conversation-header {
+  border-color: var(--card-border);
+}
+
+.teacher-dashboard[data-theme-mood="calm"] .teacher-main-header h1,
+.teacher-dashboard[data-theme-mood="calm"] .teacher-section-heading h2,
+.teacher-dashboard[data-theme-mood="calm"] .settings-page-heading h2,
+.student-workspace-shell[data-theme-mood="calm"] .student-main-header h1 {
+  font-weight: 680;
+}
+
+.teacher-dashboard[data-theme-mood="focused"] .teacher-main-header h1,
+.teacher-dashboard[data-theme-mood="focused"] .teacher-section-heading h2,
+.teacher-dashboard[data-theme-mood="focused"] .settings-page-heading h2,
+.student-workspace-shell[data-theme-mood="focused"] .student-main-header h1 {
+  font-weight: 760;
+}
+
+.teacher-dashboard[data-theme-mood="warm"] .teacher-main-header h1,
+.teacher-dashboard[data-theme-mood="warm"] .teacher-section-heading h2,
+.teacher-dashboard[data-theme-mood="warm"] .settings-page-heading h2,
+.student-workspace-shell[data-theme-mood="warm"] .student-main-header h1 {
+  color: color-mix(in srgb, var(--theme-primary) 26%, var(--text-primary));
+  font-weight: 720;
+}
+
+.teacher-dashboard[data-theme-mood="highContrast"] .teacher-main-header h1,
+.teacher-dashboard[data-theme-mood="highContrast"] .teacher-section-heading h2,
+.teacher-dashboard[data-theme-mood="highContrast"] .settings-page-heading h2,
+.student-workspace-shell[data-theme-mood="highContrast"] .student-main-header h1 {
+  font-weight: 800;
+}
+
+.teacher-dashboard[data-theme-mood] .sidebar-nav-item[aria-current="page"],
+.teacher-dashboard[data-theme-mood] .primary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood] .secondary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood] .settings-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood] .ai-tutor-section-nav button[aria-current="page"],
+.student-workspace-shell[data-theme-mood] .student-conversation-row[aria-pressed="true"] {
+  border-color: var(--selected-row-border);
+  background: var(--selected-row-bg);
+}
+
+.teacher-dashboard[data-theme-mood="calm"] .sidebar-nav-item[aria-current="page"],
+.teacher-dashboard[data-theme-mood="calm"] .primary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood="calm"] .secondary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood="calm"] .settings-nav-row[aria-current="page"] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--theme-primary) 12%, transparent);
+}
+
+.teacher-dashboard[data-theme-mood="focused"] .sidebar-nav-item[aria-current="page"],
+.teacher-dashboard[data-theme-mood="focused"] .primary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood="focused"] .secondary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood="focused"] .settings-nav-row[aria-current="page"] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--theme-primary) 38%, transparent);
+}
+
+.teacher-dashboard[data-theme-mood="warm"] .sidebar-nav-item[aria-current="page"],
+.teacher-dashboard[data-theme-mood="warm"] .primary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood="warm"] .secondary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood="warm"] .settings-nav-row[aria-current="page"] {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--theme-primary) 30%, transparent),
+    0 8px 20px rgba(108, 68, 22, 0.08);
+}
+
+.teacher-dashboard[data-theme-mood="highContrast"] .sidebar-nav-item[aria-current="page"],
+.teacher-dashboard[data-theme-mood="highContrast"] .primary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood="highContrast"] .secondary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood="highContrast"] .settings-nav-row[aria-current="page"] {
+  border-width: 2px;
+  box-shadow: none;
+}
+
+.teacher-dashboard[data-theme-mood="calm"] .teacher-action-button,
+.teacher-dashboard[data-theme-mood="calm"] .settings-choice-pill > span,
+.teacher-dashboard[data-theme-mood="calm"] .settings-theme-swatch > span,
+.student-workspace-shell[data-theme-mood="calm"] .student-new-chat-button {
+  border-color: color-mix(in srgb, var(--card-border) 72%, transparent);
+}
+
+.teacher-dashboard[data-theme-mood="focused"] .teacher-action-button,
+.teacher-dashboard[data-theme-mood="focused"] .settings-choice-pill > span,
+.teacher-dashboard[data-theme-mood="focused"] .settings-theme-swatch > span,
+.student-workspace-shell[data-theme-mood="focused"] .student-new-chat-button {
+  box-shadow: none;
+}
+
+.teacher-dashboard[data-theme-mood="warm"] .teacher-action-button,
+.teacher-dashboard[data-theme-mood="warm"] .settings-choice-pill > span,
+.teacher-dashboard[data-theme-mood="warm"] .settings-theme-swatch > span,
+.student-workspace-shell[data-theme-mood="warm"] .student-new-chat-button {
+  border-color: color-mix(in srgb, var(--theme-primary) 20%, var(--card-border));
+}
+
+.teacher-dashboard[data-theme-mood="highContrast"] .settings-workspace .settings-group,
+.teacher-dashboard[data-theme-mood="highContrast"] .ai-tutor-card,
+.teacher-dashboard[data-theme-mood="highContrast"] .overview-panel,
+.teacher-dashboard[data-theme-mood="highContrast"] .conversation-inbox-panel,
+.teacher-dashboard[data-theme-mood="highContrast"] .transcript-viewer-panel,
+.teacher-dashboard[data-theme-mood="highContrast"] .review-side-panel,
+.teacher-dashboard[data-theme-mood="highContrast"] .roster-stat-card,
+.teacher-dashboard[data-theme-mood="highContrast"] .roster-table-card,
+.teacher-dashboard[data-theme-mood="highContrast"] .student-detail-panel,
+.teacher-dashboard[data-theme-mood="highContrast"] .student-detail-card,
+.teacher-dashboard[data-theme-mood="highContrast"] .material-list,
+.teacher-dashboard[data-theme-mood="highContrast"] .student-list,
+.teacher-dashboard[data-theme-mood="highContrast"] .knowledge-library-card,
+.teacher-dashboard[data-theme-mood="highContrast"] .knowledge-detail-card,
+.teacher-dashboard[data-theme-mood="highContrast"] .problems-table-card,
+.teacher-dashboard[data-theme-mood="highContrast"] .problem-detail-panel,
+.student-workspace-shell[data-theme-mood="highContrast"] .student-settings-card,
+.student-workspace-shell[data-theme-mood="highContrast"] .student-current-class-card,
+.student-workspace-shell[data-theme-mood="highContrast"] .student-composer {
+  border-width: 2px;
+}
+
+.teacher-dashboard[data-theme-mood="highContrast"] .teacher-action-button,
+.teacher-dashboard[data-theme-mood="highContrast"] .settings-choice-pill > span,
+.teacher-dashboard[data-theme-mood="highContrast"] .settings-theme-swatch > span,
+.teacher-dashboard[data-theme-mood="highContrast"] .class-row,
+.teacher-dashboard[data-theme-mood="highContrast"] .student-row,
+.teacher-dashboard[data-theme-mood="highContrast"] .material-row,
+.teacher-dashboard[data-theme-mood="highContrast"] .conversation-inbox-row,
+.teacher-dashboard[data-theme-mood="highContrast"] .roster-table-row,
+.teacher-dashboard[data-theme-mood="highContrast"] .knowledge-source-row,
+.teacher-dashboard[data-theme-mood="highContrast"] .teacher-conversation-row,
+.teacher-dashboard[data-theme-mood="highContrast"] .problems-table-row,
+.teacher-dashboard[data-theme-mood="highContrast"] .problem-student-row {
+  border-width: 2px;
+}
+
 @media (max-width: 1180px) {
   .teacher-dashboard.has-persistent-primary-sidebar.has-secondary-sidebar {
     grid-template-columns: var(--teacher-expanded-sidebar-width) 212px minmax(0, 1fr) !important;
@@ -24691,4 +25892,173 @@ button[aria-label="Open Next.js Dev Tools"] {
   .sidebar-pull-affordance {
     display: none;
   }
+}
+
+/* Teacher area cleanup: calmer navigation, consistent actions, and quieter empty review state. */
+.teacher-dashboard .teacher-primary-button,
+.teacher-dashboard .primary-button.teacher-primary-button,
+.teacher-dashboard .ai-tutor-section-heading .teacher-primary-button,
+.teacher-dashboard .settings-page-heading .teacher-primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  min-width: 118px;
+  border: 1px solid var(--theme-primary);
+  border-radius: 7px;
+  background: var(--theme-primary);
+  color: var(--on-primary);
+  box-shadow: none;
+  font-size: 0.86rem;
+  font-weight: 750;
+  line-height: 1;
+  padding: 0 16px;
+}
+
+.teacher-dashboard .teacher-primary-button:hover,
+.teacher-dashboard .teacher-primary-button:focus-visible,
+.teacher-dashboard .primary-button.teacher-primary-button:hover,
+.teacher-dashboard .primary-button.teacher-primary-button:focus-visible,
+.teacher-dashboard .ai-tutor-section-heading .teacher-primary-button:hover,
+.teacher-dashboard .ai-tutor-section-heading .teacher-primary-button:focus-visible,
+.teacher-dashboard .settings-page-heading .teacher-primary-button:hover,
+.teacher-dashboard .settings-page-heading .teacher-primary-button:focus-visible {
+  outline: none;
+  border-color: var(--theme-primary-strong);
+  background: var(--theme-primary-strong);
+  box-shadow: none;
+}
+
+.teacher-dashboard .teacher-primary-button:disabled,
+.teacher-dashboard .primary-button.teacher-primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.teacher-dashboard .teacher-action-button,
+.teacher-dashboard .overview-small-action,
+.teacher-dashboard .overview-link-action,
+.teacher-dashboard .conversation-bulk-bar button,
+.teacher-dashboard .transcript-header-actions button,
+.teacher-dashboard .review-note-actions button,
+.teacher-dashboard .student-feedback-actions button,
+.teacher-dashboard .follow-up-preset-row button,
+.teacher-dashboard .knowledge-source-action,
+.teacher-dashboard .student-icon-button {
+  border-radius: 7px;
+  box-shadow: none;
+  font-weight: 700;
+}
+
+.teacher-secondary-sidebar {
+  border-color: var(--card-border);
+  background: var(--sidebar-bg);
+}
+
+.secondary-sidebar-heading {
+  min-height: 64px;
+  border-bottom-color: var(--card-border);
+  padding: 16px 18px 14px;
+}
+
+.secondary-sidebar-heading h2 {
+  font-size: 0.9rem;
+  line-height: 1.18;
+}
+
+.secondary-sidebar-heading span {
+  font-size: 0.74rem;
+  line-height: 1.2;
+}
+
+.secondary-nav {
+  gap: 2px;
+  padding: 12px 10px;
+}
+
+.secondary-nav-row,
+.teacher-dashboard[data-appearance] .secondary-nav-row,
+.teacher-dashboard[data-theme-mood] .secondary-nav-row {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 8px;
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 0 8px;
+  font-size: 0.8rem;
+  font-weight: 680;
+  transform: none;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.secondary-nav-row::before,
+.secondary-nav-row[aria-current="page"]::before,
+.primary-nav-row[aria-current="page"]::before {
+  display: none;
+}
+
+.secondary-nav-row svg {
+  width: 16px;
+  height: 16px;
+}
+
+.secondary-nav-row em {
+  min-width: 1.5ch;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  text-align: right;
+}
+
+.secondary-nav-row:hover,
+.secondary-nav-row:focus-visible,
+.teacher-dashboard[data-appearance] .secondary-nav-row:hover,
+.teacher-dashboard[data-appearance] .secondary-nav-row:focus-visible,
+.teacher-dashboard[data-theme-mood] .secondary-nav-row:hover,
+.teacher-dashboard[data-theme-mood] .secondary-nav-row:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--theme-primary) 12%, transparent);
+  background: color-mix(in srgb, var(--theme-primary-soft) 42%, transparent);
+  color: var(--text-primary);
+  box-shadow: none;
+  transform: none;
+}
+
+.secondary-nav-row[aria-current="page"],
+.teacher-dashboard[data-appearance] .secondary-nav-row[aria-current="page"],
+.teacher-dashboard[data-theme-mood] .secondary-nav-row[aria-current="page"] {
+  border-color: color-mix(in srgb, var(--theme-primary) 18%, transparent);
+  background: color-mix(in srgb, var(--theme-primary-soft) 64%, transparent);
+  color: var(--theme-primary);
+  box-shadow: none;
+}
+
+.secondary-nav-row[aria-current="page"] span,
+.teacher-dashboard[data-appearance] .secondary-nav-row[aria-current="page"] span,
+.teacher-dashboard[data-appearance="dark"] .secondary-nav-row[aria-current="page"] span {
+  color: inherit;
+}
+
+.conversation-review-side.is-empty {
+  position: static;
+  overflow: visible;
+}
+
+.conversation-review-side.is-empty .review-side-panel:not(.review-empty-panel) {
+  display: none;
+}
+
+.conversation-review-side .review-empty-panel {
+  padding: 0 14px 16px;
+}
+
+.review-empty-panel .review-panel-empty-copy {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
 }

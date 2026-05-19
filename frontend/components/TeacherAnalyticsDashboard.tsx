@@ -69,6 +69,7 @@ type TeacherAnalyticsDashboardContentProps = {
   selectedDate?: string;
   joinCode?: string;
   isLoadingClassDetails?: boolean;
+  isLoadingOverview?: boolean;
   sourceCount?: number;
   studentCount?: number;
   onAddSource?: () => void;
@@ -124,6 +125,7 @@ export function TeacherAnalyticsDashboardContent({
   selectedDate,
   joinCode,
   isLoadingClassDetails = false,
+  isLoadingOverview = false,
   sourceCount = 0,
   studentCount = 0,
   onAddSource,
@@ -151,7 +153,6 @@ export function TeacherAnalyticsDashboardContent({
       status: row.status
     })
   );
-  const visibleReviewRows = allReviewRowsToCheck.slice(0, 4);
   const reviewQueueByConversationId = new Map((overview?.reviewQueueRows ?? []).map((row) => [row.conversationId, row]));
   const overviewDateLabel =
     dateLabel ??
@@ -169,22 +170,59 @@ export function TeacherAnalyticsDashboardContent({
   const averageChatCount = calculateAverageChatCount(allChatUsers, totalStudents);
   const followUpRows = allChatUsers.filter((row) => isAboveClassAverage(row.chatsThisWeek, averageChatCount)).slice(0, 4);
   const topUserMax = Math.max(...chatUsers.map((row) => row.chatsThisWeek), 1);
-  const readySourceLabel = sourceCount ? "Ready" : "Add sources";
   const calendarWeeks = buildCalendarWeeks(visibleCalendarMonth, selectedDashboardDate, maxDate);
+  const attentionRows = buildAttentionRows({
+    averageChatCount,
+    followUpRows,
+    onOpenPriorityStudent,
+    onReviewConversation,
+    onUsageDecision,
+    reviewQueueByConversationId,
+    reviewRows: allReviewRowsToCheck
+  });
+  const visibleAttentionRows = attentionRows.slice(0, 8);
+  const showAttentionSkeleton = isLoadingOverview && !visibleAttentionRows.length;
+  const updatedLabel = formatUpdatedAt(overview?.generatedAt);
 
   return (
     <div className="analytics-dashboard-content">
       <header className="analytics-page-header" aria-label="Dashboard overview">
-        <div className="analytics-page-title">
-          <div className="analytics-page-title-row">
-            <h1>{selectedDateIsToday ? "Today" : "Daily overview"}</h1>
-            {isLoadingClassDetails ? (
-              <span className="analytics-title-loader" role="status" aria-label="Loading class details">
-                <span className="sr-only">Loading class details</span>
-              </span>
-            ) : null}
+        <div className="analytics-page-header-main">
+          <div className="analytics-page-title">
+            <div className="analytics-page-title-row">
+              <h1>{selectedDateIsToday ? "Today" : "Daily overview"}</h1>
+              {isLoadingClassDetails || isLoadingOverview ? (
+                <span className="analytics-title-loader" role="status" aria-label="Loading overview">
+                  <span className="sr-only">Loading overview</span>
+                </span>
+              ) : null}
+            </div>
+            <p>{classLabel}</p>
+            <span className="analytics-trust-signal">{updatedLabel}</span>
           </div>
-          <p>{classLabel}</p>
+          <div className="analytics-class-control-strip" aria-label="Class controls">
+            <ClassControlButton
+              actionLabel="Pause"
+              icon="message"
+              label="Chat"
+              status="On"
+              onAction={onPauseChat}
+            />
+            <ClassControlButton
+              actionLabel="Copy"
+              icon="key"
+              label="Join code"
+              status={joinCode?.trim() || "Set up"}
+              onAction={onCopyJoinCode}
+            />
+            <ClassControlButton
+              actionLabel={sourceCount ? "Add" : "Add source"}
+              icon="file"
+              label="Sources"
+              status={sourceCount ? `${sourceCount} ready` : "None yet"}
+              onAction={onAddSource}
+            />
+          </div>
         </div>
         <div className="analytics-header-actions">
           <div className="analytics-date-menu">
@@ -261,95 +299,62 @@ export function TeacherAnalyticsDashboardContent({
         </div>
       </header>
 
-      <section className="analytics-kpi-grid" aria-label="Class metrics">
-        <KpiCard detail="Enrolled" icon="users" label="Students" tone="green" value={String(totalStudents)} />
-        <KpiCard detail="All students" icon="message" label="Chats this week" tone="green" value={String(weeklyChats)} />
-        <KpiCard detail="Students" icon="pulse" label="Active this week" tone="green" value={String(activeStudentsThisWeek)} />
-        <KpiCard
-          detail="Needs review"
-          icon="alert"
-          label="Chats to check"
-          tone="orange"
-          value={String(allReviewRowsToCheck.length)}
-        />
+      <section className="analytics-status-strip" aria-label="Class metrics">
+        <MetricPill label="Students" value={String(totalStudents)} detail="enrolled" />
+        <MetricPill label="Chats" value={String(weeklyChats)} detail="this week" />
+        <MetricPill label="Active" value={String(activeStudentsThisWeek)} detail="this week" />
+        <MetricPill label="Needs review" value={String(allReviewRowsToCheck.length)} detail="open items" tone="warning" />
       </section>
 
       <section className="analytics-overview-grid">
-        <section className="analytics-card analytics-overview-panel">
+        <section className="analytics-card analytics-attention-panel">
           <div className="analytics-card-heading">
             <div>
-              <h2>Students to Follow Up With</h2>
-              <p>Students who used chat much more than the class average this week</p>
+              <h2>Needs attention</h2>
+              <p>Review requests, source warnings, and unusual chat volume across this class.</p>
             </div>
           </div>
-          <div className="analytics-compact-table follow-up-table" role="table" aria-label="Students to follow up with">
+          <div className="analytics-compact-table attention-table" role="table" aria-label="Needs attention">
             <div className="analytics-compact-table-header" role="row">
               <span>Student</span>
-              <span>Chats this week</span>
-              <span>Class average</span>
+              <span>Reason</span>
+              <span>Evidence</span>
+              <span>Last activity</span>
               <span>Action</span>
             </div>
-            {followUpRows.map((row) => (
+            {visibleAttentionRows.map((row) => (
               <div className="analytics-compact-table-row" role="row" key={row.id}>
                 <span className="analytics-student-cell">
                   <span className={`analytics-avatar ${avatarTone(row.studentName)}`}>{initialsForName(row.studentName, row.studentEmail)}</span>
                   <strong>{row.studentName}</strong>
                 </span>
-                <span>{row.chatsThisWeek}</span>
-                <span>{averageChatCount}</span>
-                <button className="analytics-row-action" type="button" onClick={() => onOpenPriorityStudent?.(studentChatRowToPriorityRow(row))}>
-                  Open student
-                </button>
+                <span>{row.reason}</span>
+                <span>{row.evidence}</span>
+                <span className="analytics-time-cell">{row.lastActivity}</span>
+                {row.decisions ? (
+                  <span className="analytics-decision-actions">
+                    <button type="button" onClick={row.decisions.deny}>
+                      Deny
+                    </button>
+                    <button type="button" onClick={row.decisions.approve}>
+                      Approve
+                    </button>
+                  </span>
+                ) : (
+                  <button className="analytics-row-action" type="button" onClick={row.onAction}>
+                    {row.actionLabel}
+                  </button>
+                )}
               </div>
             ))}
+            {showAttentionSkeleton ? <AttentionSkeletonRows /> : null}
           </div>
-          {!followUpRows.length ? <p className="analytics-empty-state">No students need follow-up right now.</p> : null}
-        </section>
-
-        <section className="analytics-card analytics-overview-panel">
-          <div className="analytics-card-heading">
-            <div>
-              <h2>Chats to Check</h2>
+          {!visibleAttentionRows.length && !showAttentionSkeleton ? (
+            <div className="analytics-empty-state">
+              <strong>No attention items right now.</strong>
+              <span>Student review requests, source warnings, and unusually high chat volume will appear here.</span>
             </div>
-          </div>
-          <div className="analytics-compact-table check-table" role="table" aria-label="Chats to check">
-            <div className="analytics-compact-table-header" role="row">
-              <span>Student</span>
-              <span>Reason</span>
-              <span>Time</span>
-              <span>Action</span>
-            </div>
-            {visibleReviewRows.map((row) => {
-              const overviewRow = reviewQueueByConversationId.get(row.id);
-              const isUsageRequest = conversationHasOpenUsageRequest(row);
-
-              return (
-                <div className="analytics-compact-table-row" role="row" key={row.id}>
-                  <span className="analytics-student-cell">
-                    <span className={`analytics-avatar ${avatarTone(row.studentName)}`}>{initialsForName(row.studentName, row.studentEmail)}</span>
-                    <strong>{row.studentName}</strong>
-                  </span>
-                  <span>{issueForConversation(row, overviewRow?.issue)}</span>
-                  <span className="analytics-time-cell">{row.lastMessageLabel}</span>
-                  {isUsageRequest ? (
-                    <span className="analytics-decision-actions">
-                      <button type="button" onClick={() => onUsageDecision?.(row, "deny")}>
-                        No
-                      </button>
-                      <button type="button" onClick={() => onUsageDecision?.(row, "approve")}>
-                        Yes
-                      </button>
-                    </span>
-                  ) : (
-                    <button className="analytics-row-action" type="button" onClick={() => onReviewConversation?.(row)}>
-                      Review
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          {!visibleReviewRows.length ? <p className="analytics-empty-state">No chats currently need review.</p> : null}
+          ) : null}
         </section>
 
         <section className="analytics-card analytics-chart-card">
@@ -381,35 +386,26 @@ export function TeacherAnalyticsDashboardContent({
           </div>
         </section>
       </section>
-
-      <section className="analytics-control-grid" aria-label="Class controls">
-        <StatusCard
-          actionLabel="Pause Chat"
-          icon="message"
-          label="Chat"
-          status="On"
-          onAction={onPauseChat}
-        />
-        <StatusCard
-          actionLabel="Copy"
-          icon="key"
-          label="Join Code"
-          status={joinCode?.trim() || "Set up"}
-          onAction={onCopyJoinCode}
-        />
-        <StatusCard
-          actionLabel="Add Source"
-          icon="file"
-          label="Sources"
-          status={readySourceLabel}
-          onAction={onAddSource}
-        />
-      </section>
     </div>
   );
 }
 
-function StatusCard({
+type AttentionRow = {
+  actionLabel: string;
+  decisions?: {
+    approve: () => void;
+    deny: () => void;
+  };
+  evidence: string;
+  id: string;
+  lastActivity: string;
+  onAction?: () => void;
+  reason: string;
+  studentEmail?: string;
+  studentName: string;
+};
+
+function ClassControlButton({
   actionLabel,
   icon,
   label,
@@ -423,43 +419,52 @@ function StatusCard({
   onAction?: () => void;
 }) {
   return (
-    <div className="analytics-status-card analytics-card">
-      <div>
+    <div className="analytics-class-control">
+      <span className="analytics-class-control-icon">
         <DashboardIcon name={icon} />
-        <span>
-          <strong>{label}</strong>
-          <em>{status}</em>
-        </span>
-      </div>
+      </span>
+      <span>
+        <strong>{label}</strong>
+        <em>{status}</em>
+      </span>
       <button type="button" onClick={onAction}>{actionLabel}</button>
     </div>
   );
 }
 
-function KpiCard({
+function MetricPill({
   detail,
-  icon,
   label,
   tone,
   value
 }: {
-  icon: SvgIconName;
   detail: string;
   label: string;
-  tone: "green" | "orange";
+  tone?: "default" | "warning";
   value: string;
 }) {
   return (
-    <div className="analytics-kpi-card analytics-card">
-      <span className={`analytics-kpi-icon ${tone}`}>
-        <DashboardIcon name={icon} />
-      </span>
-      <span>
-        <em>{label}</em>
-        <strong>{value}</strong>
-        <small>{detail}</small>
-      </span>
+    <div className={`analytics-metric-pill ${tone === "warning" ? "warning" : ""}`}>
+      <strong>{value}</strong>
+      <span>{label}</span>
+      <em>{detail}</em>
     </div>
+  );
+}
+
+function AttentionSkeletonRows() {
+  return (
+    <>
+      {[0, 1, 2].map((row) => (
+        <div className="analytics-compact-table-row analytics-skeleton-row" role="row" key={row}>
+          <span />
+          <span />
+          <span />
+          <span />
+          <span />
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -507,6 +512,136 @@ function conversationHasOpenUsageRequest(row: AnalyticsConversationRow) {
   return row.feedback?.some((feedback) => feedback.status !== "resolved" && feedback.kind === "usage_request") ?? false;
 }
 
+function buildAttentionRows({
+  averageChatCount,
+  followUpRows,
+  onOpenPriorityStudent,
+  onReviewConversation,
+  onUsageDecision,
+  reviewQueueByConversationId,
+  reviewRows
+}: {
+  averageChatCount: number;
+  followUpRows: StudentChatRow[];
+  onOpenPriorityStudent?: (row: TeacherClassOverviewPriorityRow) => void;
+  onReviewConversation?: (row: AnalyticsConversationRow) => void;
+  onUsageDecision?: (row: AnalyticsConversationRow, decision: "approve" | "deny") => void;
+  reviewQueueByConversationId: Map<string, TeacherClassOverview["reviewQueueRows"][number]>;
+  reviewRows: AnalyticsConversationRow[];
+}): AttentionRow[] {
+  const attentionRows: AttentionRow[] = [];
+
+  for (const row of reviewRows) {
+    const overviewRow = reviewQueueByConversationId.get(row.id);
+    const isUsageRequest = conversationHasOpenUsageRequest(row);
+
+    attentionRows.push({
+      actionLabel: isUsageRequest ? "Decide" : "Review",
+      decisions: isUsageRequest
+        ? {
+            approve: () => onUsageDecision?.(row, "approve"),
+            deny: () => onUsageDecision?.(row, "deny")
+          }
+        : undefined,
+      evidence: evidenceForConversation(row, overviewRow),
+      id: `conversation-${row.id}`,
+      lastActivity: row.lastMessageLabel || "Recent",
+      onAction: () => onReviewConversation?.(row),
+      reason: issueForConversation(row, overviewRow?.issue),
+      studentEmail: row.studentEmail,
+      studentName: row.studentName
+    });
+  }
+
+  const reviewStudentKeys = new Set(
+    reviewRows.map((row) => row.studentEmail || row.studentId || row.studentName)
+  );
+
+  for (const row of followUpRows) {
+    const studentKey = row.studentEmail || row.studentId || row.studentName;
+
+    if (reviewStudentKeys.has(studentKey)) {
+      continue;
+    }
+
+    attentionRows.push({
+      actionLabel: "Open student",
+      evidence: `${row.chatsThisWeek} chats this week; class average ${averageChatCount}`,
+      id: `follow-up-${row.id}`,
+      lastActivity: row.lastMessageLabel || "This week",
+      onAction: () => onOpenPriorityStudent?.(studentChatRowToPriorityRow(row)),
+      reason: "High chat volume",
+      studentEmail: row.studentEmail,
+      studentName: row.studentName
+    });
+  }
+
+  return attentionRows;
+}
+
+function evidenceForConversation(
+  row: AnalyticsConversationRow,
+  overviewRow?: TeacherClassOverview["reviewQueueRows"][number]
+) {
+  if (conversationHasOpenUsageRequest(row)) {
+    return "Student is asking for more AI usage";
+  }
+
+  if ((row.learningSignals?.safetyReviewCount ?? 0) > 0) {
+    return `${row.learningSignals?.safetyReviewCount} safety signal`;
+  }
+
+  if ((row.learningSignals?.answerSeekingReviewCount ?? 0) > 0) {
+    return `${row.learningSignals?.answerSeekingReviewCount} answer-seeking signal`;
+  }
+
+  if (row.sourceAudit.lowSourceConfidence || row.latestRetrievalConfidence === "low") {
+    return overviewRow?.meta || "Low source confidence";
+  }
+
+  if (row.sourceAudit.noSourceUsedWarning) {
+    return "No class source used";
+  }
+
+  if (row.sourceAudit.learningSignals.reviewSourceCount > 0) {
+    return `${row.sourceAudit.learningSignals.reviewSourceCount} source check`;
+  }
+
+  return overviewRow?.meta || row.title || row.topic || "Recent student activity";
+}
+
+function formatUpdatedAt(value?: string) {
+  if (!value) {
+    return "Waiting for current data";
+  }
+
+  const updatedAt = new Date(value);
+
+  if (Number.isNaN(updatedAt.getTime())) {
+    return "Updated recently";
+  }
+
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - updatedAt.getTime()) / 1000));
+
+  if (elapsedSeconds < 45) {
+    return "Updated just now";
+  }
+
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+
+  if (elapsedMinutes < 60) {
+    return `Updated ${elapsedMinutes} min ago`;
+  }
+
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+
+  if (elapsedHours < 24) {
+    return `Updated ${elapsedHours} hr ago`;
+  }
+
+  return `Updated ${updatedAt.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+}
+
 function initialsForName(name: string, email?: string) {
   const source = name.trim() || email?.split("@")[0] || "Student";
   const words = source.split(/\s+/).filter(Boolean);
@@ -544,6 +679,8 @@ function formatOverviewButtonDate(date?: string, fallback?: string) {
 type StudentChatRow = {
   chatsThisWeek: number;
   id: string;
+  lastMessageAt?: unknown;
+  lastMessageLabel?: string;
   priorityRow?: TeacherClassOverviewPriorityRow;
   studentEmail?: string;
   studentId?: string;
@@ -562,12 +699,18 @@ function buildStudentChatRows(
 
     if (existing) {
       existing.chatsThisWeek += Math.max(row.messageCount, 1);
+      if (isAfterAnalyticsValue(row.lastMessageAt, existing.lastMessageAt)) {
+        existing.lastMessageAt = row.lastMessageAt;
+        existing.lastMessageLabel = row.lastMessageLabel;
+      }
       continue;
     }
 
     rowsByStudent.set(key, {
       chatsThisWeek: Math.max(row.messageCount, 1),
       id: key,
+      lastMessageAt: row.lastMessageAt,
+      lastMessageLabel: row.lastMessageLabel,
       studentEmail: row.studentEmail,
       studentId: row.studentId,
       studentName: row.studentName
@@ -744,6 +887,21 @@ function isOnOrBeforeEndOfDate(value: unknown, date: Date) {
 
   const endOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
   return itemDate.getTime() <= endOfDay.getTime();
+}
+
+function isAfterAnalyticsValue(nextValue: unknown, currentValue: unknown) {
+  const nextDate = coerceAnalyticsDate(nextValue);
+  const currentDate = coerceAnalyticsDate(currentValue);
+
+  if (!nextDate) {
+    return false;
+  }
+
+  if (!currentDate) {
+    return true;
+  }
+
+  return nextDate.getTime() > currentDate.getTime();
 }
 
 function dateKeyForAnalyticsDate(date: Date) {

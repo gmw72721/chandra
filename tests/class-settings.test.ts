@@ -82,6 +82,21 @@ test("teacher settings form submits help limits with answer policy", () => {
   assert.match(source, /updateTeacherClassSettings\(\{\s*answerPolicy,/s);
 });
 
+test("pre-dashboard theme step sets the teacher theme and exposes mood", () => {
+  const source = readFileSync(join(repoRoot, "frontend/components/PreDashboardWizard.tsx"), "utf8");
+  const styles = readFileSync(join(repoRoot, "frontend/app/styles.css"), "utf8");
+
+  assert.match(source, /<h2>Choose your theme<\/h2>/);
+  assert.match(source, /Your Workspace/);
+  assert.match(source, /updateUserThemePreference\(\{/);
+  assert.match(source, /teacherClassThemeMoodOptions\.map/);
+  assert.match(source, /data-theme-mood=\{themeMood\}/);
+  assert.match(styles, /\.wizard-backdrop\[data-appearance="light"\]\[data-theme-mood="calm"\]/);
+  assert.match(styles, /\.wizard-backdrop\[data-appearance="dark"\]\[data-theme-mood="highContrast"\]/);
+  assert.doesNotMatch(source, /Choose the class theme/);
+  assert.doesNotMatch(source, /students will see the same class appearance/i);
+});
+
 test("Help Rules tab is organized into four policy sections", () => {
   const managerSource = readFileSync(join(repoRoot, "frontend/components/TeacherClassManager.tsx"), "utf8");
 

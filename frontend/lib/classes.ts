@@ -12,8 +12,10 @@ import { apiUrl } from "./api-client";
 import {
   normalizeTeacherClassAppearance,
   normalizeTeacherClassThemeColor,
+  normalizeTeacherClassThemeMood,
   type TeacherClassAppearance,
-  type TeacherClassThemeColor
+  type TeacherClassThemeColor,
+  type TeacherClassThemeMood
 } from "./class-theme";
 import {
   type AnswerPolicySettings,
@@ -39,6 +41,7 @@ export type TeacherClass = {
   teacherName: string;
   appearance?: TeacherClassAppearance;
   themeColor?: TeacherClassThemeColor;
+  themeMood?: TeacherClassThemeMood;
   joinCode?: string;
   answerPolicy?: AnswerPolicySettings;
   behaviorTitle?: TutorBehavior;
@@ -362,7 +365,8 @@ export async function updateTeacherClassSettings({
   sourceUsage,
   studentFacingInstructions,
   tutorAccess,
-  themeColor
+  themeColor,
+  themeMood
 }: {
   answerPolicy: AnswerPolicySettings;
   appearance: TeacherClassAppearance;
@@ -383,6 +387,7 @@ export async function updateTeacherClassSettings({
   studentFacingInstructions: string;
   tutorAccess: TutorAccessSettings;
   themeColor: TeacherClassThemeColor;
+  themeMood: TeacherClassThemeMood;
 }) {
   assertFirestoreReady();
 
@@ -416,7 +421,8 @@ export async function updateTeacherClassSettings({
       studentFacingInstructions: studentFacingInstructions.trim(),
       studentChatEnabled: tutorAccess.enabled,
       tutorAccess,
-      themeColor: normalizeTeacherClassThemeColor(themeColor)
+      themeColor: normalizeTeacherClassThemeColor(themeColor),
+      themeMood: normalizeTeacherClassThemeMood(themeMood)
     })
   });
   const data = (await response.json().catch(() => ({}))) as { error?: string };

@@ -16,6 +16,7 @@ export type ClassRecord = {
   studentPromptPlaceholder: string;
   appearance: string;
   themeColor: string;
+  themeMood: string;
   settings: {
     answerPolicy: Record<string, unknown>;
     modelSettings: Record<string, unknown>;
@@ -62,6 +63,7 @@ type ClassRow = {
   student_prompt_placeholder: string;
   appearance: string;
   theme_color: string;
+  theme_mood: string;
   answer_policy: Record<string, unknown>;
   model_settings: Record<string, unknown>;
   notification_settings: Record<string, unknown>;
@@ -105,6 +107,7 @@ export type UpsertClassInput = {
   studentPromptPlaceholder?: string;
   appearance?: string;
   themeColor?: string;
+  themeMood?: string;
   settings?: Partial<ClassRecord["settings"]>;
 };
 
@@ -113,12 +116,12 @@ export async function upsertClass(input: UpsertClassInput, client?: PostgresQuer
     client,
     `INSERT INTO classes (
       id, teacher_id, teacher_name, name, section, join_code, student_chat_enabled,
-      student_prompt_placeholder, appearance, theme_color, answer_policy, model_settings, notification_settings, privacy_settings,
+      student_prompt_placeholder, appearance, theme_color, theme_mood, answer_policy, model_settings, notification_settings, privacy_settings,
       response_format, source_defaults, source_usage, tutor_access
     ) VALUES (
       $1, $2, $3, $4, $5, $6, $7,
-      $8, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb,
-      $15::jsonb, $16::jsonb, $17::jsonb, $18::jsonb
+      $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
+      $16::jsonb, $17::jsonb, $18::jsonb, $19::jsonb
     )
     ON CONFLICT (id) DO UPDATE SET
       teacher_id = EXCLUDED.teacher_id,
@@ -130,6 +133,7 @@ export async function upsertClass(input: UpsertClassInput, client?: PostgresQuer
       student_prompt_placeholder = EXCLUDED.student_prompt_placeholder,
       appearance = EXCLUDED.appearance,
       theme_color = EXCLUDED.theme_color,
+      theme_mood = EXCLUDED.theme_mood,
       answer_policy = classes.answer_policy || EXCLUDED.answer_policy,
       model_settings = classes.model_settings || EXCLUDED.model_settings,
       notification_settings = classes.notification_settings || EXCLUDED.notification_settings,
@@ -150,6 +154,7 @@ export async function upsertClass(input: UpsertClassInput, client?: PostgresQuer
       input.studentPromptPlaceholder?.trim() ?? "",
       input.appearance ?? "",
       input.themeColor ?? "",
+      input.themeMood ?? "",
       JSON.stringify(input.settings?.answerPolicy ?? {}),
       JSON.stringify(input.settings?.modelSettings ?? {}),
       JSON.stringify(input.settings?.notificationSettings ?? {}),
@@ -368,6 +373,7 @@ export async function updateClassSettings(input: {
   teacherName?: string;
   tutorAccess?: Record<string, unknown>;
   themeColor?: string;
+  themeMood?: string;
 }, client?: PostgresQueryClient) {
   const result = await runPostgresQuery<ClassRow>(
     client,
@@ -376,24 +382,25 @@ export async function updateClassSettings(input: {
       answer_policy = coalesce($2::jsonb, answer_policy),
       appearance = coalesce($3, appearance),
       theme_color = coalesce($4, theme_color),
-      behavior_instructions = coalesce($5, behavior_instructions),
-      behavior_title = coalesce($6, behavior_title),
-      default_assignment_context = coalesce($7, default_assignment_context),
-      model_settings = coalesce($8::jsonb, model_settings),
-      name = coalesce($9, name),
-      notification_settings = coalesce($10::jsonb, notification_settings),
-      opening_message = coalesce($11, opening_message),
-      privacy_settings = coalesce($12::jsonb, privacy_settings),
-      refusal_style = coalesce($13, refusal_style),
-      response_format = coalesce($14::jsonb, response_format),
-      section = coalesce($15, section),
-      source_defaults = coalesce($16::jsonb, source_defaults),
-      source_usage = coalesce($17::jsonb, source_usage),
-      student_facing_instructions = coalesce($18, student_facing_instructions),
-      student_chat_enabled = coalesce($19, student_chat_enabled),
-      teacher_name = coalesce($20, teacher_name),
-      tutor_access = coalesce($21::jsonb, tutor_access),
-      student_prompt_placeholder = coalesce($22, student_prompt_placeholder)
+      theme_mood = coalesce($5, theme_mood),
+      behavior_instructions = coalesce($6, behavior_instructions),
+      behavior_title = coalesce($7, behavior_title),
+      default_assignment_context = coalesce($8, default_assignment_context),
+      model_settings = coalesce($9::jsonb, model_settings),
+      name = coalesce($10, name),
+      notification_settings = coalesce($11::jsonb, notification_settings),
+      opening_message = coalesce($12, opening_message),
+      privacy_settings = coalesce($13::jsonb, privacy_settings),
+      refusal_style = coalesce($14, refusal_style),
+      response_format = coalesce($15::jsonb, response_format),
+      section = coalesce($16, section),
+      source_defaults = coalesce($17::jsonb, source_defaults),
+      source_usage = coalesce($18::jsonb, source_usage),
+      student_facing_instructions = coalesce($19, student_facing_instructions),
+      student_chat_enabled = coalesce($20, student_chat_enabled),
+      teacher_name = coalesce($21, teacher_name),
+      tutor_access = coalesce($22::jsonb, tutor_access),
+      student_prompt_placeholder = coalesce($23, student_prompt_placeholder)
     WHERE id = $1
     RETURNING *`,
     [
@@ -401,6 +408,7 @@ export async function updateClassSettings(input: {
       input.answerPolicy ? JSON.stringify(input.answerPolicy) : null,
       input.appearance ?? null,
       input.themeColor ?? null,
+      input.themeMood ?? null,
       input.behaviorInstructions ?? null,
       input.behaviorTitle ?? null,
       input.defaultAssignmentContext ?? null,
@@ -551,6 +559,7 @@ function rowToClass(row: ClassRow): ClassRecord {
     studentPromptPlaceholder: row.student_prompt_placeholder,
     appearance: row.appearance,
     themeColor: row.theme_color,
+    themeMood: row.theme_mood,
     settings: {
       answerPolicy: row.answer_policy,
       modelSettings: row.model_settings,

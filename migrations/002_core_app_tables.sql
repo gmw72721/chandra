@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS classes (
   student_prompt_placeholder TEXT NOT NULL DEFAULT '',
   appearance TEXT NOT NULL DEFAULT '',
   theme_color TEXT NOT NULL DEFAULT '',
+  theme_mood TEXT NOT NULL DEFAULT '',
   answer_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
   model_settings JSONB NOT NULL DEFAULT '{}'::jsonb,
   notification_settings JSONB NOT NULL DEFAULT '{}'::jsonb,

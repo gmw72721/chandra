@@ -284,9 +284,10 @@ test("Firestore user theme preference updates only validate theme fields", () =>
   const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
 
   assert.match(rules, /function validProfileThemePreferenceUpdate\(\)/);
-  assert.match(rules, /affectedKeys\(\)\.hasOnly\(\[\s*"appearance",\s*"themeColor"\s*\]\)/);
+  assert.match(rules, /affectedKeys\(\)\.hasOnly\(\[\s*"appearance",\s*"themeColor",\s*"themeMood"\s*\]\)/);
   assert.match(rules, /validOptionalProfileAppearance\(request\.resource\.data\)/);
   assert.match(rules, /validOptionalProfileThemeColor\(request\.resource\.data\)/);
+  assert.match(rules, /validOptionalProfileThemeMood\(request\.resource\.data\)/);
   assert.match(rules, /validProfileUpdate\(userId\)\s*\|\|\s*validProfileThemePreferenceUpdate\(\)/);
 });
 
@@ -294,7 +295,7 @@ test("Firestore profile class membership fields are server-owned", () => {
   const rules = readFileSync(join(repoRoot, "firestore.rules"), "utf8");
 
   assert.match(rules, /request\.resource\.data\.role == "student"\s*&& !request\.resource\.data\.keys\(\)\.hasAny\(\["classId", "classIds"\]\)/);
-  assert.match(rules, /request\.resource\.data\.diff\(resource\.data\)\.affectedKeys\(\)\.hasOnly\(\[\s*"displayName",\s*"appearance",\s*"themeColor"\s*\]\)/);
+  assert.match(rules, /request\.resource\.data\.diff\(resource\.data\)\.affectedKeys\(\)\.hasOnly\(\[\s*"displayName",\s*"appearance",\s*"themeColor",\s*"themeMood"\s*\]\)/);
   assert.match(rules, /"username"/);
   assert.match(rules, /function validProfileUsernameBackfill\(userId\)/);
   assert.match(rules, /request\.resource\.data\.username == resource\.data\.email/);
@@ -370,6 +371,19 @@ test("username login resolver and auth form support username or email sign-in", 
   assert.match(authFormSource, /id="username"/);
   assert.match(resolveRouteSource, /where\("username", "==", identifier\)/);
   assert.match(resolveRouteSource, /where\("email", "==", identifier\)/);
+});
+
+test("email magic link completion handles Firebase link mode and missing local email state", () => {
+  const authSource = readFileSync(join(repoRoot, "frontend/lib/auth.ts"), "utf8");
+  const authFormSource = readFileSync(join(repoRoot, "frontend/components/AuthForm.tsx"), "utf8");
+
+  assert.match(authSource, /authMode=signin/);
+  assert.match(authSource, /normalizeEmailLinkAuthError\(caughtError\)/);
+  assert.match(authFormSource, /searchParams\.get\("authMode"\) \?\? searchParams\.get\("mode"\)/);
+  assert.match(authFormSource, /normalized === "sign-in"/);
+  assert.match(authFormSource, /setEmailLinkCompletionStatus\("needsEmail"\)/);
+  assert.match(authFormSource, /id="email-link-email"/);
+  assert.match(authFormSource, /finishEmailMagicLinkSignIn\(email\.trim\(\)\)/);
 });
 
 test("browser-requested app icons are served instead of logging 404s", () => {

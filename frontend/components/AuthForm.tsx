@@ -30,6 +30,7 @@ import { CLASS_CODE_LENGTH, formatClassCodeInput } from "@/lib/class-code";
 import { useAuth } from "./AuthProvider";
 
 type AuthMode = "signin" | "signup" | "reset";
+type EmailLinkCompletionStatus = "idle" | "needsEmail" | "working";
 
 const pendingProfileStorageKey = "chandra.pendingProfile";
 
@@ -46,7 +47,12 @@ const providerOptions: Array<{ key: AuthProviderKey; label: string }> = [
 ];
 
 function parseAuthMode(value: string | null): AuthMode {
-  return value === "signin" || value === "reset" ? value : "signup";
+  const normalized = value?.toLowerCase() ?? "";
+  return normalized === "signin" || normalized === "sign-in" || normalized === "sign_in"
+    ? "signin"
+    : normalized === "reset"
+      ? "reset"
+      : "signup";
 }
 interface AuthFormProps {
   onAuthSuccess?: (destination: string) => void;
@@ -57,7 +63,7 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
   const searchParams = useSearchParams();
   const requestedRole = searchParams.get("role") === "teacher" ? "teacher" : "student";
   const requestedClassId = formatClassCodeInput(searchParams.get("classId") ?? "");
-  const [mode, setMode] = useState<AuthMode>(() => parseAuthMode(searchParams.get("mode")));
+  const [mode, setMode] = useState<AuthMode>(() => parseAuthMode(searchParams.get("authMode") ?? searchParams.get("mode")));
   const [role, setRole] = useState<AccountRole>(requestedRole);
   const [classId, setClassId] = useState(requestedClassId);
   const [displayName, setDisplayName] = useState("");
@@ -76,6 +82,7 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
 
     return isEmailMagicLink(window.location.href) ? window.location.href : "";
   });
+  const [emailLinkCompletionStatus, setEmailLinkCompletionStatus] = useState<EmailLinkCompletionStatus>("idle");
   const [linkingRequest, setLinkingRequest] = useState<PendingProviderCredential | null>(null);
   const [linkingPassword, setLinkingPassword] = useState("");
   const [backupPassword, setBackupPassword] = useState("");
@@ -133,6 +140,20 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
     }
   }, [router, onAuthSuccess]);
 
+  const finishEmailMagicLinkSignIn = useCallback(async (emailForLink: string) => {
+    setEmailLinkCompletionStatus("working");
+    const credential = await completeEmailMagicLinkSignIn(emailLinkUrl, emailForLink);
+    const hasPendingProfile = Boolean(readPendingProfile());
+
+    if (hasPendingProfile) {
+      updatePendingProfileFromProvider(credential.user);
+      await finishPendingRoleProfileSetup(credential.user);
+      return;
+    }
+
+    router.replace("/auth");
+  }, [emailLinkUrl, finishPendingRoleProfileSetup, router]);
+
   useEffect(() => {
     if (!firebaseReady || !emailLinkUrl || hasCheckedEmailLinkRef.current) {
       return;
@@ -144,19 +165,21 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
     if (!pendingEmail) {
       queueMicrotask(() => {
         setMode("signin");
-        setNotice("Enter the email address you used for this magic link, then complete sign-in.");
+        setEmailLinkCompletionStatus("needsEmail");
+        setNotice("Enter the email address you used for this magic link to finish signing in.");
       });
       return;
     }
 
-    completeEmailMagicLinkSignIn(emailLinkUrl, pendingEmail)
-      .then(() => {
-        router.replace("/auth");
-      })
-      .catch((caughtError) => {
-        setError(caughtError instanceof Error ? caughtError.message : "Magic-link sign-in failed.");
-      });
-  }, [emailLinkUrl, firebaseReady, router]);
+    queueMicrotask(() => {
+      void finishEmailMagicLinkSignIn(pendingEmail)
+        .catch((caughtError) => {
+          setEmail(pendingEmail);
+          setEmailLinkCompletionStatus("needsEmail");
+          setError(caughtError instanceof Error ? caughtError.message : "Magic-link sign-in failed.");
+        });
+    });
+  }, [emailLinkUrl, finishEmailMagicLinkSignIn, firebaseReady]);
 
   useEffect(() => {
     if (!firebaseReady || hasCheckedProviderRedirectRef.current) {
@@ -349,8 +372,7 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
 
     try {
       if (emailLinkUrl) {
-        await completeEmailMagicLinkSignIn(emailLinkUrl, email.trim());
-        router.replace("/auth");
+        await finishEmailMagicLinkSignIn(email.trim());
         return;
       }
 
@@ -364,6 +386,9 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
       const message = await sendEmailMagicLink(email.trim());
       setNotice(message);
     } catch (caughtError) {
+      if (emailLinkUrl) {
+        setEmailLinkCompletionStatus("needsEmail");
+      }
       setError(caughtError instanceof Error ? caughtError.message : "Magic-link sign-in failed.");
     } finally {
       setIsSubmitting(false);
@@ -528,6 +553,50 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
     return (
       <section className="auth-card">
         <h1>Checking your session.</h1>
+      </section>
+    );
+  }
+
+  if (emailLinkUrl && !user) {
+    return (
+      <section className="auth-card">
+        <h1>{emailLinkCompletionStatus === "working" ? "Completing email-link sign-in." : "Finish email-link sign-in."}</h1>
+        <p>
+          {emailLinkCompletionStatus === "working"
+            ? "Checking this sign-in link now."
+            : "Confirm the email address that received this link."}
+        </p>
+
+        {emailLinkCompletionStatus !== "working" ? (
+          <form
+            className="auth-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitMagicLink();
+            }}
+          >
+            <label className="field-label" htmlFor="email-link-email">
+              Email
+            </label>
+            <input
+              id="email-link-email"
+              required
+              autoCapitalize="none"
+              autoComplete="email"
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="you@example.com"
+            />
+
+            {error ? <p className="form-error">{error}</p> : null}
+            {notice ? <p className="form-notice">{notice}</p> : null}
+
+            <button className="primary-button" disabled={isSubmitting} type="submit">
+              {isSubmitting ? "Working" : "Complete sign-in"}
+            </button>
+          </form>
+        ) : null}
       </section>
     );
   }

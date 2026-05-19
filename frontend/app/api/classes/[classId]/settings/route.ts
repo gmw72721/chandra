@@ -45,6 +45,7 @@ export async function PATCH(
         studentChatEnabled: typeof body.studentChatEnabled === "boolean" ? body.studentChatEnabled : undefined,
         studentFacingInstructions: stringOrUndefined(body.studentFacingInstructions),
         themeColor: stringOrUndefined(body.themeColor),
+        themeMood: stringOrUndefined(body.themeMood),
         tutorAccess: objectOrUndefined(body.tutorAccess)
       })
     );

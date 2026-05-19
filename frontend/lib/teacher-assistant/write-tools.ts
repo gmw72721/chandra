@@ -9,7 +9,8 @@ import {
 } from "../class-settings.ts";
 import {
   normalizeTeacherClassAppearance,
-  normalizeTeacherClassThemeColor
+  normalizeTeacherClassThemeColor,
+  normalizeTeacherClassThemeMood
 } from "../class-theme.ts";
 
 const notificationPatchSchema = z
@@ -80,7 +81,8 @@ const sourceDefaultsPatchSchema = z
 const appearancePatchSchema = z
   .object({
     appearance: z.enum(["light", "dark"]).optional(),
-    themeColor: z.enum(["purple", "indigo", "blue", "teal", "emerald", "rose"]).optional()
+    themeColor: z.enum(["purple", "indigo", "blue", "teal", "cyan", "emerald", "amber", "coral", "rose"]).optional(),
+    themeMood: z.enum(["calm", "focused", "warm", "highContrast"]).optional()
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, "Choose at least one appearance setting to update.");
@@ -322,11 +324,13 @@ export function buildAppearanceSettingsChange(input: { classData: Record<string,
   const patch = appearancePatchSchema.parse(input.patch);
   const before = {
     appearance: normalizeTeacherClassAppearance(input.classData.appearance),
-    themeColor: normalizeTeacherClassThemeColor(input.classData.themeColor)
+    themeColor: normalizeTeacherClassThemeColor(input.classData.themeColor),
+    themeMood: normalizeTeacherClassThemeMood(input.classData.themeMood)
   };
   const after = {
     appearance: patch.appearance ? normalizeTeacherClassAppearance(patch.appearance) : before.appearance,
-    themeColor: patch.themeColor ? normalizeTeacherClassThemeColor(patch.themeColor) : before.themeColor
+    themeColor: patch.themeColor ? normalizeTeacherClassThemeColor(patch.themeColor) : before.themeColor,
+    themeMood: patch.themeMood ? normalizeTeacherClassThemeMood(patch.themeMood) : before.themeMood
   };
 
   return { after, before, patch, summary: summarizeChangedKeys("Update appearance", before, after) };

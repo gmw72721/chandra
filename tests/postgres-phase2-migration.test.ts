@@ -77,7 +77,8 @@ test("material metadata, job progress, and visibility use Postgres without movin
   assert.match(materials, /adminStorage/);
   assert.match(classClient, /\/api\/classes\/\$\{encodeURIComponent\(classId\)\}\/materials/);
   assert.doesNotMatch(classClient, /collection\(db!, "classes", classId, "materials"\)/);
-  assert.match(classMaterialsRoute, /listClassMaterials/);
+  assert.match(classMaterialsRoute, /listClassMaterialsPostgresFirst/);
+  assert.match(source("frontend/lib/data/server.ts"), /collection\("materialJobs"\)/);
   assert.match(uploadSession, /createMaterialUploadSession/);
   assert.match(materialData, /INSERT INTO materials/);
   assert.match(materialData, /INSERT INTO material_jobs/);

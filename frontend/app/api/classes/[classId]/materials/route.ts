@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { listActiveMaterialJobsByClass, listClassMaterials, type MaterialJobRecord, type MaterialRecord } from "@/lib/data/materials";
+import type { MaterialJobRecord, MaterialRecord } from "@/lib/data/materials";
 import { PostgresDataError } from "@/lib/data/postgres";
+import { listClassMaterialsPostgresFirst } from "@/lib/data/server";
 import { authorizeClassAccess, TutorKnowledgeHttpError } from "@/lib/tutor-knowledge-server";
 
 export const runtime = "nodejs";
@@ -12,10 +13,7 @@ export async function GET(
   try {
     const { classId } = await params;
     await authorizeClassAccess(request, classId, "viewMaterials");
-    const [materials, activeJobs] = await Promise.all([
-      listClassMaterials(classId),
-      listActiveMaterialJobsByClass(classId)
-    ]);
+    const { activeJobs, materials } = await listClassMaterialsPostgresFirst(classId);
     const activeJobByMaterialId = new Map(
       activeJobs.flatMap((job) => (job.materialId ? [[job.materialId, job]] : []))
     );

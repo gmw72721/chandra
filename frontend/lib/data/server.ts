@@ -22,6 +22,15 @@ import {
   type ClassRecord,
   type UpsertClassInput
 } from "./classes.ts";
+import {
+  listActiveMaterialJobsByClass,
+  listClassMaterials,
+  type MaterialJobRecord,
+  type MaterialJobStatus,
+  type MaterialPriority,
+  type MaterialRecord,
+  type MaterialStatus
+} from "./materials.ts";
 import { isPostgresConfigured, shouldFallbackToFirestoreWhenPostgresFails } from "./postgres.ts";
 import { adminDb } from "../firebase-admin.ts";
 
@@ -321,6 +330,216 @@ export async function listStudentClassIdsPostgresFirst({
   return postgresClassIds ?? new Set<string>();
 }
 
+export async function listClassMaterialsPostgresFirst(classId: string): Promise<{
+  activeJobs: MaterialJobRecord[];
+  materials: MaterialRecord[];
+}> {
+  const postgresMaterials = await tryPostgresData("material.list.read", async () => {
+    const [materials, activeJobs] = await Promise.all([
+      listClassMaterials(classId),
+      listActiveMaterialJobsByClass(classId)
+    ]);
+
+    return { activeJobs, materials };
+  });
+
+  if (postgresMaterials) {
+    return postgresMaterials;
+  }
+
+  const classReference = adminDb!.collection("classes").doc(classId);
+  const [materialsSnapshot, jobsSnapshot] = await Promise.all([
+    classReference.collection("materials").get(),
+    classReference.collection("materialJobs").get()
+  ]);
+  const materials = materialsSnapshot.docs
+    .map((materialDoc) => firestoreMaterialToRecord(classId, materialDoc.id, materialDoc.data() ?? {}))
+    .filter((material) => material.status !== "deleted")
+    .sort((firstMaterial, secondMaterial) => firstMaterial.title.localeCompare(secondMaterial.title));
+  const jobsByMaterialId = new Map<string, MaterialJobRecord>();
+
+  for (const job of jobsSnapshot.docs
+    .map((jobDoc) => firestoreMaterialJobToRecord(classId, jobDoc.id, jobDoc.data() ?? {}))
+    .filter((job) => job.materialId && job.status === "processing")
+    .sort((firstJob, secondJob) => secondJob.updatedAt.getTime() - firstJob.updatedAt.getTime())) {
+    if (job.materialId && !jobsByMaterialId.has(job.materialId)) {
+      jobsByMaterialId.set(job.materialId, job);
+    }
+  }
+
+  return {
+    activeJobs: Array.from(jobsByMaterialId.values()),
+    materials
+  };
+}
+
+function firestoreMaterialToRecord(
+  classId: string,
+  id: string,
+  data: Record<string, unknown>
+): MaterialRecord {
+  const kind = readString(data.kind ?? data.materialType, "document");
+  const teacherOnly = readBooleanWithDefault(data.teacherOnly, false);
+  const activeForStudents = readBooleanWithDefault(data.activeForStudents ?? data.studentVisible, true) && !teacherOnly;
+  const citationsRequired = readBooleanWithDefault(data.citationsRequired ?? data.requireCitations, true);
+  const createdAt = readDate(data.createdAt ?? data.addedAt);
+  const updatedAt = readDate(data.updatedAt ?? data.indexedAt ?? data.createdAt ?? data.addedAt, createdAt);
+
+  return {
+    id,
+    classId: readString(data.classId ?? data.class_id ?? data.course_id, classId),
+    teacherId: readString(data.teacherId ?? data.professorId ?? data.professor_id, ""),
+    title: readString(data.title, "Untitled material"),
+    kind,
+    materialType: readString(data.materialType, kind),
+    sourceMode: readString(data.sourceMode, data.filePath || data.fileUrl ? "file" : "pasted"),
+    status: readMaterialStatus(data.status),
+    activeForStudents,
+    citationsRequired,
+    teacherOnly,
+    priority: readMaterialPriority(data.priority),
+    fileName: readNullableString(data.fileName),
+    contentType: readNullableString(data.contentType),
+    fileSize: readNumber(data.fileSize, 0),
+    characterCount: readNumber(data.characterCount, 0),
+    chunkCount: readNumber(data.chunkCount, 0),
+    storageBucket: readNullableString(data.storageBucket ?? data.fullPdfBucket),
+    storagePath: readNullableString(data.storagePath ?? data.filePath ?? data.fullPdfPath),
+    storageUri: readNullableString(data.storageUri ?? data.fullPdfUri),
+    fileUrl: readNullableString(data.fileUrl),
+    searchMetadataSource: readString(data.searchMetadataSource, "firestore"),
+    metadata: firestoreMaterialMetadata(data),
+    createdAt,
+    updatedAt,
+    deletedAt: readNullableDate(data.deletedAt)
+  };
+}
+
+function firestoreMaterialJobToRecord(
+  classId: string,
+  id: string,
+  data: Record<string, unknown>
+): MaterialJobRecord {
+  const step = readString(data.step, "processing");
+  const updatedAt = readDate(data.updatedAt ?? data.createdAt);
+
+  return {
+    id,
+    classId: readString(data.classId ?? data.class_id, classId),
+    materialId: readNullableString(data.materialId ?? data.material_id),
+    step,
+    status: readMaterialJobStatus(data.status, step),
+    percent: Math.max(0, Math.min(100, readNumber(data.percent, 0))),
+    detail: readString(data.detail, ""),
+    error: readNullableString(data.error),
+    completedChunks: readNullableNumber(data.completedChunks ?? data.completed_chunks),
+    totalChunks: readNullableNumber(data.totalChunks ?? data.total_chunks),
+    metadata: firestorePlainObject(data.metadata),
+    createdAt: readDate(data.createdAt, updatedAt),
+    updatedAt
+  };
+}
+
+function firestoreMaterialMetadata(data: Record<string, unknown>) {
+  const metadata = firestorePlainObject(data.metadata);
+
+  for (const key of [
+    "ocrPageCount",
+    "ocrProblemCount",
+    "pageCount",
+    "professorName",
+    "sourceKind",
+    "textSource",
+    "visualPageCount"
+  ]) {
+    if (data[key] !== undefined) {
+      metadata[key] = data[key];
+    }
+  }
+
+  return metadata;
+}
+
+function firestorePlainObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+}
+
+function readString(value: unknown, fallback: string) {
+  const stringValue = typeof value === "string" ? value.trim() : "";
+  return stringValue || fallback;
+}
+
+function readNullableString(value: unknown) {
+  const stringValue = typeof value === "string" ? value.trim() : "";
+  return stringValue || null;
+}
+
+function readNumber(value: unknown, fallback: number) {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readNullableNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const parsed = readNumber(value, NaN);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function readBooleanWithDefault(value: unknown, fallback: boolean) {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function readDate(value: unknown, fallback = new Date()) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+
+  if (value && typeof value === "object" && "toDate" in value) {
+    const date = (value as { toDate: () => Date }).toDate();
+    return Number.isNaN(date.getTime()) ? fallback : date;
+  }
+
+  if (typeof value === "string" || typeof value === "number") {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? fallback : date;
+  }
+
+  return fallback;
+}
+
+function readNullableDate(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  return readDate(value);
+}
+
+function readMaterialStatus(value: unknown): MaterialStatus {
+  return value === "uploaded" || value === "processing" || value === "ready" || value === "failed" || value === "deleted"
+    ? value
+    : "uploaded";
+}
+
+function readMaterialJobStatus(value: unknown, step: string): MaterialJobStatus {
+  if (value === "queued" || value === "processing" || value === "ready" || value === "failed") {
+    return value;
+  }
+
+  if (step === "ready" || step === "failed") {
+    return step;
+  }
+
+  return step === "queued" ? "queued" : "processing";
+}
+
+function readMaterialPriority(value: unknown): MaterialPriority {
+  return value === "primary" || value === "normal" || value === "low" ? value : "normal";
+}
+
 function classRecordToData(
   record: ClassRecord,
   coTeachers: Array<{
@@ -352,6 +571,7 @@ function classRecordToData(
     teacherId: record.teacherId,
     teacherName: record.teacherName,
     themeColor: record.themeColor,
+    themeMood: record.themeMood,
     tutorAccess: record.settings.tutorAccess
   };
 }

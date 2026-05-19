@@ -14,7 +14,7 @@ import {
   defaultSourceUsageSettings,
   defaultTutorAccessSettings
 } from "@/lib/class-settings";
-import { defaultTeacherClassAppearance, defaultTeacherClassThemeColor } from "@/lib/class-theme";
+import { defaultTeacherClassAppearance, defaultTeacherClassThemeColor, defaultTeacherClassThemeMood } from "@/lib/class-theme";
 import { getAccountProfile, resolveClassCodePostgresFirst, upsertClassPostgresFirst } from "@/lib/data/server";
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 
@@ -87,7 +87,8 @@ export async function POST(request: Request) {
       teacherName,
       tutorAccess: defaultTutorAccessSettings,
       appearance: defaultTeacherClassAppearance,
-      themeColor: defaultTeacherClassThemeColor
+      themeColor: defaultTeacherClassThemeColor,
+      themeMood: defaultTeacherClassThemeMood
     };
     await upsertClassPostgresFirst({
       id: classCode,
@@ -100,6 +101,7 @@ export async function POST(request: Request) {
       studentPromptPlaceholder,
       appearance: defaultTeacherClassAppearance,
       themeColor: defaultTeacherClassThemeColor,
+      themeMood: defaultTeacherClassThemeMood,
       settings: {
         answerPolicy: defaultAnswerPolicySettings,
         modelSettings: defaultClassModelSettings,

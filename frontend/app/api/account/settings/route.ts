@@ -5,7 +5,8 @@ import { updateClassSettings, updateCoTeacherProfile, updateStudentEnrollmentIde
 import { adminAuth, adminDb, assertFirebaseAdminAuthReady } from "@/lib/firebase-admin";
 import {
   normalizeTeacherClassAppearance,
-  normalizeTeacherClassThemeColor
+  normalizeTeacherClassThemeColor,
+  normalizeTeacherClassThemeMood
 } from "@/lib/class-theme";
 
 export const runtime = "nodejs";
@@ -18,6 +19,7 @@ type AccountSettingsBody = {
   email?: unknown;
   revokeOtherSessions?: unknown;
   themeColor?: unknown;
+  themeMood?: unknown;
   username?: unknown;
 };
 
@@ -29,6 +31,7 @@ type AccountSettingsProfile = {
   email?: unknown;
   role?: unknown;
   themeColor?: unknown;
+  themeMood?: unknown;
   uid?: unknown;
   username?: unknown;
 };
@@ -82,6 +85,9 @@ export async function PATCH(request: Request) {
     const themeColor = bodyHasKey(body, "themeColor")
       ? normalizeTeacherClassThemeColor(body.themeColor)
       : normalizeTeacherClassThemeColor(currentProfile.themeColor);
+    const themeMood = bodyHasKey(body, "themeMood")
+      ? normalizeTeacherClassThemeMood(body.themeMood)
+      : normalizeTeacherClassThemeMood(currentProfile.themeMood);
 
     if (username !== currentUsername) {
       await assertUsernameIsAvailable(username, decodedToken.uid);
@@ -97,6 +103,7 @@ export async function PATCH(request: Request) {
       appearance,
       email,
       themeColor,
+      themeMood,
       username
     };
 
@@ -173,6 +180,7 @@ export async function PATCH(request: Request) {
         displayName,
         email,
         themeColor,
+        themeMood,
         uid: decodedToken.uid,
         username
       },

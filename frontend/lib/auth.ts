@@ -36,8 +36,10 @@ import { normalizeClassCode } from "./class-code";
 import {
   normalizeTeacherClassAppearance,
   normalizeTeacherClassThemeColor,
+  normalizeTeacherClassThemeMood,
   type TeacherClassAppearance,
-  type TeacherClassThemeColor
+  type TeacherClassThemeColor,
+  type TeacherClassThemeMood
 } from "./class-theme";
 import { auth, db, isFirebaseConfigured } from "./firebase";
 
@@ -54,6 +56,7 @@ export type UserProfile = {
   classId?: string;
   classIds?: string[];
   themeColor?: TeacherClassThemeColor;
+  themeMood?: TeacherClassThemeMood;
   createdAt?: unknown;
 };
 
@@ -444,7 +447,7 @@ export async function sendEmailMagicLink(email: string) {
     throw new Error("Enter the email address where Firebase should send the magic link.");
   }
 
-  const url = typeof window === "undefined" ? "/auth" : `${window.location.origin}/auth`;
+  const url = typeof window === "undefined" ? "/auth?authMode=signin" : `${window.location.origin}/auth?authMode=signin`;
 
   try {
     await sendSignInLinkToEmail(auth!, cleanEmail, {
@@ -475,7 +478,14 @@ export async function completeEmailMagicLinkSignIn(url: string, email?: string) 
     throw new Error("Enter the email address you used for this magic link to finish signing in.");
   }
 
-  const credential = await signInWithEmailLink(auth!, cleanEmail, url);
+  let credential: UserCredential;
+
+  try {
+    credential = await signInWithEmailLink(auth!, cleanEmail, url);
+  } catch (caughtError) {
+    throw normalizeEmailLinkAuthError(caughtError);
+  }
+
   if (typeof window !== "undefined") {
     window.localStorage.removeItem(magicLinkEmailStorageKey);
   }
@@ -665,15 +675,18 @@ export async function updateStudentClass({
 export async function updateUserThemePreference({
   appearance,
   themeColor,
+  themeMood,
   uid
 }: {
   appearance: TeacherClassAppearance;
   themeColor: TeacherClassThemeColor;
+  themeMood?: TeacherClassThemeMood;
   uid: string;
 }) {
   return updateUserAccountSettings({
     appearance,
     themeColor,
+    themeMood,
     uid
   });
 }
@@ -686,6 +699,7 @@ export async function updateUserAccountSettings({
   newPassword,
   username,
   themeColor,
+  themeMood,
   uid
 }: {
   appearance?: TeacherClassAppearance;
@@ -695,6 +709,7 @@ export async function updateUserAccountSettings({
   newPassword?: string;
   username?: string;
   themeColor?: TeacherClassThemeColor;
+  themeMood?: TeacherClassThemeMood;
   uid: string;
 }) {
   assertFirebaseReady();
@@ -745,7 +760,8 @@ export async function updateUserAccountSettings({
       ...(cleanEmail ? { email: cleanEmail } : {}),
       ...(shouldUpdateEmail || shouldUpdatePassword ? { revokeOtherSessions: true } : {}),
       ...(typeof username === "string" ? { username } : {}),
-      ...(themeColor ? { themeColor: normalizeTeacherClassThemeColor(themeColor) } : {})
+      ...(themeColor ? { themeColor: normalizeTeacherClassThemeColor(themeColor) } : {}),
+      ...(themeMood ? { themeMood: normalizeTeacherClassThemeMood(themeMood) } : {})
     })
   });
   const data = (await response.json()) as { profile?: UserProfile; error?: string; sessionRevoked?: boolean };
@@ -898,6 +914,22 @@ function normalizeEmailLinkAuthError(error: unknown) {
 
   if (code === "auth/unauthorized-continue-uri" || code === "auth/unauthorized-domain") {
     return new Error("Add this app domain to Firebase Authentication authorized domains before sending magic links.");
+  }
+
+  if (code === "auth/invalid-hosting-link-domain") {
+    return new Error("The Firebase Hosting link domain for magic links is not configured for this project.");
+  }
+
+  if (code === "auth/expired-action-code") {
+    return new Error("This magic link has expired. Request a new email sign-in link.");
+  }
+
+  if (code === "auth/invalid-action-code" || code === "auth/invalid-credential") {
+    return new Error("This magic link is invalid or has already been used. Request a new email sign-in link.");
+  }
+
+  if (code === "auth/invalid-email") {
+    return new Error("Enter the same email address that received this magic link.");
   }
 
   if (error instanceof Error) {

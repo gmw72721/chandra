@@ -12,6 +12,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState
 } from "react";
 import ReactMarkdown from "react-markdown";
@@ -22,7 +23,12 @@ import { deleteCurrentAccount, signOutAllSessions, signOutCurrentUser, updateUse
 import {
   normalizeTeacherClassAppearance,
   normalizeTeacherClassThemeColor,
-  teacherClassThemeColorOptions
+  normalizeTeacherClassThemeMood,
+  teacherClassThemeColorOptions,
+  teacherClassThemeMoodOptions,
+  type TeacherClassAppearance,
+  type TeacherClassThemeColor,
+  type TeacherClassThemeMood
 } from "@/lib/class-theme";
 import {
   defaultRefusalStyle,
@@ -138,6 +144,8 @@ type MaterialUploadDisplayStep = "upload" | "read" | "prepare" | "ready";
 
 const materialUploadDisplaySteps: MaterialUploadDisplayStep[] = ["upload", "read", "prepare", "ready"];
 const teacherPrimarySidebarStorageKey = "chandra.teacher.primarySidebarPulledOpen";
+const devPreDashboardModeStorageKey = "chandra.dev.preDashboardMode";
+const devPreDashboardAlwaysMode = "always";
 const classAccessPermissionLabels: Record<ClassAccessPermission, string> = {
   viewOverview: "View overview",
   viewRoster: "View roster",
@@ -208,6 +216,26 @@ const materialUploadExactSteps: Array<{
     label: "Failed"
   }
 ];
+
+function isPreDashboardAlwaysTestModeEnabled() {
+  if (process.env.NODE_ENV === "production") {
+    return false;
+  }
+
+  if (process.env.NEXT_PUBLIC_CHANDRA_PRE_DASHBOARD_MODE === devPreDashboardAlwaysMode) {
+    return true;
+  }
+
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return window.localStorage.getItem(devPreDashboardModeStorageKey) === devPreDashboardAlwaysMode;
+  } catch {
+    return false;
+  }
+}
 
 type TeacherTab = "overview" | "roster" | "problems" | "sources" | "settings" | "knowledge" | "conversations";
 const teacherTabs: TeacherTab[] = ["overview", "roster", "problems", "sources", "settings", "knowledge", "conversations"];
@@ -777,6 +805,12 @@ const rosterStatusSortPriority: Record<RosterRow["status"], number> = {
   "No activity": 2
 };
 
+type PersonalThemePreference = {
+  appearance: TeacherClassAppearance;
+  themeColor: TeacherClassThemeColor;
+  themeMood: TeacherClassThemeMood;
+};
+
 export function TeacherClassManager({
   studentProfileRoute
 }: {
@@ -916,10 +950,12 @@ export function TeacherClassManager({
   const [isSavingStudent, setIsSavingStudent] = useState(false);
   const [isSavingMaterial, setIsSavingMaterial] = useState(false);
   const [isSavingThemePreference, setIsSavingThemePreference] = useState(false);
-  const [themePreferencePreview, setThemePreferencePreview] = useState<{
-    appearance?: unknown;
-    themeColor?: unknown;
-  } | null>(null);
+  const [themePreferencePreview, setThemePreferencePreview] = useState<PersonalThemePreference | null>(null);
+  const themePreferenceValueRef = useRef<PersonalThemePreference | null>(null);
+  const persistedThemePreferenceRef = useRef<PersonalThemePreference | null>(null);
+  const pendingThemePreferenceRef = useRef<PersonalThemePreference | null>(null);
+  const themePreferenceSaveTimerRef = useRef<number | null>(null);
+  const isThemePreferenceSaveInFlightRef = useRef(false);
   const [isSavingAccountSettings, setIsSavingAccountSettings] = useState(false);
   const [isResettingAccountPassword, setIsResettingAccountPassword] = useState(false);
   const [isSigningOutAllSessions, setIsSigningOutAllSessions] = useState(false);
@@ -932,7 +968,29 @@ export function TeacherClassManager({
   const [materialDetailLoadingId, setMaterialDetailLoadingId] = useState("");
   const [materialDetailError, setMaterialDetailError] = useState("");
   const [deletingMaterialId, setDeletingMaterialId] = useState("");
+  const [isPreDashboardWizardActive, setIsPreDashboardWizardActive] = useState(false);
+  const isPreDashboardAlwaysTestMode = useMemo(() => isPreDashboardAlwaysTestModeEnabled(), []);
+  const preDashboardTestModeLoginUserIdRef = useRef("");
   const isLoadingClasses = Boolean(user && loadedTeacherId !== user.uid);
+
+  useEffect(() => {
+    const syncPreDashboardTestModeTimer = window.setTimeout(() => {
+      if (!user) {
+        preDashboardTestModeLoginUserIdRef.current = "";
+        setIsPreDashboardWizardActive(false);
+        return;
+      }
+
+      if (!isPreDashboardAlwaysTestMode || preDashboardTestModeLoginUserIdRef.current === user.uid) {
+        return;
+      }
+
+      preDashboardTestModeLoginUserIdRef.current = user.uid;
+      setIsPreDashboardWizardActive(true);
+    }, 0);
+
+    return () => window.clearTimeout(syncPreDashboardTestModeTimer);
+  }, [isPreDashboardAlwaysTestMode, user]);
 
   useEffect(() => {
     if (!user) {
@@ -943,6 +1001,9 @@ export function TeacherClassManager({
       user.uid,
       (nextClasses) => {
         setClasses(nextClasses);
+        if (nextClasses.length === 0) {
+          setIsPreDashboardWizardActive(true);
+        }
         setLoadedTeacherId(user.uid);
       },
       (caughtError) => {
@@ -1362,6 +1423,34 @@ export function TeacherClassManager({
   const selectedThemeColor = normalizeTeacherClassThemeColor(
     themePreferencePreview?.themeColor ?? profile?.themeColor ?? selectedClass?.themeColor
   );
+  const selectedThemeMood = normalizeTeacherClassThemeMood(
+    themePreferencePreview?.themeMood ?? profile?.themeMood ?? selectedClass?.themeMood
+  );
+  const selectedThemePreference = useMemo<PersonalThemePreference>(
+    () => ({
+      appearance: selectedAppearance,
+      themeColor: selectedThemeColor,
+      themeMood: selectedThemeMood
+    }),
+    [selectedAppearance, selectedThemeColor, selectedThemeMood]
+  );
+
+  useEffect(() => {
+    themePreferenceValueRef.current = selectedThemePreference;
+
+    if (!themePreferencePreview) {
+      persistedThemePreferenceRef.current = selectedThemePreference;
+    }
+  }, [selectedThemePreference, themePreferencePreview]);
+
+  useEffect(() => {
+    return () => {
+      if (themePreferenceSaveTimerRef.current !== null) {
+        window.clearTimeout(themePreferenceSaveTimerRef.current);
+      }
+    };
+  }, []);
+
   const displayedCreativity =
     settingsCreativityPreview?.classId === activeClassId
       ? settingsCreativityPreview.value
@@ -2145,7 +2234,8 @@ export function TeacherClassManager({
         sourceUsage,
         studentFacingInstructions: formValue("studentFacingInstructions"),
         tutorAccess,
-        themeColor: selectedClassThemeColor
+        themeColor: selectedClassThemeColor,
+        themeMood: normalizeTeacherClassThemeMood(selectedClass?.themeMood)
       });
     } catch (caughtError) {
       setError(formatClassError(caughtError, "Class settings failed."));
@@ -2415,37 +2505,85 @@ export function TeacherClassManager({
     }
   }
 
-  async function updatePersonalThemePreference(nextPreference: {
+  function flushPersonalThemePreferenceSave(uid: string) {
+    if (isThemePreferenceSaveInFlightRef.current) {
+      return;
+    }
+
+    const preferenceToSave = pendingThemePreferenceRef.current;
+
+    if (!preferenceToSave) {
+      setIsSavingThemePreference(false);
+      return;
+    }
+
+    pendingThemePreferenceRef.current = null;
+    isThemePreferenceSaveInFlightRef.current = true;
+
+    void updateUserThemePreference({
+      appearance: preferenceToSave.appearance,
+      themeColor: preferenceToSave.themeColor,
+      themeMood: preferenceToSave.themeMood,
+      uid
+    })
+      .then(() => {
+        persistedThemePreferenceRef.current = preferenceToSave;
+      })
+      .catch((caughtError) => {
+        if (!pendingThemePreferenceRef.current) {
+          const fallbackPreference = persistedThemePreferenceRef.current;
+
+          if (fallbackPreference) {
+            themePreferenceValueRef.current = fallbackPreference;
+            setThemePreferencePreview(fallbackPreference);
+          }
+
+          setError(formatClassError(caughtError, "Theme preference failed."));
+        }
+      })
+      .finally(() => {
+        isThemePreferenceSaveInFlightRef.current = false;
+
+        if (pendingThemePreferenceRef.current) {
+          flushPersonalThemePreferenceSave(uid);
+          return;
+        }
+
+        setIsSavingThemePreference(false);
+      });
+  }
+
+  function updatePersonalThemePreference(nextPreference: {
     appearance?: unknown;
     themeColor?: unknown;
+    themeMood?: unknown;
   }) {
     if (!user) {
       return;
     }
 
-    const previousPreview = themePreferencePreview;
-    const nextAppearance = normalizeTeacherClassAppearance(nextPreference.appearance ?? selectedAppearance);
-    const nextThemeColor = normalizeTeacherClassThemeColor(nextPreference.themeColor ?? selectedThemeColor);
+    const currentPreference = themePreferenceValueRef.current ?? selectedThemePreference;
+    const nextThemePreference: PersonalThemePreference = {
+      appearance: normalizeTeacherClassAppearance(nextPreference.appearance ?? currentPreference.appearance),
+      themeColor: normalizeTeacherClassThemeColor(nextPreference.themeColor ?? currentPreference.themeColor),
+      themeMood: normalizeTeacherClassThemeMood(nextPreference.themeMood ?? currentPreference.themeMood)
+    };
 
     setError("");
-    setThemePreferencePreview({
-      appearance: nextAppearance,
-      themeColor: nextThemeColor
-    });
+    themePreferenceValueRef.current = nextThemePreference;
+    pendingThemePreferenceRef.current = nextThemePreference;
+    setThemePreferencePreview(nextThemePreference);
     setIsSavingThemePreference(true);
 
-    try {
-      await updateUserThemePreference({
-        appearance: nextAppearance,
-        themeColor: nextThemeColor,
-        uid: user.uid
-      });
-    } catch (caughtError) {
-      setThemePreferencePreview(previousPreview);
-      setError(formatClassError(caughtError, "Theme preference failed."));
-    } finally {
-      setIsSavingThemePreference(false);
+    if (themePreferenceSaveTimerRef.current !== null) {
+      window.clearTimeout(themePreferenceSaveTimerRef.current);
     }
+
+    const uid = user.uid;
+    themePreferenceSaveTimerRef.current = window.setTimeout(() => {
+      themePreferenceSaveTimerRef.current = null;
+      flushPersonalThemePreferenceSave(uid);
+    }, 160);
   }
 
   async function saveAccountSettings({ resetPassword = false }: { resetPassword?: boolean } = {}) {
@@ -2515,6 +2653,7 @@ export function TeacherClassManager({
           displayName: accountDisplayName ?? accountName,
           email: nextEmail,
           themeColor: selectedThemeColor,
+          themeMood: selectedThemeMood,
           uid: user.uid,
           username: nextUsername
         });
@@ -4101,8 +4240,15 @@ export function TeacherClassManager({
     window.addEventListener("pointercancel", handlePointerCancel);
   };
 
-  if (!isLoadingClasses && classes.length === 0) {
-    return <PreDashboardWizard onComplete={(newClassId) => selectTeacherClass(newClassId)} />;
+  if (!isLoadingClasses && (classes.length === 0 || isPreDashboardWizardActive)) {
+    return (
+      <PreDashboardWizard
+        onComplete={(newClassId) => {
+          setIsPreDashboardWizardActive(false);
+          selectTeacherClass(newClassId);
+        }}
+      />
+    );
   }
 
   return (
@@ -4114,6 +4260,7 @@ export function TeacherClassManager({
         data-active-tab={activeTab}
         data-appearance={selectedAppearance}
         data-theme-color={selectedThemeColor}
+        data-theme-mood={selectedThemeMood}
         aria-label="Teacher dashboard"
       >
         {!isPrimarySidebarPulledOpen ? (
@@ -4128,7 +4275,6 @@ export function TeacherClassManager({
               accountEmail={accountEmail}
               accountName={accountName}
               activeTab={activeTab}
-              isSavingThemePreference={isSavingThemePreference}
               navItems={teacherPrimaryNavItems}
               nextAppearance={nextAppearance}
               onNavigate={handlePrimaryNavigate}
@@ -4158,7 +4304,6 @@ export function TeacherClassManager({
             classes={classes}
             isClassSwitcherOpen={isClassSwitcherOpen}
             isLoadingClasses={isLoadingClasses}
-            isSavingThemePreference={isSavingThemePreference}
             navItems={teacherPrimaryNavItems}
             nextAppearance={nextAppearance}
             selectedClass={selectedClass}
@@ -4187,7 +4332,6 @@ export function TeacherClassManager({
           isClassSwitcherOpen={isClassSwitcherOpen}
           isLoadingClasses={isLoadingClasses}
           isOpen={isSidebarDrawerOpen}
-          isSavingThemePreference={isSavingThemePreference}
           navItems={teacherPrimaryNavItems}
           nextAppearance={nextAppearance}
           selectedClass={selectedClass}
@@ -4311,6 +4455,7 @@ export function TeacherClassManager({
                     priorityRows={classOverview?.priorityRows ?? []}
                     reviewRows={conversationReviewRows}
                     isLoadingClassDetails={isLoadingClassDetails}
+                    isLoadingOverview={isLoadingClassOverview}
                     selectedDate={overviewDate}
                     sourceCount={overviewReadySourceCount}
                     studentCount={rosterRows.length || students.length}
@@ -5153,9 +5298,9 @@ export function TeacherClassManager({
                         </div>
 
                         <div className="settings-pane" hidden={activeSettingsPane !== "appearance"}>
-                          <section className="settings-group" aria-labelledby="settings-appearance">
+                          <section className="settings-group" aria-busy={isSavingThemePreference} aria-labelledby="settings-appearance">
                             <h3 id="settings-appearance">Appearance</h3>
-                            <p>These display preferences are personal to your teacher account.</p>
+                            <p>Personal preferences change your dashboard.</p>
                             <div className="settings-theme-control" aria-label="Personal theme color" role="radiogroup">
                               <span className="settings-control-label">Personal theme color</span>
                               <div className="settings-theme-swatches">
@@ -5163,7 +5308,6 @@ export function TeacherClassManager({
                                   <label className="settings-theme-swatch" key={option.id}>
                                     <input
                                       checked={selectedThemeColor === option.id}
-                                      disabled={isSavingThemePreference}
                                       name="personalThemeColor"
                                       type="radio"
                                       value={option.id}
@@ -5172,7 +5316,7 @@ export function TeacherClassManager({
                                     <span>
                                       <span
                                         className="settings-theme-swatch-dot"
-                                        style={{ backgroundColor: option.color }}
+                                        style={{ backgroundColor: selectedAppearance === "dark" ? option.darkColor : option.color }}
                                         aria-hidden="true"
                                       />
                                       {option.label}
@@ -5189,13 +5333,33 @@ export function TeacherClassManager({
                                   <label className="settings-choice-pill" key={appearance}>
                                     <input
                                       checked={selectedAppearance === appearance}
-                                      disabled={isSavingThemePreference}
                                       name="personalAppearance"
                                       type="radio"
                                       value={appearance}
                                       onChange={() => updatePersonalThemePreference({ appearance })}
                                     />
                                     <span>{capitalizeLabel(appearance)}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="settings-appearance-control" aria-label="Personal mood" role="radiogroup">
+                              <span className="settings-control-label">Personal mood</span>
+                              <div className="settings-appearance-pills settings-mood-pills">
+                                {teacherClassThemeMoodOptions.map((option) => (
+                                  <label className="settings-choice-pill settings-mood-pill" key={option.id}>
+                                    <input
+                                      checked={selectedThemeMood === option.id}
+                                      name="personalThemeMood"
+                                      type="radio"
+                                      value={option.id}
+                                      onChange={() => updatePersonalThemePreference({ themeMood: option.id })}
+                                    />
+                                    <span>
+                                      <strong>{option.label}</strong>
+                                      <small>{option.description}</small>
+                                    </span>
                                   </label>
                                 ))}
                               </div>
@@ -5640,8 +5804,8 @@ export function TeacherClassManager({
                         >
                           <div className="ai-tutor-section-heading">
                             <div>
-                              <h2 id="ai-tutor-sources-title">Sources</h2>
-                              <span>Upload and manage the materials Chandra can use when helping students.</span>
+                              <h2 id="ai-tutor-sources-title">Class materials</h2>
+                              <span>Manage searchable files, visibility, and source behavior for this class.</span>
                             </div>
                             <button
                               className="primary-button teacher-primary-button compact"
@@ -6789,7 +6953,21 @@ export function TeacherClassManager({
                         </div>
                       </section>
 
-                      <aside className="conversation-review-side" aria-label="Teacher review and metadata">
+                      <aside
+                        className={`conversation-review-side ${selectedConversationReviewRow ? "" : "is-empty"}`}
+                        aria-label="Teacher review and metadata"
+                      >
+                        {!selectedConversationReviewRow ? (
+                          <section className="review-side-panel review-empty-panel" aria-label="Conversation review tools">
+                            <div className="conversation-panel-heading">
+                              <h3>Review tools</h3>
+                              <span>Select a conversation</span>
+                            </div>
+                            <p className="review-panel-empty-copy">
+                              Safety notes, feedback, review actions, private notes, source checks, and student timeline will appear here after a conversation is selected.
+                            </p>
+                          </section>
+                        ) : null}
                         <section className="review-side-panel" aria-labelledby="safety-review-title">
                           <div className="conversation-panel-heading">
                             <h3 id="safety-review-title">Safety Review</h3>
@@ -8609,7 +8787,6 @@ function PrimaryIconRail({
   accountEmail,
   accountName,
   activeTab,
-  isSavingThemePreference,
   navItems,
   nextAppearance,
   onNavigate,
@@ -8619,7 +8796,6 @@ function PrimaryIconRail({
   accountEmail: string;
   accountName: string;
   activeTab: TeacherTab;
-  isSavingThemePreference: boolean;
   navItems: TeacherPrimaryNavItem[];
   nextAppearance: string;
   onNavigate: (tab: TeacherTab) => void;
@@ -8663,7 +8839,6 @@ function PrimaryIconRail({
         <button
           aria-label={`Switch to ${nextAppearance} theme`}
           className="sidebar-theme-icon-button"
-          disabled={isSavingThemePreference}
           title={`Switch to ${nextAppearance} theme`}
           type="button"
           onClick={onToggleTheme}
@@ -8684,7 +8859,6 @@ function SidebarDrawer({
   isClassSwitcherOpen,
   isLoadingClasses,
   isOpen,
-  isSavingThemePreference,
   navItems,
   nextAppearance,
   selectedClass,
@@ -8704,7 +8878,6 @@ function SidebarDrawer({
   isClassSwitcherOpen: boolean;
   isLoadingClasses: boolean;
   isOpen: boolean;
-  isSavingThemePreference: boolean;
   navItems: TeacherPrimaryNavItem[];
   nextAppearance: string;
   selectedClass: TeacherClass | null;
@@ -8788,7 +8961,6 @@ function SidebarDrawer({
             <button
               aria-label={`Switch to ${nextAppearance} theme`}
               className="sidebar-theme-icon-button"
-              disabled={isSavingThemePreference}
               title={`Switch to ${nextAppearance} theme`}
               type="button"
               onClick={onToggleTheme}
@@ -8813,7 +8985,6 @@ function PersistentPrimarySidebar({
   classes,
   isClassSwitcherOpen,
   isLoadingClasses,
-  isSavingThemePreference,
   navItems,
   nextAppearance,
   selectedClass,
@@ -8832,7 +9003,6 @@ function PersistentPrimarySidebar({
   classes: TeacherClass[];
   isClassSwitcherOpen: boolean;
   isLoadingClasses: boolean;
-  isSavingThemePreference: boolean;
   navItems: TeacherPrimaryNavItem[];
   nextAppearance: string;
   selectedClass: TeacherClass | null;
@@ -8908,7 +9078,6 @@ function PersistentPrimarySidebar({
           <button
             aria-label={`Switch to ${nextAppearance} theme`}
             className="sidebar-theme-icon-button"
-            disabled={isSavingThemePreference}
             title={`Switch to ${nextAppearance} theme`}
             type="button"
             onClick={onToggleTheme}

@@ -29,6 +29,7 @@ export type AccountProfileShape = {
   classId?: string;
   classIds?: string[];
   themeColor?: unknown;
+  themeMood?: unknown;
   createdAt?: unknown;
 };
 
