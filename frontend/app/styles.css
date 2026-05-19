@@ -3631,61 +3631,205 @@ button.student-row[aria-pressed="true"] {
   .auth-shell {
     width: 100%;
     min-height: 100vh;
-    padding: 20px 18px 38px;
+    overflow-x: hidden;
+    padding: 0 0 28px;
   }
 
   .auth-topbar {
-    margin-bottom: 24px;
+    box-sizing: border-box;
+    margin: 0 0 18px;
+    padding: 16px 20px;
   }
 
   .auth-brand {
-    font-size: clamp(1.6rem, 7.2vw, 1.85rem);
+    font-size: clamp(1.62rem, 7vw, 1.95rem);
+  }
+
+  .auth-topbar .nav-actions a.nav-button-home {
+    min-height: 42px;
+    padding: 0 16px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
   }
 
   .auth-layout {
     grid-template-columns: 1fr;
-    gap: 24px;
+    gap: 18px;
+    padding: 0 18px;
   }
 
   .auth-story-panel {
-    gap: 16px;
+    gap: 0;
     padding-top: 0;
   }
 
+  .auth-pill {
+    justify-self: stretch;
+    justify-content: center;
+    margin: 0 0 18px;
+    padding: 0.58rem 0.95rem;
+    font-size: 0.68rem;
+    line-height: 1.35;
+    text-align: center;
+  }
+
   .auth-story-panel h1 {
-    max-width: 100%;
-    font-size: clamp(2.3rem, 11vw, 3.1rem);
+    max-width: 9.5ch;
+    margin-top: 0;
+    font-size: clamp(2.55rem, 13vw, 3.55rem);
+    line-height: 1.02;
   }
 
   .auth-story-panel p {
     max-width: 34rem;
-    font-size: 0.96rem;
+    margin-top: 18px;
+    font-size: 1rem;
+    line-height: 1.6;
   }
 
   .auth-card,
   .auth-state-panel {
     width: 100%;
-    padding: 26px 18px 22px;
+    border-radius: 14px;
+    padding: 24px 18px 20px;
+  }
+
+  .auth-card--signin {
+    margin-top: 2px;
+    padding-top: 22px;
   }
 
   .auth-card h1,
   .auth-state-panel h1 {
-    font-size: clamp(1.72rem, 7.8vw, 2.08rem);
+    font-size: clamp(1.9rem, 9vw, 2.45rem);
+    line-height: 1.06;
   }
 
   .segmented-control {
-    margin: 20px 0;
+    margin: 18px 0;
+    border-radius: 10px;
   }
 
   .segmented-control button {
-    min-height: 42px;
-    font-size: 0.9rem;
+    min-height: 46px;
+    border-radius: 8px;
+    font-size: 0.92rem;
+  }
+
+  .auth-method-group {
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+
+  .auth-provider-button,
+  .auth-secondary-button {
+    min-height: 50px;
+    border-radius: 9px;
+    font-size: 0.92rem;
+  }
+
+  .auth-divider {
+    gap: 10px;
+    margin-top: 2px;
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+  }
+
+  .auth-form-heading {
+    margin-bottom: 12px;
+    font-size: 1.02rem;
+    line-height: 1.35;
+  }
+
+  .auth-form .field-label {
+    margin-bottom: 6px;
+    font-size: 0.76rem;
+    letter-spacing: 0.08em;
+  }
+
+  .auth-form .field-label:not(:first-child) {
+    margin-top: 12px;
   }
 
   .auth-form select,
   .auth-form input {
-    min-height: 42px;
-    font-size: 0.9rem;
+    min-height: 48px;
+    border-radius: 9px;
+    font-size: 0.95rem;
+  }
+
+  .auth-magic-link-panel {
+    gap: 10px;
+    margin-top: 16px;
+    padding-top: 16px;
+  }
+
+  .auth-magic-link-panel p,
+  .auth-inline-action {
+    font-size: 0.92rem;
+  }
+
+  .auth-inline-action {
+    flex-wrap: wrap;
+    margin-top: 14px;
+  }
+
+  .auth-form .primary-button {
+    min-height: 52px;
+    margin-top: 20px;
+    border-radius: 9px;
+    font-size: 1rem;
+  }
+}
+
+@media (max-width: 520px) {
+  .auth-layout {
+    padding: 0 14px;
+  }
+
+  .auth-story-panel {
+    padding: 4px 4px 0;
+  }
+
+  .auth-story-panel h1 {
+    font-size: clamp(2.35rem, 11vw, 3.05rem);
+    max-width: 10ch;
+  }
+
+  .auth-layout:has(.auth-card--signin) .auth-story-panel,
+  .auth-layout:has(.auth-card--reset) .auth-story-panel {
+    display: none;
+  }
+
+  .auth-layout:has(.auth-card--signin),
+  .auth-layout:has(.auth-card--reset) {
+    padding-top: 6px;
+  }
+
+  .auth-card--signin {
+    padding: 20px 16px 18px;
+  }
+
+  .auth-card--signin h1 {
+    font-size: clamp(2.15rem, 10vw, 2.85rem);
+  }
+
+  .auth-card--signin .auth-form-heading {
+    font-size: 0.98rem;
+  }
+
+  .auth-card--signin .auth-magic-link-panel {
+    margin-top: 14px;
+  }
+
+  .auth-card--signin .auth-inline-action {
+    gap: 4px 7px;
+  }
+
+  .auth-card--signin .primary-button {
+    margin-top: 18px;
   }
 
   .chat-panel {

@@ -888,7 +888,7 @@ export function AuthForm({ onAuthSuccess }: AuthFormProps = {}) {
   }
 
   return (
-    <section className="auth-card">
+    <section className={`auth-card auth-card--${mode}`}>
       <h1>
         {mode === "signup"
           ? "Create your Chandra account"
