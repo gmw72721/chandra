@@ -24985,7 +24985,7 @@ button.student-row[aria-pressed="true"] {
 
 .student-main-header {
   position: relative;
-  z-index: 3;
+  z-index: 60;
   min-height: 48px;
   padding-bottom: 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--card-border) 72%, transparent);
