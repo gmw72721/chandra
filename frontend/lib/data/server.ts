@@ -146,7 +146,7 @@ export async function getAccountProfile(uid: string): Promise<AccountProfileShap
   const backfillInput = firestoreProfileToUpsertAccountInput(uid, data);
 
   if (backfillInput) {
-    void tryPostgresData("account.profile.backfill", () => upsertAccount(backfillInput));
+    await tryPostgresData("account.profile.backfill", () => upsertAccount(backfillInput));
   }
 
   return firestoreProfileToShape(uid, data);

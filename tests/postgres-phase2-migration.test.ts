@@ -62,6 +62,13 @@ test("Postgres-first reads keep Firestore fallback paths", () => {
   assert.match(tutorKnowledge, /getMaterialById/);
 });
 
+test("legacy account backfill completes before dependent Postgres writes", () => {
+  const server = source("frontend/lib/data/server.ts");
+
+  assert.match(server, /await tryPostgresData\("account\.profile\.backfill", \(\) => upsertAccount\(backfillInput\)\)/);
+  assert.doesNotMatch(server, /void tryPostgresData\("account\.profile\.backfill"/);
+});
+
 test("material metadata, job progress, and visibility use Postgres without moving file storage", () => {
   const materials = source("frontend/lib/tutor-knowledge-server.ts");
   const classClient = source("frontend/lib/classes.ts");
