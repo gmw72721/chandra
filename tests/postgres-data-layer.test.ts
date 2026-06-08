@@ -93,6 +93,37 @@ test("shared Postgres data layer uses the Cloud SQL pg configuration path", () =
   }
 });
 
+test("Postgres migration runner applies every ordered SQL migration", () => {
+  const migrationRunner = readFileSync(join(repoRoot, "scripts/apply-postgres-migrations.mjs"), "utf8");
+  const migrationFiles = [
+    "001_pdf_ocr_metadata.sql",
+    "002_core_app_tables.sql",
+    "003_class_student_prompt_placeholder.sql",
+    "004_class_theme_mood.sql"
+  ];
+
+  assert.match(migrationRunner, /readdirSync\(migrationsDirectory\)/);
+  assert.match(migrationRunner, /\/\^\\d\+_\.\+\\\.sql\$\/\.test\(fileName\)/);
+
+  for (const migrationFile of migrationFiles) {
+    assert.equal(existsSync(join(repoRoot, "migrations", migrationFile)), true);
+  }
+});
+
+test("incremental class migrations cover fields used during class creation", () => {
+  const classData = readFileSync(join(repoRoot, "frontend/lib/data/classes.ts"), "utf8");
+  const studentPromptPlaceholderMigration = readFileSync(
+    join(repoRoot, "migrations/003_class_student_prompt_placeholder.sql"),
+    "utf8"
+  );
+  const themeMoodMigration = readFileSync(join(repoRoot, "migrations/004_class_theme_mood.sql"), "utf8");
+
+  assert.match(classData, /student_prompt_placeholder/);
+  assert.match(classData, /theme_mood/);
+  assert.match(studentPromptPlaceholderMigration, /ADD COLUMN IF NOT EXISTS student_prompt_placeholder/);
+  assert.match(themeMoodMigration, /ADD COLUMN IF NOT EXISTS theme_mood/);
+});
+
 test("documentation and env examples describe the target data split", () => {
   const docs = readFileSync(join(repoRoot, "docs/DATA_ARCHITECTURE.md"), "utf8");
   const envExample = readFileSync(join(repoRoot, ".env.example"), "utf8");
@@ -102,6 +133,8 @@ test("documentation and env examples describe the target data split", () => {
   assert.match(docs, /Firebase Storage and GCS remain the file\/object store/);
   assert.match(docs, /Postgres and Cloud SQL become the source of truth/);
   assert.match(docs, /Firestore remains available as a legacy fallback/);
+  assert.match(docs, /npm run migrate:postgres/);
+  assert.match(docs, /ADD COLUMN IF NOT EXISTS/);
   assert.match(envExample, /DATABASE_URL=/);
   assert.match(envExample, /CLOUD_SQL_POSTGRES_URL=/);
   assert.match(configEnvExample, /CHANDRA_CLOUD_SQL_POSTGRES_URL=/);

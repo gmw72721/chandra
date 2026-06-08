@@ -57,6 +57,10 @@ test("health check reports Postgres, Firebase Admin/Auth, Storage, and PDF OCR t
 
   assert.match(health, /checkPostgres/);
   assert.match(health, /queryPostgres\("SELECT 1"\)/);
+  assert.match(health, /checkAppPostgresSchema/);
+  assert.match(health, /information_schema\.columns/);
+  assert.match(health, /student_prompt_placeholder/);
+  assert.match(health, /theme_mood/);
   assert.match(health, /checkFirebaseAdmin/);
   assert.match(health, /adminAuth\.listUsers\(1\)/);
   assert.match(health, /checkFirebaseStorage/);
@@ -71,7 +75,7 @@ test("final architecture docs describe status, migrations, backfill, and remaini
 
   assert.match(docs, /Postgres-first data model/);
   assert.match(docs, /Applying SQL Migrations/);
-  assert.match(docs, /psql "\$DATABASE_URL" -f migrations\/001_pdf_ocr_metadata\.sql/);
+  assert.match(docs, /npm run migrate:postgres/);
   assert.match(docs, /Legacy Backfill Plan/);
   assert.match(docs, /Remaining Cleanup/);
   assert.match(docs, /userPresence/);

@@ -13,7 +13,9 @@ Chandra is now organized around a Postgres-first data model. Firebase still prov
 
 Implemented phases:
 
+- `migrations/001_pdf_ocr_metadata.sql`, covering existing searchable PDF OCR/page/problem metadata.
 - `migrations/002_core_app_tables.sql`, covering accounts, classes, roster/enrollment data, materials, upload/job metadata, conversations, messages, attachments, feedback, learning profiles, reviews, support notes, AI usage, audit/security records, rate limits, and lockouts.
+- Incremental schema migrations under `migrations/` for fields added after the core tables were first deployed.
 - `frontend/lib/data/postgres.ts`, the shared `pg` pool/config/transaction helper for app data and health checks.
 - Postgres-first modules under `frontend/lib/data/` for accounts, classes, materials, conversations, student records, usage accounting, operational logs, rate limits, and lockouts.
 - Account/profile, class, roster, co-teacher, material metadata, conversation, message, attachment metadata, feedback, learning profile, support, review, usage, audit/security, and chat-error workflows now try Postgres first.
@@ -31,11 +33,10 @@ The core schema adds `materials` and keeps IDs aligned so `pdf_materials.materia
 Apply migrations in order against the Cloud SQL/Postgres database configured by `DATABASE_URL`, `CLOUD_SQL_POSTGRES_URL`, or `CHANDRA_CLOUD_SQL_POSTGRES_URL`:
 
 ```bash
-psql "$DATABASE_URL" -f migrations/001_pdf_ocr_metadata.sql
-psql "$DATABASE_URL" -f migrations/002_core_app_tables.sql
+npm run migrate:postgres
 ```
 
-Use the Cloud SQL Auth Proxy or private network access when applying migrations from a local machine or CI runner. Re-running these migrations is safe for existing tables because they use `CREATE TABLE IF NOT EXISTS`, idempotent indexes, and guarded trigger creation.
+The migration runner applies every ordered SQL file in `migrations/`, including incremental `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations for existing production databases. Use the Cloud SQL Auth Proxy or private network access when applying migrations from a local machine or CI runner. Re-running these migrations is safe for existing tables because they use `CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, idempotent indexes, and guarded trigger creation.
 
 ## Legacy Backfill Plan
 

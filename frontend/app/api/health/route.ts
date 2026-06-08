@@ -20,17 +20,18 @@ export async function GET(request: Request) {
   const requestId = requestIdFromRequest(request);
   const startedAt = performance.now();
   const dependencies = {
-	    backend: await checkBackend(),
-	    betterStackLogging: checkBetterStackLogging(),
-	    embeddings: await checkEmbeddings(),
-	    firebaseAdmin: await checkFirebaseAdmin(),
-	    firebaseStorage: await checkFirebaseStorage(),
-	    frontendRuntimeConfig: checkFrontendRuntimeConfig(),
-	    firebaseWebConfig: checkFirebaseWebConfig(),
-	    openrouter: await checkOpenRouter(),
-	    pdfOcrSearchTables: await checkPdfOcrSearchTables(),
-	    postgres: await checkPostgres()
-	  };
+    appPostgresSchema: await checkAppPostgresSchema(),
+    backend: await checkBackend(),
+    betterStackLogging: checkBetterStackLogging(),
+    embeddings: await checkEmbeddings(),
+    firebaseAdmin: await checkFirebaseAdmin(),
+    firebaseStorage: await checkFirebaseStorage(),
+    frontendRuntimeConfig: checkFrontendRuntimeConfig(),
+    firebaseWebConfig: checkFirebaseWebConfig(),
+    openrouter: await checkOpenRouter(),
+    pdfOcrSearchTables: await checkPdfOcrSearchTables(),
+    postgres: await checkPostgres()
+  };
   const status = overallStatus(Object.values(dependencies));
   const responseStatus = status === "ok" ? 200 : 503;
   const response = NextResponse.json(
@@ -174,6 +175,60 @@ async function checkPdfOcrSearchTables(): Promise<DependencyStatus> {
   } catch {
     return {
       detail: "PDF OCR/search table connectivity check failed.",
+      status: "down"
+    };
+  }
+}
+
+async function checkAppPostgresSchema(): Promise<DependencyStatus> {
+  if (!isPostgresConfigured()) {
+    return {
+      detail: "Postgres is not configured for app data.",
+      status: "missing_config"
+    };
+  }
+
+  const requiredClassColumns = [
+    "id",
+    "teacher_id",
+    "student_prompt_placeholder",
+    "theme_mood"
+  ];
+
+  try {
+    const result = await queryPostgres<{ column_name: string }>(
+      `SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'classes'
+        AND column_name = ANY($1::text[])`,
+      [requiredClassColumns]
+    );
+    const presentColumns = new Set(result.rows.map((row) => row.column_name));
+    const missingColumns = requiredClassColumns.filter((columnName) => !presentColumns.has(columnName));
+
+    if (missingColumns.length) {
+      return {
+        detail: `Missing classes columns: ${missingColumns.join(", ")}.`,
+        status: "down"
+      };
+    }
+
+    const accountsResult = await queryPostgres<{ accounts_table: string | null }>(
+      "SELECT to_regclass('accounts')::text AS accounts_table"
+    );
+
+    if (!accountsResult.rows[0]?.accounts_table) {
+      return {
+        detail: "accounts table is missing.",
+        status: "down"
+      };
+    }
+
+    return { status: "ok" };
+  } catch {
+    return {
+      detail: "App Postgres schema check failed.",
       status: "down"
     };
   }

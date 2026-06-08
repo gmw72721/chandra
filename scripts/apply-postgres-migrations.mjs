@@ -1,15 +1,12 @@
 #!/usr/bin/env node
 import pg from "pg";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const { Pool } = pg;
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const migrationFiles = [
-  "migrations/001_pdf_ocr_metadata.sql",
-  "migrations/002_core_app_tables.sql"
-];
+const migrationFiles = listMigrationFiles();
 
 loadDotEnvLocal();
 
@@ -89,6 +86,15 @@ function loadDotEnvLocal() {
       process.env[key] = value;
     }
   }
+}
+
+function listMigrationFiles() {
+  const migrationsDirectory = join(root, "migrations");
+
+  return readdirSync(migrationsDirectory)
+    .filter((fileName) => /^\d+_.+\.sql$/.test(fileName))
+    .sort((firstFile, secondFile) => firstFile.localeCompare(secondFile))
+    .map((fileName) => `migrations/${fileName}`);
 }
 
 function readPostgresSslConfig(connectionString) {

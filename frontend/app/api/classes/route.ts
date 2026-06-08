@@ -122,6 +122,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: message }, { status: 500 });
     }
 
+    console.error("Class creation failed.", caughtError);
     return NextResponse.json({ error: "Class creation failed." }, { status: 500 });
   }
 }

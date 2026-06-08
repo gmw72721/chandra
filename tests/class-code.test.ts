@@ -143,4 +143,5 @@ test("teacher class creation uses an authenticated server route", () => {
   assert.match(routeSource, /verifyIdToken\(token\)/);
   assert.match(routeSource, /profile\?\.role !== "teacher"/);
   assert.match(routeSource, /upsertClassPostgresFirst/);
+  assert.match(routeSource, /console\.error\("Class creation failed\.", caughtError\)/);
 });
